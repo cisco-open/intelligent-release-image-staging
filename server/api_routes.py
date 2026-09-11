@@ -29,9 +29,28 @@ class Route:
 # required.  Path variables are exactly one encoded URL segment.
 _CONSOLE_RESOURCES = (
     ("GET", "/peer-policy", "Read peer policy"),
+    ("GET", "/peer-policy/roles", "List role definitions"),
+    ("GET", "/peer-policy/roles/export-csv", "Export role definitions as CSV"),
+    ("POST", "/peer-policy/roles/import-csv", "Replace role definitions from CSV"),
+    ("PUT", "/peer-policy/roles/{name}", "Replace a role definition"),
+    ("DELETE", "/peer-policy/roles/{name}", "Delete a role definition"),
+    ("PUT", "/peer-policy/qos", "Replace global or role QoS"),
+    ("POST", "/devices/{device_id}/role", "Set a device role"),
+    ("POST", "/devices/bulk-role", "Set device roles in bulk"),
+    ("GET", "/devices/{device_id}/effective-qos", "Explain effective device QoS"),
+    ("GET", "/peer-policy/explain", "Explain mutual peer access"),
     ("PUT", "/peer-policy/quarantine/{device_id}", "Set device quarantine"),
     ("GET", "/audit", "List audit events"),
     ("GET", "/audit/histogram", "Read audit histogram"),
+    ("GET", "/schedules", "List schedules"),
+    ("POST", "/schedules", "Create a schedule"),
+    ("GET", "/schedules/{id}", "Read a schedule"),
+    ("PUT", "/schedules/{id}", "Replace a schedule"),
+    ("PATCH", "/schedules/{id}", "Update a schedule"),
+    ("DELETE", "/schedules/{id}", "Delete a schedule"),
+    ("GET", "/schedules/{id}/occurrences", "List schedule occurrences"),
+    ("GET", "/schedules/{id}/receipts", "List schedule receipts"),
+    ("POST", "/schedules/{id}/reaffirm", "Reaffirm a schedule"),
     ("GET", "/session", "Read console session"),
     ("POST", "/login", "Create console session"),
     ("POST", "/setup", "Create the first administrator"),
@@ -133,6 +152,8 @@ ROUTES = tuple(
     Route("catalog", "GET", "/v1/images/{image_id}", "deviceBearer", "Read assigned image"),
     Route("catalog", "GET", "/v1/torrents/{image_id}", "deviceBearer", "Download personalized torrent"),
     Route("catalog", "GET", "/v1/devices/{device_id}/policy", "deviceBearer", "Read device policy"),
+    Route("catalog", "GET", "/v1/devices/{device_id}/instructions", "deviceBearer", "Read sealed device instructions"),
+    Route("catalog", "GET", "/v1/devices/{device_id}/instruction-keylist", "deviceBearer", "Read installed instruction keylist"),
     Route("catalog", "POST", "/v1/devices/{device_id}/heartbeat", "deviceBearer", "Record heartbeat"),
     Route("catalog", "POST", "/v1/devices/{device_id}/telemetry", "deviceBearer", "Record telemetry"),
     Route("catalog", "POST", "/v1/devices/{device_id}/token-refresh", "deviceBearer", "Rotate device token"),
@@ -148,7 +169,8 @@ ROUTES = tuple(
           "artifactBasic", "Download device artifact"),
     Route("artifact", "HEAD", "/v1/devices/{device_id}/artifacts/{artifact_path}",
           "artifactBasic", "Inspect device artifact"),
-    # Guest Shell uses IOS ``copy https:`` and cannot attach Basic headers.
+    # Guest Shell's installers run IOS ``copy https:`` without the IOS HTTP
+    # client credential that would attach the Basic header (IOx sets it).
     # Static entries contain no credentials; staging names carry a 128-bit
     # capability and are swept.  Keep these explicit so the compatibility
     # exception cannot silently grow into arbitrary anonymous file serving.
@@ -168,6 +190,10 @@ ROUTES = tuple(
           "Download Guest Shell catalog CA"),
     Route("artifact", "HEAD", "/iris-catalog.pem", "guestShellAnonymousStatic",
           "Inspect Guest Shell catalog CA"),
+    Route("artifact", "GET", "/iris-signers.pem", "guestShellAnonymousStatic",
+          "Download Guest Shell instruction signer trust"),
+    Route("artifact", "HEAD", "/iris-signers.pem", "guestShellAnonymousStatic",
+          "Inspect Guest Shell instruction signer trust"),
     Route("artifact", "GET", "/staging/{legacy_artifact}",
           "legacyGuestShell", "Download Guest Shell enrollment capability"),
     Route("artifact", "HEAD", "/staging/{legacy_artifact}",
@@ -186,7 +212,9 @@ def _pattern(template):
             atom = ".+"
         elif match.group(1) == "legacy_artifact":
             atom = (r"(?:iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf|"
-                    r"rpc-secret-[0-9A-Fa-f]{32})")
+                    r"rpc-secret-[0-9A-Fa-f]{32}|"
+                    r"iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope|"
+                    r"bundle-sha256-[0-9a-f]{32})")
         else:
             atom = "[^/]+"
         pieces.append("(?P<%s>%s)" % (match.group(1), atom))

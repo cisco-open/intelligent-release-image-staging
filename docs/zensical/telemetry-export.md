@@ -97,6 +97,17 @@ because one is a level and the other is a flag.
 These eight are the `otel.log.name` values IRIS emits. Filter and group
 records by these names to select the measurement you need.
 
+Role enrichment does not add a ninth record family. When a peer is an
+authenticated device, existing tracker, rate, and byte records may carry
+`iris.device.role`, sourced from the loaded compiled policy membership.
+`iris.peer.role` keeps its older BitTorrent meaning (`seeder` or `leecher`), so
+do not group those two attributes as if they shared a vocabulary. The
+`iris.peer.policy` operation record remains count-only: it carries the policy
+revision/action and aggregate enforcement state/applied revision/desired IP
+count, never role membership lists, raw rules, addresses, or origin-QoS option
+values. The management policy view is the source for current preflight and
+`pre-instructions` status.
+
 !!! danger "Never sum the two peer record names together"
     `iris.swarm.peer_bytes` and `iris.device.peer_transfer_record` describe the *same
     bytes* from opposite ends of the wire — one badly, one exactly. They carry
@@ -104,9 +115,10 @@ records by these names to select the measurement you need.
     both counts every transfer twice. Pick one name per panel, and prefer
     `iris.device.peer_transfer_record` where you need a number you can defend.
 
-Key attributes on the peer records: `iris.image.id`, `iris.torrent.info_hash`,
-`network.peer.address`, `device.id`, `iris.peer.device.id`,
-`iris.peer.attribution`, `iris.transfer.session_bytes_from_peer`,
+Key attributes on the peer records: `iris.image.id`, `iris.image.name`,
+`iris.torrent.info_hash`, `network.peer.address`, `device.id`,
+`iris.peer.device.id`, `iris.peer.device_id`, `iris.peer.attribution`,
+`iris.transfer.session_bytes_from_peer`,
 `iris.transfer_record.capture_complete`.
 
 `iris.peer.attribution` is `origin` | `device` | `unknown`. The origin seeder
@@ -116,6 +128,14 @@ origin; the server can, and does.** A row the server did not resolve stays
 `unknown` rather than being folded into `device` — `unknown` is a normal
 outcome (a peer that has not heartbeated, a NAT address, a non-IRIS seeder),
 not an error.
+
+On `iris.device.peer_transfer_record`, `iris.peer.device_id` names the sender
+in one column: the sending device's id for a `device` row, `origin` for the
+seeder's row, and absent for an `unknown` row. `iris.image.name` is the
+catalog filename for `iris.image.id` at export time. The classification is
+made once, when the report is first exported, and pinned in the server's
+`report-attribution.json`, so the copy re-exported under the same `event.id`
+after a server restart is identical to the first.
 
 Key attributes on `iris.transfer.lifecycle`: `event` (`planned` or
 `seeding_started`), `iris.plan.id` and `iris.transfer.id` (the plan's two

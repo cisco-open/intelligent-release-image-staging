@@ -65,9 +65,11 @@ the file the error points at is enough to find them. See
 the full procedure.
 """
 import contextlib
+import errno
 import fcntl
 import json
 import os
+import stat
 import tempfile
 import zlib
 
@@ -77,12 +79,39 @@ import zlib
 SHARD_COUNT = 256
 
 
+def _fsync_directory(path):
+    fd = os.open(path or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        unsupported = {errno.EINVAL}
+        if hasattr(errno, "ENOTSUP"):
+            unsupported.add(errno.ENOTSUP)
+        if exc.errno not in unsupported:
+            raise
+    finally:
+        os.close(fd)
+
+
 class KeyedStateError(RuntimeError):
     """Existing keyed state is unreadable and must not be overwritten."""
 
 
 #: Sentinel an ``update``/``sweep`` callback returns to delete the row.
 DELETE = object()
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value):
+    raise ValueError("non-finite JSON number")
 
 
 def shard_dir(path):
@@ -132,7 +161,8 @@ class KeyedState:
     """
 
     def __init__(self, path, error=KeyedStateError, validate=None,
-                 legacy_extract=None, shards=SHARD_COUNT, indent=2):
+                 legacy_extract=None, shards=SHARD_COUNT, indent=2,
+                 durable=False):
         self.legacy_path = path
         self.dir = shard_dir(path)
         self.error = error
@@ -140,6 +170,7 @@ class KeyedState:
         self.indent = indent
         self._validate = validate
         self._legacy_extract = legacy_extract
+        self.durable = bool(durable)
         self._migrated = False
 
     # -- shard I/O ---------------------------------------------------------
@@ -150,7 +181,9 @@ class KeyedState:
     def _read_json(self, path):
         try:
             with open(path) as f:
-                data = json.load(f)
+                data = json.load(
+                    f, object_pairs_hook=_unique_object,
+                    parse_constant=_reject_constant)
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
@@ -178,10 +211,14 @@ class KeyedState:
         if not rows:
             # An empty shard is removed so a whole-fleet scan stays
             # proportional to the rows that actually exist.
+            removed = False
             try:
                 os.remove(path)
+                removed = True
             except FileNotFoundError:
                 pass
+            if removed and self.durable:
+                _fsync_directory(self.dir)
             return
         os.makedirs(self.dir, exist_ok=True)
         mode = None
@@ -198,9 +235,14 @@ class KeyedState:
                 # accepts, poisoning every reader of the shard.
                 json.dump(rows, f, indent=self.indent, sort_keys=True,
                           allow_nan=False)
+                if self.durable:
+                    f.flush()
+                    os.fsync(f.fileno())
             if mode is not None:
                 os.chmod(tmp, mode)
             os.replace(tmp, path)
+            if self.durable:
+                _fsync_directory(self.dir)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -505,13 +547,86 @@ def change_key(path):
     return tuple(sorted(out))
 
 
-def read_all(path):
-    """Best-effort whole-fleet read for an out-of-process READER (the
-    telemetry sidecar): the shard directory for *path*, falling back to the
-    legacy document while it is still there. Never raises — an unreadable
-    shard contributes nothing, exactly as the readers' previous
-    ``open(...)/json.load`` in a ``try`` did. Writers must use
-    :class:`KeyedState`, which fails closed instead."""
+def _read_all_strict(path):
+    """Read without migrating or writing. A missing or failed contribution
+    invalidates the pass: callers may prune durable cursors only after a
+    successful read. Atomic shard updates need not form a fleet transaction,
+    but migration or directory replacement must not look like an empty ring.
+    """
+    def optional_stat(filename):
+        try:
+            return os.stat(filename)
+        except FileNotFoundError:
+            return None
+
+    def directory_identity(st):
+        if st is None:
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            raise ValueError("not a directory")
+        return st.st_dev, st.st_ino
+
+    def marker_identity(st):
+        if st is None:
+            return None
+        return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+    def read_object(filename):
+        with open(filename) as f:
+            data = json.load(f, object_pairs_hook=_unique_object,
+                             parse_constant=_reject_constant)
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+        return data
+
+    try:
+        path = os.fspath(path)
+        parent = os.path.dirname(path) or "."
+        # An unavailable state mount is unknown, not a fresh empty store.
+        parent_before = directory_identity(os.stat(parent))
+        marker = path + ".migrated"
+        marker_before = marker_identity(optional_stat(marker))
+        directory = shard_dir(path)
+        directory_before = directory_identity(optional_stat(directory))
+        if marker_before is not None and directory_before is None:
+            raise ValueError("migrated shard directory missing")
+        out = {}
+        # The retired legacy path is an intentionally invalid rollback guard.
+        # Before migration, merge legacy first so newer shard rows win.
+        if marker_before is None and optional_stat(path) is not None:
+            out.update(read_object(path))
+        if directory_before is not None:
+            with os.scandir(directory) as entries:
+                names = []
+                for entry in entries:
+                    if not entry.name.endswith(".json") or entry.name.startswith("."):
+                        continue
+                    # is_file() can silently return False after disappearance.
+                    # An enumerated shard must instead be present and readable.
+                    if not stat.S_ISREG(entry.stat().st_mode):
+                        raise ValueError("not a regular shard")
+                    names.append(entry.path)
+            for name in sorted(names):
+                out.update(read_object(name))
+        if (directory_identity(os.stat(parent)) != parent_before
+                or directory_identity(optional_stat(directory)) != directory_before
+                or marker_identity(optional_stat(marker)) != marker_before):
+            raise ValueError("store changed during read")
+        return out
+    except (OSError, ValueError):
+        # Do not include state contents or parser exception text in diagnostics.
+        raise KeyedStateError("keyed state snapshot unavailable") from None
+
+
+def read_all(path, *, strict=False):
+    """Read the shard directory plus any unmigrated legacy document without
+    writing or migrating. By default this is best effort: an unreadable shard
+    contributes nothing. ``strict=True`` raises :class:`KeyedStateError` on
+    an incomplete read, for callers that use absence to retire durable state.
+    A fresh missing store is empty only when its parent directory exists.
+    Writers must use :class:`KeyedState`, which fails closed instead."""
+    if strict:
+        return _read_all_strict(path)
     out = {}
     # The legacy document first, then the shards on top: during the migration
     # window both exist, and a shard row always wins over the copy in the

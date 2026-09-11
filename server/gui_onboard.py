@@ -17,6 +17,9 @@ streamed job lines are the installer's stdout, which never echoes the password
 (sshpass reads it from the env). The stage-host HOST_USER/HOST_PASS pair is
 deliberately NOT exported: the console always stages locally
 (IRIS_STAGE_LOCAL=1), so no recipe can reach the ssh branch that reads it."""
+import copy
+from collections import deque
+from contextlib import contextmanager, nullcontext
 import inspect
 import ipaddress
 import os
@@ -24,7 +27,9 @@ import queue
 import re
 import secrets
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -63,6 +68,62 @@ _LOG_TRUNCATED = "[additional job output truncated: retention limit reached]"
 # finished job's log is also written there so an operator can read yesterday's
 # failure. Bounded: the directory is pruned to the newest N files.
 _MAX_PERSISTED_LOGS = 200
+_INSTRUCTION_BOOTSTRAP_MAX = 256 * 1024
+_STAGING_CAPABILITY = re.compile(r"^[0-9a-f]{32}$")
+_BOOTSTRAP_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _write_private_snapshot(path, body):
+    """Atomically publish bounded ciphertext and return its inode identity."""
+    if type(body) is not bytes or not body \
+            or len(body) > _INSTRUCTION_BOOTSTRAP_MAX:
+        raise ValueError("instruction bootstrap unavailable")
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    directory_stat = os.lstat(directory)
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise ValueError("instruction bootstrap unavailable")
+    descriptor, temporary = tempfile.mkstemp(
+        dir=directory, prefix=".instruction-bootstrap-", suffix=".tmp")
+    installed_identity = None
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        installed = os.lstat(path)
+        installed_identity = (installed.st_dev, installed.st_ino)
+        if not stat.S_ISREG(installed.st_mode) \
+                or installed.st_mode & 0o777 != 0o600 \
+                or installed.st_size != len(body):
+            raise ValueError("instruction bootstrap unavailable")
+        return installed_identity
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        if installed_identity is not None:
+            _unlink_snapshot(path, installed_identity)
+        raise
+
+
+def _unlink_snapshot(path, identity=None):
+    """Remove only the expected private inode (or an exact capability leaf)."""
+    try:
+        current = os.lstat(path)
+        if identity is not None and (current.st_dev, current.st_ino) != identity:
+            return
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _fmt_dur(secs):
@@ -106,7 +167,7 @@ _MODEL_INSTALL_TABLE = (
     (r"^IE-?3", ("iox",)),        # IE-3x00: no Guest Shell on IOS-XE >=17.9
     (r"^IR1[018]", ("iox",)),     # IR1101/IR18xx are IOx-hosted the same way
     (r"^C9[0-9]{3}", ("guestshell", "iox")),
-    (r"^C8[0-9]{3}", ("router",)),
+    (r"^C8[0-9]{3}", ("router", "iox")),   # Guest Shell (auto) or an IOx app, both via VPG
     (r"^(ISR|ASR|CSR)", ("guestshell",)),  # legacy router mapping; not yet supported
 )
 _MODEL_PLATFORMS = tuple((pattern, options[0])
@@ -131,6 +192,29 @@ _XR_PLATFORM = "xr-appmgr"
 # number so the fleet's stored model reads consistently regardless of which
 # path recorded it (console form, CSV import, live probe).
 _SYS_SUFFIX_RE = re.compile(r"^(8[0-9]{2,3})-SYS$")
+
+_MODEL_FAMILY_NAMES = (
+    "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
+)
+assert len(_MODEL_FAMILY_NAMES) == len(_MODEL_INSTALL_TABLE)
+
+
+def family(model):
+    """Return the stable scheduling family for a trusted fleet model.
+
+    This deliberately shares the onboarding classifier instead of growing a
+    second model taxonomy. Callers decide whether their model source is
+    trusted; management targeting passes only the fleet/record projection and
+    never the device-authored heartbeat model.
+    """
+    model = (model or "").strip()
+    if _XR_MODEL_RE.match(model):
+        return "XR8000"
+    for (pattern, _options), name in zip(
+            _MODEL_INSTALL_TABLE, _MODEL_FAMILY_NAMES):
+        if re.match(pattern, model, re.IGNORECASE):
+            return name
+    return "unknown"
 
 
 def normalize_model(model):
@@ -205,6 +289,27 @@ _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
 # `copy` onto bootflash — same final placement as Guest Shell, and no
 # CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
 _C9K_MODEL = r"^C9[0-9]{3}"
+# Catalyst 8000 -> amd64 IOx package attached through the IRIS VirtualPortGroup
+# (device/iox/install.sh derives the vnic form from the router management
+# type); no AppGig, staging straight to bootflash:. Like the C9300 it hands
+# the image to IOS through a bind-mounted host share plus an IOS-internal
+# plain `copy`, so no image bytes cross the punted control plane and the
+# device's SCP server stays off (issue #228: SCP is for IE-3x00 only, the one
+# IOx platform that cannot bind-mount its staging filesystem into the app).
+#
+# No share on a Catalyst 8000: verified on a C8000V (IOS-XE 17.15.5) on
+# 2026-09-10 -- CAF accepts a `-v /bootflash/iox_host_data_share:/mnt/share`
+# run option but never mounts it, the only bootflash mount the app gets
+# (/local/local1/core_dir) is invisible to IOS `dir`, and `app-hosting data`
+# copies only INTO the app. The router therefore hands the image to IOS over
+# the scp push, and its SCP server stays enabled (issue #228).
+_C8K_MODEL = r"^C8[0-9]{3}"
+_ROUTER_MANAGEMENT_TYPES = frozenset(("router-routed", "router-nat"))
+_C8K_IOX_ENV = {
+    "PKG": "iris-amd64.tar",
+    "PKG_FS": "bootflash:",
+    "TARGET_FS": "bootflash:",
+}
 _C9K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
     "APP_INTF": "AppGigabitEthernet1/0/1",
@@ -230,6 +335,8 @@ def _iox_arch_env(device_id, model):
         _refuse_xr(device_id)
     if model and re.match(_C9K_MODEL, model, re.IGNORECASE):
         return dict(_C9K_IOX_ENV)
+    if model and re.match(_C8K_MODEL, model, re.IGNORECASE):
+        return dict(_C8K_IOX_ENV)
     if model and any(re.match(p, model, re.IGNORECASE) for p in _ARM_IOX_MODELS):
         return {}
     raise ValueError(
@@ -270,6 +377,64 @@ def _refuse_xr_platform_on_xe(device_id):
                                        if p != _XR_PLATFORM))))
 
 
+def validate_legacy_onboard_target(target, device_id=None):
+    """Return a complete legacy routed target, without I/O or mutation.
+
+    Bare inventory is valid storage but not deployment authority. Historical
+    positional CSVs and their v2 exports use different names for VLAN/app IP;
+    both retain the original SVI mask/gateway defaults. Classified records are
+    validated by their existing management-type paths instead.
+    """
+    if not isinstance(target, dict):
+        raise ValueError("unclassified_management_type")
+    result = dict(target)
+    if result.get("management_type", "legacy_routed") != "legacy_routed":
+        return result
+
+    def text(value):
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            raise ValueError("unclassified_management_type")
+        return str(value).strip()
+
+    def alias(primary, historical):
+        preferred = result.get(primary)
+        old = result.get(historical)
+        if preferred not in (None, "") and old not in (None, ""):
+            if text(preferred) != text(old):
+                raise ValueError("unclassified_management_type")
+        return preferred if preferred not in (None, "") else old
+
+    try:
+        did = text(result.get("device_id", device_id))
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", did) \
+                or did == "seeder" or (device_id is not None and did != device_id):
+            raise ValueError("invalid device id")
+        result["device_id"] = did
+        result["device_ip"] = str(ipaddress.IPv4Address(text(result.get("device_ip"))))
+        vlan = int(text(alias("iris_vlan", "vlan")))
+        if not 1 <= vlan <= 4094:
+            raise ValueError("invalid VLAN")
+        result["iris_vlan"] = str(vlan)
+        result["svi_ip"] = str(ipaddress.IPv4Address(text(result.get("svi_ip"))))
+        result["svi_mask"] = str(ipaddress.IPv4Network(
+            "0.0.0.0/" + text(result.get("svi_mask"))).netmask)
+        result["app_ip"] = str(ipaddress.IPv4Address(text(alias("app_ip", "guest_ip"))))
+        app_mask = result.get("app_mask")
+        if app_mask in (None, ""):
+            app_mask = result["svi_mask"]
+        app_gateway = result.get("app_gateway")
+        if app_gateway in (None, ""):
+            app_gateway = result["svi_ip"]
+        result["app_mask"] = str(ipaddress.IPv4Network(
+            "0.0.0.0/" + text(app_mask)).netmask)
+        result["app_gateway"] = str(ipaddress.IPv4Address(text(app_gateway)))
+    except (ValueError, TypeError):
+        # Stable non-secret admission code; raw operator input is not logged.
+        raise ValueError("unclassified_management_type") from None
+    result["management_type"] = "legacy_routed"
+    return result
+
+
 def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
@@ -307,8 +472,8 @@ def resolve_platform(dev, probe=None, os_family=None):
         if explicit == _XR_PLATFORM and family == "xe":
             _refuse_xr_platform_on_xe(device_id)
         if re.match(r"^C8[0-9]{3}", dev.get("model") or "", re.IGNORECASE) \
-                and explicit != "router":
-            raise ValueError("Catalyst 8000 models require platform router")
+                and explicit not in ("router", "iox"):
+            raise ValueError("Catalyst 8000 models require platform router or iox")
         return explicit
 
     def _match(model):
@@ -507,6 +672,46 @@ def _check_iris_named_collisions(running, extra=(), waive=()):
 # retry until the operator undeployed by hand).
 _IOX_RESUMABLE_APP_STATES = ("DEPLOYED", "ACTIVATED")
 
+# The description the IOx recipe writes into the VirtualPortGroup it creates
+# on a router (server/iox_verification.py renders it; device/iox/install.sh
+# prints the same literal in its dry run). Not the Guest Shell recipe's
+# marker on purpose: device/router-uninstall.sh's record-less reclaim must
+# never remove the group an IOx app is still attached to.
+_IOX_VPG_DESCRIPTION = "description IRIS IOx VPG"
+
+
+def _iox_own_router_footprint(resolved, sections):
+    """True when the VirtualPortGroup the plan wants already exists AND is
+    provably IRIS's own from a half-finished IOx onboard of this same plan:
+    the group carries the IOx recipe's description with exactly the planned
+    address, and the app is either installed but never started
+    (_IOX_RESUMABLE_APP_STATES) or absent altogether -- an attempt that
+    configured the network and then failed before or at the app block leaves
+    exactly that footprint (a Catalyst 8000V refusing `app-hosting appid`
+    did, 2026-09-10). Both retries are the documented idempotent re-install,
+    so the VPG/subnet/NAT collision checks must not refuse them the way they
+    refuse an operator's group -- the router spelling of scrubber #78. A
+    RUNNING app, or a marked group at a different address, is still a
+    collision: that is not this plan's own half-finished work."""
+    if resolved.get("platform") != "iox":
+        return False
+    appid = str(resolved.get("iox_appid") or "iris")
+    if _iox_app_state(sections["apps"], appid) not in (
+            "", *_IOX_RESUMABLE_APP_STATES):
+        return False
+    vpg = str(resolved.get("vpg_number", ""))
+    block = re.search(
+        r"(?ms)^interface VirtualPortGroup%s\s*$\n(.*?)(?=^\S|\Z)" % re.escape(vpg),
+        sections["running"])
+    if not block:
+        return False
+    body = block.group(1)
+    return bool(
+        re.search(r"(?m)^\s*%s\s*$" % re.escape(_IOX_VPG_DESCRIPTION), body) and
+        re.search(r"(?m)^\s*ip address %s %s\s*$" % (
+            re.escape(str(resolved.get("app_gateway", ""))),
+            re.escape(str(resolved.get("app_mask", "")))), body))
+
 # The IRIS-named artifacts device/iox/install.sh re-establishes on every run:
 # step [4/9] pastes `no crypto pki trustpoint IRIS` before re-adding the
 # trustpoint and re-binding the HTTP client to it. Those are the only
@@ -526,6 +731,33 @@ def _iox_app_state(apps, appid):
     return match.group(1).upper() if match else ""
 
 
+def _runner_failure_reason(out):
+    """The last line the runner wrote to stderr, printable-only and bounded,
+    so a preflight that could not even log in says WHY ("Connection timed
+    out", "Permission denied", "Host key verification failed") instead of
+    leaving the operator to guess between a dead device, a wrong password
+    and a changed host key. sshpass reads the password from its environment
+    and never echoes it; the runner's own diagnostics name files, not
+    secrets."""
+    # sshpass reports a rejected password as exit 5 and an untrusted host key
+    # as exit 6 without writing a word; ssh's own connection failures land on
+    # stderr after an accept-new "Permanently added" warning that is not the
+    # reason.
+    if out.returncode == 5:
+        return "the device rejected the login credentials"
+    if out.returncode == 6:
+        return "the device's SSH host key is not trusted"
+    # Injected transport doubles carry no stderr; a missing channel is simply
+    # no reason to report, never an error of its own.
+    lines = [line.strip()
+             for line in (getattr(out, "stderr", "") or "").splitlines()
+             if line.strip() and "Permanently added" not in line]
+    if not lines:
+        return ""
+    reason = "".join(ch for ch in lines[-1] if 32 <= ord(ch) < 127)
+    return reason[:160]
+
+
 def _probe_sections(runner, env, commands, label):
     """Run every command in ONE ssh login and split the output on echoed
     markers. One login per device is what makes a large fleet submission
@@ -539,7 +771,9 @@ def _probe_sections(runner, env, commands, label):
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
                          capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
-        raise ValueError("%s preflight could not run" % label)
+        reason = _runner_failure_reason(out)
+        raise ValueError("%s preflight could not run%s" % (
+            label, ": " + reason if reason else ""))
     sections = {}
     for name, _command in commands:
         start = "%s%s__" % (marker, name.upper())
@@ -628,7 +862,9 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
                          capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
-        raise ValueError("router preflight could not run")
+        reason = _runner_failure_reason(out)
+        raise ValueError("router preflight could not run%s" % (
+            ": " + reason if reason else ""))
     sections = {}
     for name, _command in commands:
         start = "%s%s__" % (marker, name.upper())
@@ -658,7 +894,11 @@ def _default_router_preflight(dev, env, resolved, repo_root):
 
     running = sections["running"]
     vpg = str(resolved.get("vpg_number", ""))
-    if re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running):
+    # An IOx retry over its own half-finished footprint is not a collision;
+    # anything that does not match the plan exactly still is.
+    own_footprint = _iox_own_router_footprint(resolved, sections)
+    if (re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running)
+            and not own_footprint):
         raise ValueError("VirtualPortGroup%s already exists" % vpg)
 
     candidate = ipaddress.IPv4Network(
@@ -671,18 +911,24 @@ def _default_router_preflight(dev, env, resolved, repo_root):
             configured = ipaddress.IPv4Network("%s/%s" % (address, mask), strict=False)
         except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
             continue
-        if candidate.overlaps(configured):
+        if candidate.overlaps(configured) and not (
+                own_footprint and configured == candidate):
             raise ValueError("router app subnet %s is already configured" % candidate)
 
-    apps = sections["apps"]
-    if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
-        raise ValueError("guestshell is already enabled")
-    _check_iris_named_collisions(running, extra=(
-        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
-    guest_share = sections["guest_share"]
-    if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
-            and not re.search(r"(?im)^No files in directory\s*$", guest_share):
-        raise ValueError("bootflash:guest-share is not empty")
+    # An IOx app on this router shares the VPG/subnet/NAT checks above but
+    # not the Guest Shell footprint: its app-hosting collisions (including a
+    # resumable retry of its own appid) are the IOx preflight's job, which
+    # runs alongside this one for that platform.
+    if resolved.get("platform") != "iox":
+        apps = sections["apps"]
+        if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
+            raise ValueError("guestshell is already enabled")
+        _check_iris_named_collisions(running, extra=(
+            (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
+        guest_share = sections["guest_share"]
+        if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
+                and not re.search(r"(?im)^No files in directory\s*$", guest_share):
+            raise ValueError("bootflash:guest-share is not empty")
 
     evidence = {"status": "passed", "detected_model": model,
                 "device_identity": device_identity,
@@ -708,11 +954,17 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     evidence["nat_outside_preexisting"] = bool(
         block and re.search(r"(?m)^\s*ip nat outside\s*$", block.group(1)))
     acl = "IRIS-NAT-%s" % vpg
-    if re.search(r"(?m)^ip access-list standard %s\s*$" % re.escape(acl), running):
+    if (re.search(r"(?m)^ip access-list standard %s\s*$" % re.escape(acl), running)
+            and not own_footprint):
         raise ValueError("NAT ACL %s already exists" % acl)
-    if re.search(r"(?m)^ip nat inside source list %s\s" % re.escape(acl), running):
-        raise ValueError("NAT overload rule for %s already exists" % acl)
+    own_overload = "ip nat inside source list %s interface %s overload" % (acl, outside)
+    for line in re.findall(r"(?m)^ip nat inside source list %s\s.*$" % re.escape(acl),
+                           running):
+        if not (own_footprint and line.strip() == own_overload):
+            raise ValueError("NAT overload rule for %s already exists" % acl)
     port = str(resolved.get("swarm_port", "6881"))
+    own_static = "ip nat inside source static tcp %s %s interface %s %s" % (
+        resolved["app_ip"], port, outside, port)
     for line in re.findall(r"(?m)^ip nat inside source static tcp\s+.*$", running):
         fields = line.split()
         # ip nat inside source static tcp <inside-ip> <inside-port>
@@ -726,6 +978,8 @@ def _default_router_preflight(dev, env, resolved, repo_root):
             outside_port = fields[9]
         if ((inside_ip == resolved["app_ip"] and inside_port == port)
                 or outside_port == port):
+            if own_footprint and line.strip() == own_static:
+                continue
             raise ValueError("NAT static mapping collides with swarm port %s" % port)
     return evidence
 
@@ -881,6 +1135,9 @@ def bind_preflight(resolved, evidence, platform=None):
     if platform == "router":
         return apply_router_preflight(resolved, evidence)
     if platform == "iox":
+        if (resolved or {}).get("management_type") in _ROUTER_MANAGEMENT_TYPES:
+            return apply_iox_preflight(
+                apply_router_preflight(resolved, evidence), evidence)
         return apply_iox_preflight(resolved, evidence)
     if platform == "guestshell":
         return apply_guestshell_preflight(resolved, evidence)
@@ -952,6 +1209,40 @@ def _default_xr_preflight(dev, env, resolved, repo_root):
     return evidence
 
 
+class ScheduledAdmissionError(ValueError):
+    """A non-secret, machine-readable refusal of internal scheduled work."""
+
+    def __init__(self, reason):
+        if not isinstance(reason, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", reason):
+            raise ValueError("invalid scheduled admission reason")
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _WorkQueueView:
+    """Compatibility view for embedded callers that drain work themselves."""
+
+    def __init__(self, service):
+        self.service = service
+
+    def get_nowait(self):
+        with self.service._condition:
+            job = self.service._reserve_work_locked()
+            if job is None:
+                raise queue.Empty
+        return lambda: self.service._execute_reserved(job)
+
+    def task_done(self):
+        # Execution itself releases accounting, including on exceptions.
+        pass
+
+    def join(self):
+        with self.service._condition:
+            while (self.service._manual_queue or self.service._scheduled_queue
+                   or self.service._active_work):
+                self.service._condition.wait()
+
+
 class OnboardService:
     def __init__(self, fleet, creds, server_dir=None, device_install=None,
                  crt_public=None, host_ip=None, catalog_url=None,
@@ -959,7 +1250,8 @@ class OnboardService:
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
                  max_concurrent=None, clear_state_fn=None, record_store=None,
                  preflight_fn=None, iox_preflight_fn=None, log_dir=None,
-                 guestshell_preflight_fn=None, xr_preflight_fn=None):
+                 guestshell_preflight_fn=None, xr_preflight_fn=None,
+                 iox_controller=None, instruction_bootstrap_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -985,6 +1277,7 @@ class OnboardService:
         self._guestshell_preflight = guestshell_preflight_fn or (
             lambda dev, env, resolved: _default_guestshell_preflight(
                 dev, env, resolved, self.repo_root))
+        self._iox_preflight_is_default = iox_preflight_fn is None
         self._iox_preflight = iox_preflight_fn or (
             lambda dev, env, resolved: _default_iox_preflight(
                 dev, env, resolved, self.repo_root))
@@ -999,6 +1292,14 @@ class OnboardService:
         # so orchestration stays unit-testable without a catalog.
         self._clear_state = clear_state_fn
         self.record_store = record_store
+        # Every non-dry-run IOx operation is admitted and supervised by this
+        # controller.  It is injected so the Console+controller handoff can be
+        # exercised without opening a device connection.
+        self._iox_controller = iox_controller
+        # A production callback stamps and seals one ciphertext envelope after
+        # the enrollment key has been durably minted.  It is optional for old
+        # embedded/test callers; management_api always injects it.
+        self._instruction_bootstrap = instruction_bootstrap_fn
         # Directory for persisted per-job logs (None disables persistence —
         # unit tests and legacy callers keep the purely in-memory behavior).
         self.log_dir = log_dir
@@ -1009,10 +1310,23 @@ class OnboardService:
         # A bounded queue plus at most max_concurrent workers prevents one
         # parked daemon thread per submission. Workers are created lazily so a
         # service that never onboards does not consume 25 idle threads.
-        self._work_queue = queue.Queue(maxsize=_MAX_QUEUED_JOBS)
+        self._manual_queue = deque()
+        self._scheduled_queue = deque()
+        self._manual_reservation = (self.max_concurrent + 1) // 2
+        self._scheduled_limit = self.max_concurrent // 2
+        self._scheduled_inflight = set()
+        # Cancellation releases logical reservations immediately, but a worker
+        # blocked entering outer authority still physically occupies the pool.
+        # Keep that occupancy until its execution wrapper actually unwinds.
+        self._scheduled_workers = set()
+        self._reserved = set()
+        self._active_work = 0
+        self._work_queue = _WorkQueueView(self)
         self._workers = []
         self._jobs = {}
         self._procs = {}   # job_id -> live installer Popen (for abort)
+        self._closing = False
+        self._iox_cancels = {}  # job_id -> controller cancellation Event
         # Whether the injected runner can report its process for abort support.
         try:
             self._run_supports_proc = len(
@@ -1020,32 +1334,260 @@ class OnboardService:
         except (TypeError, ValueError):
             self._run_supports_proc = False
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
         # The autonomous escalation driver: started on the first submission,
         # and it retires itself once no job is left (see _maintenance_loop).
         self._maintenance = None
         self._maintenance_stop = threading.Event()
 
+    def _prepare_instruction_bootstrap(self, device_id, platform, env):
+        """Create the platform's private fire-time snapshot and cleanup set."""
+        if self._instruction_bootstrap is None:
+            return []
+        try:
+            body = self._instruction_bootstrap(device_id)
+        except Exception as exc:
+            raise ValueError("instruction bootstrap unavailable") from exc
+        if type(body) is not bytes or not body \
+                or len(body) > _INSTRUCTION_BOOTSTRAP_MAX:
+            raise ValueError("instruction bootstrap unavailable")
+
+        staging = os.path.join(self.artifacts_dir, "staging")
+        if platform in ("guestshell", "router"):
+            if not _BOOTSTRAP_DEVICE_ID.fullmatch(device_id):
+                raise ValueError("instruction bootstrap unavailable")
+            capability = env.get("IRIS_STAGING_CAPABILITY")
+            if capability in (None, ""):
+                capability = secrets.token_hex(16)
+            if not isinstance(capability, str) \
+                    or _STAGING_CAPABILITY.fullmatch(capability) is None:
+                raise ValueError("invalid staging capability")
+            env["IRIS_STAGING_CAPABILITY"] = capability
+            envelope = os.path.join(
+                staging, "iris-instructions-%s-%s.envelope"
+                % (device_id, capability))
+            identity = _write_private_snapshot(envelope, body)
+            digest = os.path.join(staging, "bundle-sha256-" + capability)
+            return [(envelope, identity), (digest, None)]
+        if platform == _XR_PLATFORM:
+            snapshot = os.path.join(
+                staging, ".instruction-bootstrap-%s" % secrets.token_hex(16))
+            identity = _write_private_snapshot(snapshot, body)
+            env["IRIS_INSTRUCTION_BOOTSTRAP_FILE"] = snapshot
+            return [(snapshot, identity)]
+        raise ValueError("instruction bootstrap unavailable")
+
+    @staticmethod
+    def _cleanup_instruction_bootstrap(paths):
+        for path, identity in paths:
+            _unlink_snapshot(path, identity)
+
+    @staticmethod
+    def _schedule_provenance(context, device_id):
+        if context is None:
+            return None
+        keys = ("schema_version", "schedule_id", "schedule_rev",
+                "occurrence_id", "device_id")
+        if (not isinstance(context, dict) or set(context) != set(keys)
+                or type(context["schema_version"]) is not int
+                or context["schema_version"] != 1
+                or type(context["schedule_rev"]) is not int
+                or context["schedule_rev"] < 1
+                or context["device_id"] != device_id):
+            raise ValueError("invalid schedule provenance")
+        for key in ("schedule_id", "occurrence_id", "device_id"):
+            value = context[key]
+            if (not isinstance(value, str) or not value or len(value) > 256
+                    or any(ord(ch) < 32 for ch in value)):
+                raise ValueError("invalid schedule provenance")
+        return tuple((key, context[key]) for key in keys)
+
+    @contextmanager
+    def _authority(self, job, phase):
+        guard = job.get("_authority_guard")
+        try:
+            with guard(phase) if guard else nullcontext():
+                yield
+        except ScheduledAdmissionError as exc:
+            # The nested job-lock section has unwound before this handler.
+            # Retain refusal provenance even at IOx's deferred boundary.
+            if job.get("_schedule_context"):
+                with self._condition:
+                    job["admission_reason"] = exc.reason
+            raise
+
+    @staticmethod
+    def _check_authority(job, phase):
+        check = job.get("_authority_check")
+        if check:
+            check(phase)
+
+    def _cancel_queued_locked(self, job, reason="cancelled before start"):
+        job["state"] = "cancelled"
+        job["finished_at"] = int(self._now())
+        if job.get("_defer_iox_prepare"):
+            job["result_code"] = 130
+            job["error_category"] = "cancelled"
+        self._append_locked(job, reason)
+        job.pop("_work", None)
+        if job.get("_schedule_context") and reason == "manual_override":
+            job["admission_reason"] = reason
+        jid = job["id"]
+        for pending in (self._manual_queue, self._scheduled_queue):
+            try:
+                pending.remove(jid)
+            except ValueError:
+                pass
+        self._reserved.discard(jid)
+        self._scheduled_inflight.discard(jid)
+        self._condition.notify_all()
+
+    def _admit(self, job, work, prepare=None):
+        """Guard -> job lock -> record transaction; no enqueue failure gap."""
+        with self._authority(job, "admission"):
+            with self._condition:
+                scheduled = bool(job.get("_schedule_context"))
+                if self._closing:
+                    if scheduled:
+                        raise ScheduledAdmissionError("service_unavailable")
+                    raise ValueError("onboarding service is shutting down")
+                if scheduled and not self._scheduled_limit:
+                    raise ScheduledAdmissionError("capacity_unavailable")
+                superseded = []
+                for current in self._jobs.values():
+                    if (current["device_id"] != job["device_id"] or
+                            current["state"] in _TERMINAL):
+                        continue
+                    if (not scheduled and current["state"] == "queued"
+                            and current.get("_schedule_context")):
+                        superseded.append(current)
+                        continue
+                    if ((job.get("_maintenance_key") is not None and
+                         current.get("_maintenance_key") == job["_maintenance_key"])
+                            or (job.get("_maintenance_key") is None and
+                                current.get("action", "onboard") == job["action"])):
+                        self._check_authority(job, "admission")
+                        return current["id"]
+                    if scheduled:
+                        raise ScheduledAdmissionError("device_busy")
+                    raise ValueError(
+                        "device %s is busy with an active %s job (%s)" %
+                        (job["device_id"], current.get("action", "onboard"),
+                         current["id"]))
+                pending = sum(j["state"] == "queued" for j in self._jobs.values())
+                if pending - len(superseded) >= _MAX_QUEUED_JOBS:
+                    if scheduled:
+                        raise ScheduledAdmissionError("queue_full")
+                    raise ValueError("onboarding queue is full")
+                scheduled_pending = sum(
+                    j["state"] == "queued" and bool(j.get("_schedule_context"))
+                    for j in self._jobs.values())
+                if (scheduled and scheduled_pending >=
+                        max(0, _MAX_QUEUED_JOBS - self._manual_reservation)):
+                    raise ScheduledAdmissionError("queue_full")
+                self._check_authority(job, "admission")
+                # Supersession and its record retirement precede the replacement
+                # record create, so the old planned record cannot block manual intent.
+                for current in superseded:
+                    if current.get("record_id") and self.record_store:
+                        retire = getattr(
+                            self.record_store, "retire_planned", None)
+                        if retire is None:
+                            self.record_store.transition(
+                                current["record_id"], "removed")
+                        else:
+                            retire(current["record_id"])
+                    self._cancel_queued_locked(current, "manual_override")
+                if prepare and not job.get("_defer_iox_prepare"):
+                    prepared = prepare()
+                    if job.get("record_id") is not None and prepared != job["record_id"]:
+                        raise ValueError("prepared record does not match request")
+                    job["record_id"] = prepared
+                self._evict_old(self._now())
+                job["_work"] = work
+                self._jobs[job["id"]] = job
+                pending_queue = self._scheduled_queue if scheduled else self._manual_queue
+                pending_queue.append(job["id"])
+                self._ensure_workers()
+                self._ensure_maintenance()
+                self._condition.notify_all()
+                return job["id"]
+
+    def _reserve_work_locked(self):
+        if self._manual_queue:
+            jid = self._manual_queue.popleft()
+        elif (self._scheduled_queue and
+              len(self._scheduled_inflight) < self._scheduled_limit and
+              len(self._scheduled_workers) < self._scheduled_limit):
+            jid = self._scheduled_queue.popleft()
+            self._scheduled_inflight.add(jid)
+            self._scheduled_workers.add(jid)
+        else:
+            return None
+        self._reserved.add(jid)
+        self._active_work += 1
+        return self._jobs[jid]
+
+    def _execute_reserved(self, job):
+        jid = job["id"]
+        try:
+            # Never enter an outer role/fleet/secrets guard under the job lock.
+            with self._authority(job, "execution"):
+                with self._condition:
+                    if job["state"] != "queued" or jid not in self._reserved:
+                        return
+                    self._check_authority(job, "execution")
+                    self._reserved.remove(jid)
+                    job["state"] = "running"
+                    job["started_at"] = int(self._now())
+            job["_work"]()
+        except Exception as exc:
+            reason = (exc.reason if isinstance(exc, ScheduledAdmissionError)
+                      else "execution_failed")
+            with self._condition:
+                queued = job["state"] == "queued"
+                if job["state"] in _TERMINAL:
+                    return
+                if job.get("_schedule_context"):
+                    job["admission_reason"] = reason
+                if queued:
+                    self._cancel_queued_locked(job, reason)
+            if queued:
+                if job.get("record_id"):
+                    self._retire_planned_or_note(jid, job["record_id"])
+            else:
+                self._append(jid, "ERROR: execution failed")
+                if job.get("record_id"):
+                    self._transition_or_note(jid, job["record_id"], "needs-reconcile")
+                self._finish(jid, "error", None)
+        finally:
+            with self._condition:
+                self._reserved.discard(jid)
+                self._scheduled_inflight.discard(jid)
+                self._scheduled_workers.discard(jid)
+                self._active_work -= 1
+                job.pop("_work", None)
+                self._condition.notify_all()
+
     def _worker_loop(self):
         while True:
-            try:
-                work = self._work_queue.get(timeout=60)
-            except queue.Empty:
-                # TTL cleanup does not depend on another submission: an idle
-                # worker drives it for free. The maintenance thread covers the
-                # case where NO worker is idle to wake up.
-                with self._lock:
+            with self._condition:
+                job = self._reserve_work_locked()
+                if job is None:
+                    if self._closing:
+                        return
+                    self._condition.wait(timeout=60)
                     self._evict_old(self._now())
-                # The reaper's SIGTERM -> SIGKILL escalation must advance even
-                # when no operator submits anything for hours.
+                    job = self._reserve_work_locked()
+            if job is None:
+                # Preserve the idle pool's reaper as well as the independent
+                # maintenance thread that covers a completely occupied pool.
                 try:
                     self.reap_overdue_jobs()
                 except Exception:
                     pass
                 continue
-            try:
-                work()
-            finally:
-                self._work_queue.task_done()
+            self._execute_reserved(job)
 
     def _ensure_workers(self):
         """Grow the fixed-size pool lazily, never beyond max_concurrent."""
@@ -1109,20 +1651,47 @@ class OnboardService:
         if t is not None:
             t.join(timeout=5)
 
-    def _build_env(self, device_id, mint=True, resolved=None, env_extra=None):
+    def shutdown(self):
+        """Stop admission and drain the bounded worker pool safely.
+
+        Queued jobs have not touched a device, so retire them through the
+        normal cancellation path. Running jobs keep the controller alive and
+        are allowed to finish restoration/reaping before this method returns.
+        """
+        with self._lock:
+            self._closing = True
+        self.cancel_queued()
+        self.stop_maintenance()
+        self._work_queue.join()
+        with self._lock:
+            workers = list(self._workers)
+        with self._condition:
+            self._condition.notify_all()
+        for worker in workers:
+            worker.join()
+        with self._lock:
+            self._workers = []
+
+    def _build_env(self, device_id, mint=True, resolved=None, env_extra=None,
+                   resolve_credentials=True, onboarding=False):
         dev = self.fleet.get_device(device_id)
         if not dev:
             raise ValueError("unknown device: %s" % device_id)
-        cred = self.creds.get_secrets(dev.get("credential_profile_id") or "")
-        if not cred:
-            raise ValueError("device has no credential profile")
+        target = resolved if resolved is not None else dev
+        if mint or onboarding:
+            target = validate_legacy_onboard_target(target, device_id)
+        cred = None
+        if resolve_credentials:
+            cred = self.creds.get_secrets(
+                dev.get("credential_profile_id") or "")
+            if not cred:
+                raise ValueError("device has no credential profile")
         if not self.host_ip:
             raise ValueError("IRIS_HOST_IP not configured on the server")
         # Undeploy never mints: minting persists fresh enrollment state into
         # the secrets store — pure teardown must not touch it.
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
-        target = resolved or dev
         management_type = target["management_type"]
         if management_type == "legacy_routed":
             management_type = "routed"
@@ -1158,9 +1727,6 @@ class OnboardService:
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,
-            "DEVICE_USER": cred["device_user"],
-            "DEVICE_PASS": cred["device_pass"],
-            "DEVICE_ENABLE": cred.get("enable_secret") or cred["device_pass"],
             "IRIS_CRT_FILE": self.crt_public,
             # The state-owning management worker remains in the server tier
             # beside the artifact volume, so device-install.sh can stage its
@@ -1172,6 +1738,20 @@ class OnboardService:
             "IRIS_STAGE_LOCAL": "1",
             "IRIS_ARTIFACTS_DIR": self.artifacts_dir,
         })
+        if cred is not None:
+            env.update({
+                "DEVICE_USER": cred["device_user"],
+                "DEVICE_PASS": cred["device_pass"],
+                "DEVICE_ENABLE": (
+                    cred.get("enable_secret") or cred["device_pass"]),
+            })
+        else:
+            # The management process may itself have legacy installer
+            # variables in its environment. Controller-custodied IOx jobs
+            # must carry only the credential reference across this boundary.
+            for key in ("DEVICE_USER", "DEVICE_PASS", "DEVICE_ENABLE",
+                        "DEVICE_SSH_USER", "DEVICE_SSH_PASS"):
+                env.pop(key, None)
         if target.get("model"):
             env["MODEL"] = target["model"]
         # Per-device override of device-install.sh's SVI_IGP (issue #85): the
@@ -1218,6 +1798,18 @@ class OnboardService:
         if platform == "router":
             return self._router_preflight(dev, env, resolved)
         if platform == "iox":
+            if resolved.get("management_type") in _ROUTER_MANAGEMENT_TYPES:
+                # A router carrying the IOx app needs both: the router checks
+                # own the VirtualPortGroup, subnet and NAT footprint; the IOx
+                # checks own the app-hosting collisions. Both read the same
+                # box, so they must agree on which box it is.
+                router = self._router_preflight(dev, env, resolved)
+                iox = self._iox_preflight(dev, env, resolved)
+                if (router.get("device_identity") or "") != (iox.get("device_identity") or ""):
+                    raise ValueError("router and IOx preflights saw different devices")
+                merged = dict(router)
+                merged.update({k: v for k, v in iox.items() if k != "detected_model"})
+                return merged
             return self._iox_preflight(dev, env, resolved)
         if platform == "guestshell":
             return self._guestshell_preflight(dev, env, resolved)
@@ -1225,7 +1817,8 @@ class OnboardService:
             return self._xr_preflight(dev, env, resolved)
         return {"status": "not-required"}
 
-    def _resolve(self, device_id, dev, env, action="onboard"):
+    def _resolve(self, device_id, dev, env, action="onboard",
+                 controller_owns_credentials=False):
         """Resolve (platform, script) for a device, using the live probe (if
         needed) with creds already present in env. Caches a probed model onto
         the fleet row so future onboards (and the devices table) skip the
@@ -1246,11 +1839,10 @@ class OnboardService:
                 # would overwrite a previously cached family (upsert filters
                 # None, not empty strings) and silently reopen the misroute
                 # this guard exists to close.
-                record = {"device_id": device_id, "model": model}
                 family = d.get("os_family")
-                if family:
-                    record["os_family"] = family
-                self.fleet.upsert(record)
+                self.fleet.update_observation(
+                    device_id, model=model,
+                    os_family=family if family else None)
                 dev["model"] = model   # so the job line reports what was found
             return model
 
@@ -1270,10 +1862,66 @@ class OnboardService:
         script = os.path.join(self.repo_root, _PLATFORM_RECIPES[platform])
         if platform == "guestshell":
             script = self.device_install
-        elif platform == "iox":
+        elif platform == "iox" and not controller_owns_credentials:
             env["DEVICE_SSH_PASS"] = env["DEVICE_PASS"]
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
+
+    @staticmethod
+    def _iox_request_target(dev, env, resolved):
+        """Build the non-secret, immutable-input view admitted by the IOx
+        controller. Environment variable names and credential material never
+        cross this boundary.
+        """
+        source = resolved or dev
+        target = {
+            "host": env["DEVICE_IP"],
+            "port": int(source.get("port") or source.get("ssh_port") or 22),
+            "platform": "iox",
+        }
+        for key in ("model", "os_family", "management_type",
+                    "device_identity", "resources", "device_ip",
+                    "package_fs", "iox_appid"):
+            value = source.get(key)
+            if value not in (None, ""):
+                target[key] = copy.deepcopy(value)
+        # These are renderer inputs, never credentials or verification
+        # authority. _build_env has already applied the accepted deployment
+        # plan and explicit operator overrides for this job.
+        env_fields = {
+            "vlan": "VLAN",
+            "svi_ip": "SVI_IP",
+            "svi_mask": "SVI_MASK",
+            "guest_ip": "GUEST_IP",
+            "inband_vlan": "INBAND_VLAN",
+            "app_ip": "APP_IP",
+            "app_mask": "APP_MASK",
+            "app_gateway": "APP_GATEWAY",
+            "vpg_number": "VPG_NUMBER",
+            "nat_interface": "NAT_INTERFACE",
+            "bt_listen_port": "BT_LISTEN_PORT",
+            "nat_outside_owned": "NAT_OUTSIDE_OWNED",
+            "ios_ssh_host": "IOS_SSH_HOST",
+            "target_fs": "TARGET_FS",
+            "package_fs": "PKG_FS",
+            "share_host_path": "SHARE_HOST_PATH",
+            "share_ios_path": "SHARE_IOS_PATH",
+            "app_intf": "APP_INTF",
+            "pkg": "PKG",
+        }
+        for key, env_key in env_fields.items():
+            value = env.get(env_key)
+            if value not in (None, ""):
+                target[key] = value
+        for key, env_keys, default in (
+                ("telemetry", ("IRIS_TELEMETRY", "TELEMETRY"), "on"),
+                ("telemetry_stream",
+                 ("IRIS_TELEMETRY_STREAM", "TELEMETRY_STREAM"), "off"),
+                ("log", ("IRIS_LOG",), "off")):
+            target[key] = next(
+                (env[name] for name in env_keys
+                 if env.get(name) not in (None, "")), default)
+        return target
 
     def _bind_evidence(self, job_id, device_id, action, job, pre_apply,
                        evidence, platform, dev, env, script):
@@ -1314,7 +1962,7 @@ class OnboardService:
         if not family or family == prior_family:
             return
         try:
-            self.fleet.upsert({"device_id": device_id, "os_family": family})
+            self.fleet.update_observation(device_id, os_family=family)
         except Exception:
             pass
 
@@ -1336,8 +1984,43 @@ class OnboardService:
                          % (record_id, state, exc))
             return False
 
+    def _retire_planned_or_note(self, job_id, record_id):
+        """Retire only device-untouched plans and preserve recovery records."""
+        if not record_id:
+            return True
+        if self.record_store is None:
+            return self._transition_or_note(job_id, record_id, "removed")
+        retire = getattr(self.record_store, "retire_planned", None)
+        if retire is None:
+            return self._transition_or_note(job_id, record_id, "removed")
+        try:
+            retire(record_id)
+            return True
+        except Exception as exc:
+            self._append(job_id, "planned record %s not retired: %s"
+                         % (record_id, exc))
+            return False
+
+    def _submission_uses_iox(self, device_id, resolved):
+        """Return whether queue admission already identifies an IOx job.
+
+        IOx record preparation must remain deferred until the controller owns
+        the physical-board lock and has recovered any predecessor obligation.
+        Resolution here is deliberately local: it never invokes the network
+        probe while the job mutex is held.
+        """
+        candidate = dict(self.fleet.get_device(device_id) or {})
+        if resolved:
+            candidate.update(resolved)
+        try:
+            return resolve_platform(candidate) == "iox"
+        except ValueError:
+            return candidate.get("platform") == "iox"
+
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
-              pre_apply=None, env_extra=None, on_success=None):
+              pre_apply=None, env_extra=None, on_success=None, record_id=None,
+              teardown_mode=None, schedule_context=None,
+              authority_guard=None, authority_check=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (the platform's install recipe: device-install.sh, device/iox/install.sh
@@ -1353,21 +2036,49 @@ class OnboardService:
         failure must not restate that as a failure. Like prepare(), it is never
         registered when this start joins an already-active same-action job.
 
-        prepare() (optional) is called EXACTLY ONCE, under the job lock, only
-        when a genuinely new job is registered — never when this start joins an
-        already-active same-action job. It returns the record id to bind to the
-        job. Creating the record there (instead of before start) means a
-        concurrent double-onboard cannot leave an orphan planned record behind.
+        prepare() (optional) is called EXACTLY ONCE only for a genuinely new
+        job — never when this start joins an already-active same-action job.
+        Ordinary platform jobs call it under the job lock at registration. IOx
+        jobs defer it to the controller callback after cross-process board
+        exclusion, predecessor recovery, preflight and wrapper admission. It
+        returns the record id to bind to the job, so a concurrent double-onboard
+        cannot leave an orphan planned record behind.
+
+        Internal scheduled callers may supply closed immutable schedule_context
+        provenance and authority_guard(phase)/authority_check(phase). The guard
+        returns a context manager and is entered without the job lock; the check
+        runs with that guard and the job condition held and must never acquire
+        outer locks. Both are repeated at admission, execution, and (for IOx)
+        iox_prepare. Checks raise ScheduledAdmissionError with a stable reason.
+        Only short authority/record operations belong in these callbacks: no
+        probes, scripts, credential minting or controller waits. IOx controller
+        work happens outside both locks and reacquires the guard only at its
+        deferred record creation boundary.
 
         Jobs are in-memory and per-process: a server restart loses all job state
         and abandons any in-flight job (re-running either script is
         idempotent). Terminal (done/error/cancelled) jobs are evicted after
         _JOB_TTL."""
+        provenance = self._schedule_provenance(schedule_context, device_id)
         if action not in ("onboard", "undeploy"):
             raise ValueError("unknown action: %s" % action)
+        if action == "onboard":
+            target = resolved if resolved is not None else self.fleet.get_device(device_id)
+            if target is not None:
+                checked = validate_legacy_onboard_target(target, device_id)
+                if checked.get("management_type") == "legacy_routed":
+                    # Bind the admitted legacy inputs for a queued job; later
+                    # inventory edits cannot change the execution target.
+                    resolved = checked
+        defer_iox_prepare = self._submission_uses_iox(device_id, resolved)
+        if teardown_mode is None:
+            teardown_mode = "none" if action == "onboard" else "recorded"
         job_id = secrets.token_hex(8)
         job = {"id": job_id, "device_id": device_id, "action": action,
                  "state": "queued", "lines": [], "returncode": None,
+                 "result_code": None, "recovery_code": None,
+                 "iox_verification": None, "iox_session": None,
+                 "error_category": None,
                  "_line_bytes": 0, "_log_truncated": False,
                 # Wall-clock of each captured line, kept PARALLEL to "lines"
                 # rather than prefixed into it: the SSE stream, the console and
@@ -1380,8 +2091,17 @@ class OnboardService:
                 # from a slow artifact fetch.
                 "_line_ts": [],
                 "queued_at": int(self._now()),
-                "started_at": None, "finished_at": None, "record_id": None,
-                "resolved": resolved, "env_extra": env_extra}
+                "started_at": None, "finished_at": None,
+                "record_id": record_id,
+                "resolved": resolved, "env_extra": env_extra,
+                "teardown_mode": teardown_mode,
+                "_defer_iox_prepare": defer_iox_prepare,
+                "_schedule_context": provenance,
+                "_authority_guard": authority_guard,
+                "_authority_check": authority_check}
+        if provenance:
+            job["schedule_id"] = dict(provenance)["schedule_id"]
+            job["occurrence_id"] = dict(provenance)["occurrence_id"]
         # Reap BEFORE the busy guard, not after it. The reaper used to run
         # further down, past every path that returns or raises — so it could
         # only ever fire on a start() for some OTHER device, and never for the
@@ -1389,43 +2109,26 @@ class OnboardService:
         # _JOB_DEADLINE window with no way to clear it, which is exactly the
         # strand the reaper exists to prevent.
         self.reap_overdue_jobs()
-        with self._lock:
-            # Never run two scripts against the same device at once: the same
-            # action again (double-click, overlapping batches) joins the
-            # active job; the OPPOSITE action is refused — silently attaching
-            # an undeploy click to a running onboard (or vice versa) would do
-            # the exact reverse of what the operator asked.
-            for j in self._jobs.values():
-                if j["device_id"] == device_id and j["state"] not in _TERMINAL:
-                    if j.get("action", "onboard") == action:
-                        return j["id"]
-                    raise ValueError(
-                        "device %s is busy with an active %s job (%s)"
-                        % (device_id, j.get("action", "onboard"), j["id"]))
-            # Only now, holding the lock and past the dedup guard, do we mint the
-            # record — so exactly one record exists per genuinely started job.
-            job["record_id"] = prepare() if prepare else None
-            self._evict_old(self._now())
-            self._jobs[job_id] = job
-
         def run():
             with self._lock:
                 j = self._jobs.get(job_id)
-                # cancelled (or TTL-evicted) while parked on the semaphore
-                if j is None or j["state"] != "queued":
+                if j is None or j["state"] != "running":
                     return
-                j["state"] = "running"
-                j["started_at"] = int(self._now())
             try:
                 # Build credentials and resolve the recipe without minting. A
                 # Router preflight runs only here, in the bounded worker pool,
                 # immediately before its record becomes applying and before an
                 # enrollment token is created. Batch submissions therefore do
                 # not block their HTTP requests on individual routers' SSH.
-                dev, env = self._build_env(device_id, mint=False,
-                                           resolved=j.get("resolved"),
-                                           env_extra=j.get("env_extra"))
-                platform, script = self._resolve(device_id, dev, env, action)
+                controller_custody = bool(j.get("_defer_iox_prepare"))
+                dev, env = self._build_env(
+                    device_id, mint=False, resolved=j.get("resolved"),
+                    env_extra=j.get("env_extra"),
+                    resolve_credentials=not controller_custody,
+                    onboarding=action == "onboard")
+                platform, script = self._resolve(
+                    device_id, dev, env, action,
+                    controller_owns_credentials=controller_custody)
                 if action == "onboard" and platform == "guestshell":
                     # The reachability probe stays AHEAD of the collision
                     # preflight: an unreachable device is far more common than
@@ -1444,8 +2147,8 @@ class OnboardService:
                     # classification exists, and no existing fleet row carries
                     # one. Cache it so later calls short-circuit at resolution.
                     if dev.get("os_family") == "xr":
-                        self.fleet.upsert({"device_id": device_id,
-                                           "os_family": "xr"})
+                        self.fleet.update_observation(
+                            device_id, os_family="xr")
                         _refuse_xr(device_id)
                     # Guest Shell used to stop there, so a device still
                     # carrying IRIS config was refused as a router and
@@ -1511,32 +2214,6 @@ class OnboardService:
                     dev, env, platform, script = self._bind_evidence(
                         job_id, device_id, action, j, pre_apply, evidence,
                         platform, dev, env, script)
-                elif action == "onboard" and platform == "iox":
-                    # The console never supplies device_identity for IOx
-                    # devices (unlike router, there is no separate
-                    # collision-check preflight that already probes 'show
-                    # version'), so device/iox/install.sh's identity guard
-                    # would otherwise always see an empty
-                    # EXPECTED_DEVICE_IDENTITY -- a no-op guard against
-                    # reconfiguring the wrong switch. Probe live here, at
-                    # execution time, the same as the router flow.
-                    # Persist a classification the same way as the router
-                    # path above -- see _persist_os_family.
-                    prior_family = dev.get("os_family")
-                    try:
-                        evidence = self._iox_preflight(
-                            dev, env, j.get("resolved") or dev)
-                    except Exception as exc:
-                        self._persist_os_family(device_id, dev, prior_family)
-                        raise ValueError("preflight failed: %s" % exc)
-                    self._persist_os_family(device_id, dev, prior_family)
-                    # Bound onto the RECORD as well as the job (pre_apply),
-                    # not just into this job's env as before: the persisted
-                    # record used to say preflight "not-required" and carry
-                    # no identity for a check that had in fact run.
-                    dev, env, platform, script = self._bind_evidence(
-                        job_id, device_id, action, j, pre_apply, evidence,
-                        platform, dev, env, script)
             except Exception as exc:
                 # Nothing has reached the device yet. A planned onboarding
                 # record must not become teardown authority: another actor
@@ -1544,8 +2221,8 @@ class OnboardService:
                 # An undeploy record already describes the live deployment,
                 # so leave it unchanged when teardown never started.
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("record_id"),
-                                             "removed")
+                    self._retire_planned_or_note(
+                        job_id, j.get("record_id"))
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -1564,8 +2241,8 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
-                    self._transition_or_note(job_id, j.get("record_id"),
-                                             "removed")
+                    self._retire_planned_or_note(
+                        job_id, j.get("record_id"))
                     self._finish(job_id, "error", None)
                     return
             # An operator abort can land while the job is "running" but the
@@ -1582,24 +2259,355 @@ class OnboardService:
                 self._append(job_id, "ERROR: aborted by operator before the "
                              "installer started; device untouched")
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("record_id"),
-                                             "removed")
+                    self._retire_planned_or_note(
+                        job_id, j.get("record_id"))
+                if platform == "iox":
+                    with self._lock:
+                        current = self._jobs.get(job_id)
+                        if current is not None:
+                            current["result_code"] = 130
+                            current["error_category"] = "cancelled"
+                    self._finish(job_id, "cancelled", None)
+                else:
+                    self._finish(job_id, "error", None)
+                return
+            if platform == "iox":
+                if self._iox_controller is None:
+                    with self._lock:
+                        current = self._jobs.get(job_id)
+                        if current is not None:
+                            current["result_code"] = 5
+                            current["error_category"] = "authority_mismatch"
+                    self._append(
+                        job_id,
+                        "ERROR: the authoritative IOx controller is unavailable")
+                    self._finish(job_id, "error", None)
+                    return
+
+                target = self._iox_request_target(
+                    dev, env, j.get("resolved") or resolved)
+                request = {
+                    "action": "install" if action == "onboard" else "uninstall",
+                    "device_id": device_id,
+                    "job_id": job_id,
+                    "target": target,
+                    "credential_ref": dev.get("credential_profile_id") or "",
+                    "record_id": j.get("record_id"),
+                    "teardown_mode": j.get("teardown_mode"),
+                }
+                if action == "onboard":
+                    request["wrapper_path"] = os.path.join(
+                        self.artifacts_dir, env.get("PKG", "iris-arm64.tar"))
+
+                cancel = threading.Event()
+                with self._lock:
+                    current = self._jobs.get(job_id)
+                    if current is not None and current.get("_abort_requested"):
+                        cancel.set()
+                    self._iox_cancels[job_id] = cancel
+
+                preflight_evidence = [None]
+                preflight_diagnostic = [None]
+                output_buffers = {"stdout": b"", "stderr": b""}
+
+                def controller_output(stream, data):
+                    if stream not in output_buffers:
+                        raise ValueError("unknown controller output stream")
+                    if not isinstance(data, bytes):
+                        raise ValueError("controller output must be bytes")
+                    body = output_buffers[stream] + data
+                    lines = body.splitlines(True)
+                    output_buffers[stream] = b""
+                    if lines and not lines[-1].endswith((b"\n", b"\r")):
+                        output_buffers[stream] = lines.pop()
+                    for line in lines:
+                        self._append(
+                            job_id, line.rstrip(b"\r\n").decode(
+                                "utf-8", "replace"))
+
+                def controller_preflight(_request, identity):
+                    callback_dev = dict(dev)
+                    prior_family = callback_dev.get("os_family")
+                    for source_key, destination_key in (
+                            ("board_identity", "device_identity"),
+                            ("device_identity", "device_identity"),
+                            ("model", "model"),
+                            ("os_family", "os_family"),
+                            ("platform", "platform")):
+                        value = (identity.get(source_key)
+                                 if isinstance(identity, dict)
+                                 else getattr(identity, source_key, None))
+                        if value not in (None, ""):
+                            callback_dev[destination_key] = value
+                    plan = j.get("resolved") or resolved or callback_dev
+                    router_evidence = None
+                    if (action == "onboard" and plan.get("management_type")
+                            in _ROUTER_MANAGEMENT_TYPES):
+                        # An IOx app on a router: the controller's own
+                        # preflight owns the app-hosting facts, but the
+                        # VirtualPortGroup/subnet/NAT collision checks and
+                        # the ownership facts bind_preflight records
+                        # (nat_interface, what pre-existed) belong to the
+                        # router preflight and must be observed, never
+                        # assumed. Its refusals name the collision, so they
+                        # are worth surfacing verbatim.
+                        # The IOx env deliberately carries no DEVICE_USER/
+                        # DEVICE_PASS -- a controller-custodied job hands its
+                        # credentials to the controller, not the recipe env.
+                        # The router preflight is a read-only SSH probe that
+                        # must still log in, so give it a credential-bearing
+                        # copy resolved from the device's own profile.
+                        router_env = dict(env)
+                        try:
+                            _pf_cred = self.creds.get_secrets(
+                                callback_dev.get("credential_profile_id") or "")
+                        except Exception:
+                            _pf_cred = None
+                        if isinstance(_pf_cred, dict) and _pf_cred.get("device_user"):
+                            router_env["DEVICE_USER"] = _pf_cred["device_user"]
+                            router_env["DEVICE_PASS"] = _pf_cred.get("device_pass", "")
+                            router_env["DEVICE_ENABLE"] = (
+                                _pf_cred.get("enable_secret")
+                                or _pf_cred.get("device_pass", ""))
+                        try:
+                            router_evidence = self._router_preflight(
+                                callback_dev, router_env, plan)
+                        except Exception as exc:
+                            self._persist_os_family(
+                                device_id, callback_dev, prior_family)
+                            preflight_diagnostic[0] = (
+                                "preflight failed: %s" % exc)
+                            self._append(job_id, "ERROR: " + preflight_diagnostic[0])
+                            raise ValueError("IOx preflight rejected") from None
+                    try:
+                        if self._iox_preflight_is_default:
+                            board = callback_dev.get("device_identity")
+                            if not board:
+                                raise ValueError(
+                                    "controller preflight did not return a "
+                                    "device identity")
+                            status = (identity.get("status", "passed")
+                                      if isinstance(identity, dict)
+                                      else getattr(identity, "status", "passed"))
+                            evidence = {
+                                "status": status,
+                                "device_identity": board,
+                            }
+                            if callback_dev.get("model"):
+                                evidence["detected_model"] = callback_dev["model"]
+                        else:
+                            evidence = self._iox_preflight(
+                                callback_dev, env,
+                                j.get("resolved") or resolved or callback_dev)
+                    except Exception as exc:
+                        self._persist_os_family(
+                            device_id, callback_dev, prior_family)
+                        preflight_diagnostic[0] = (
+                            "preflight failed: device reports IOS-XR; select "
+                            "the xr-appmgr platform and xr-host management type"
+                            if callback_dev.get("os_family") == "xr" else
+                            "preflight failed")
+                        self._append(job_id, "ERROR: " + preflight_diagnostic[0])
+                        raise ValueError("IOx preflight rejected") from None
+                    self._persist_os_family(
+                        device_id, callback_dev, prior_family)
+                    if router_evidence is not None:
+                        # Both preflights read a box; they must agree which.
+                        if ((router_evidence.get("device_identity") or "") !=
+                                (evidence.get("device_identity") or "")):
+                            preflight_diagnostic[0] = (
+                                "preflight failed: router and IOx preflights "
+                                "saw different devices")
+                            self._append(job_id, "ERROR: " + preflight_diagnostic[0])
+                            raise ValueError("IOx preflight rejected")
+                        merged = dict(router_evidence)
+                        merged.update({key: value for key, value in evidence.items()
+                                       if key != "detected_model"})
+                        evidence = merged
+                    preflight_evidence[0] = copy.deepcopy(evidence)
+                    bound = apply_iox_preflight(
+                        j.get("resolved") or resolved or callback_dev,
+                        evidence)
+                    published = {
+                        "status": "passed",
+                        "device_identity": bound["device_identity"],
+                    }
+                    if bound.get("model"):
+                        published["model"] = bound["model"]
+                    return published
+
+                def controller_prepare(_request, identity):
+                    del identity
+                    with self._authority(j, "iox_prepare"):
+                        with self._condition:
+                            current = self._jobs.get(job_id)
+                            if (current is None or current["state"] != "running"
+                                    or current.get("_abort_requested")):
+                                raise ValueError("window_closed")
+                            self._check_authority(j, "iox_prepare")
+                            prepared = prepare() if prepare else j.get("record_id")
+                            if (j.get("record_id") is not None and prepared !=
+                                    j.get("record_id")):
+                                raise ValueError("prepared record does not match request")
+                            if prepared:
+                                current["record_id"] = prepared
+                    try:
+                        if (action == "onboard" and
+                                preflight_evidence[0] is not None):
+                            final_resolved = (
+                                pre_apply(preflight_evidence[0])
+                                if pre_apply else bind_preflight(
+                                    j.get("resolved") or resolved or dev,
+                                    preflight_evidence[0], platform="iox"))
+                            if final_resolved is not None:
+                                with self._lock:
+                                    current = self._jobs.get(job_id)
+                                    if current is not None:
+                                        current["resolved"] = final_resolved
+                    except Exception:
+                        # Wrapper admission and record creation are still
+                        # pre-mutation here. Retire a new planned record so a
+                        # failed evidence bind cannot leave false teardown
+                        # authority behind.
+                        if action == "onboard" and prepared:
+                            self._retire_planned_or_note(job_id, prepared)
+                        raise
+                    if prepared:
+                        if not self._transition_or_note(
+                                job_id, prepared, "applying"):
+                            raise ValueError(
+                                "the job's record is no longer active")
+                    # The production controller owns the one credential mint.
+                    # Small injected controller fakes do not; retain the
+                    # service's historical mint callback for those callers.
+                    if (action == "onboard" and not getattr(
+                            self._iox_controller,
+                            "_mints_enrollment_token", False)):
+                        self._mint(device_id)
+                    return prepared
+
+                try:
+                    operation = (self._iox_controller.run_install
+                                 if action == "onboard"
+                                 else self._iox_controller.run_uninstall)
+                    result = operation(
+                        request, controller_prepare, controller_preflight,
+                        controller_output, cancel)
+                    if not isinstance(result, dict):
+                        raise ValueError("invalid IOx controller result")
+                    required = ("result_code", "returncode", "recovery_code",
+                                "record_id", "iox_verification", "iox_session")
+                    if any(key not in result for key in required):
+                        raise ValueError("incomplete IOx controller result")
+                    result_code = result["result_code"]
+                    if type(result_code) is not int:
+                        raise ValueError("invalid IOx controller result code")
+                    detail = result.get("detail", "")
+                    if (not isinstance(detail, str) or
+                            len(detail.encode("utf-8")) > 512 or
+                            any(ord(character) < 32 or
+                                127 <= ord(character) <= 159
+                                for character in detail)):
+                        raise ValueError("invalid IOx controller detail")
+                    if detail:
+                        self._append(job_id, "IOx controller: " + detail)
+                except Exception as exc:
+                    result = None
+                    result_code = (2 if isinstance(exc, ValueError) else 5)
+                    with self._lock:
+                        current = self._jobs.get(job_id)
+                        if current is not None:
+                            current["result_code"] = result_code
+                            current["error_category"] = (
+                                "rejected" if result_code == 2 else
+                                "journal_unreadable")
+                    # The controller's admission refusals are fixed strings
+                    # naming the invalid field ("invalid credential
+                    # reference", "invalid IOx target pkg"), never device
+                    # output or a secret: an operator needs the field name.
+                    self._append(job_id, "ERROR: " + (
+                        preflight_diagnostic[0] or
+                        ("IOx controller rejected the request: %s" % exc
+                         if isinstance(exc, ValueError) else
+                         "IOx authority operation failed")))
+                finally:
+                    for stream, data in output_buffers.items():
+                        if data:
+                            self._append(
+                                job_id, data.decode("utf-8", "replace"))
+                    with self._lock:
+                        self._iox_cancels.pop(job_id, None)
+
+                if result is not None:
+                    with self._lock:
+                        current = self._jobs.get(job_id)
+                        if current is not None:
+                            for key in ("result_code", "returncode",
+                                        "recovery_code", "record_id",
+                                        "iox_verification", "iox_session",
+                                        "error_category"):
+                                current[key] = copy.deepcopy(result.get(key))
+                    record_id = result.get("record_id")
+                    if result_code == 0:
+                        if action == "onboard":
+                            self._transition_or_note(
+                                job_id, record_id, "active")
+                        else:
+                            self._transition_or_note(
+                                job_id, record_id, "removed")
+                            if self._clear_state is not None:
+                                try:
+                                    self._clear_state(device_id)
+                                except Exception:
+                                    pass
+                        if on_success is not None:
+                            try:
+                                on_success()
+                            except Exception:
+                                pass
+                    else:
+                        self._transition_or_note(
+                            job_id, record_id, "needs-reconcile")
+                else:
+                    record_id = j.get("record_id")
+                    self._transition_or_note(
+                        job_id, record_id, "needs-reconcile")
+
+                terminal_state = (
+                    "done" if result_code == 0 else
+                    "cancelled" if result_code == 130 else "error")
+                observed_returncode = (
+                    result.get("returncode") if result is not None else None)
+                self._finish(job_id, terminal_state, observed_returncode)
+                return
+            record_id = j.get("record_id")
+            bootstrap_paths = []
+            if action == "onboard":
+                try:
+                    env["CATALOG_TOKEN"] = self._mint(device_id)
+                    bootstrap_paths = self._prepare_instruction_bootstrap(
+                        device_id, platform, env)
+                except Exception as exc:
+                    self._cleanup_instruction_bootstrap(bootstrap_paths)
+                    self._retire_planned_or_note(job_id, record_id)
+                    diagnostic = ("invalid staging capability"
+                                  if str(exc) == "invalid staging capability"
+                                  else "instruction bootstrap unavailable")
+                    self._append(job_id, "ERROR: " + diagnostic)
+                    self._finish(job_id, "error", None)
+                    return
+            if not self._transition_or_note(job_id, record_id, "applying"):
+                self._cleanup_instruction_bootstrap(bootstrap_paths)
+                # The bound record is no longer usable (a newer action
+                # superseded it). Running a script rendered from a STALE
+                # record would act on a box someone else just changed —
+                # abort before touching the device.
+                self._append(job_id, "ERROR: the job's record is no "
+                             "longer active; aborting without touching "
+                             "the device")
                 self._finish(job_id, "error", None)
                 return
             try:
-                record_id = j.get("record_id")
-                if not self._transition_or_note(job_id, record_id, "applying"):
-                    # The bound record is no longer usable (a newer action
-                    # superseded it). Running a script rendered from a STALE
-                    # record would act on a box someone else just changed —
-                    # abort before touching the device.
-                    self._append(job_id, "ERROR: the job's record is no "
-                                 "longer active; aborting without touching "
-                                 "the device")
-                    self._finish(job_id, "error", None)
-                    return
-                if action == "onboard":
-                    env["CATALOG_TOKEN"] = self._mint(device_id)
                 if self._run_supports_proc:
                     rc = self._run(script, env,
                                    lambda line: self._append(job_id, line),
@@ -1611,6 +2619,8 @@ class OnboardService:
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
+            finally:
+                self._cleanup_instruction_bootstrap(bootstrap_paths)
             # A successful undeploy wiped the box: forget its stored heartbeat
             # so the console stops calling it 'deployed' from stale state. Only
             # on success — a failed undeploy may have left it partly deployed.
@@ -1638,21 +2648,136 @@ class OnboardService:
                 self._transition_or_note(job_id, record_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
-        try:
-            self._work_queue.put_nowait(run)
-        except queue.Full:
+        return self._admit(job, run, prepare)
+
+    def _start_iox_maintenance(self, operation, device_id, credential_ref,
+                               board_identity, record_id=None,
+                               transaction_id=None, expected_revision=None,
+                               acknowledge_external_resolution=False):
+        """Queue a controller recovery or acknowledged reconciliation job.
+
+        These jobs share the Console's bounded worker pool, job table,
+        cancellation path, deadline reaper, and per-device busy guard. The
+        controller still owns the physical-board lock and every device-capable
+        descendant.
+        """
+        if operation not in ("recover", "reconcile_enabled"):
+            raise ValueError("unknown IOx maintenance operation")
+        if self._iox_controller is None:
+            raise ValueError("the authoritative IOx controller is unavailable")
+        for label, value, limit in (
+                ("device_id", device_id, 256),
+                ("credential_ref", credential_ref, 256),
+                ("board_identity", board_identity, 128)):
+            if (not isinstance(value, str) or not value or
+                    len(value.encode("utf-8")) > limit or
+                    any(ch in value for ch in "\x00\r\n")):
+                raise ValueError("invalid %s" % label)
+        if operation == "reconcile_enabled":
+            if (not isinstance(record_id, str) or not record_id or
+                    not isinstance(transaction_id, str) or
+                    not transaction_id or type(expected_revision) is not int or
+                    expected_revision < 0 or
+                    acknowledge_external_resolution is not True):
+                raise ValueError("invalid reconciliation binding")
+
+        action = ("iox-recover" if operation == "recover" else
+                  "iox-reconcile-enabled")
+        maintenance_key = (operation, board_identity, record_id,
+                           transaction_id, expected_revision)
+        job_id = secrets.token_hex(8)
+        job = {
+            "id": job_id, "device_id": device_id, "action": action,
+            "state": "queued", "lines": [], "returncode": None,
+            "result_code": None, "recovery_code": None,
+            "iox_verification": None, "iox_session": None,
+            "error_category": None,
+            "_line_bytes": 0, "_log_truncated": False, "_line_ts": [],
+            "queued_at": int(self._now()), "started_at": None,
+            "finished_at": None, "record_id": record_id,
+            "resolved": None, "env_extra": None, "teardown_mode": "none",
+            "platform": "iox", "_defer_iox_prepare": True,
+            "_maintenance_key": maintenance_key,
+        }
+
+        self.reap_overdue_jobs()
+        def run():
             with self._lock:
-                self._jobs.pop(job_id, None)
-            if job.get("record_id"):
-                self._transition_or_note(job_id, job["record_id"], "removed")
-            raise ValueError("onboarding queue is full")
-        with self._lock:
-            self._ensure_workers()
-            # Under the same lock, and after the job is in self._jobs: the
-            # reaper now advances on a timer even if this job wedges every
-            # worker and nobody ever clicks again.
-            self._ensure_maintenance()
-        return job_id
+                current = self._jobs.get(job_id)
+                if current is None or current["state"] != "running":
+                    return
+            cancel = threading.Event()
+            cancel._iris_job_id = job_id
+            cancel._iris_device_id = device_id
+            cancel._iris_credential_ref = credential_ref
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current is not None and current.get("_abort_requested"):
+                    cancel.set()
+                self._iox_cancels[job_id] = cancel
+            try:
+                if operation == "recover":
+                    result = self._iox_controller.recover_board(
+                        board_identity, cancel)
+                else:
+                    result = self._iox_controller.reconcile_enabled(
+                        record_id, transaction_id, expected_revision,
+                        True, cancel)
+                if not isinstance(result, dict):
+                    raise ValueError("invalid IOx controller result")
+                required = ("result_code", "returncode", "recovery_code",
+                            "record_id", "iox_verification", "iox_session")
+                if any(key not in result for key in required):
+                    raise ValueError("incomplete IOx controller result")
+                if type(result["result_code"]) is not int:
+                    raise ValueError("invalid IOx controller result code")
+            except Exception as exc:
+                result = {
+                    "result_code": 2 if isinstance(exc, ValueError) else 5,
+                    "returncode": None, "recovery_code": None,
+                    "record_id": record_id, "iox_verification": None,
+                    "iox_session": None,
+                    "error_category": (
+                        "rejected" if isinstance(exc, ValueError) else
+                        "journal_unreadable"),
+                }
+                self._append(
+                    job_id,
+                    "ERROR: IOx controller rejected the request"
+                    if isinstance(exc, ValueError)
+                    else "ERROR: IOx authority operation failed")
+            finally:
+                with self._lock:
+                    self._iox_cancels.pop(job_id, None)
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current is not None:
+                    for key in ("result_code", "returncode", "recovery_code",
+                                "record_id", "iox_verification", "iox_session",
+                                "error_category"):
+                        current[key] = copy.deepcopy(result.get(key))
+            code = result["result_code"]
+            state = ("done" if code == 0 else
+                     "cancelled" if code == 130 else "error")
+            self._finish(job_id, state, result.get("returncode"))
+
+        return self._admit(job, run)
+
+    def start_iox_recovery(self, device_id, credential_ref, board_identity,
+                           record_id=None):
+        return self._start_iox_maintenance(
+            "recover", device_id, credential_ref, board_identity,
+            record_id=record_id)
+
+    def start_iox_reconciliation(
+            self, device_id, credential_ref, board_identity, record_id,
+            transaction_id, expected_revision,
+            acknowledge_external_resolution):
+        return self._start_iox_maintenance(
+            "reconcile_enabled", device_id, credential_ref, board_identity,
+            record_id=record_id, transaction_id=transaction_id,
+            expected_revision=expected_revision,
+            acknowledge_external_resolution=acknowledge_external_resolution)
 
     def _append(self, job_id, line):
         with self._lock:
@@ -1709,10 +2834,17 @@ class OnboardService:
         with self._lock:
             j = self._jobs.get(job_id)
             proc = self._procs.get(job_id)
+            controller_cancel = self._iox_cancels.get(job_id)
             if j is None or j["state"] != "running":
                 return False
+            if controller_cancel is not None:
+                j["_abort_requested"] = True
+                self._append_locked(j, "[abort requested by operator]")
+                controller_cancel.set()
+                return True
             if proc is None:
-                if not self._run_supports_proc:
+                if (not self._run_supports_proc and
+                        not j.get("_defer_iox_prepare")):
                     # Legacy runner that never reports its process: there is
                     # nothing to signal once the installer is in flight, so
                     # keep the old "cannot abort" contract.
@@ -1757,6 +2889,13 @@ class OnboardService:
                 # order raced them into a created-but-empty file. The flip
                 # happens in the finally below, after _persist_log returns.
                 j["returncode"] = rc
+                if (j.get("_defer_iox_prepare") and
+                        j.get("result_code") is None):
+                    j["result_code"] = (
+                        0 if state == "done" else
+                        130 if state == "cancelled" else 2)
+                    if state == "error" and not j.get("error_category"):
+                        j["error_category"] = "rejected"
                 j["finished_at"] = int(self._now())
                 device_id = j.get("device_id")
                 action = j.get("action", "onboard")
@@ -1866,6 +3005,19 @@ class OnboardService:
             return ({k: v for k, v in j.items() if not k.startswith("_")} |
                     {"lines": list(j["lines"])}) if j else None
 
+    def get_schedule_context(self, job_id):
+        """Return detached internal provenance, never mutable job authority."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            context = job.get("_schedule_context") if job else None
+            return dict(context) if context else None
+
+    def jobs_for_occurrence(self, occurrence_id, device_id=None):
+        """Find retained jobs for durable receipt reconciliation."""
+        return [job for job in self.list_jobs()
+                if job.get("occurrence_id") == occurrence_id
+                and (device_id is None or job["device_id"] == device_id)]
+
     def list_jobs(self):
         """Summaries of every retained job (no 'lines' — cheap to poll from
         the console's batch panel; 'last_line' carries the newest line for a
@@ -1905,33 +3057,39 @@ class OnboardService:
                     best[did] = j
             return {did: {"action": j.get("action", "onboard"),
                           "state": j["state"],
-                          "finished_at": j.get("finished_at")}
+                          "finished_at": j.get("finished_at"),
+                          **({"pending_schedule_id": j["schedule_id"],
+                              "pending_occurrence_id": j["occurrence_id"]}
+                             if j["state"] == "queued" and j.get("_schedule_context")
+                             else {})}
                     for did, j in best.items()}
 
-    def cancel_queued(self, job_ids=None):
+    def cancel_queued(self, job_ids=None, occurrence_id=None):
         """Flip still-queued jobs to 'cancelled' — only those in job_ids when
         given (the console scopes a cancel to its own batch; other sessions'
         queued jobs must survive), every queued job when None. Running
         installers are NOT killed (an interrupted device-install.sh
-        mid-IOS-config is worse than letting it finish). A cancelled job's
-        parked thread exits without running when it eventually wins a slot.
-        Returns the count cancelled."""
+        mid-IOS-config is worse than letting it finish). Cancelled entries
+        release pending capacity and reservations immediately. occurrence_id
+        additionally scopes internal schedule cancellation. Returns the count
+        cancelled."""
         n = 0
         record_ids = []
         with self._lock:
-            now = int(self._now())
             for jid, j in self._jobs.items():
                 if job_ids is not None and jid not in job_ids:
                     continue
+                if (occurrence_id is not None and
+                        j.get("occurrence_id") != occurrence_id):
+                    continue
                 if j["state"] == "queued":
-                    j["state"] = "cancelled"
-                    j["finished_at"] = now
-                    self._append_locked(j, "cancelled before start")
-                    if j.get("record_id"):
+                    self._cancel_queued_locked(j)
+                    if (j.get("action") == "onboard" and
+                            j.get("record_id")):
                         record_ids.append((jid, j["record_id"]))
                     n += 1
         for jid, record_id in record_ids:
-            if not self._transition_or_note(jid, record_id, "removed"):
+            if not self._retire_planned_or_note(jid, record_id):
                 self._append(jid, "cancelled job record could not be retired")
         return n
 
@@ -1967,6 +3125,7 @@ class OnboardService:
         Takes the lock itself and does the signalling and log/audit I/O
         outside it, so start() can call this before its busy guard."""
         to_signal = []
+        to_cancel = []
         to_finish = []
         with self._lock:
             now = self._now()
@@ -1975,6 +3134,24 @@ class OnboardService:
                 j = self._jobs[jid]
                 proc = self._procs.get(jid)
                 stage = j.get("_reap_stage", 0)
+                if j.get("_defer_iox_prepare"):
+                    # The IOx controller owns every device-capable child and
+                    # exposes cancellation instead of a raw Popen handle. Do
+                    # not make the job terminal while that custody is still
+                    # active: the busy guard must remain truthful until the
+                    # controller has restored verification and reaped its
+                    # descendants.
+                    if stage == 0:
+                        j["_reap_stage"] = 1
+                        j["_abort_requested"] = True
+                        self._append_locked(
+                            j, "[job exceeded %ds deadline; cancelling the "
+                            "IOx controller]" % _JOB_DEADLINE)
+                    j["_reap_signalled_at"] = now
+                    controller_cancel = self._iox_cancels.get(jid)
+                    if controller_cancel is not None:
+                        to_cancel.append(controller_cancel)
+                    continue
                 if not self._run_supports_proc:
                     stage = 2   # nothing to signal: straight to marking failed
                 if stage == 0:
@@ -2011,6 +3188,8 @@ class OnboardService:
                     to_finish.append(jid)
         for proc, sig in to_signal:
             self._signal_group(proc, sig)
+        for cancel in to_cancel:
+            cancel.set()
         for jid in to_finish:
             self._finish(jid, "error", -1)
         return acted

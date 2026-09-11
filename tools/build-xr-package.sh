@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Wrap the canonical amd64 IRIS device manifest as an IOS-XR appmgr RPM.
-# device/iox/build.sh selects from the same signed multi-platform OCI index.
+# device/iox/build.sh selects from the same signable multi-platform OCI index.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -14,11 +14,16 @@ XR_DIR="$REPO/device/xr"
 
 OUT="$XR_DIR/out"
 DRY_RUN=0
+ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="${2:?--out needs a value}"; shift 2 ;;
+    --instruction-roots-dir)
+      ROOTS="${2:?--instruction-roots-dir needs a value}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) echo "usage: $0 [--out DIR] [--dry-run]"; exit 0 ;;
+    -h|--help)
+      echo "usage: $0 [--out DIR] [--instruction-roots-dir DIR] [--dry-run]"
+      exit 0 ;;
     -*) echo "!! unknown option: $1" >&2; exit 2 ;;
     *) echo "!! unexpected argument: $1" >&2; exit 2 ;;
   esac
@@ -51,7 +56,7 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
   cat <<PLAN
 >> [dry-run] would build or verify one canonical amd64+arm64 OCI archive via:
-   tools/build-device-image.sh --context <temporary-dir>
+   tools/build-device-image.sh --context <temporary-dir> --instruction-roots-dir $ROOTS
 >> [dry-run] would select linux/amd64 from that immutable OCI index into
    $APPMGR_BUILD_DIR/iris-src/$IMAGE_TAR_NAME
 >> [dry-run] would reuse or safely clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT
@@ -65,7 +70,7 @@ fi
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$OUT"
-"$REPO/tools/build-device-image.sh" --context "$CTX"
+"$REPO/tools/build-device-image.sh" --context "$CTX" --instruction-roots-dir "$ROOTS"
 OCI_ARCHIVE="$(cat "$CTX/iris-device-oci-path")"
 OCI_INDEX="$(sed -n 's/^index_digest=//p' "$CTX/iris-device-oci.manifest")"
 OCI_ARCHIVE_SHA="$(sed -n 's/^archive_sha256=//p' "$CTX/iris-device-oci.manifest")"

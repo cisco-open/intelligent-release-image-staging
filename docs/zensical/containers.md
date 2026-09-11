@@ -132,6 +132,55 @@ Deployment records persist under `IRIS_STATE` on the `iris-state` volume, so
 undeploy-from-record and restart recovery behave identically to the Kubernetes
 PVC layout. See [Management Type and VLAN Ownership](management-type.md).
 
+## Instruction trust and server custody
+
+The server still supervises five processes. Custody and stamper loops are two
+daemon threads in the management process, not another service/container. Both
+instruction GETs use existing authenticated catalog HTTPS 8443; 9443 remains
+Console-to-server management-only. The optional encrypted signing key stays at
+`$IRIS_CONFIG/instr/signing-key.age`, runtime plaintext at
+`$IRIS_RUN/instr/signing-key`, and durable instruction state under `$IRIS_STATE`.
+The Console receives none of those files or the age identity, even on split
+hosts. See the [exact path inventory](server.md#instruction-state-and-processes).
+
+Exactly two distinct offline-root public keys are embedded as mode-0444 signer
+and root files in the unified IOx/XR image. Their private keys remain offline
+with separate custodians. Guest Shell gets identical public trust through a
+replaceable flash bundle, so its guarantee is tamper-evidence rather than an
+image pin. Runtime `ssh-keygen -Y verify` probing can leave Guest Shell
+tracker-only. The image-pinning premise requires native package signing and
+platform verification; current unsigned proof artifacts do not establish it.
+
+IOx verification is device-global. Signed wrappers cause no state change;
+unsigned/enabled records an obligation, disables only for installation, then
+restores with read-back before activation/start. Unsigned/disabled stays
+disabled; unknown refuses. Durable interruption/resume and uninstall recovery
+never blindly enables operator-changed or unowned state. Cisco documents the
+control/media limits in its [IE-3x00 guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html)
+and [Catalyst 9000 guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html).
+See the [IOx transaction](iox.md#device-global-package-verification) before onboarding.
+
+The enrollment bearer remains in IOx `run-opts` and XR `docker-run-opts`, with
+IOx's SSH-to-self password also present. Privileged device administrators can
+read these bootstrap credentials. Enrollment defaults to one hour (3,600
+seconds); prompt authenticated refresh uses normal 120-second token overlap.
+Instruction current/prior keys arrive only through refresh into mode-0600
+agent config; its LKG key is device-local. Neither those keys nor online/offline
+private signing keys enter platform configuration or installer arguments.
+
+`IRIS_MAX_PEERS` and `IRIS_MAX_CONCURRENT` are legacy provisional launcher
+inputs, absent from image defaults and superseded by verified/default options
+at the first successful tick before restored downloads can run. Every future
+`addTorrent` uses verified/default values. Parsed legacy `max_peers` has no
+policy authority. `IRIS_TICK_SECONDS` remains the mechanical interval/floor;
+signed `catalog_tick_s` controls logical catalog/staging cadence while QoS
+reassertion and heartbeat run every mechanical tick.
+
+For a disconnected device, F3 redelivery transports a ciphertext bootstrap
+envelope through the platform installer; it is not a secret key or a verifier
+bypass. Authenticated refresh self-heals key availability. See
+[offline delivery](operations.md#f3-offline-bootstrap-envelope-redelivery).
+
 ## Unified app-hosting image
 
 `device/container/Dockerfile` and `device/container/entrypoint.sh` are the one
@@ -155,6 +204,14 @@ bootstrap/EEM launcher and installer rather than this container image. Every
 platform pins the current public server certificate at runtime, but the unified
 container does not carry it: IOx onboarding uses application data and XR
 onboarding places it on the router's `harddisk:` mount.
+
+Before any device-package build, point `IRIS_INSTRUCTION_ROOTS_DIR` at a
+reviewed directory containing exactly two distinct public-root `.pub` files.
+Private root files never belong there. The helpers also accept
+`--instruction-roots-dir DIR`; no disposable proof root may be substituted for
+production trust. Supply current pinned binaries with `ARIA2C_BIN_AMD64` and
+`ARIA2C_BIN_ARM64` when the repository's fallback bundles contain older inputs.
+The builder verifies architecture and `tools/aria2c.sha256` before packaging.
 
 Build only the canonical image when iterating locally. `--image-only` is not
 architecture-selected: every run builds or verifies one OCI archive containing

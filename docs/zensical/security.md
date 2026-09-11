@@ -195,6 +195,175 @@ Credential lookup uses fixed-size SHA-256 digest keys and checks the selected
 record's token with a constant-time comparison. Each request checks that
 record's current expiry and revocation state without scanning other devices.
 
+### Roles, virtual ACLs, and server enforcement
+
+A device may declare one role. Role names match
+`^[a-z0-9][a-z0-9._-]{0,31}$`; `default`, `quarantine`, `origin`, `seeder`, and
+`legacy` are reserved. A restricted role becomes one **virtual role ACL** in
+memory: it permits its own role, the explicitly permitted peer roles, and
+`service:seeder` when `origin` is true, then denies everything else. Restricted
+roles that communicate must name one another symmetrically. An unrestricted
+role keeps implicit open discovery.
+
+Exactly one ACL governs a principal. Fail-closed and revoked state come first,
+then an explicit stored-ACL assignment, then a restricted role's virtual ACL,
+then implicit permit. An explicit assignment therefore **shadows the role**;
+it is not conjoined with the role ACL. Quarantine remains the reserved explicit
+deny-all assignment and takes precedence. Use the explain route before changing
+or migrating a device that already has an explicit assignment.
+
+The tracker enforces new introductions. It **does not sever existing connections**
+or purge peers that aria2 already knows, and aria2 may reconnect
+to a retained peer without asking the tracker again. An applied verified
+device deny list may cooperatively disconnect matching peers. To request
+containment, unassign every image from the restricted device; torrent removal
+requires the next successful due policy poll and successful aria2 policy apply.
+Signed logical cadence and catalog/RPC failures can delay that action; it is
+not an immediate or guaranteed next-tick disconnect. No role operation installs,
+activates, reloads, changes boot variables, or otherwise changes running device
+software.
+
+Issue #153 is **preflight only** in this phase. The reconciler computes how many
+devices a future mutual origin ACL would newly deny, but it continues applying
+the prior self-evaluation blocklist. `origin: false` controls whether the
+tracker introduces the origin; it does not yet add that device's address to the
+origin's aria2 blocklist. The management surface exposes the preflight count,
+not the device IDs or addresses. When the protected seeder IPv4 address is
+unknown, the prospective result is unavailable (`null`), not a completed zero
+or a deny-all result. Existing ACL enforcement retains its normal behavior.
+
+Issue #153 remains open through one full release of preflight observation. A
+later, separately reviewed activation would apply the
+union of current self-evaluation and mutual-origin evaluation to **all** ACLs,
+including hand-written ACLs. Phase 1 does not complete that tagged-release dwell
+or authorize activation or lab/live validation of the union.
+
+When permitted and denied principals share one translated IPv4 address, a
+global origin block would affect both. IRIS records a `shared_permit_deny`
+conflict and leaves that address unblocked. This availability rule means NAT can
+weaken address-level origin isolation; use distinct addresses when that
+isolation is required.
+
+The **agent-distribution exemption** is an invariant: role ACLs, QoS values,
+announce cadence, candidate ceilings, and instruction policy cannot gate
+bootstrap artifacts, enrollment, token refresh, or agent packages. A restricted
+or quarantined device retains this recovery path. Recovery artifacts are
+separate from OS-image torrent staging; instruction-body fetch/verification failure stops the
+instruction step only; heartbeat/staging continue with verified fallback or
+defaults when policy apply succeeds. An aria2 RPC apply failure still sends
+heartbeat but skips staging for that tick. Tracker and origin enforcement
+remains authoritative for those server controls.
+
+### Device administrator trust boundary
+
+The encrypted instruction file is confidential against users below privilege 15, against swarm peers and network observers, against reuse on another device, and against envelope-only copies that do not include device private keys. It is not, and cannot be, confidential against the device's own administrator, who is root where the agent runs and holds every key the agent holds. Its integrity and authenticity hold against everyone including that administrator once the verification root is pinned inside the signed image; on Guest Shell, and on any platform where the package signature is not enforced, integrity is tamper-evidence rather than tamper-proofing. Role isolation, announce cadence, peer discovery and origin rates are enforced by the tracker and the origin and do not depend on any device honouring anything.
+
+An offline filesystem copy containing `iris-agent.conf`, its current/prior
+instruction keys or its `lkg_key` is not confidential from the holder of that
+copy. Mode-0600 permissions protect access on the running filesystem; they do
+not encrypt a copied filesystem. Diagnostic output such as `show tech` is
+within the envelope-only guarantee only when it excludes those private keys.
+
+A privilege-15 or IOS-XR root-lr administrator can alter the runtime or bypass
+the agent. A valid signature proves the signed instruction's origin, not that
+the administrator applied it. Device-side rates and caps remain cooperative;
+**violation = 0 does not mean compliant**. See [instruction evidence](observability.md#instruction-evidence-and-custody)
+and the [platform comparison](device-agents.md#instruction-trust-by-platform).
+
+### Encrypted instruction envelope
+
+Phase 1 serves a bounded, per-device envelope on authenticated catalog HTTPS.
+A response over 256 KiB is rejected before parsing or cryptographic work.
+SP800-108/HMAC-SHA-256 derives separate encryption, MAC and nonce keys with
+per-device audience context; a deterministic
+16-byte nonce binds device ID, key ID, epoch and instruction serial. An
+HMAC-SHA-256 counter keystream encrypts the private device part. A separate
+HMAC authenticates the PAE-bound envelope, including header, signed role body,
+nonce and ciphertext. MAC-before-decrypt prevents unauthenticated plaintext
+from reaching the policy parser. This construction is not AES-GCM.
+
+The agent verifies the OpenSSH role signature and envelope MAC before
+decrypting or applying either part. It also checks the signer revocation list,
+device/platform audience and role binding, and applies monotonic
+`(epoch, instr_serial)` replay floors. Reusing an identity with different bytes
+is rejected. An authenticated server clock anchors expiry; a wall-clock change
+cannot silently extend validity. Signed role intent is public within the
+envelope; confidentiality protects the private per-device part. Failure never
+makes unverified instructions authoritative. See the [failure table](device-agents.md#instruction-failures-and-recovery).
+
+### Two-root trust and custody
+
+Exactly two distinct offline-root public keys form the trust set. Keep their
+private keys with separate custodians at separate sites, never on the server.
+The unified IOx/XR image embeds `iris-signers.allowed_signers` and
+`iris-root.allowed_signers` as mode-0444 files. With a natively signed package
+and enforced platform verification, these are image-pinned roots. Guest Shell
+receives the same two public-root files in its bundle on replaceable flash:
+that is tamper-evidence, not an immutable image pin. Losing one root's private
+material leaves provisioned trust bytes unchanged; the surviving root can
+issue the next online certificate. Follow the [root runbooks](operations.md#instruction-root-ceremony-and-recovery).
+
+The optional online signing private key is encrypted at
+`$IRIS_CONFIG/instr/signing-key.age`; plaintext exists only at runtime as
+`$IRIS_RUN/instr/signing-key`. Public key, certificate and `roots.d/` remain
+under `$IRIS_CONFIG/instr/`. The age identity and instruction state remain on
+the server host. The Console has management token/CA files only, never server
+instruction state, the age identity, encrypted signing key, or runtime plaintext.
+Public roots are public material, not credentials.
+
+No current/prior instruction key, LKG key, online signing private key or
+offline-root private key enters IOx `run-opts`, XR `docker-run-opts`, installer
+arguments, or device platform configuration. Authenticated refresh alone
+returns the current and bounded prior instruction keys into the agent's
+mode-0600 configuration; the LKG key is created on the device. A valid LKG is
+locally re-encrypted and survives per-device instruction-key rotation.
+
+There is a bootstrap exception: the enrollment bearer remains in IOx
+`run-opts` and XR `docker-run-opts`; IOx also retains its SSH-to-self password.
+A privileged device administrator can read those bootstrap credentials,
+including in platform configuration or diagnostic output. The default
+enrollment TTL is 3,600 seconds (one hour); prompt first authenticated refresh
+replaces the agent's active credential, with a normal token overlap of 120
+seconds. Refresh does not erase the original bootstrap value from platform
+activation configuration. These values are not promised confidential from
+privilege 15/root-lr or `show tech-support`.
+The closed credential-width registry retains 128-bit bearer credentials and
+uses 256-bit cryptographic instruction keys. Missing, unsupported or mismatched
+widths fail before minting, without printing values.
+
+For a leaked key on an otherwise honest device, rotate its instruction key
+with `iris-instr-key rotate --no-overlap <device_id>`. For a retired or
+compromised device, use `iris-revoke <device_id>`; never rotate keys to spare a
+revoked device. Revocation is durable server authority and blocks its catalog
+access even when the last device report still says LKG.
+
+### IOx verification and Guest Shell bundle boundary
+
+IOx verification is a device-global setting. A signed wrapper is preferred
+and causes no verification-state change. An unsigned wrapper uses the
+[owned transaction](iox.md#device-global-package-verification): initial
+`enabled` is recorded durably, disabled only for installation, and restored
+with read-back before activation/start; initial `disabled` stays disabled;
+`unknown` refuses mutation and installation. Durable obligations survive
+interruption/resume and guide uninstall recovery; an operator-changed or
+unowned state is never blindly enabled. Signature-marker presence is not
+cryptographic validation. The claim that the container never changes in the
+field requires a natively signed wrapper and verification remaining enabled.
+Current proof artifacts are unsigned and do not establish that premise.
+
+Cisco documents the global control and media restrictions in the
+[IE-3x00 IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html)
+and [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html).
+Platform signature refusal is preserved; the unsigned transaction is not a
+promise that every media/platform combination will accept or run the app.
+
+`server/pack-agent-bundle.sh` emits Guest Shell's adjacent 64-hex SHA-256
+sidecar. This is digest validation, not a detached signature. Bootstrap collects sidecar before archive, bounds archive
+and member processing, and refuses missing, malformed or mismatched evidence
+while preserving the prior runnable bundle. Bundle and installer also bind the
+two public-root files. An administrator who can replace bootstrap, bundle and
+evidence remains inside the trusted-device-admin boundary.
+
 ### Tracker transport security
 
 The tracker on TCP 6969 is **HTTPS-only** and presents the same server
@@ -223,30 +392,49 @@ the torrent.
 ### Peer policy failure posture
 
 Peer ACLs and per-device assignments live in `peer-policy.json` under
-`IRIS_STATE`, with a last-known-good copy at `peer-policy.lkg.json`. Every commit
-writes the current authoritative document to the LKG before atomically replacing
-the authoritative file, so the last-known-good copy is the revision before the
-current one and never a half-written candidate. On a fresh start, when neither
-file exists, both are written with the same base revision.
+`IRIS_STATE`, with a last-known-good copy at `peer-policy.lkg.json` and the five
+most recent prior committed documents in `peer-policy.lkg.d/`. Every commit
+writes the current authoritative document to the LKG and ring before atomically
+replacing the authoritative file, so recovery copies are never half-written
+candidates. The durable `peer-policy.roles-ever` watermark is created before
+the first role-bearing commit and supports startup downgrade/state-loss
+warnings. On a fresh start, when neither policy file exists, both are written
+with the same base revision.
 
 Read precedence decides the posture:
 
 | State on disk | Result |
 | --- | --- |
-| Neither file present | Open discovery. The validated base document is materialized to both paths; not degraded, not fail-closed. |
-| Valid authoritative | Used as-is. |
+| Neither file present, no roles-ever watermark | Open discovery. The validated base document is materialized to both paths; not degraded, not fail-closed. |
+| Neither file present, roles-ever watermark retained | The base document is materialized and discovery is open, but the result is `degraded` because prior role state was lost. Subsequent reads remain degraded. |
+| Valid authoritative | Used as-is, except that an authoritative document with no `roles` is `degraded` when `roles_present` or the roles-ever watermark proves role state previously existed. |
 | Corrupt authoritative, valid LKG | The LKG is used and the policy reports `degraded`. |
 | At least one file present, neither valid | `fail_closed`: no announce is offered any candidate peer, and the seeder blocklist switches to the emergency deny list below. |
 
 The first and last rows are easy to confuse and lead to opposite repairs. Both
 files *missing* is the open case, not the deny-everything case.
 
-Recovery is to put a valid document back at `peer-policy.json`. Copying
-`peer-policy.lkg.json` over it restores service, but that copy is one revision
-behind: the most recent policy change is lost and has to be reapplied from the
-console. Removing both files re-materializes the base policy, which drops every
-device's ACL assignment — including every quarantine assignment — and every
-operator-defined ACL; only the reserved `quarantine` ACL is re-created.
+Before recovery, preserve the authoritative policy, Fleet state, tracker and
+origin status, LKG and ring, and the roles-ever watermark. When the
+authoritative file is corrupt and the service is already using the valid LKG,
+a controlled repair may replace `peer-policy.json` with the verified LKG bytes;
+that repairs the store at the LKG revision and loses the newest policy change.
+It is a corrupt-store repair, not the normal rollback mechanism.
+
+An intentional rollback uses the policy restore primitive to copy reviewed
+historical content into a **monotonic new revision**. It preserves the live
+outbox, appends a `restore` event, and rotates the acknowledgement epoch. There
+is no public restore route or CLI, so do not simulate this by copying a ring
+file over a usable authoritative policy. The primitive itself requires usable
+authoritative state. Follow a reviewed maintenance procedure that invokes the
+restore primitive and then reconcile Fleet drift.
+
+Removing both files re-materializes the base policy, which drops
+every device's ACL assignment — including every quarantine assignment — every
+role and member, every QoS override, and every operator-defined ACL; only the
+reserved `quarantine` ACL is re-created. The roles-ever watermark remains, so a
+role-capable server reports the loss rather than treating it as a pristine
+install.
 
 A **valid but empty** policy is not the same as a broken one. The tracker applies
 an empty blocklist — a full replace, so anything previously blocked is released —

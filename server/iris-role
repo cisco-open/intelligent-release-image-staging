@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Manage IRIS role definitions and declared device membership."""
+import argparse
+import csv
+import io
+import ipaddress
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gui_fleet       # noqa: E402
+import peer_policy     # noqa: E402
+import role_csv        # noqa: E402
+import role_management # noqa: E402
+import schedules       # noqa: E402
+
+
+ROLE_QOS_FIELDS = role_csv.ROLE_QOS_FIELDS
+ROLE_CSV_FIELDS = role_csv.ROLE_CSV_FIELDS
+
+
+def _paths():
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    return (state_dir, os.path.join(state_dir, "peer-policy.json"),
+            os.path.join(state_dir, "peer-policy.lkg.json"))
+
+
+def _manager():
+    state_dir, auth_path, lkg_path = _paths()
+    return role_management.RoleCoordinator(
+        gui_fleet.FleetStore(state_dir), auth_path, lkg_path,
+        now_fn=time.time, schedule_store=schedules.ScheduleStore(state_dir))
+
+
+def _print_json(value):
+    print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+_bool = role_csv.parse_bool
+_qos_value = role_csv.parse_qos_value
+_nets = role_csv.parse_nets
+_csv_definitions = role_csv.parse_roles_csv
+_export_roles = role_csv.export_roles_csv
+
+
+def _qos_args(values):
+    qos = {}
+    for item in values or ():
+        if "=" not in item:
+            raise ValueError("--qos must be KEY=VALUE")
+        name, value = item.split("=", 1)
+        name = name.strip()
+        if name not in ROLE_QOS_FIELDS:
+            raise ValueError("unknown role QoS key: %s" % name)
+        if name in qos:
+            raise ValueError("duplicate role QoS key: %s" % name)
+        qos[name] = _qos_value(name, value)
+    return qos
+
+
+def _definition(args):
+    peers = [args.name]
+    for peer in args.peer or ():
+        if peer not in peers:
+            peers.append(peer)
+    definition = {"restricted": bool(args.restricted), "peers": peers}
+    if args.no_origin:
+        definition["origin"] = False
+    if args.net:
+        definition["nets"] = _nets(args.net)
+    if args.on_stale:
+        definition["on_stale"] = args.on_stale
+    qos = _qos_args(args.qos)
+    if qos:
+        definition["qos"] = qos
+    return definition
+
+
+def _load_policy():
+    _state_dir, auth_path, lkg_path = _paths()
+    result = peer_policy.load_policy(auth_path, lkg_path)
+    if result.fail_closed:
+        raise ValueError("peer policy is fail closed")
+    if result.degraded:
+        raise ValueError("peer policy is degraded")
+    return result
+
+
+def _preview_policy_document():
+    """Read the prior document without materializing a fresh store."""
+    _state_dir, auth_path, lkg_path = _paths()
+    if not os.path.exists(auth_path) and not os.path.exists(lkg_path):
+        return peer_policy.base_document()
+    return _load_policy().document
+
+
+def _role_arg(value):
+    return None if value in ("-", "__none", "clear") else value
+
+
+def _blast_payload(prior, candidate):
+    blast = peer_policy.blast_radius(
+        prior, candidate, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD)
+    return blast, role_management.RoleCoordinator._blast_details(blast)
+
+
+def _confirmed_guard(prior, candidate, token, required=True):
+    blast, payload = _blast_payload(prior, candidate)
+    if required and blast.requires_confirmation and not \
+            peer_policy.confirm_blast_radius(
+                prior, candidate, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD,
+                token):
+        raise role_management.RoleManagementError(
+            "confirmation required", code="confirmation_required", status=428,
+            **payload)
+    return (role_management.RoleCoordinator._confirmation_guard(token)
+            if required and blast.requires_confirmation else None), payload
+
+
+def _define_parser(sub):
+    parser = sub.add_parser("define", help="create or replace a role")
+    parser.add_argument("name")
+    parser.add_argument("--restricted", action="store_true")
+    parser.add_argument("--peer", action="append", default=[])
+    parser.add_argument("--no-origin", action="store_true")
+    parser.add_argument("--net", action="append", default=[])
+    parser.add_argument("--on-stale", choices=("keep", "defaults"))
+    parser.add_argument("--qos", action="append", default=[])
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--confirm")
+    return parser
+
+
+def _parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    _define_parser(sub)
+    delete = sub.add_parser("delete", help="delete an unused role")
+    delete.add_argument("name")
+    delete.add_argument("--dry-run", action="store_true")
+    delete.add_argument("--confirm")
+    set_one = sub.add_parser("set", help="set one device role; '-' clears")
+    set_one.add_argument("device_id")
+    set_one.add_argument("role")
+    set_one.add_argument("--dry-run", action="store_true")
+    set_one.add_argument("--confirm")
+    bulk = sub.add_parser("bulk", help="set one role on a device list")
+    bulk.add_argument("role")
+    bulk.add_argument("device_ids", nargs="+")
+    bulk.add_argument("--dry-run", action="store_true")
+    bulk.add_argument("--confirm")
+    imported = sub.add_parser("import", help="replace role definitions from CSV")
+    imported.add_argument("path")
+    imported.add_argument("--dry-run", action="store_true")
+    imported.add_argument("--confirm")
+    sub.add_parser("export", help="write role definitions as CSV")
+    explain = sub.add_parser("explain", help="show declared and enforced role")
+    explain.add_argument("device_id")
+    migrate = sub.add_parser("migrate", help="migrate explicit ACL members")
+    migrate.add_argument("acl")
+    migrate.add_argument("role")
+    mode = migrate.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true")
+    mode.add_argument("--dry-run", action="store_true")
+    migrate.add_argument("--confirm")
+    return parser
+
+
+def _run(args):
+    manager = _manager()
+    if args.command == "define":
+        prior = _preview_policy_document()
+        candidate = manager.define_role(
+            args.name, _definition(args), actor="iris-role", dry_run=True)
+        replacing = args.name in prior.get("roles", {}).get("defs", {})
+        _preview, blast = _blast_payload(prior, candidate)
+        if args.dry_run:
+            _print_json({"ok": True, "dry_run": True, "mode": "dry-run",
+                         "revision": candidate["revision"], **blast})
+            return 0
+        guard, _blast = _confirmed_guard(
+            prior, candidate, args.confirm, required=replacing)
+        result = manager.define_role(
+            args.name, _definition(args), actor="iris-role",
+            expected_revision=prior["revision"], precommit=guard)
+        _print_json({"ok": True, "dry_run": False,
+                     "mode": "applied",
+                     "revision": result["revision"]})
+        return 0
+    if args.command == "delete":
+        prior = _preview_policy_document()
+        candidate = manager.delete_role(
+            args.name, actor="iris-role", dry_run=True)
+        _preview, blast = _blast_payload(prior, candidate)
+        if args.dry_run:
+            _print_json({"ok": True, "dry_run": True,
+                         "revision": candidate["revision"], **blast})
+            return 0
+        guard, _blast = _confirmed_guard(
+            prior, candidate, args.confirm, required=True)
+        result = manager.delete_role(
+            args.name, actor="iris-role", expected_revision=prior["revision"],
+            precommit=guard)
+        _print_json({"ok": True, "dry_run": False,
+                     "revision": result["revision"]})
+        return 0
+    if args.command == "set":
+        result = manager.set_role(
+            args.device_id, _role_arg(args.role), actor="iris-role",
+            dry_run=args.dry_run, confirm_token=args.confirm,
+            require_confirmation=True)
+        _print_json(result)
+        return 0 if result.get("ok") else 1
+    if args.command == "bulk":
+        if len(set(args.device_ids)) != len(args.device_ids):
+            raise ValueError("duplicate device id in bulk request")
+        result = manager.set_roles(
+            {device_id: _role_arg(args.role)
+             for device_id in args.device_ids}, actor="iris-role",
+            dry_run=args.dry_run, confirm_token=args.confirm,
+            require_confirmation=True)
+        _print_json(result)
+        return 0 if result.get("ok") else 1
+    if args.command == "import":
+        with open(args.path, encoding="utf-8", newline="") as stream:
+            definitions = _csv_definitions(stream.read())
+        prior = _preview_policy_document()
+        candidate = manager.replace_definitions(
+            definitions, actor="iris-role", dry_run=True)
+        _preview, blast = _blast_payload(prior, candidate)
+        if args.dry_run:
+            _print_json({"ok": True, "dry_run": True,
+                         "roles": len(definitions),
+                         "revision": candidate["revision"], **blast})
+            return 0
+        guard, _blast = _confirmed_guard(
+            prior, candidate, args.confirm, required=True)
+        result = manager.replace_definitions(
+            definitions, actor="iris-role",
+            expected_revision=prior["revision"], precommit=guard)
+        _print_json({"ok": True, "dry_run": False,
+                     "roles": len(definitions), "revision": result["revision"]})
+        return 0
+    if args.command == "export":
+        sys.stdout.write(_export_roles(_load_policy().document))
+        return 0
+    if args.command == "explain":
+        policy = _load_policy()
+        declared = (manager.fleet.get_device(args.device_id) or {}).get("role")
+        enforced = policy.roles.role_of.get(args.device_id)
+        assignment = policy.document.get("assignments", {}).get(args.device_id)
+        drift = declared != enforced or bool(
+            declared and assignment is not None and
+            assignment != peer_policy.RESERVED_QUARANTINE)
+        _print_json({
+            "device_id": args.device_id, "declared_role": declared,
+            "enforced_role": enforced,
+            "role_drift": drift,
+            "role_shadowed_by": assignment
+                if assignment != peer_policy.RESERVED_QUARANTINE else None,
+            "revision": policy.document["revision"]})
+        return 1 if drift else 0
+    if args.command == "migrate":
+        result = manager.migrate_assignment(
+            args.acl, args.role, actor="iris-role", dry_run=not args.apply,
+            confirm_token=args.confirm)
+        _print_json(result)
+        return 0 if result.get("ok") else 1
+    raise ValueError("unknown command")
+
+
+def main(argv=None):
+    try:
+        return _run(_parser().parse_args(argv))
+    except (ValueError, OSError, role_management.RoleManagementError) as exc:
+        code = getattr(exc, "code", None)
+        print("error: %s%s" % ((code + ": ") if code else "", exc),
+              file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

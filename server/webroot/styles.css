@@ -314,7 +314,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .badge-queued { background:var(--inactive-tint); color:var(--inactive); }
 .badge-running { background:var(--action-tint); color:var(--action); }
 .badge-cancelled { background:var(--warning-tint); color:var(--warning); }
-.legacy-warning { background:var(--warning-tint); border:1px solid var(--warning); border-left:4px solid var(--warning);
+.legacy-warning, .policy-warning { background:var(--warning-tint); border:1px solid var(--warning); border-left:4px solid var(--warning);
   border-radius:6px; color:var(--warning); font-size:13px; margin:0 0 16px; padding:8px 10px; }
 #batch-panel td.out { color:var(--text-secondary); max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* Category tags are a 7-way qualitative palette for visual distinction
@@ -579,7 +579,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    --------------------------------------------------------------------- */
 
 /* Horizontal scroll wrapper for every operational table: the console's
-   density is deliberate (Devices carries 11 columns), so at narrow
+   density is deliberate (Devices carries 12 columns), so at narrow
    viewports the table scrolls within its own box instead of forcing the
    whole page to scroll sideways. The edge gradients are a pure-CSS "is
    there more to scroll" cue (Lea Verou's scroll-shadow trick, adapted to
@@ -692,7 +692,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    scale (12/18) regardless of content kind; family still varies by data
    kind (sans for names/labels, --font-mono for machine data), weight 500
    stays on .dev-id below. Scoped to #devices only via this "tbl dense"
-   class pairing on that one <table> (11 columns, the console's densest) --
+   class pairing on that one <table> (12 columns, the console's densest) --
    Images (5 columns, 14px-base) is unaffected. */
 .tbl.dense td { font-size:12px; line-height:18px; }
 /* Row controls must match the row's own 12px text or they tower over
@@ -712,6 +712,22 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    (deploy-info drawer, batch panel, help popover, …). */
 #dev-rows .dev-id { font-family: var(--font-sans); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--text-heading); }
 #dev-rows .machine { color: var(--text-secondary); }
+
+/* Peer-policy counts sit behind one native disclosure above the fleet.
+   The outbox fraction is deliberately the same scale as the role counts:
+   it is an operations backlog, not image-transfer progress. */
+.policy-panel { margin-bottom: var(--sp-lg); border: 1px solid var(--rule); border-radius: var(--radius-card); background: var(--surface); }
+.policy-panel summary { padding: var(--sp-md) var(--sp-lg); cursor: pointer; font-weight: 500; }
+.policy-panel summary .muted { margin-left: var(--sp-md); font-weight: 400; }
+.policy-panel summary:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-card); }
+.policy-panel-body { padding: 0 var(--sp-lg) var(--sp-sm); border-top: 1px solid var(--rule); }
+.policy-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: var(--sp-md); }
+.policy-counts dt { color: var(--text-secondary); font-size: 12px; }
+.policy-counts dd { margin: var(--sp-xs) 0 0; font-family: var(--font-mono); font-size: 16px; color: var(--text-heading); }
+.policy-members { display: flex; flex-wrap: wrap; gap: var(--sp-sm) var(--sp-xl); padding: 0; list-style: none; }
+.policy-members li, #dev-rows .dev-role, .role-preview, .role-message { overflow-wrap: anywhere; }
+.policy-members .machine { font-size: 12px; }
+.role-preview { white-space: pre-line; padding: var(--sp-md); background: var(--surface-subtle); border-left: 3px solid var(--action); }
 
 /* "More filters" disclosure: a native <details>, no JS needed to toggle it
    open/closed (CSP-clean by construction) -- the expanded body is an
@@ -852,3 +868,22 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   .table-actions { width:100%; }
   .selbar-actions { margin-left:0; width:100%; }
 }
+
+/* Role definitions: the editable table inside the Peer policy panel (in the
+   shared .table-scroll wrapper like every other console table) and its
+   editor modal. */
+.role-def-actions { display:flex; flex-wrap:wrap; gap:var(--sp-sm); margin:var(--sp-sm) 0; }
+.role-def-table th, .role-def-table td { white-space:nowrap; }
+.role-def-table td.qos { white-space:normal; min-width:200px; }
+.role-def-table td:last-child { white-space:nowrap; }
+.qos-chip { display:inline-block; font-size:12px; line-height:18px; padding:0 6px; border-radius:999px;
+  background:var(--surface-subtle); margin:1px 2px 1px 0; }
+.modal.modal-wide { width:min(840px, 100%); max-height:min(92vh, 960px); }
+.role-def-modal h4 { margin:var(--sp-md) 0 var(--sp-xs); font-size:13px; font-weight:600; }
+.role-def-modal h4 .muted { font-weight:400; margin-left:var(--sp-sm); }
+.role-def-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));
+  gap:var(--sp-sm) var(--sp-md); margin-bottom:var(--sp-sm); }
+.role-def-grid .field { display:flex; }
+.role-def-grid .field > input, .role-def-grid .field > select { width:100%; }
+.role-def-grid .check-row { grid-column:1 / -1; }
+.role-def-grid .rate-hint { font-size:11px; line-height:14px; min-height:14px; }

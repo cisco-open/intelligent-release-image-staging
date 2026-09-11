@@ -24,6 +24,8 @@ WORKDIR /opt/iris/server
 COPY server/gui_server.py server/api_problem.py server/api_routes.py \
      server/tier_auth.py server/bounded_pool.py /opt/iris/server/
 COPY server/webroot/ /opt/iris/server/webroot/
+COPY docs/zensical/swagger/ /opt/iris/docs/zensical/swagger/
+COPY docs/zensical/openapi.yaml /opt/iris/docs/zensical/openapi.yaml
 
 RUN groupadd --system --gid 10001 iris \
     && useradd --system --uid 10001 --gid iris --home-dir /nonexistent \

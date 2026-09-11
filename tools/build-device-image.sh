@@ -18,12 +18,15 @@ VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
 
 CONTEXT_DIR=""
 OCI_ARCHIVE="${IRIS_DEVICE_IMAGE_OCI:-$REPO/artifacts/iris-device-$VERSION.oci.tar}"
+ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --context) CONTEXT_DIR="${2:?--context needs a directory}"; shift 2 ;;
     --output) OCI_ARCHIVE="${2:?--output needs a path}"; shift 2 ;;
+    --instruction-roots-dir)
+      ROOTS="${2:?--instruction-roots-dir needs a directory}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --context DIR [--output iris-device.oci.tar]"
+      echo "usage: $0 --context DIR [--output iris-device.oci.tar] [--instruction-roots-dir DIR]"
       exit 0 ;;
     *) echo "!! unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -105,6 +108,23 @@ for tuple in "amd64:x86_64:iris-agent.tgz" "arm64:aarch64:iris-agent-arm.tgz"; d
     exit 1
   fi
   chmod +x "$dest"
+done
+
+PYTHONPATH="$REPO/server${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 - "$ROOTS" "$CONTEXT_DIR/agent" <<'PYTHON'
+import sys
+from instruction_keys import InstructionKeyError, render_device_trust
+
+try:
+    render_device_trust(sys.argv[1], sys.argv[2])
+except InstructionKeyError as exc:
+    print("device image build: instruction trust unavailable: " + str(exc),
+          file=sys.stderr)
+    raise SystemExit(1)
+PYTHON
+for trust in iris-signers.allowed_signers iris-root.allowed_signers; do
+  [ -f "$CONTEXT_DIR/agent/$trust" ] \
+    || { echo "!! instruction trust renderer omitted $trust" >&2; exit 1; }
 done
 
 SOURCE_SHA256="$(cd "$CONTEXT_DIR" && {

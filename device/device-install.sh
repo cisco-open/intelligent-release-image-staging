@@ -63,16 +63,29 @@ RPC_SECRET=""   # NOT baked: the agent fetches it on its first token-refresh
 CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
 HOST_USER="${HOST_USER:-}"; HOST_PASS="${HOST_PASS:-}"   # required only when STAGE_HOST is REMOTE (enforced at the ssh path below)
 STAGE="${STAGE:-/flash/guest-share/iris}"
+[[ "$STAGE" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+  && [[ "$STAGE" != *"//"* ]] && [[ "/$STAGE/" != *"/../"* ]] \
+  && [[ "/$STAGE/" != *"/./"* ]] \
+  || { echo "ERROR: STAGE must be a simple absolute Guest Shell path" >&2; exit 1; }
 IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"   # local path to the bare crt.pem (trustpoint + curl --cacert)
 # the resolved guest-side path of the pinned CA after bootstrap.sh moves it in (spec §3.4/§4.5)
 CATALOG_CA="${STAGE}/iris-catalog.pem"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
-CAP="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
-[ "${#CAP}" -eq 32 ] || { echo "ERROR: failed to generate staging capability" >&2; exit 1; }
+if [ -n "${IRIS_STAGING_CAPABILITY:-}" ]; then
+  CAP="$IRIS_STAGING_CAPABILITY"
+else
+  CAP="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+fi
+[[ "$CAP" =~ ^[0-9a-f]{32}$ ]] \
+  || { echo "ERROR: IRIS_STAGING_CAPABILITY must be 32 lowercase hexadecimal characters" >&2; exit 1; }
+[[ "$DEVICE_ID" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] \
+  || { echo "ERROR: DEVICE_ID contains unsupported characters" >&2; exit 1; }
 CONF="iris-agent-$DEVICE_ID-$CAP.conf"
 RPC_SECRET_FILE="rpc-secret-$CAP"
+INSTRUCTION_ENVELOPE="iris-instructions-$DEVICE_ID-$CAP.envelope"
+BUNDLE_DIGEST_FILE="bundle-sha256-$CAP"
 
 # --- Model-aware config: the ONE place the install path branches by device ---
 # Catalyst 9300 and IE-3x00 differ in (a) the app-hosting port, (b) the writable
@@ -203,6 +216,7 @@ telemetry_stream = ${TELEMETRY_STREAM:-off}
 token_expires_at = 0
 agent_version = $(cat "$HERE/../VERSION" 2>/dev/null || echo unknown)
 EOF
+[ -z "${PRESERVED_LKG_KEY:-}" ] || printf 'lkg_key = %s\n' "$PRESERVED_LKG_KEY"
 }
 
 # --- the PKI trustpoint that lets `copy https:` validate the self-signed server cert ---
@@ -243,9 +257,15 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== Agent configuration ====="; agent_conf
   echo "===== Copy agent files over HTTPS ====="
   IOS_ROOT="${IOS_FS}/guest-share"
+  echo "delete /force $IOS_ROOT/bundle.tgz"
+  echo "delete /force $IOS_ROOT/bundle.tgz.sha256"
   for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-              "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
-              "iris-catalog.pem:iris-catalog.pem"; do
+              "staging/$RPC_SECRET_FILE:rpc-secret" \
+              "iris-catalog.pem:iris-catalog.pem" \
+              "iris-signers.pem:iris-signers.allowed_signers" \
+              "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
+              "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" \
+              "$BUNDLE:bundle.tgz"; do
     src="${pair%%:*}"; dst="${pair##*:}"
     printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
   done
@@ -268,6 +288,135 @@ ssh_host() {                       # run a command on STAGE_HOST
     -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@" || rc=$?
   iris_ssh_cleanup
   return "$rc"
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+regular_bounded_file() {
+  # $1 path, $2 maximum bytes. Symlinks are never accepted as trust or
+  # capability inputs, even when their target is a regular file.
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  local _size
+  _size="$(wc -c < "$1" 2>/dev/null | tr -d '[:space:]')"
+  case "$_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_size" -gt 0 ] && [ "$_size" -le "$2" ]
+}
+
+validate_and_stage_local_artifacts() {
+  local _bundle _sidecar _signers _envelope _expected _actual _digest _tmp
+  _bundle="$ART/$BUNDLE"
+  _sidecar="$_bundle.sha256"
+  _signers="$ART/iris-signers.pem"
+  _envelope="$ART/staging/$INSTRUCTION_ENVELOPE"
+  regular_bounded_file "$_bundle" 33554432 \
+    || { echo "ERROR: bundle digest evidence is missing or invalid" >&2; return 1; }
+  [ -f "$_sidecar" ] && [ ! -L "$_sidecar" ] \
+    && [ "$(wc -c < "$_sidecar" 2>/dev/null | tr -d '[:space:]')" = 65 ] \
+    || { echo "ERROR: bundle digest evidence is missing or invalid" >&2; return 1; }
+  IFS= read -r _expected < "$_sidecar" || true
+  [[ "$_expected" =~ ^[0-9a-f]{64}$ ]] \
+    || { echo "ERROR: bundle digest evidence is missing or invalid" >&2; return 1; }
+  _actual="$(sha256_file "$_bundle" 2>/dev/null || true)"
+  [ "$_actual" = "$_expected" ] \
+    || { echo "ERROR: bundle digest evidence is missing or invalid" >&2; return 1; }
+  regular_bounded_file "$_signers" 65536 \
+    || { echo "ERROR: iris-signers.pem is missing or invalid" >&2; return 1; }
+  regular_bounded_file "$_envelope" 262144 \
+    || { echo "ERROR: instruction bootstrap artifact is missing or invalid" >&2; return 1; }
+
+  _digest="$ART/staging/$BUNDLE_DIGEST_FILE"
+  _tmp="$ART/staging/.$BUNDLE_DIGEST_FILE.$$"
+  (umask 077; printf '%s\n' "$_actual" > "$_tmp") \
+    && mv -f "$_tmp" "$_digest" \
+    || { rm -f "$_tmp" 2>/dev/null || true
+         echo "ERROR: could not materialize bundle digest capability" >&2; return 1; }
+}
+
+validate_and_stage_remote_artifacts() {
+  # All interpolated names have already passed the closed DEVICE_ID/CAP grammar.
+  # Exit codes keep diagnostics fixed and prevent remote paths or bytes from
+  # entering the operator transcript.
+  _remote_rc=0
+  ssh_host "set -eu
+base=\$HOME/iris/artifacts
+bundle=\$base/$BUNDLE
+sidecar=\$base/$BUNDLE.sha256
+signers=\$base/iris-signers.pem
+envelope=\$base/staging/$INSTRUCTION_ENVELOPE
+[ -d \"\$base/staging\" ] && [ ! -L \"\$base/staging\" ] || exit 44
+[ -f \"\$base/bootstrap.sh\" ] && [ ! -L \"\$base/bootstrap.sh\" ] || exit 44
+[ -f \"\$bundle\" ] && [ ! -L \"\$bundle\" ] || exit 41
+bundle_size=\$(wc -c < \"\$bundle\" | tr -d '[:space:]')
+[ \"\$bundle_size\" -gt 0 ] && [ \"\$bundle_size\" -le 33554432 ] || exit 41
+[ -f \"\$sidecar\" ] && [ ! -L \"\$sidecar\" ] || exit 41
+[ \"\$(wc -c < \"\$sidecar\" | tr -d '[:space:]')\" = 65 ] || exit 41
+expected=\$(cat \"\$sidecar\")
+case \"\$expected\" in *[!0-9a-f]*|'') exit 41 ;; esac
+[ \"\${#expected}\" -eq 64 ] || exit 41
+actual=\$(sha256sum \"\$bundle\" | awk '{print \$1}')
+[ \"\$actual\" = \"\$expected\" ] || exit 41
+[ -f \"\$signers\" ] && [ ! -L \"\$signers\" ] || exit 42
+signer_size=\$(wc -c < \"\$signers\" | tr -d '[:space:]')
+[ \"\$signer_size\" -gt 0 ] && [ \"\$signer_size\" -le 65536 ] || exit 42
+[ -f \"\$envelope\" ] && [ ! -L \"\$envelope\" ] || exit 43
+envelope_size=\$(wc -c < \"\$envelope\" | tr -d '[:space:]')
+[ \"\$envelope_size\" -gt 0 ] && [ \"\$envelope_size\" -le 262144 ] || exit 43
+tmp=\$base/staging/.$BUNDLE_DIGEST_FILE.\$\$
+trap 'rm -f \"\$tmp\"' EXIT HUP INT TERM
+umask 077
+printf '%s\\n' \"\$actual\" > \"\$tmp\"
+mv -f \"\$tmp\" \"\$base/staging/$BUNDLE_DIGEST_FILE\"" >/dev/null 2>&1 \
+    || _remote_rc=$?
+  case "$_remote_rc" in
+    0) return 0 ;;
+    42) echo "ERROR: iris-signers.pem is missing or invalid" >&2 ;;
+    43) echo "ERROR: instruction bootstrap artifact is missing or invalid" >&2 ;;
+    44) echo "ERROR: required artifact staging inputs are missing or invalid" >&2 ;;
+    *) echo "ERROR: bundle digest evidence is missing or invalid" >&2 ;;
+  esac
+  return 1
+}
+
+read_preserved_lkg_key() {
+  local _existing _candidate
+  _existing="$(printf 'more %s/iris-agent.conf\n' "$IOS_STAGE" \
+    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+  _candidate="$(printf '%s\n' "$_existing" \
+    | sed -n 's/^[[:space:]]*lkg_key[[:space:]]*=[[:space:]]*//p' \
+    | tail -n1 | tr -d '\r' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$_candidate" =~ ^[0-9a-f]{64}$ ]]; then
+    PRESERVED_LKG_KEY="$_candidate"
+  else
+    PRESERVED_LKG_KEY=""
+  fi
+}
+
+check_existing_stage_writable() {
+  local _app _probe
+  _app="$(printf 'show app-hosting list\n' \
+    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null \
+    | grep -i guestshell || true)"
+  [ -n "$_app" ] || return 0
+  case "$_app" in
+    *RUNNING*) ;;
+    *) echo "ERROR: existing Guest Shell is not running; start it and repair guest-share/iris ownership before re-onboarding" >&2
+       return 1 ;;
+  esac
+  _probe="$(printf "guestshell run bash -c 'test -d %s && test -w %s && echo __IRIS_STAGE_WRITABLE__'\n" \
+    "$STAGE" "$STAGE" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+  if printf '%s\n' "$_probe" | tr -d '\r' \
+      | grep -qx '__IRIS_STAGE_WRITABLE__'; then
+    return 0
+  fi
+  echo "ERROR: guest-share/iris is not writable by Guest Shell; repair its ownership before re-onboarding" >&2
+  return 1
 }
 
 echo "[1/6] check storage on $DEVICE_IP"
@@ -353,21 +502,49 @@ ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 # arrived earlier over SSH in the trustpoint paste, so this is non-circular).
 : "${IRIS_CRT_FILE:?set IRIS_CRT_FILE — local path to the bare server cert crt.pem (the generator supplies it)}"
 [ -r "$IRIS_CRT_FILE" ] || { echo "  ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE is not readable" >&2; exit 1; }
-if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] || ip -o addr 2>/dev/null | grep -qw "$STAGE_HOST" || [ "$STAGE_HOST" = "localhost" ]; then
+STAGE_LOCAL=0
+if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] \
+    || ip -o addr 2>/dev/null | grep -qw "$STAGE_HOST" \
+    || [ "$STAGE_HOST" = "localhost" ]; then
+  STAGE_LOCAL=1
+fi
+if [ "$STAGE_LOCAL" -eq 1 ]; then
   # we ARE the stage host — write directly, no ssh needed
   mkdir -p "$ART/staging"
+  [ -d "$ART/staging" ] && [ ! -L "$ART/staging" ] \
+    || { echo "ERROR: artifact staging directory is invalid" >&2; exit 1; }
+  validate_and_stage_local_artifacts || exit 1
+else
+  : "${HOST_USER:?set HOST_USER (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
+  : "${HOST_PASS:?set HOST_PASS (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
+  validate_and_stage_remote_artifacts || exit 1
+fi
+
+# These probes are read-only and occur only after every required artifact has
+# been validated. Preserve the device-local instruction LKG key when replacing
+# the enrollment configuration, and refuse a legacy stage Guest Shell cannot
+# write instead of deleting that directory and its runnable state.
+PRESERVED_LKG_KEY=""
+read_preserved_lkg_key
+check_existing_stage_writable || exit 1
+
+if [ "$STAGE_LOCAL" -eq 1 ]; then
+  _conf_tmp="$ART/staging/.$CONF.$$"
+  _rpc_tmp="$ART/staging/.$RPC_SECRET_FILE.$$"
   (umask 077
-   agent_conf > "$ART/staging/$CONF"
-   printf '%s\n' "$RPC_SECRET" > "$ART/staging/$RPC_SECRET_FILE")
+   agent_conf > "$_conf_tmp"
+   printf '%s\n' "$RPC_SECRET" > "$_rpc_tmp") \
+    && mv -f "$_conf_tmp" "$ART/staging/$CONF" \
+    && mv -f "$_rpc_tmp" "$ART/staging/$RPC_SECRET_FILE" \
+    || { rm -f "$_conf_tmp" "$_rpc_tmp" 2>/dev/null || true
+         echo "ERROR: could not stage agent configuration" >&2; exit 1; }
   # static served files are normally provisioned at container startup by
   # server/provision-served.sh (or by tools/make-agent-bundle.sh); the
   # copy-if-absent below also covers CLI runs from a stage host.
   [ -e "$ART/bootstrap.sh" ]     || cp "$HERE/bootstrap.sh" "$ART/bootstrap.sh"
   [ -e "$ART/iris-catalog.pem" ] || cp "$IRIS_CRT_FILE" "$ART/iris-catalog.pem"
 else
-  : "${HOST_USER:?set HOST_USER (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
-  : "${HOST_PASS:?set HOST_PASS (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
-  agent_conf | ssh_host "umask 077 && mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\n' '$RPC_SECRET' > ~/iris/artifacts/staging/$RPC_SECRET_FILE"
+  agent_conf | ssh_host "set -eu; umask 077; d=\$HOME/iris/artifacts/staging; c=\$d/.$CONF.\$\$; r=\$d/.$RPC_SECRET_FILE.\$\$; trap 'rm -f \"\$c\" \"\$r\"' EXIT HUP INT TERM; cat > \"\$c\"; printf '%s\n' '$RPC_SECRET' > \"\$r\"; mv -f \"\$c\" \"\$d/$CONF\"; mv -f \"\$r\" \"\$d/$RPC_SECRET_FILE\""
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
@@ -453,15 +630,20 @@ if ! artifact_preflight; then
   echo "  Is the server container up, did you run tools/make-agent-bundle.sh, and is IRIS_CRT_FILE the server's crt.pem?" >&2
   exit 1
 fi
-# IMPORTANT: files go to the guest-share ROOT, not a subdirectory. A dir made by
-# IOS `mkdir` is root-owned and the guest user cannot write inside it; the
-# bootstrap (running as the guest user) creates the working dir itself and moves
-# these files in. Also remove any stale root-owned working dir from older installs.
-printf 'delete /force /recursive %s\n' "$IOS_STAGE" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
+# IMPORTANT: files go to the guest-share ROOT, not a subdirectory. Preserve the
+# live Guest Shell work directory and its LKG/runtime state. Only stale incoming
+# archive evidence at the root is safe to clear before the ordered copy.
 IOS_ROOT="${IOS_FS}/guest-share"
+printf 'delete /force %s/bundle.tgz\ndelete /force %s/bundle.tgz.sha256\n' \
+  "$IOS_ROOT" "$IOS_ROOT" \
+  | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-            "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
-            "iris-catalog.pem:iris-catalog.pem"; do
+            "staging/$RPC_SECRET_FILE:rpc-secret" \
+            "iris-catalog.pem:iris-catalog.pem" \
+            "iris-signers.pem:iris-signers.allowed_signers" \
+            "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
+            "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" \
+            "$BUNDLE:bundle.tgz"; do
   src="${pair%%:*}"; dst="${pair##*:}"; ok=0
   for attempt in 1 2 3; do
     # capture THEN match — `grep -q` on a live pipe SIGPIPEs ssh at first match

@@ -56,12 +56,13 @@
 #   there is nothing here to get wrong about numbers. Validation is the agent's.
 #
 # ENVIRONMENT (exported by the launcher -- guestshell-start.sh / entrypoint.sh)
-#   IRIS_RPC_SECRET or RPC_SECRET  aria2's --rpc-secret, INHERITED rather than
-#       re-read from a file: a conf file and the running daemon can disagree,
-#       and that skew was the 2026-08-20 silent-device incident. An empty value
-#       legitimately means the daemon is on the "iris" placeholder.
+#   IRIS_RPC_SECRET or RPC_SECRET  aria2's effective RPC secret, INHERITED from
+#       the launcher rather than re-read from a file: a conf file and the
+#       running daemon can disagree, and that skew was the 2026-08-20
+#       silent-device incident. An empty baked value is resolved by the
+#       launcher to the "iris" placeholder before inheritance.
 #   IRIS_RPC_PORT or RPC_PORT      aria2's --rpc-listen-port (default 6800).
-#   No new secret exposure: the value is already on aria2c's own argv.
+#   The launchers keep this value out of aria2c and curl process arguments.
 #
 # POSIX sh only (/bin/sh is dash in the IOx container, bash in Guest Shell) and
 # no python3: interpreter start-up is the one thing that would widen the race

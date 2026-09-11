@@ -54,6 +54,12 @@ def _splunk_text():
         return stream.read()
 
 
+def _splunk_rollout_text():
+    with open(os.path.join(DASHBOARDS, "splunk-iris-rollout.xml"),
+              encoding="utf-8") as stream:
+        return stream.read()
+
+
 def _grafana():
     import json
     with open(os.path.join(DASHBOARDS, "grafana-iris-swarm.json"),
@@ -63,7 +69,140 @@ def _grafana():
 
 def test_splunk_dashboard_is_well_formed_xml():
     import xml.etree.ElementTree as ET
-    ET.parse(os.path.join(DASHBOARDS, "splunk-iris-swarm.xml"))
+    for name in ("splunk-iris-swarm.xml", "splunk-iris-rollout.xml"):
+        ET.parse(os.path.join(DASHBOARDS, name))
+
+
+def test_splunk_simple_xml_queries_do_not_repeat_the_search_command():
+    """Simple XML supplies `search`; a second copy becomes a literal term."""
+    import xml.etree.ElementTree as ET
+    offenders = []
+    for name, text in (("swarm", _splunk_text()),
+                       ("rollout", _splunk_rollout_text())):
+        offenders.extend(
+            "%s query %d" % (name, number)
+            for number, node in enumerate(ET.fromstring(text).iter("query"), 1)
+            if (node.text or "").lstrip().startswith("search "))
+    assert not offenders, (
+        "Simple XML dispatches each standalone query as `search <query>`; an "
+        "XML query beginning with `search` becomes `search search index=...` "
+        "and scans zero events: " + ", ".join(offenders))
+
+
+def test_splunk_peer_evidence_collapses_repeated_capture_before_aggregation():
+    """A Console pull repeats the same counters with a fresh report/event id.
+    The real Splunk fixture checks the arithmetic; this guards both shipped
+    copies against returning to event-id-only deduplication."""
+    import xml.etree.ElementTree as ET
+    document = open(os.path.join(REPO, "docs", "zensical", "splunk.md")).read()
+    section = document.split("### Peer-to-peer evidence\n", 1)[1].split(
+        "### Assignment to confirmed seeding", 1)[0]
+    docs_queries = re.findall(r"```spl\n(.*?)```", section, re.S)
+    xml_queries = []
+    for text in (_splunk_text(), _splunk_rollout_text()):
+        queries = [query.text for query in ET.fromstring(text).iter("query")
+                   if '"otel.log.name"="iris.device.peer_transfer_record"' in query.text]
+        assert len(queries) == 3
+        xml_queries.extend(queries)
+    assert len(docs_queries) == 3
+    for query in docs_queries + xml_queries:
+        commands = [command.strip() for command in query.split("|")]
+        numeric = next(i for i, command in enumerate(commands)
+                       if command.startswith("eval received_bytes=tonumber("))
+        maximum = commands.index("sort 0 -received_bytes")
+        collapse = commands.index(
+            'dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"')
+        assert numeric < maximum < collapse
+        # Filtering to device rows first could resurrect an older device
+        # classification that the selected cumulative capture did not carry.
+        assert '"iris.peer.attribution"="device"' not in commands[0]
+        aggregations = [i for i, command in enumerate(commands)
+                        if command.startswith(("stats ", "timechart ", "table "))]
+        assert aggregations and min(aggregations) > collapse
+
+
+def test_splunk_rollout_preserves_inputs_and_panels_while_filtering_receivers():
+    """The deployed source extends iris_rollout without changing its URL tokens.
+
+    Receiver filtering belongs after cumulative-capture selection, uses Simple
+    XML's string-token escape, and must not inherit the swarm board's image
+    token (whose basename/catalog-id conversion is irrelevant here).
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(_splunk_rollout_text())
+    inputs = [(node.get("type"), node.get("token"))
+              for node in root.findall(".//input")]
+    assert inputs == [("time", "tr"), ("text", "dev")]
+    titles = {node.text for node in root.findall(".//title")}
+    preserved = {
+        "Active seeders", "Active leechers", "Average leecher → seeder",
+        "Telemetry last seen", "Seeds and leechers over time",
+        "Measured swarm transfer rate", "Received data by source",
+        "Time to seed by device", "Transfer verification issues",
+        "Active seeds and leechers by device type",
+    }
+    measured = {
+        "Bytes received, by source", "Share of bytes from peer devices",
+        "Peer-to-peer transfers (measured, device-reported)",
+    }
+    assert titles == preserved | measured
+    peer_queries = [node.text for node in root.iter("query")
+                    if "iris.device.peer_transfer_record" in (node.text or "")]
+    assert len(peer_queries) == 3
+    for query in peer_queries:
+        commands = [command.strip() for command in query.split("|")]
+        collapse = commands.index(
+            'dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"')
+        receiver = commands.index('search "device.id"=$dev')
+        aggregations = [i for i, command in enumerate(commands)
+                        if command.startswith(("stats ", "timechart ", "table "))]
+        assert collapse < receiver < min(aggregations)
+        assert '$dev|s$' in query
+        assert "$img$" not in query
+    assert "$img$" not in _splunk_rollout_text()
+
+
+def test_splunk_rollout_received_sources_keeps_the_capped_row_bucket():
+    """Rows dropped by the peer cap are measured bytes, not unknown senders."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(_splunk_rollout_text())
+    panel = next(node for node in root.findall(".//panel")
+                 if node.findtext("title") == "Received data by source")
+    query = panel.findtext(".//query")
+    assert 'latest("iris.transfer.bytes_unattributed_omitted")' in query
+    assert re.search(
+        r'sum\([^)]*\)\s+as\s+"Untraced capped rows"', query, re.IGNORECASE)
+
+
+def test_splunk_swarm_provenance_distinguishes_windows_and_measurements():
+    """Descriptions must match the two base-search windows and data sources."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(_splunk_text())
+    label = root.findtext('.//input[@token="tr"]/label')
+    assert "historical panels" in label
+    assert "last 15 minutes" in label
+    mbase = root.find('.//search[@id="mbase"]')
+    livebase = root.find('.//search[@id="livebase"]')
+    assert (mbase.findtext("earliest"), mbase.findtext("latest")) == \
+        ("$tr.earliest$", "$tr.latest$")
+    assert (livebase.findtext("earliest"), livebase.findtext("latest")) == \
+        ("-15m", "now")
+    text = " ".join(root.itertext())
+    assert re.search(r"provide\s+direct\s+evidence", text)
+    assert "capture_complete=false" in text
+    assert re.search(
+        r"Origin\s+and\s+unknown\s+bytes\s+remain\s+in\s+the\s+measured\s+share\s+denominator",
+        text)
+    assert "do not depend on the window" not in text
+    assert "IRIS cannot see device-to-device transfers directly" not in text
+
+
+def test_splunk_per_sender_table_keeps_distinct_unknown_peer_addresses():
+    document = open(os.path.join(REPO, "docs", "zensical", "splunk.md")).read()
+    query = next(query for query in re.findall(r"```spl\n(.*?)```", document, re.S)
+                 if "max(received_bytes)" in query)
+    group = query.split("BY ", 1)[1]
+    assert '"network.peer.address"' in group
 
 
 def test_splunk_eval_syntax_single_quotes_dotted_fields():

@@ -46,6 +46,38 @@ def test_console_has_its_own_minimal_image_and_port():
     assert "/opt/iris/server/iris-gui" in server
 
 
+def test_console_image_bakes_only_canonical_api_docs():
+    console = _read("Dockerfile.console")
+    doc_copies = [line.strip() for line in console.splitlines()
+                  if line.strip().startswith("COPY docs/")]
+    assert doc_copies == [
+        "COPY docs/zensical/swagger/ /opt/iris/docs/zensical/swagger/",
+        "COPY docs/zensical/openapi.yaml /opt/iris/docs/zensical/openapi.yaml",
+    ]
+    assert not any(line.strip().startswith("VOLUME ")
+                   for line in console.splitlines())
+
+
+def test_console_api_docs_need_no_state_or_documentation_mounts():
+    import yaml
+    allowed_targets = {
+        "/run/iris-tier", "/run/iris-management-ca", "/run/iris-console-tls",
+        "/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2",
+    }
+    for filename in ("docker-compose.yml", "docker-compose.console.yml"):
+        console = yaml.safe_load(_read(filename))["services"]["console"]
+        for mount in console.get("volumes", []):
+            if isinstance(mount, dict):
+                target = mount["target"]
+                read_only = mount.get("read_only", False)
+            else:
+                # Right split keeps ${NAME:-default} colons in the source.
+                _, target, mode = mount.rsplit(":", 2)
+                read_only = mode == "ro"
+            assert target in allowed_targets, (filename, target)
+            assert read_only, (filename, target)
+
+
 def test_console_image_has_independent_local_readiness_healthcheck():
     console = _read("Dockerfile.console")
     assert "HEALTHCHECK" in console

@@ -37,10 +37,13 @@ flowchart LR
     Server --> PVC["RWO data PVC"]
 ```
 
-The server Deployment uses `replicas: 1` with `Recreate`. The tracker peer
-registry is in memory, catalog state is file-backed, and seeder RPC is local to
-the server pod. More replicas would split coordination state rather than add
-capacity. Console can restart independently without interrupting devices. Pods receive
+The server Deployment uses `replicas: 1` with `Recreate`. There are three single-replica reasons: the tracker peer
+registry is in memory; catalog state is file-backed and seeder RPC is local to
+the pod; and the instruction stamper, serial history, activation/admission
+state and file-backed instruction artifacts have single-writer semantics with
+no cross-pod coordination. Multi-replica server operation is unsupported and
+not covered by validation. More replicas would split coordination state rather
+than add capacity. Console can restart independently without interrupting devices. Pods receive
 private cluster addresses and use Service DNS; devices and browsers use the
 LoadBalancer addresses. Neither pod needs its own external IP.
 
@@ -52,7 +55,10 @@ reconciliation rather than blindly retrying a device operation. See
 [Management Type and VLAN Ownership](management-type.md).
 
 IOx onboarding needs `iris-arm64.tar` and/or `iris-amd64.tar` under
-`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. Copy each package's
+`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. When the aria2c pin
+in `tools/aria2c.sha256` changes, refresh both `deliverables/` binaries,
+rebuild both images and every device package from them, and copy the packages
+again: the agents must be file-identical across packages. Copy each package's
 adjacent `.manifest` as well, because readiness binds the served wrapper bytes
 to their canonical OCI provenance. Kubernetes does not run host-side package
 builders. Build the deployment-neutral packages elsewhere and copy them to the
@@ -64,6 +70,31 @@ does not require rebuilding them: server startup refreshes the distributed
 IOS-XR harddisk bind mount receives the new runtime trust anchor. Package
 readiness checks bytes against manifests, not whether the source has changed;
 use the [rebuild procedure](development.md#embedded-agent-packages).
+
+Before publishing fresh bundles, provision exactly two distinct approved public
+instruction roots as `.pub` files under `/data/config/instr/roots.d`, readable
+by the server's UID 10001. Use the same approved pair when building every
+device package; never generate replacement roots in the pod or copy offline
+private keys there. Follow the [instruction-root ceremony](operations.md#instruction-root-ceremony-and-recovery).
+Missing or invalid roots leave bundle publication unavailable even when the
+pod's listeners are ready. Check package readiness in Console Setup after rollout.
+
+## Phase 1 storage and network impact
+
+The existing `iris-data` PVC stays mounted at `/data`, with `IRIS_STATE` at
+`/data/state`, `IRIS_CONFIG` at `/data/config`, images and artifacts under that
+layout. `IRIS_RUN` remains `/run/iris` on memory `emptyDir`; plaintext signing
+material never becomes PVC state. Public roots and encrypted signing material
+use the existing configuration storage. Phase 1 requires no new Secret, port,
+Service or NetworkPolicy rule.
+
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` add authenticated traffic on
+existing device HTTPS 8443, with no new listener, network path or firewall flow.
+TCP 9443 remains Console-to-server management-only. Server-only instruction
+state, age identity, encrypted signing key and runtime plaintext must never
+be mounted into Console pods. Validate this [single-replica layout](validation.md#phase-1-layout-validation)
+without claiming multi-replica coverage.
 
 ## External address
 
@@ -127,7 +158,14 @@ restrict the Console's `loadBalancerSourceRanges` to operator networks. See
 [MetalLB configuration](https://metallb.io/configuration/).
 
 For local storage, create a dedicated directory owned by `10001:10001` with
-mode `0700`. Bind it through a local PersistentVolume with node affinity,
+mode `2770` at the volume root, before any server pod mounts it. Also
+pre-create its `state` child (`/data/state` in the pod), owned by
+`10001:10001` with exact mode `0700` and setgid explicitly cleared. Only the
+volume root needs setgid; `state` must not pass it into private authority
+directories. Otherwise, a fresh IOx directory inherits mode `2700` and fails
+its strict `0700` check. Keep other private files and subdirectories at their
+own required modes; the root mode is not a recursive permission setting.
+Bind it through a local PersistentVolume with node affinity,
 `Retain` reclaim policy, and a storage class using `WaitForFirstConsumer`.
 Match the PVC's storage class and request to that volume. The base request is
 `50Gi`; a smaller lab overlay can use `10Gi` if its images and artifacts fit.
@@ -148,9 +186,19 @@ Both pods run as uid/gid `10001`, drop all capabilities, disallow privilege
 escalation, and inherit `RuntimeDefault` seccomp. The namespace enforces the
 restricted Pod Security profile. All listeners bind above 1024.
 
-The server uses `fsGroup: 10001` so its PVC and age-key projection are usable
-by the non-root process. The Console has no PVC. Whether a PVC honors `fsGroup`
-depends on the storage driver's `fsGroupPolicy`; verify it before first deploy:
+The server uses `fsGroup: 10001` with `fsGroupChangePolicy: OnRootMismatch`.
+For kubelet-managed volume permissions, preparing the root as above prevents
+recursive permission changes on mount. The default `Always` behavior widens
+private `0600` authority files to `0660`, which IRIS correctly rejects.
+`OnRootMismatch` still permits a recursive change if the root does not match;
+it does not repair files changed by an earlier mount. It does not alter the
+group handling of Secret, ConfigMap, or `emptyDir` volumes, so the age-key
+projection remains readable. The Console has no PVC.
+
+Verify the storage driver's behavior before first deploy. CSI drivers that
+delegate `VOLUME_MOUNT_GROUP` handle permissions themselves and do not use
+`fsGroupChangePolicy`; they must preserve IRIS's private file modes. See
+[Kubernetes volume permission controls](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods).
 
 ```bash
 kubectl get csidriver \
@@ -163,6 +211,34 @@ kubectl -n iris exec deployment/iris-seed-server -- \
 If the driver does not apply the group, pre-create volume ownership out of band
 or use a storage class that supports it. Do not make either container root to
 work around storage ownership.
+
+### Recover a volume whose private modes were changed
+
+If startup reports an unsafe deployment-authority or transcript mode after a
+mount, retain the failure evidence and repair the storage before retrying:
+
+1. Stop new job admission and wait for all onboard, undeploy, and scheduled
+   work to finish. Then stop the server pod and any maintenance pods mounting
+   the PVC. Do not restart or change permissions while a job is running.
+2. Inspect ownership, modes, inode/link metadata, and trusted backup evidence
+   without printing file contents. Confirm the problem is a permission change;
+   an unexplained content or identity change requires investigation.
+3. Restore only the verified, explicitly identified paths to their required
+   ownership and modes: UID/GID `10001:10001`, `0600` for
+   `/data/state/deployment_records.json`, its `.lock`, and IOx transcript files;
+   `0700` with setgid explicitly cleared for `/data/state`, the private
+   `/data/state/iox` directory, and its authority subdirectories. Restore the
+   public catalog certificate `/data/config/tls/crt.pem` to `0644`; startup
+   rejects group-writable modes such as `0660` or `0664` left by a recursive
+   mount rewrite. Check
+   other affected authority files and public instruction roots against their
+   own validation rules. Never use recursive `chmod`/`chown`, delete authority
+   evidence, or weaken the validators to make startup pass.
+4. Verify the dedicated volume root is `10001:10001` with mode `2770` and
+   `/data/state` is `10001:10001` with exact mode `0700`, without setgid.
+   Apply the `OnRootMismatch` Deployment policy before starting the server.
+   Recheck the private modes after mounting, then verify management API health
+   and deployment-record access before admitting jobs.
 
 ## Secrets and storage
 

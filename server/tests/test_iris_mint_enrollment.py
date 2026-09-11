@@ -2,11 +2,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
 import sys
 import types
 import time
 from importlib.machinery import SourceFileLoader
+
+import pytest
 
 import secrets_store
 import auth
@@ -24,6 +27,17 @@ def _load_cli():
     mod.__file__ = _CLI_PATH
     loader.exec_module(mod)
     return mod
+
+
+def _instruction_record(value, created_at, expires_at, revoked=False):
+    return {
+        "value": value,
+        "key_id": hashlib.sha256(bytes.fromhex(value)).hexdigest(),
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "revoked": revoked,
+        "_scope": "instructions",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +103,7 @@ def test_mint_enrollment_not_revoked(tmp_path, monkeypatch):
 
 
 def test_mint_enrollment_provisions_announce_and_rpc(tmp_path, monkeypatch):
-    """Enrollment must also provision the device's announce_token + rpc_secret.
+    """Enrollment also provisions the device's three stable secrets.
 
     The installer bakes neither; the agent fetches them on its first
     token-refresh, which returns whatever is in the device record. If
@@ -110,6 +124,10 @@ def test_mint_enrollment_provisions_announce_and_rpc(tmp_path, monkeypatch):
         "enrollment did not provision a device announce_token"
     assert dev.get("rpc_secret", {}).get("value"), \
         "enrollment did not provision a device rpc_secret"
+    instr = dev["instr_key"]
+    assert secrets_store.validate_instruction_key_record(instr) is instr
+    assert instr["key_id"] == hashlib.sha256(
+        bytes.fromhex(instr["value"])).hexdigest()
 
 
 def test_reenrollment_replaces_revoked_stable_secrets(tmp_path, monkeypatch):
@@ -122,6 +140,7 @@ def test_reenrollment_replaces_revoked_stable_secrets(tmp_path, monkeypatch):
     old = secrets_store.load(sp)["devices"]["retired"]
     old_announce = old["announce_token"]["value"]
     old_rpc = old["rpc_secret"]["value"]
+    old_instr = old["instr_key"]["value"]
     store = secrets_store.load(sp)
     secrets_store.revoke(store, "retired")
     secrets_store.save(store, sp)
@@ -130,6 +149,8 @@ def test_reenrollment_replaces_revoked_stable_secrets(tmp_path, monkeypatch):
     dev = store["devices"]["retired"]
     assert dev["announce_token"]["value"] != old_announce
     assert dev["rpc_secret"]["value"] != old_rpc
+    assert dev["instr_key"]["value"] != old_instr
+    assert "instr_key_prev" not in dev
     index = secrets_store.build_announce_index(store)
     context = auth.resolve_announce_principal(
         "announce_token=" + dev["announce_token"]["value"], index, store,
@@ -149,7 +170,73 @@ def test_valid_stable_secrets_are_retained(tmp_path, monkeypatch):
     after = secrets_store.load(sp)["devices"]["existing"]
     assert after["announce_token"]["value"] == before["announce_token"]["value"]
     assert after["rpc_secret"]["value"] == before["rpc_secret"]["value"]
+    assert after["instr_key"] == before["instr_key"]
     assert after["catalog_token"]["value"] != before["catalog_token"]["value"]
+
+
+@pytest.mark.parametrize("damage", ["expired-current", "malformed-current",
+                                    "malformed-previous", "revoked-previous",
+                                    "expired-previous", "duplicate-previous",
+                                    "live-previous"])
+def test_reenrollment_repairs_instruction_lineage(
+        tmp_path, monkeypatch, capsys, damage):
+    sp = str(tmp_path / "secrets.json")
+    monkeypatch.setenv("IRIS_SECRETS", sp)
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+    mod = _load_cli()
+    assert mod.main(["repair"]) == 0
+    capsys.readouterr()
+    before = secrets_store.load(sp)["devices"]["repair"]["instr_key"]
+    store = secrets_store.load(sp)
+    dev = store["devices"]["repair"]
+    now = int(time.time())
+    previous = _instruction_record("de" * 32, now - 10, now + 1000)
+    dev["instr_key_prev"] = previous
+    if damage == "expired-current":
+        dev["instr_key"]["created_at"] = 1
+        dev["instr_key"]["expires_at"] = 1 + 2592000
+    elif damage == "malformed-current":
+        dev["instr_key"]["key_id"] = "bad"
+    elif damage == "malformed-previous":
+        dev["instr_key_prev"]["key_id"] = "bad"
+    elif damage == "revoked-previous":
+        dev["instr_key_prev"]["revoked"] = True
+    elif damage == "expired-previous":
+        dev["instr_key_prev"]["created_at"] = 1
+        dev["instr_key_prev"]["expires_at"] = 2
+    elif damage == "duplicate-previous":
+        previous = dict(before)
+        previous["expires_at"] = now + 1000
+        dev["instr_key_prev"] = previous
+    secrets_store.save(store, sp)
+
+    persist_calls = []
+    real_persist = mod.secretfs.persist_store
+
+    def persist(*args, **kwargs):
+        persist_calls.append(True)
+        return real_persist(*args, **kwargs)
+
+    monkeypatch.setattr(mod.secretfs, "persist_store", persist)
+
+    assert mod.main(["repair"]) == 0
+    output = capsys.readouterr()
+    assert len(output.out.strip()) == 32
+    assert output.err == ""
+    assert persist_calls == [True]
+    after = secrets_store.load(sp)["devices"]["repair"]
+    assert output.out.strip() == after["catalog_token"]["value"]
+    assert secrets_store.validate_instruction_key_record(after["instr_key"])
+    if damage in ("expired-current", "malformed-current"):
+        assert after["instr_key"]["value"] != before["value"]
+        assert "instr_key_prev" not in after
+    elif damage != "live-previous":
+        assert after["instr_key"] == before
+        assert "instr_key_prev" not in after
+    else:
+        assert after["instr_key"] == before
+        assert after["instr_key_prev"] == previous
 
 
 def test_reenrollment_clears_previous_catalog_recovery_token(

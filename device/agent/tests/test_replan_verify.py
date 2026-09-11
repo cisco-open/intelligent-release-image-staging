@@ -171,6 +171,10 @@ def _staged_under_plan_a():
     sizes = {STAGE: SIZE}
     verifier = Verifier()
     deps, rec = make_deps(cat, sizes, verifier)
+    # Once staged, the image is seeding and aria2 says so: a replan must not
+    # be read as board #248's re-seed of an image aria2 has forgotten.
+    deps = deps._replace(aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                                               if sizes.get(p) else None))
     state = {}
 
     assert iris_agent.run_once(CFG, deps, state) == "complete"

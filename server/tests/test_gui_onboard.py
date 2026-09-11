@@ -31,6 +31,14 @@ class _Fleet:
         self._d[did] = merged
         return merged
 
+    def update_observation(self, device_id, *, model=None, os_family=None):
+        record = {"device_id": device_id}
+        if model is not None:
+            record["model"] = model
+        if os_family is not None:
+            record["os_family"] = os_family
+        return self.upsert(record)
+
 
 class _Creds:
     def __init__(self, profs): self._p = profs
@@ -54,7 +62,7 @@ def _wait(svc, job_id, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         j = svc.get_job(job_id)
-        if j and j["state"] in ("done", "error"):
+        if j and j["state"] in ("done", "error", "cancelled"):
             return j
         time.sleep(0.01)
     return svc.get_job(job_id)
@@ -185,6 +193,7 @@ def test_onboard_unknown_device_errors(tmp_path):
 
 def test_onboard_missing_credential_errors(tmp_path):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
+                           "management_type": "routed",
                            "credential_profile_id": "missing"}})
     creds = _Creds({})
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -430,7 +439,7 @@ def test_build_env_raises_without_management_type():
                                      run_fn=lambda p, e, on: 0,
                                      mint_fn=lambda d: "TOK")
     with pytest.raises(KeyError, match="management_type"):
-        svc._build_env("d1")
+        svc._build_env("d1", mint=False)
 
 
 # --- resolve_platform ---------------------------------------------------
@@ -465,7 +474,7 @@ def test_resolve_platform_model_map_catalyst_8000_router():
 
 
 def test_c8000_explicit_guestshell_is_rejected():
-    with pytest.raises(ValueError, match="platform router"):
+    with pytest.raises(ValueError, match="platform router or iox"):
         gui_onboard.resolve_platform({"device_id": "d", "model": "C8000V",
                                       "platform": "guestshell"})
 
@@ -884,9 +893,11 @@ def test_install_options_for_iox_only_models():
         assert gui_onboard.install_options_for(model, "") == ["iox"], model
 
 
-def test_install_options_for_c8k_router_only():
+def test_install_options_for_c8k_router_first_then_iox():
+    # Guest Shell through the VirtualPortGroup is the auto default; the IOx
+    # app attaches through the same VPG and is the explicit alternative.
     for model in ("C8000V", "C8200-1N-4T", "C8300-2N2S-6T", "C8500-12X"):
-        assert gui_onboard.install_options_for(model, "") == ["router"], model
+        assert gui_onboard.install_options_for(model, "") == ["router", "iox"], model
 
 
 def test_install_options_for_legacy_router_family_guestshell():
@@ -901,6 +912,23 @@ def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
     # recipe that IS IOS-XR, never one of the IOS-XE three.
     assert gui_onboard.install_options_for("8201", "xr") == ["xr-appmgr"]
     assert gui_onboard.install_options_for("", "xr") == ["xr-appmgr"]
+
+
+@pytest.mark.parametrize("model, expected", [
+    ("IE-3400-8T2S", "IE3x00"),
+    ("IE3300", "IE3x00"),
+    ("IR1101", "IR1x00"),
+    ("IR1800", "IR1x00"),
+    ("C9300-48UXM", "C9xxx"),
+    ("C8000V", "C8xxx"),
+    ("ISR4451", "ISR/ASR/CSR"),
+    ("ASR1001-X", "ISR/ASR/CSR"),
+    ("8201-SYS", "XR8000"),
+    ("N9K-C93180YC-EX", "unknown"),
+    ("", "unknown"),
+])
+def test_family_reuses_the_install_model_taxonomy(model, expected):
+    assert gui_onboard.family(model) == expected
 
 
 def test_install_options_for_xr_os_family_refuses_non_8000_models():
@@ -1073,24 +1101,21 @@ def _iox_preflight_ok(identity="FDO2547X9AB", model=None):
 
 
 def test_probe_resolves_iox_and_caches_model(tmp_path):
-    art_dir = tmp_path
-    (art_dir / "iris-arm64.tar").write_text("fake")
     fleet = _iox_fleet()  # no explicit platform/model -> falls to probe
-    creds = _iox_creds()
-    seen = {}
-
-    def fake_run(install_path, env, on_line):
-        seen["install_path"] = install_path
-        return 0
-
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, probe_fn=lambda dev, env: "IE-3400",
-        iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(art_dir))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        probe_fn=lambda dev, env: "IE-3400")
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["install_path"].endswith("device/iox/install.sh")
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "wrapper_path").endswith(
+        "iris-arm64.tar")
+    target = _request_value(request, "target")
+    assert target["model"] == "IE-3400"
+    assert "board_identity" not in target
     assert {"device_id": "d1", "model": "IE-3400"} in fleet.upserts
     # the job line reports the model the probe just found, not a placeholder
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
@@ -1261,24 +1286,18 @@ def test_default_probe_xe_device_records_xe(monkeypatch):
 
 
 def test_iox_env_has_ssh_creds(tmp_path):
-    art_dir = tmp_path
-    (art_dir / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    creds = _iox_creds()
-    seen = {}
-
-    def fake_run(install_path, env, on_line):
-        seen["env"] = env
-        return 0
-
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(art_dir))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(tmp_path, controller, raw_runs)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["env"]["DEVICE_SSH_PASS"] == "s3cret"
-    assert seen["env"]["DEVICE_SSH_USER"] == "admin"
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "credential_ref") == "lab"
+    target = _request_value(request, "target")
+    assert "DEVICE_SSH_PASS" not in target
+    assert "DEVICE_SSH_USER" not in target
+    assert "s3cret" not in repr(request)
 
 
 def test_guestshell_env_unchanged_no_ssh_keys(tmp_path):
@@ -1372,6 +1391,121 @@ def test_router_execution_preflight_runs_before_mint_and_refreshes_env(tmp_path)
     assert seen["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
 
 
+# --- fire-time instruction bootstrap custody (Task 18) ------------------
+
+def test_guestshell_materializes_private_envelope_after_mint_before_applying(
+        tmp_path):
+    events = []
+    observed = {}
+
+    def preflight(dev, env, resolved):
+        events.append("preflight")
+        return {"status": "passed", "device_identity": "FOC0000TEST"}
+
+    def mint(device_id):
+        events.append("mint")
+        return "TOK-" + device_id
+
+    def bootstrap(device_id):
+        events.append("materialize")
+        assert events[-2:] == ["mint", "materialize"]
+        return b"sealed-bootstrap-envelope"
+
+    def run(_path, env, _line):
+        events.append("run")
+        capability = env["IRIS_STAGING_CAPABILITY"]
+        assert re.fullmatch(r"[0-9a-f]{32}", capability)
+        path = (tmp_path / "staging" /
+                ("iris-instructions-d1-%s.envelope" % capability))
+        assert path.read_bytes() == b"sealed-bootstrap-envelope"
+        assert path.stat().st_mode & 0o777 == 0o600
+        observed["path"] = path
+        return 0
+
+    svc = _svc(
+        run, artifacts_dir=str(tmp_path), mint_fn=mint,
+        instruction_bootstrap_fn=bootstrap,
+        guestshell_preflight_fn=preflight)
+    svc._transition_or_note = lambda _jid, _rid, state: (
+        events.append(state) or True)
+
+    job = _wait(svc, svc.start("d1", record_id="record-1"))
+
+    assert job["state"] == "done", job["lines"]
+    assert events[:5] == [
+        "preflight", "mint", "materialize", "applying", "run"]
+    assert not observed["path"].exists()
+
+
+def test_bootstrap_failure_removes_planned_record_before_device_touch(tmp_path):
+    events = []
+    svc = _svc(
+        lambda *_args: events.append("run") or 0,
+        artifacts_dir=str(tmp_path),
+        mint_fn=lambda _device_id: events.append("mint") or "TOK",
+        instruction_bootstrap_fn=lambda _device_id: (_ for _ in ()).throw(
+            RuntimeError("private-ciphertext-must-not-escape")))
+    svc._transition_or_note = lambda _jid, _rid, state: (
+        events.append(state) or True)
+
+    job = _wait(svc, svc.start("d1", record_id="record-1"))
+
+    assert job["state"] == "error"
+    assert events == ["mint", "removed"]
+    assert not any("private-ciphertext" in line for line in job["lines"])
+    assert any("instruction bootstrap unavailable" in line
+               for line in job["lines"])
+
+
+def test_queued_onboard_materializes_only_when_its_worker_fires(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    materialized = []
+
+    def run(_path, env, _line):
+        if env["DEVICE_ID"] == "d1":
+            entered.set()
+            release.wait(5)
+        return 0
+
+    svc = _multi_svc(
+        2, run, max_concurrent=1, artifacts_dir=str(tmp_path),
+        instruction_bootstrap_fn=lambda device_id: (
+            materialized.append(device_id) or b"envelope"))
+    first = svc.start("d1")
+    assert entered.wait(5)
+    second = svc.start("d2")
+    assert svc.get_job(second)["state"] == "queued"
+    assert materialized == ["d1"]
+    release.set()
+    assert _wait(svc, first)["state"] == "done"
+    assert _wait(svc, second)["state"] == "done"
+    assert materialized == ["d1", "d2"]
+
+
+def test_xr_runner_gets_bounded_private_snapshot_and_service_cleans_it(
+        tmp_path):
+    observed = {}
+
+    def run(_path, env, _line):
+        snapshot = env["IRIS_INSTRUCTION_BOOTSTRAP_FILE"]
+        observed["path"] = snapshot
+        assert os.path.isfile(snapshot)
+        assert os.stat(snapshot).st_mode & 0o777 == 0o600
+        assert open(snapshot, "rb").read() == b"xr-envelope"
+        return 0
+
+    svc = _xr_svc(
+        run, artifacts_dir=str(tmp_path),
+        instruction_bootstrap_fn=lambda _device_id: b"xr-envelope")
+    job = _wait(svc, svc.start(
+        "d1", resolved={"platform": "xr-appmgr",
+                         "management_type": "xr-host"}))
+
+    assert job["state"] == "done", job["lines"]
+    assert not os.path.exists(observed["path"])
+
+
 def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
     fleet = _Fleet({"r1": {
         "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
@@ -1442,18 +1576,26 @@ def test_iox_onboard_persists_xr_family_on_refusal(tmp_path):
     # device through to the iox preflight itself -- an 8xxx-shaped model
     # would refuse earlier, inside _iox_arch_env, without ever reaching it.
     fleet = _iox_fleet(platform="iox", model="C9300")
-    creds = _iox_creds()
+    raw_runs = []
+    minted = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300",
+        "os_family": "xe", "platform": "iox",
+    })
 
     def iox_preflight(dev, env, resolved):
         dev["os_family"] = "xr"
         gui_onboard._refuse_xr(dev.get("device_id"))
 
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=lambda p, e, on: 0, iox_preflight_fn=iox_preflight,
-        artifacts_dir=str(tmp_path))
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        preflight_fn=iox_preflight,
+        mint_fn=lambda device_id: minted.append(device_id) or "TOK",
+        artifact_names=("iris-amd64.tar",))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
+    assert raw_runs == [] and minted == []
+    assert [call[0] for call in controller.callback_calls] == ["preflight"]
     assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
     assert {"device_id": "d1", "os_family": "xr"} in fleet.upserts
     assert fleet._d["d1"]["os_family"] == "xr"
@@ -1613,6 +1755,51 @@ def test_default_router_preflight_rejects_named_global_collisions(monkeypatch, c
         gui_onboard._default_router_preflight(
             {}, {"DEVICE_IP": "192.0.2.10"},
             _router_resolved("router-routed"), "/repo")
+
+
+def _iox_router_resolved():
+    resolved = _router_resolved("router-routed")
+    resolved["platform"] = "iox"
+    return resolved
+
+
+_IOX_ROUTER_OWN_VPG = ("interface VirtualPortGroup10\n"
+                       " description IRIS IOx VPG\n"
+                       " ip address 10.8.0.1 255.255.255.252\n!\n")
+
+
+def test_default_router_preflight_resumes_over_its_own_vpg_when_no_app_exists(monkeypatch):
+    """An IOx-on-router attempt that configured the group and then failed
+    before the app existed (a Catalyst 8000V refusing the app block on
+    2026-09-10) leaves the IRIS-marked group at exactly the planned address
+    and no app. The retry must not be refused as an operator collision."""
+    _router_preflight_stub(monkeypatch, running=_IOX_ROUTER_OWN_VPG,
+                           apps="No App found\n")
+    gui_onboard._default_router_preflight(
+        {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+
+
+def test_default_router_preflight_still_refuses_a_foreign_or_live_vpg(monkeypatch):
+    # No marker: an operator's group at our address.
+    _router_preflight_stub(monkeypatch, running=(
+        "interface VirtualPortGroup10\n ip address 10.8.0.1 255.255.255.252\n!\n"),
+        apps="No App found\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+    # Marker but a different address: not this plan's footprint.
+    _router_preflight_stub(monkeypatch, running=(
+        "interface VirtualPortGroup10\n description IRIS IOx VPG\n"
+        " ip address 10.9.0.1 255.255.255.252\n!\n"), apps="No App found\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+    # Our marker and address, but the app is RUNNING: a live deployment.
+    _router_preflight_stub(monkeypatch, running=_IOX_ROUTER_OWN_VPG,
+                           apps="App id   State\niris     RUNNING\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
 
 
 def test_default_router_preflight_allows_empty_guest_share(monkeypatch):
@@ -1887,25 +2074,24 @@ def test_apply_iox_preflight_rejects_identity_drift_while_queued():
 
 def test_iox_onboard_runs_preflight_and_exports_identity_and_model(tmp_path):
     """Console onboard of an IOx-platform device runs the preflight and
-    threads a non-empty EXPECTED_DEVICE_IDENTITY (and MODEL) into the
-    installer env -- the CRITICAL defect fix."""
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    events, seen = [], {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9",
+    binds the discovered device identity and model inside controller custody."""
+    events, raw_runs = [], []
+    controller = _FrozenIoxController(events=events)
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs,
         mint_fn=lambda d: events.append("mint") or "TOK",
-        run_fn=lambda p, e, on: (events.append("run"), seen.update(e), 0)[2],
-        iox_preflight_fn=lambda dev, env, resolved: (
+        preflight_fn=lambda dev, env, resolved: (
             events.append("preflight") or {
                 "status": "passed", "device_identity": "FDO2547X9AB",
-                "detected_model": "IE-3400"}),
-        artifacts_dir=str(tmp_path))
+                "detected_model": "IE-3400"}))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert events == ["preflight", "mint", "run"]
-    assert seen["EXPECTED_DEVICE_IDENTITY"] == "FDO2547X9AB"
-    assert seen["MODEL"] == "IE-3400"
+    assert events == ["controller:install", "preflight", "mint"]
+    assert raw_runs == []
+    bound = controller.preflight_results[0]
+    assert _request_value(bound, "device_identity") == "FDO2547X9AB"
+    assert _request_value(bound, "model") == "IE-3400"
+    assert "board_identity" not in bound
 
 
 def test_iox_preflight_parse_failure_fails_job_before_installer_runs(tmp_path):
@@ -1913,19 +2099,17 @@ def test_iox_preflight_parse_failure_fails_job_before_installer_runs(tmp_path):
     job (fail-closed) before the installer ever runs or the token is
     minted -- an empty EXPECTED_DEVICE_IDENTITY would make install.sh's
     identity guard a no-op."""
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    minted, ran = [], []
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9",
+    minted, raw_runs = [], []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs,
         mint_fn=lambda d: minted.append(d) or "TOK",
-        run_fn=lambda p, e, on: ran.append(1) or 0,
-        iox_preflight_fn=lambda dev, env, resolved: (_ for _ in ()).throw(
-            ValueError("could not determine the device's processor board ID")),
-        artifacts_dir=str(tmp_path))
+        preflight_fn=lambda dev, env, resolved: (_ for _ in ()).throw(
+            ValueError("could not determine the device's processor board ID")))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
-    assert minted == [] and ran == []
+    assert minted == [] and raw_runs == []
+    assert [call[0] for call in controller.callback_calls] == ["preflight"]
     assert any("preflight failed" in l for l in job["lines"])
 
 
@@ -1949,34 +2133,25 @@ def test_iox_missing_iris_tar_errors_before_run(tmp_path):
 
 
 def test_iox_present_iris_tar_proceeds(tmp_path):
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    creds = _iox_creds()
-    seen = {}
-
-    def fake_run(install_path, env, on_line):
-        seen["install_path"] = install_path
-        return 0
-
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(tmp_path, controller, raw_runs)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["install_path"].endswith("device/iox/install.sh")
+    assert raw_runs == []
+    assert _request_value(
+        controller.requests[0], "wrapper_path") == str(
+            tmp_path / "iris-arm64.tar")
 
 
 def test_job_lines_note_platform_and_recipe(tmp_path):
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    creds = _iox_creds()
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=lambda p, e, on: 0, iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(tmp_path, controller, raw_runs)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
+    assert raw_runs == []
+    assert _request_value(controller.requests[0], "action") == "install"
     assert any("platform: iox" in l and "device/iox/install.sh" in l
                for l in job["lines"])
 
@@ -2293,19 +2468,22 @@ def test_onboard_jobs_carry_action_and_default_onboard():
     assert j["action"] == "onboard"
 
 
-def test_undeploy_iox_runs_the_iox_uninstall_script():
-    """Fleet-wide undeploy: an IOx device runs device/iox/uninstall.sh (NOT the
-    Guest Shell teardown, and no longer refused). No token is minted."""
-    seen = {}
+def test_undeploy_iox_runs_the_iox_uninstall_script(tmp_path):
+    """IOx undeploy selects its recipe and enters controller custody."""
+    raw_runs = []
     minted = []
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9",
-        mint_fn=lambda d: minted.append(d) or "TOK",
-        run_fn=lambda p, e, on: seen.update(install_path=p, env=e) or 0)
-    job = _wait(svc, svc.start("d1", action="undeploy"))
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs,
+        mint_fn=lambda d: minted.append(d) or "TOK")
+    job = _wait(svc, svc.start(
+        "d1", action="undeploy", teardown_mode="force_agent_only"))
     assert job["state"] == "done"
-    assert seen["install_path"].endswith("device/iox/uninstall.sh")
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "uninstall"
+    assert _request_value(request, "teardown_mode") == "force_agent_only"
+    assert not _request_has(request, "wrapper_path")
     assert minted == []                       # undeploy never mints
     assert any("device/iox/uninstall.sh" in l for l in job["lines"])
 
@@ -2489,44 +2667,53 @@ def _run_capture(seen):
 
 
 def test_c9k_iox_gets_amd64_env(tmp_path):
-    (tmp_path / "iris-amd64.tar").write_text("fake")
     fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300-48UXM",
+        "os_family": "xe", "platform": "iox",
+    })
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        artifact_names=("iris-amd64.tar",))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    env = seen["env"]
-    assert env["PKG"] == "iris-amd64.tar"
-    assert env["APP_INTF"] == "AppGigabitEthernet1/0/1"
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "wrapper_path").endswith(
+        "iris-amd64.tar")
+    target = _request_value(request, "target")
+    assert target["pkg"] == "iris-amd64.tar"
+    assert target["app_intf"] == "AppGigabitEthernet1/0/1"
     # Route B: the C9k SSD share is bind-mounted into the app, the scratch
     # lands there at disk speed, and placement targets bootflash like the
     # Guest Shell path — no scp, no CoPP-limited punt traffic.
-    assert env["TARGET_FS"] == "flash:"
-    assert env["SHARE_HOST_PATH"] == "/vol/usb1/iox_host_data_share"
-    assert env["SHARE_IOS_PATH"] == "usbflash1:iox_host_data_share"
+    assert target["target_fs"] == "flash:"
+    assert target["share_host_path"] == "/vol/usb1/iox_host_data_share"
+    assert target["share_ios_path"] == "usbflash1:iox_host_data_share"
+    assert "board_identity" not in target
 
 
 def test_ie3k_iox_keeps_arm_defaults(tmp_path):
-    (tmp_path / "iris-arm64.tar").write_text("fake")
     fleet = _iox_fleet(model="IE-3400")   # model regex -> iox, arm
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    env = seen["env"]
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "wrapper_path").endswith(
+        "iris-arm64.tar")
+    target = _request_value(request, "target")
     # arm case leaves these unset so install.sh's own defaults apply
-    assert "PKG" not in env
-    assert "APP_INTF" not in env
-    assert "TARGET_FS" not in env
+    assert "pkg" not in target
+    assert "app_intf" not in target
+    assert "target_fs" not in target
     # the SSD share mount is a C9k mechanism; IE-3x00 keeps the scp path
-    assert "SHARE_HOST_PATH" not in env
-    assert "SHARE_IOS_PATH" not in env
+    assert "share_host_path" not in target
+    assert "share_ios_path" not in target
 
 
 def test_c9k_guestshell_override_runs_guestshell(tmp_path):
@@ -2542,29 +2729,25 @@ def test_c9k_guestshell_override_runs_guestshell(tmp_path):
     assert "PKG" not in seen["env"] and "DEVICE_SSH_PASS" not in seen["env"]
 
 
-def test_c9k_stacked_member_app_intf_override_wins(tmp_path):
-    (tmp_path / "iris-amd64.tar").write_text("fake")
+def test_c9k_stacked_member_app_intf_override_wins(tmp_path, monkeypatch):
     fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300-48UXM",
+        "os_family": "xe", "platform": "iox",
+    })
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        artifact_names=("iris-amd64.tar",))
     # simulate an operator/env override for a stacked member 2/0/1
-    import os as _os
-    old = _os.environ.get("APP_INTF")
-    _os.environ["APP_INTF"] = "AppGigabitEthernet2/0/1"
-    try:
-        job = _wait(svc, svc.start("d1"))
-    finally:
-        if old is None:
-            _os.environ.pop("APP_INTF", None)
-        else:
-            _os.environ["APP_INTF"] = old
+    monkeypatch.setenv("APP_INTF", "AppGigabitEthernet2/0/1")
+    job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
+    assert raw_runs == []
+    target = _request_value(controller.requests[0], "target")
     # setdefault must not clobber the explicit override
-    assert seen["env"]["APP_INTF"] == "AppGigabitEthernet2/0/1"
-    assert seen["env"]["PKG"] == "iris-amd64.tar"
+    assert target["app_intf"] == "AppGigabitEthernet2/0/1"
+    assert target["pkg"] == "iris-amd64.tar"
 
 
 def test_iox_unclassifiable_model_raises_guard(tmp_path):
@@ -2587,15 +2770,23 @@ def test_iox_unclassifiable_model_raises_guard(tmp_path):
 
 def test_undeploy_c9k_uses_resolved_amd64_pkg(tmp_path):
     fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
-    job = _wait(svc, svc.start("d1", action="undeploy"))
+    raw_runs = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300-48UXM",
+        "os_family": "xe", "platform": "iox",
+    })
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        artifact_names=("iris-amd64.tar",))
+    job = _wait(svc, svc.start(
+        "d1", action="undeploy", teardown_mode="force_agent_only"))
     assert job["state"] == "done"
+    assert raw_runs == []
     # undeploy never checks the artifacts guard, but _resolve populates PKG so
     # uninstall.sh deletes flash:iris-amd64.tar
-    assert seen["env"]["PKG"] == "iris-amd64.tar"
+    request = controller.requests[0]
+    assert not _request_has(request, "wrapper_path")
+    assert _request_value(request, "target")["pkg"] == "iris-amd64.tar"
 
 
 def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
@@ -3581,3 +3772,1241 @@ def test_build_env_record_svi_igp_overrides_the_inherited_env_default(monkeypatc
         "platform": "guestshell", "management_type": "routed",
         "device_ip": "10.0.0.1", "svi_igp": "none"})
     assert env["SVI_IGP"] == "none"
+
+
+# ---- IOx controller custody -------------------------------------------------
+
+def _request_value(request, key):
+    if isinstance(request, dict):
+        return request.get(key)
+    return getattr(request, key)
+
+
+def _request_has(request, key):
+    if isinstance(request, dict):
+        return key in request
+    return hasattr(request, key)
+
+
+def _cancel_value(cancel):
+    return cancel() if callable(cancel) else cancel.is_set()
+
+
+class _FrozenIoxController:
+    """Small behavioral fake for the frozen controller/service boundary."""
+
+    def __init__(self, events=None, result=None, entered=None, release=None,
+                 identity=None):
+        self.events = events if events is not None else []
+        self.result = result if result is not None else {}
+        self.requests = []
+        self.callback_calls = []
+        self.preflight_results = []
+        self.prepare_results = []
+        self.entered = entered
+        self.release = release
+        self.identity = identity or {
+            "board_identity": "FDO2547X9AB",
+            "model": "IE-3400", "os_family": "xe", "platform": "iox",
+        }
+
+    def _run(self, operation, request, prepare, preflight, on_output, cancel):
+        self.events.append("controller:" + operation)
+        self.requests.append(request)
+        job_id = _request_value(request, "job_id")
+        assert isinstance(job_id, str) and re.fullmatch(
+            r"[0-9a-f]{16}", job_id)
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            assert self.release.wait(5.0)
+        assert not _cancel_value(cancel)
+        identity = dict(self.identity)
+        self.callback_calls.append(("preflight", request, identity))
+        self.preflight_results.append(preflight(request, identity))
+        self.callback_calls.append(("prepare", request, identity))
+        record_id = prepare(request, identity)
+        self.prepare_results.append(record_id)
+        on_output("stdout", b"controller-owned IOx output\n")
+        result = {
+            "result_code": 0,
+            "returncode": 0,
+            "recovery_code": None,
+            "record_id": record_id,
+            "iox_verification": None,
+            "iox_session": None,
+        }
+        result.update(
+            self.result(request) if callable(self.result) else self.result)
+        return result
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "install", request, prepare, preflight, on_output, cancel)
+
+    def run_uninstall(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "uninstall", request, prepare, preflight, on_output, cancel)
+
+
+class _CancellingIoxController(_FrozenIoxController):
+    def __init__(self):
+        _FrozenIoxController.__init__(self)
+        self.entered = threading.Event()
+        self.stop = threading.Event()
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        self.requests.append(request)
+        self.entered.set()
+        deadline = time.time() + 5.0
+        while (not _cancel_value(cancel) and not self.stop.is_set()
+               and time.time() < deadline):
+            time.sleep(0.005)
+        assert _cancel_value(cancel), "abort did not reach controller"
+        job_id = _request_value(request, "job_id")
+        assert isinstance(job_id, str) and re.fullmatch(
+            r"[0-9a-f]{16}", job_id)
+        return {
+            "result_code": 130, "returncode": None, "recovery_code": 0,
+            "record_id": None, "iox_verification": None,
+            "iox_session": {
+                "attempt_id": "b" * 32, "job_id": job_id,
+                "device_id": "d1", "board_identity": "FDO2547X9AB",
+                "operation": "install", "teardown_mode": "none",
+                "record_id": None, "state": "reaped",
+                "mutation_blocked": False,
+            },
+        }
+
+
+def _iox_controller_service(tmp_path, controller, raw_runs=None,
+                            preflight_fn=None, mint_fn=None, fleet=None,
+                            probe_fn=None, artifact_names=None, creds=None):
+    artifact_names = artifact_names or ("iris-arm64.tar",)
+    for name in artifact_names:
+        (tmp_path / name).write_bytes(b"frozen-wrapper")
+    raw_runs = raw_runs if raw_runs is not None else []
+
+    def legacy_runner(*args, **kwargs):
+        raw_runs.append((args, kwargs))
+        raise AssertionError("real IOx work escaped controller custody")
+
+    return gui_onboard.OnboardService(
+        fleet or _iox_fleet(platform="iox", model="IE-3400"),
+        creds or _iox_creds(),
+        host_ip="10.9.9.9",
+        mint_fn=mint_fn or (lambda device_id: "TOK-" + device_id),
+        run_fn=legacy_runner,
+        probe_fn=probe_fn,
+        iox_preflight_fn=preflight_fn or _iox_preflight_ok(),
+        artifacts_dir=str(tmp_path), iox_controller=controller)
+
+
+def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
+    """Freeze the whole Console -> controller -> private recipe handoff."""
+    import test_iox_verification as iox_spec
+
+    board_identity = iox_spec._BOARD
+    model = "IE-3400-8T2S"
+    wrapper_source = iox_spec._write_wrapper(
+        tmp_path, markers=("package.sign", "package.cert"))
+    wrapper_path = tmp_path / "iris-arm64.tar"
+    with open(wrapper_source, "rb") as source:
+        wrapper_path.write_bytes(source.read())
+
+    recipe_event = tmp_path / "recipe-events"
+    recipe = iox_spec._write_recipe_peer(
+        tmp_path, operations=iox_spec._install_operations(),
+        event_path=str(recipe_event))
+    state_dir = tmp_path / "state"
+    store = deployment_records.DeploymentRecordStore(str(state_dir))
+    transport = iox_spec._TransportFactory(board=board_identity)
+    credentials = {
+        "device_user": "admin",
+        "device_pass": "console-device-pass-SECRET",
+        "enable_secret": "console-enable-SECRET",
+    }
+    enrollment_token = "console-catalog-token-SECRET"
+    controller = iox_spec._controller(
+        tmp_path, store, transport,
+        credential_resolver=lambda reference: (
+            credentials if reference == "lab" else None),
+        enrollment_token_minter=lambda device_id: enrollment_token,
+        recipe_argv_by_action={"install": ["/bin/bash", recipe]})
+    assert isinstance(controller, iox_spec._module().IoxController)
+    legacy_calls = []
+
+    def legacy_runner(*args, **kwargs):
+        legacy_calls.append((args, kwargs))
+        raise AssertionError("IOx job bypassed controller custody")
+
+    service = gui_onboard.OnboardService(
+        _iox_fleet(platform="iox", model=model), _iox_creds(),
+        host_ip="10.9.9.9", mint_fn=lambda device_id: enrollment_token,
+        run_fn=legacy_runner,
+        iox_preflight_fn=_iox_preflight_ok(
+            identity=board_identity, model=model),
+        artifacts_dir=str(tmp_path), record_store=store,
+        iox_controller=controller)
+
+    def prepare_record():
+        record = store.create({
+            "record_id": "record-1", "controller_id": "controller-1",
+            "device_id": "d1", "inventory_revision": 1,
+            "plan_hash": "a" * 64,
+            "resolved": {
+                "platform": "iox", "model": model, "os_family": "xe",
+                "device_ip": "10.0.0.1", "management_type": "routed",
+                "device_identity": board_identity, "vlan": "666",
+                "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                "guest_ip": "10.0.0.3",
+                "resources": [
+                    {"kind": "iox-app", "ownership": "iris-created"}],
+            },
+            "preflight": {
+                "status": "passed", "device_identity": board_identity,
+                "detected_model": model,
+            },
+            "resources": [
+                {"kind": "iox-app", "ownership": "iris-created"}],
+        })
+        return record["record_id"]
+
+    try:
+        job_id = service.start("d1", prepare=prepare_record)
+        job = _wait(service, job_id)
+    finally:
+        controller.close()
+
+    assert re.fullmatch(r"[0-9a-f]{16}", job_id)
+    assert legacy_calls == []
+    assert job["state"] == "done"
+    assert job["result_code"] == 0
+    assert job["returncode"] == 0
+    assert job["recovery_code"] is None
+    assert job["record_id"] == "record-1"
+    assert recipe_event.read_bytes() == b"finish_ack\n"
+    # The job log is step-level: the controller's line per recipe operation,
+    # in order, and none for the closing protocol handshake.
+    step_lines = [line for line in job["lines"] if line.startswith("  ")]
+    assert step_lines[0].startswith("  fetch_wrapper ok (")
+    assert step_lines[-1].startswith("  save ok (")
+    assert [line.split()[0] for line in step_lines] == [
+        arguments.get("name") if operation == "command" else operation
+        for operation, arguments in iox_spec._install_operations()
+        if operation != "finish"]
+    assert not any(line.startswith("  finish") for line in job["lines"])
+
+    # Reload through a separate store instance: this must be the durable
+    # deployment record and terminal authority journal, not test-fake state.
+    persisted_store = deployment_records.DeploymentRecordStore(str(state_dir))
+    persisted_record = persisted_store.get("record-1", strict=True)
+    assert persisted_record["state"] == "active"
+    journal = persisted_record["iox_verification"]
+    assert journal["record_id"] == job["record_id"]
+    assert journal["controller_id"] == iox_spec._CONTROLLER_ID
+    assert journal["board_identity"] == board_identity
+    assert journal["phase"] == "unchanged"
+    assert journal["unresolved"] is False
+    assert set(job["iox_verification"]) == {
+        "schema_version", "record_id", "transaction_id", "revision",
+        "board_identity", "prior_state", "current_state", "phase",
+        "unresolved", "created_at", "updated_at", "observed_at",
+        "terminal_at", "error_category"}
+    assert job["iox_verification"]["record_id"] == journal["record_id"]
+    assert job["iox_verification"]["transaction_id"] == journal[
+        "transaction_id"]
+    assert job["iox_verification"]["phase"] == journal["phase"]
+    assert job["iox_session"]["job_id"] == job_id
+
+    persisted_files = []
+    for root, _directories, filenames in os.walk(str(tmp_path)):
+        for filename in filenames:
+            path = os.path.join(root, filename)
+            with open(path, "rb") as stream:
+                persisted_files.append(stream.read())
+    assert any(job_id.encode("ascii") in body for body in persisted_files), (
+        "controller custody never durably associated the Console job ID")
+    published = repr(job).encode("utf-8")
+    for secret in (credentials["device_pass"], credentials["enable_secret"],
+                   enrollment_token):
+        needle = secret.encode("utf-8")
+        assert needle not in published
+        assert all(needle not in body for body in persisted_files)
+
+
+def test_real_iox_teardown_accepts_restored_predecessor_transition(tmp_path):
+    """A restored scheduled predecessor remains usable for real teardown."""
+    import test_deployment_records as records_spec
+    import test_iox_verification as iox_spec
+
+    board_identity = records_spec._IOX_BOARD
+    model = "IE-3400-8T2S"
+    state_dir = tmp_path / "state"
+    store = deployment_records.DeploymentRecordStore(str(state_dir))
+    recipe_event = tmp_path / "teardown-recipe-events"
+    recipe = iox_spec._write_recipe_peer(
+        tmp_path, event_path=str(recipe_event))
+    transport = iox_spec._TransportFactory(board=board_identity)
+    controller = iox_spec._controller(
+        tmp_path, store, transport,
+        credential_resolver=lambda reference: (
+            {"device_user": "admin", "device_pass": "device-pass",
+             "enable_secret": "enable-pass"}
+            if reference == "lab" else None),
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    provenance = records_spec._provenance(device_id="d1")
+    resolved = {
+        "platform": "iox", "model": model, "os_family": "xe",
+        "device_ip": "10.0.0.1", "management_type": "routed",
+        "device_identity": board_identity,
+    }
+    resources = [{"kind": "iox-app", "ownership": "iris-created"}]
+    store.create(records_spec._record(
+        record_id="old", device_id="d1",
+        controller_id=records_spec._IOX_CONTROLLER,
+        schedule_provenance=provenance, resolved=resolved,
+        resources=resources))
+    transcript_ref, observation = records_spec._iox_transcript(
+        state_dir, state="disabled", board_identity=board_identity)
+    journal = store.iox_begin(
+        "old", records_spec._IOX_CONTROLLER, board_identity,
+        records_spec._iox_wrapper(), observation, transcript_ref)
+    store.recover_interrupted()
+    terminal_journal = store.iox_event(
+        "old", journal["transaction_id"], journal["revision"],
+        journal["phase"], "unchanged", {
+            "reason": "initially_disabled", "observation": None,
+            "transcript_refs": []})
+    admitted = store.admit_scheduled(
+        records_spec._record(
+            record_id="new", device_id="d1",
+            controller_id=records_spec._IOX_CONTROLLER,
+            resolved=resolved, resources=resources),
+        provenance=provenance, attempt=1,
+        authorize=lambda *_args: None, resume_record_id="old")
+    assert store.get("old", strict=True)["state"] == "abandoned"
+    store.retire_planned(admitted["record"]["record_id"])
+    restored = store.get("old", strict=True)
+    assert restored["state"] == "unknown"
+    assert restored["iox_verification"] == terminal_journal
+
+    service = gui_onboard.OnboardService(
+        _iox_fleet(platform="iox", model=model), _iox_creds(),
+        host_ip="10.9.9.9", mint_fn=lambda device_id: "unused",
+        run_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("IOx job bypassed controller custody")),
+        iox_preflight_fn=_iox_preflight_ok(
+            identity=board_identity, model=model),
+        artifacts_dir=str(tmp_path), record_store=store,
+        iox_controller=controller)
+
+    try:
+        job = _wait(service, service.start(
+            "d1", action="undeploy", record_id="old",
+            prepare=lambda: "old", teardown_mode="recorded"))
+    finally:
+        controller.close()
+
+    assert job["state"] == "done", job["lines"]
+    assert job["result_code"] == 0
+    assert job["record_id"] == "old"
+    assert recipe_event.read_bytes() == b"finish_ack\n"
+    assert any(line.startswith("  app_stop ok (") for line in job["lines"])
+    assert not any(line.startswith("  finish") for line in job["lines"])
+    removed = store.get("old", strict=True)
+    assert removed["state"] == "removed"
+    assert removed["iox_verification"] == terminal_journal
+
+
+def test_real_iox_install_routes_only_through_the_controller(tmp_path):
+    raw_runs = []
+    controller = _FrozenIoxController()
+    service = _iox_controller_service(tmp_path, controller, raw_runs)
+
+    job_id = service.start("d1")
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    assert raw_runs == []
+    assert len(controller.requests) == 1
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "install"
+    assert _request_value(request, "device_id") == "d1"
+    assert _request_value(request, "job_id") == job_id
+    assert _request_value(request, "credential_ref") == "lab"
+    assert _request_value(request, "teardown_mode") == "none"
+    assert _request_value(request, "record_id") is None
+    assert _request_has(request, "wrapper_path")
+    assert _request_value(request, "wrapper_path").endswith("iris-arm64.tar")
+    target = _request_value(request, "target")
+    assert {key: target[key] for key in ("host", "port", "platform")} == {
+        "host": "10.0.0.1", "port": 22, "platform": "iox"}
+    assert "controller-owned IOx output" in job["lines"]
+
+
+def test_iox_runtime_credentials_are_resolved_only_inside_controller(
+        tmp_path, monkeypatch):
+    class ControllerOwnedCredentials:
+        def get_secrets(self, _profile_id):
+            raise AssertionError(
+                "OnboardService resolved an IOx runtime credential")
+
+    for name in ("DEVICE_USER", "DEVICE_PASS", "DEVICE_ENABLE",
+                 "DEVICE_SSH_USER", "DEVICE_SSH_PASS"):
+        monkeypatch.setenv(name, "inherited-secret")
+    observed_env = {}
+
+    def preflight(_dev, env, _resolved):
+        observed_env.update(env)
+        return {"status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}
+
+    controller = _FrozenIoxController()
+    service = _iox_controller_service(
+        tmp_path, controller, creds=ControllerOwnedCredentials(),
+        preflight_fn=preflight)
+
+    job = _wait(service, service.start("d1"))
+
+    assert job["state"] == "done", job["lines"]
+    assert len(controller.requests) == 1
+    assert _request_value(controller.requests[0], "credential_ref") == "lab"
+    for name in ("DEVICE_USER", "DEVICE_PASS", "DEVICE_ENABLE",
+                 "DEVICE_SSH_USER", "DEVICE_SSH_PASS"):
+        assert name not in observed_env
+
+
+def test_iox_request_target_preserves_device_feature_intent():
+    target = gui_onboard.OnboardService._iox_request_target(
+        {
+            "platform": "iox", "model": "IE-3400", "os_family": "xe",
+            "management_type": "routed", "device_ip": "10.0.0.1",
+        },
+        {
+            "DEVICE_IP": "10.0.0.1", "IRIS_TELEMETRY": "off",
+            "IRIS_TELEMETRY_STREAM": "on", "IRIS_LOG": "on",
+        },
+        None)
+
+    assert target["telemetry"] == "off"
+    assert target["telemetry_stream"] == "on"
+    assert target["log"] == "on"
+
+
+def test_shutdown_cancels_queued_jobs_and_waits_for_running_job():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def run(_path, _env, _on_line):
+        entered.set()
+        assert release.wait(3.0)
+        return 0
+
+    service = _svc(run, max_concurrent=1)
+    service.fleet._d["d2"] = dict(
+        service.fleet._d["d1"], device_id="d2", device_ip="10.0.0.9")
+    running = service.start("d1")
+    assert entered.wait(2.0)
+    queued = service.start("d2")
+
+    stopped = threading.Event()
+    shutdown = threading.Thread(
+        target=lambda: (service.shutdown(), stopped.set()))
+    shutdown.start()
+    try:
+        deadline = time.time() + 2.0
+        while (service.get_job(queued)["state"] != "cancelled" and
+               time.time() < deadline):
+            time.sleep(0.01)
+        assert service.get_job(queued)["state"] == "cancelled"
+        assert not stopped.is_set()
+        with pytest.raises(ValueError, match="shutting down"):
+            service.start("d2")
+    finally:
+        release.set()
+        shutdown.join(3.0)
+
+    assert stopped.is_set()
+    assert service.get_job(running)["state"] == "done"
+    assert service._workers == []
+
+
+def test_iox_prepare_is_deferred_inside_controller(tmp_path):
+    events = []
+    entered = threading.Event()
+    release = threading.Event()
+    controller = _FrozenIoxController(
+        events=events, entered=entered, release=release)
+
+    def preflight(*_args, **_kwargs):
+        events.append("preflight")
+        return {"status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}
+
+    service = _iox_controller_service(
+        tmp_path, controller, preflight_fn=preflight,
+        mint_fn=lambda device_id: events.append("mint") or "TOK-" + device_id)
+
+    def prepare():
+        events.append("prepare")
+        return "record-after-recovery"
+
+    job_id = service.start("d1", prepare=prepare)
+    assert entered.wait(2.0)
+    try:
+        running = service.get_job(job_id)
+        assert running["state"] == "running"
+        assert running["result_code"] is None
+        assert running["returncode"] is None
+        assert running["recovery_code"] is None
+        assert running["iox_verification"] is None
+        assert running["iox_session"] is None
+        assert _request_value(controller.requests[0], "job_id") == job_id
+        # Queue admission must not create a record. The controller invokes
+        # preparation only after entering its board/recovery gate.
+        assert "prepare" not in events
+        assert "mint" not in events
+    finally:
+        release.set()
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    assert events == ["controller:install", "preflight", "prepare", "mint"]
+    assert job["record_id"] == "record-after-recovery"
+
+
+def test_iox_preapply_failure_restores_recovered_predecessor_authority(
+        tmp_path):
+    import test_deployment_records as records_spec
+
+    ref, observation = records_spec._iox_transcript(
+        tmp_path, state="disabled")
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    provenance = records_spec._provenance(device_id="d1")
+    store.create(records_spec._record(
+        record_id="old", device_id="d1",
+        controller_id=records_spec._IOX_CONTROLLER,
+        schedule_provenance=provenance,
+        resolved={"platform": "iox", "device_identity":
+                  records_spec._IOX_BOARD}))
+    journal = store.iox_begin(
+        "old", records_spec._IOX_CONTROLLER, records_spec._IOX_BOARD,
+        records_spec._iox_wrapper(), observation, ref)
+    store.recover_interrupted()
+    store.iox_event(
+        "old", journal["transaction_id"], journal["revision"],
+        journal["phase"], "unchanged", {
+            "reason": "initially_disabled", "observation": None,
+            "transcript_refs": []})
+    successor = {}
+
+    def prepare():
+        admitted = store.admit_scheduled(
+            records_spec._record(
+                record_id="new", device_id="d1",
+                controller_id=records_spec._IOX_CONTROLLER,
+                resolved={"platform": "iox", "device_identity":
+                          records_spec._IOX_BOARD}),
+            provenance=provenance, attempt=1,
+            authorize=lambda *_args: None, resume_record_id="old")
+        successor.update(admitted["record"])
+        return admitted["record"]["record_id"]
+
+    controller = _FrozenIoxController()
+    service = _iox_controller_service(tmp_path, controller)
+    service.record_store = store
+    try:
+        job = _wait(service, service.start(
+            "d1", prepare=prepare,
+            pre_apply=lambda _evidence: (_ for _ in ()).throw(
+                ValueError("bind failed"))))
+        assert job["state"] == "error"
+        assert store.get(successor["record_id"])["state"] == "removed"
+        assert store.get("old")["state"] == "unknown"
+        assert store.recoverable_for_device("d1")["record_id"] == "old"
+    finally:
+        service.shutdown()
+
+
+def test_same_action_iox_submission_deduplicates_while_controller_is_running(
+        tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    controller = _FrozenIoxController(entered=entered, release=release)
+    service = _iox_controller_service(tmp_path, controller)
+    prepares = []
+
+    def prepare():
+        prepares.append("record-1")
+        return "record-1"
+
+    first = service.start("d1", prepare=prepare)
+    assert entered.wait(2.0)
+    second_result = []
+    second_done = threading.Event()
+
+    def submit_again():
+        try:
+            second_result.append(("ok", service.start("d1", prepare=prepare)))
+        except Exception as exc:
+            second_result.append(("error", exc))
+        finally:
+            second_done.set()
+
+    submitter = threading.Thread(target=submit_again)
+    submitter.daemon = True
+    submitter.start()
+    try:
+        assert second_done.wait(1.0), (
+            "same-action dedupe blocked behind controller execution")
+        assert second_result == [("ok", first)]
+        assert len(controller.requests) == 1
+        assert _request_value(controller.requests[0], "job_id") == first
+        assert prepares == []
+    finally:
+        release.set()
+        submitter.join(2.0)
+    assert not submitter.is_alive()
+
+    job = _wait(service, first)
+    assert job["state"] == "done"
+    assert prepares == ["record-1"]
+
+
+def test_running_iox_abort_reaches_controller_and_preserves_normalized_result(
+        tmp_path):
+    controller = _CancellingIoxController()
+    raw_runs = []
+    service = _iox_controller_service(tmp_path, controller, raw_runs)
+
+    job_id = service.start("d1")
+    assert controller.entered.wait(2.0)
+    abort_result = []
+    abort_thread = threading.Thread(
+        target=lambda: abort_result.append(service.abort(job_id)))
+    abort_thread.daemon = True
+    abort_thread.start()
+    try:
+        abort_thread.join(2.0)
+        assert not abort_thread.is_alive(), (
+            "abort blocked behind controller work")
+        assert abort_result == [True]
+    finally:
+        controller.stop.set()
+        abort_thread.join(2.0)
+    job = _wait(service, job_id)
+
+    assert job["state"] == "cancelled"
+    assert job["result_code"] == 130
+    assert job["returncode"] is None
+    assert job["recovery_code"] == 0
+    assert set(job["iox_session"]) == {
+        "attempt_id", "job_id", "device_id", "board_identity", "operation",
+        "teardown_mode", "record_id", "state", "mutation_blocked"}
+    assert job["iox_session"]["state"] == "reaped"
+    assert job["iox_session"]["mutation_blocked"] is False
+    assert job["iox_session"]["job_id"] == job_id
+    assert raw_runs == []
+
+
+def test_iox_terminal_controller_evidence_is_published_without_inference(tmp_path):
+    verification = {
+        "schema_version": 1, "record_id": "record-1",
+        "transaction_id": "1" * 32, "revision": 7,
+        "board_identity": "FDO2547X9AB", "prior_state": "enabled",
+        "current_state": "disabled", "phase": "restore_intent",
+        "unresolved": True, "created_at": 10, "updated_at": 20,
+        "observed_at": 19, "terminal_at": None,
+        "error_category": "journal_durability",
+    }
+    evidence = {}
+
+    def controller_result(request):
+        session = {
+            "attempt_id": "a" * 32,
+            "job_id": _request_value(request, "job_id"),
+            "device_id": "d1", "board_identity": "FDO2547X9AB",
+            "operation": "install", "teardown_mode": "none",
+            "record_id": "record-1", "state": "reaped",
+            "mutation_blocked": False,
+        }
+        evidence["session"] = session
+        return {
+            "result_code": 4, "returncode": -15, "recovery_code": 5,
+            "record_id": "record-1", "iox_verification": verification,
+            "iox_session": session,
+        }
+
+    controller = _FrozenIoxController(result=controller_result)
+    service = _iox_controller_service(tmp_path, controller)
+
+    job_id = service.start("d1", prepare=lambda: "record-1")
+    job = _wait(service, job_id)
+
+    assert job["state"] == "error"
+    assert job["result_code"] == 4
+    assert job["returncode"] == -15
+    assert job["recovery_code"] == 5
+    assert job["record_id"] == "record-1"
+    assert job["iox_verification"] == verification
+    assert job["iox_session"] == evidence["session"]
+    assert job["iox_session"]["job_id"] == job_id
+
+
+def test_recorded_iox_uninstall_keeps_the_preselected_record_target(tmp_path):
+    controller = _FrozenIoxController()
+    minted = []
+    service = _iox_controller_service(
+        tmp_path, controller,
+        mint_fn=lambda device_id: minted.append(device_id) or "TOK")
+    service.fleet.upsert({"device_id": "d1", "device_ip": "203.0.113.99"})
+    recorded = {
+        "platform": "iox", "model": "IE-3400", "os_family": "xe",
+        "device_ip": "10.0.0.1", "management_type": "routed",
+        "device_identity": "FDO2547X9AB", "vlan": "666",
+        "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+        "guest_ip": "10.0.0.3",
+        "resources": [{"kind": "iox-app", "ownership": "iris-created"}],
+    }
+
+    job_id = service.start(
+        "d1", action="undeploy", resolved=recorded,
+        record_id="record-1", teardown_mode="recorded",
+        prepare=lambda: "record-1")
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "uninstall"
+    assert _request_value(request, "device_id") == "d1"
+    assert _request_value(request, "job_id") == job_id
+    assert _request_value(request, "credential_ref") == "lab"
+    assert _request_value(request, "teardown_mode") == "recorded"
+    assert _request_value(request, "record_id") == "record-1"
+    assert not _request_has(request, "wrapper_path")
+    target = _request_value(request, "target")
+    assert {key: target[key] for key in ("host", "port", "platform")} == {
+        "host": "10.0.0.1", "port": 22, "platform": "iox"}
+    assert target["device_identity"] == "FDO2547X9AB"
+    assert target["resources"] == recorded["resources"]
+    assert minted == []
+
+
+def test_forced_iox_uninstall_uses_explicit_controller_mode_without_a_record(
+        tmp_path):
+    controller = _FrozenIoxController()
+    minted = []
+    service = _iox_controller_service(
+        tmp_path, controller,
+        mint_fn=lambda device_id: minted.append(device_id) or "TOK")
+
+    job_id = service.start(
+        "d1", action="undeploy", resolved={
+            "platform": "iox", "model": "IE-3400", "os_family": "xe",
+            "device_ip": "10.0.0.1", "management_type": "routed",
+        }, record_id=None, teardown_mode="force_agent_only",
+        prepare=lambda: None)
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "uninstall"
+    assert _request_value(request, "device_id") == "d1"
+    assert _request_value(request, "job_id") == job_id
+    assert _request_value(request, "credential_ref") == "lab"
+    assert _request_value(request, "teardown_mode") == "force_agent_only"
+    assert _request_value(request, "record_id") is None
+    assert not _request_has(request, "wrapper_path")
+    target = _request_value(request, "target")
+    assert {key: target[key] for key in ("host", "port", "platform")} == {
+        "host": "10.0.0.1", "port": 22, "platform": "iox"}
+    assert minted == []
+
+
+# Scheduled work shares device exclusion with manual work but only half the pool.
+def _schedule_context(did, occurrence="occurrence-1"):
+    return {"schema_version": 1, "schedule_id": "schedule-1", "schedule_rev": 3,
+            "occurrence_id": occurrence, "device_id": did}
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 25])
+def test_scheduled_pool_reserves_manual_workers(limit):
+    release = threading.Event()
+    started = []
+    lock = threading.Lock()
+
+    def run(_path, env, _output):
+        with lock:
+            started.append(env["DEVICE_ID"])
+        assert release.wait(5)
+        return 0
+
+    service = _multi_svc(limit + 2, run, max_concurrent=limit)
+    try:
+        assert service._manual_reservation == (limit + 1) // 2
+        assert service._scheduled_limit == limit // 2
+        if limit == 1:
+            with pytest.raises(gui_onboard.ScheduledAdmissionError) as refused:
+                service.start("d1", schedule_context=_schedule_context("d1"))
+            assert refused.value.reason == "capacity_unavailable"
+            assert service.list_jobs() == []
+        else:
+            scheduled = [service.start("d%d" % i,
+                         schedule_context=_schedule_context("d%d" % i))
+                         for i in range(1, limit // 2 + 2)]
+            assert _wait_for(lambda: len(started) == limit // 2)
+            assert len(service._scheduled_inflight) == limit // 2
+            assert service.get_job(scheduled[-1])["state"] == "queued"
+        manual_ids = ["d%d" % i for i in range(limit // 2 + 2, limit + 2)]
+        for did in manual_ids:
+            service.start(did)
+        assert _wait_for(lambda: all(did in started for did in manual_ids))
+        assert len(started) == limit
+    finally:
+        release.set()
+        service.shutdown()
+    assert service._scheduled_inflight == set()
+    assert service._scheduled_workers == set()
+    assert service._active_work == 0
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 25])
+def test_pending_capacity_and_manual_reservation_have_no_prepare_side_effect(monkeypatch, limit):
+    service = _multi_svc(1001, lambda *_args: 0, max_concurrent=limit)
+    monkeypatch.setattr(service, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(service, "_ensure_maintenance", lambda: None)
+    prepared = []
+    scheduled_count = 0 if limit == 1 else 1000 - (limit + 1) // 2
+    try:
+        for i in range(1, scheduled_count + 1):
+            did = "d%d" % i
+            service.start(did, schedule_context=_schedule_context(did))
+        if limit > 1:
+            did = "d%d" % (scheduled_count + 1)
+            with pytest.raises(gui_onboard.ScheduledAdmissionError) as refused:
+                service.start(did, schedule_context=_schedule_context(did),
+                              prepare=lambda: prepared.append(did))
+            assert refused.value.reason == "queue_full"
+        for i in range(scheduled_count + 1, 1001):
+            service.start("d%d" % i)
+        with pytest.raises(ValueError, match="onboarding queue is full"):
+            service.start("d1001", prepare=lambda: prepared.append("d1001"))
+        assert prepared == []
+        assert len(service.list_jobs()) == 1000
+        assert len(service._manual_queue) + len(service._scheduled_queue) == 1000
+        assert service.cancel_queued() == 1000
+        assert service.start("d1001", prepare=lambda: prepared.append("accepted"))
+        assert prepared == ["accepted"]
+    finally:
+        service.shutdown()
+
+
+def test_manual_dequeue_priority_and_same_device_supersession(monkeypatch):
+    order = []
+    retired = []
+    service = _multi_svc(3, lambda _p, env, _o: order.append(env["DEVICE_ID"]) or 0,
+                         max_concurrent=2)
+    monkeypatch.setattr(service, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(service, "_ensure_maintenance", lambda: None)
+    scheduled = service.start("d1", schedule_context=_schedule_context("d1"))
+    first = service.start("d2")
+    service._work_queue.get_nowait()()
+    assert order == ["d2"]
+    assert service.get_job(first)["state"] == "done"
+    assert service.get_job(scheduled)["state"] == "queued"
+    # The record retirement must happen before replacement preparation.
+    service._jobs[scheduled]["record_id"] = "scheduled-record"
+    service.record_store = SimpleNamespace(
+        transition=lambda record, state: retired.append((record, state)))
+    replacement = service.start("d1", action="undeploy", prepare=lambda: (
+        retired.append("manual-prepare") or None))
+    assert replacement != scheduled
+    assert retired == [("scheduled-record", "removed"), "manual-prepare"]
+    assert service.get_job(scheduled)["state"] == "cancelled"
+    assert service.get_job(scheduled)["admission_reason"] == "manual_override"
+    assert service.get_job(replacement)["state"] == "queued"
+    assert service._scheduled_queue == gui_onboard.deque()
+    service.shutdown()
+
+
+def test_authority_changes_after_reservation_are_rechecked_without_lock_inversion():
+    from contextlib import contextmanager
+    reserved = threading.Event()
+    release = threading.Event()
+    authority_lock = threading.Lock()
+    valid = [True]
+    executions = []
+    checked = []
+    service = _multi_svc(2, lambda *_args: executions.append(True) or 0,
+                         max_concurrent=2)
+
+    @contextmanager
+    def guard(phase):
+        # A worker waiting for outer authority must not obstruct cancellation
+        # or another authority holder acquiring the inner job condition.
+        if phase == "execution":
+            reserved.set()
+            assert release.wait(5)
+        with authority_lock:
+            yield
+
+    def check(phase):
+        assert authority_lock.locked()
+        assert service._lock.locked()
+        checked.append(phase)
+        if not valid[0]:
+            raise gui_onboard.ScheduledAdmissionError("device_revoked")
+
+    try:
+        jid = service.start("d1", schedule_context=_schedule_context("d1"),
+                            authority_guard=guard, authority_check=check)
+        assert reserved.wait(2)
+        with authority_lock:
+            with service._condition:
+                assert len(service._scheduled_inflight) == 1
+                assert jid in service._reserved
+                assert service._jobs[jid]["state"] == "queued"
+                valid[0] = False
+        # The other half of the pool remains usable while the guard waits.
+        manual = service.start("d2")
+        assert _wait(service, manual)["state"] == "done"
+        release.set()
+        result = _wait(service, jid)
+        assert result["state"] == "cancelled"
+        assert result["admission_reason"] == "device_revoked"
+        assert checked == ["admission", "execution"]
+        assert executions == [True]
+        assert _wait_for(lambda: not service._scheduled_inflight
+                         and not service._scheduled_workers)
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_cancellation_releases_reserved_scheduled_capacity_and_scopes_occurrence():
+    from contextlib import contextmanager
+    reserved = threading.Event()
+    release = threading.Event()
+    ran = []
+    service = _multi_svc(2, lambda _p, env, _o: ran.append(env["DEVICE_ID"]) or 0,
+                         max_concurrent=2)
+
+    @contextmanager
+    def guard(phase):
+        if phase == "execution":
+            reserved.set()
+            assert release.wait(5)
+        yield
+
+    try:
+        first = service.start("d1", schedule_context=_schedule_context("d1"),
+                              authority_guard=guard)
+        assert reserved.wait(2)
+        second = service.start("d2", schedule_context=_schedule_context("d2", "other"))
+        assert service.get_job(second)["state"] == "queued"
+        assert service.cancel_queued([first, second], occurrence_id="wrong") == 0
+        assert service.cancel_queued([first, second], occurrence_id="occurrence-1") == 1
+        assert service.get_job(first)["state"] == "cancelled"
+        with service._condition:
+            assert not service._reserved and not service._scheduled_inflight
+            assert service._scheduled_workers == {first}
+            assert service._jobs[second]["state"] == "queued"
+        release.set()
+        assert _wait(service, second)["state"] == "done"
+        assert _wait_for(lambda: service._active_work == 0)
+        assert ran == ["d2"]
+        assert not service._reserved and not service._scheduled_inflight
+        assert not service._scheduled_workers
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_manual_supersedes_scheduled_worker_waiting_for_authority():
+    from contextlib import contextmanager
+    reserved = threading.Event()
+    release = threading.Event()
+    ran = []
+    service = _multi_svc(1, lambda *_args: ran.append(True) or 0, max_concurrent=2)
+
+    @contextmanager
+    def guard(phase):
+        if phase == "execution":
+            reserved.set()
+            assert release.wait(5)
+        yield
+
+    try:
+        scheduled = service.start("d1", schedule_context=_schedule_context("d1"),
+                                  authority_guard=guard)
+        assert reserved.wait(2)
+        manual = service.start("d1")
+        assert _wait(service, manual)["state"] == "done"
+        assert service.get_job(scheduled)["admission_reason"] == "manual_override"
+        release.set()
+        assert _wait_for(lambda: service._active_work == 0)
+        assert ran == [True]
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_schedule_provenance_is_immutable_and_manual_projection_unchanged(monkeypatch):
+    service = _multi_svc(2, lambda *_args: 0, max_concurrent=2)
+    monkeypatch.setattr(service, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(service, "_ensure_maintenance", lambda: None)
+    context = _schedule_context("d1")
+    jid = service.start("d1", schedule_context=context)
+    context["schedule_rev"] = 999
+    detached = service.get_schedule_context(jid)
+    assert detached["schedule_rev"] == 3
+    detached["schedule_id"] = "forged"
+    assert service.get_schedule_context(jid)["schedule_id"] == "schedule-1"
+    assert [j["id"] for j in service.jobs_for_occurrence("occurrence-1", "d1")] == [jid]
+    assert service.jobs_for_occurrence("other") == []
+    assert service.latest_jobs_by_device()["d1"]["pending_schedule_id"] == "schedule-1"
+    manual = service.start("d2")
+    assert service.get_schedule_context(manual) is None
+    assert "schedule_id" not in service.get_job(manual)
+    assert service.latest_jobs_by_device()["d2"] == {
+        "action": "onboard", "state": "queued", "finished_at": None}
+    service.shutdown()
+
+
+@pytest.mark.parametrize("patch", [
+    {"schema_version": True}, {"schedule_rev": True}, {"schedule_rev": 0},
+    {"device_id": "other"}, {"occurrence_id": ""}, {"schedule_id": "a\nb"},
+    {"extra": "forbidden"},
+])
+def test_schedule_provenance_rejects_invalid_or_extra_fields(patch):
+    service = _svc(lambda *_args: 0)
+    context = _schedule_context("d1") | patch
+    with pytest.raises(ValueError, match="invalid schedule provenance"):
+        service.start("d1", schedule_context=context)
+    assert service.list_jobs() == []
+    service.shutdown()
+
+
+def test_scheduled_running_join_and_manual_opposite_action_busy():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def run(*_args):
+        entered.set()
+        assert release.wait(5)
+        return 0
+
+    service = _multi_svc(1, run, max_concurrent=2)
+    try:
+        scheduled = service.start("d1", schedule_context=_schedule_context("d1"))
+        assert entered.wait(2)
+        assert service.start("d1", prepare=lambda: pytest.fail("joined prepare")) == scheduled
+        assert service.start("d1", schedule_context=_schedule_context("d1")) == scheduled
+        with pytest.raises(ValueError, match="busy with an active onboard"):
+            service.start("d1", action="undeploy")
+        assert service.cancel_queued(occurrence_id="occurrence-1") == 0
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_admission_authority_refusal_creates_no_job_or_record():
+    from contextlib import contextmanager
+    outer = threading.Lock()
+    prepared = []
+    service = _multi_svc(1, lambda *_args: 0, max_concurrent=2)
+
+    @contextmanager
+    def guard(_phase):
+        assert not service._lock.locked()
+        with outer:
+            yield
+
+    def check(phase):
+        assert phase == "admission" and outer.locked() and service._lock.locked()
+        raise gui_onboard.ScheduledAdmissionError("vanished")
+
+    try:
+        with pytest.raises(gui_onboard.ScheduledAdmissionError) as refused:
+            service.start("d1", schedule_context=_schedule_context("d1"),
+                          authority_guard=guard, authority_check=check,
+                          prepare=lambda: prepared.append(True))
+        assert refused.value.reason == "vanished"
+        assert prepared == [] and service.list_jobs() == []
+        assert not service._reserved and not service._scheduled_inflight
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("revoke_at_prepare", [False, True])
+def test_iox_deferred_authority_recheck_releases_locks_for_controller_and_probe(
+        tmp_path, revoke_at_prepare):
+    from contextlib import contextmanager
+    outer = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+    phases = []
+    prepared = []
+    valid = [True]
+    controller = _FrozenIoxController(entered=entered, release=release)
+    service = None
+
+    def assert_unlocked():
+        assert outer.acquire(blocking=False)
+        outer.release()
+        assert service._lock.acquire(blocking=False)
+        service._lock.release()
+
+    def preflight(*_args, **_kwargs):
+        assert_unlocked()
+        return {"status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}
+
+    def mint(_did):
+        assert_unlocked()
+        return "fixture-token"
+
+    service = _iox_controller_service(tmp_path, controller, preflight_fn=preflight,
+                                       mint_fn=mint)
+
+    @contextmanager
+    def guard(phase):
+        # Guard acquisition itself must never take place under the job lock.
+        assert service._lock.acquire(blocking=False)
+        service._lock.release()
+        with outer:
+            phases.append(phase)
+            yield
+
+    def check(_phase):
+        assert outer.locked() and service._lock.locked()
+        if not valid[0]:
+            raise gui_onboard.ScheduledAdmissionError("device_revoked")
+
+    def prepare():
+        assert outer.locked() and service._lock.locked()
+        prepared.append(True)
+        return "new-record"
+
+    try:
+        jid = service.start("d1", prepare=prepare,
+                            schedule_context=_schedule_context("d1"),
+                            authority_guard=guard, authority_check=check)
+        assert entered.wait(2)
+        assert_unlocked()
+        request = controller.requests[0]
+        assert _request_value(request, "record_id") is None
+        assert not _request_has(request, "schedule_context")
+        assert not _request_has(request, "schedule_id")
+        assert prepared == []
+        with outer:
+            valid[0] = not revoke_at_prepare
+        release.set()
+        job = _wait(service, jid)
+        assert phases == ["admission", "execution", "iox_prepare"]
+        if revoke_at_prepare:
+            assert prepared == []
+            assert job["state"] == "error"
+            assert job["admission_reason"] == "device_revoked"
+            assert job["record_id"] is None
+        else:
+            assert prepared == [True]
+            assert job["state"] == "done"
+            assert job["record_id"] == "new-record"
+    finally:
+        release.set()
+        service.shutdown()
+
+
+
+def test_cancelled_authority_waiter_preserves_physical_manual_worker_slot(monkeypatch):
+    """A cancelled reservation cannot free a worker that is still lock-blocked."""
+    from contextlib import contextmanager
+    outer = threading.Lock()
+    first_waiting = threading.Event()
+    second_considered = threading.Event()
+    executed = []
+    service = _multi_svc(
+        3, lambda _p, env, _o: executed.append(env["DEVICE_ID"]) or 0,
+        max_concurrent=2)
+    reserve = service._reserve_work_locked
+
+    def observe_reservation():
+        job = reserve()
+        # Synchronize after an idle worker has considered the second scheduled
+        # job, before submitting manual work. This prevents manual-first dequeue
+        # from accidentally hiding the physical-occupancy regression.
+        if any(j["device_id"] == "d2" and j["state"] == "queued"
+               for j in service._jobs.values()):
+            second_considered.set()
+        return job
+
+    monkeypatch.setattr(service, "_reserve_work_locked", observe_reservation)
+
+    @contextmanager
+    def guard(phase):
+        if phase == "execution":
+            first_waiting.set()
+            with outer:
+                yield
+        else:
+            yield
+
+    outer.acquire()
+    try:
+        first = service.start("d1", schedule_context=_schedule_context("d1"),
+                              authority_guard=guard)
+        assert first_waiting.wait(2)
+        assert service.cancel_queued([first]) == 1
+        second = service.start("d2", schedule_context=_schedule_context("d2"),
+                               authority_guard=guard)
+        assert second_considered.wait(2)
+        manual = service.start("d3")
+        # No authority guard performs slow work. The first cancelled worker
+        # merely contends on a lock held by this thread. Manual work must finish
+        # before that lock is released, while the second schedule stays pending.
+        assert _wait(service, manual, timeout=2)["state"] == "done"
+        with service._condition:
+            assert not service._reserved and not service._scheduled_inflight
+            assert service._scheduled_workers == {first}
+            assert service._jobs[second]["state"] == "queued"
+        assert executed == ["d3"]
+    finally:
+        outer.release()
+        service.shutdown()
+    assert not service._scheduled_inflight and not service._scheduled_workers
+    assert not service._reserved and service._active_work == 0
+
+
+
+def test_catalyst_8000_offers_router_and_iox_and_resolves_the_iox_arch():
+    """IOx on a Catalyst 8000: amd64 package, bootflash staging -- the
+    installer derives the VirtualPortGroup vnic from the router management
+    type, so the arch env carries no AppGig interface. It carries NO share
+    either: a C8000V cannot bind-mount bootflash: into the app (CAF ignores
+    the -v run option; verified 2026-09-10), so the router hands the image to
+    IOS over the scp push and the recipe keeps its SCP server step."""
+    assert gui_onboard.install_options_for("C8000V") == ["router", "iox"]
+    env = gui_onboard._iox_arch_env("r1", "C8000V")
+    assert env == {"PKG": "iris-amd64.tar", "PKG_FS": "bootflash:",
+                   "TARGET_FS": "bootflash:"}
+    assert "APP_INTF" not in env
+    assert "SHARE_HOST_PATH" not in env and "SHARE_IOS_PATH" not in env
+    assert gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "iox"}) == "iox"
+    assert gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "router"}) == "router"
+    with pytest.raises(ValueError, match="router or iox"):
+        gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "guestshell"})
+
+
+def test_iox_on_a_router_binds_both_preflights():
+    """The router evidence owns the VPG/NAT facts, the IOx evidence the
+    app-hosting facts; both must name the same box."""
+    resolved = {"management_type": "router-nat", "platform": "iox", "app_ip": "10.0.2.5",
+                "nat_interface": "GigabitEthernet1", "swarm_port": "6881", "vpg_number": "2"}
+    evidence = {"status": "passed", "device_identity": "FDO123", "detected_model": "C8000V",
+                "iox_preexisting": False, "file_prompt_quiet_preexisting": True,
+                "nat_interface": "GigabitEthernet1", "nat_outside_preexisting": True}
+    bound = gui_onboard.bind_preflight(resolved, evidence)
+    assert bound["device_identity"] == "FDO123" and bound["model"] == "C8000V"
+    assert bound["nat_outside_owned"] == "0" and bound["file_prompt_quiet_preexisting"] == "1"

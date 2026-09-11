@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Initialize, recover, rotate, and resume instruction production.
+
+Usage:
+  iris-instr-key initialize
+  iris-instr-key recover
+  iris-instr-key rotate [--no-overlap] <device_id>
+  iris-instr-key restamp <device_id>
+
+Task 12 commits instruction-secret custody first and then hands the nonsecret
+key ID to Task 13's one-device stamper. No command prints or accepts key bytes.
+"""
+import argparse
+import contextlib
+import importlib
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secretfs       # noqa: E402
+import secrets_store  # noqa: E402
+
+
+class InstructionKeyCLIError(Exception):
+    """A pre-commit rotation step failed without exposing tool details."""
+
+
+class RestampIncomplete(InstructionKeyCLIError):
+    """The secret commit succeeded but the Task 13 handoff did not."""
+
+
+def _parser():
+    parser = argparse.ArgumentParser(
+        prog="iris-instr-key",
+        description="Rotate an IRIS device instruction key",
+        allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+    rotate = commands.add_parser(
+        "rotate", help="rotate one enrolled device", allow_abbrev=False)
+    rotate.add_argument("--no-overlap", action="store_true",
+                        help="retire every old server-side key immediately")
+    rotate.add_argument("device_id")
+    restamp = commands.add_parser(
+        "restamp", help="resume one enrolled device stamp", allow_abbrev=False)
+    restamp.add_argument("device_id")
+    commands.add_parser(
+        "initialize", help="activate a fresh instruction producer",
+        allow_abbrev=False)
+    commands.add_parser(
+        "recover", help="advance the epoch and recover producer authority",
+        allow_abbrev=False)
+    return parser
+
+
+def resolve_default_restamp():
+    """Resolve Task 13 lazily so help and injected foundation tests still work."""
+    try:
+        module = importlib.import_module("instruction_stamper")
+        callback = getattr(module, "restamp_instruction_key")
+    except Exception:
+        raise InstructionKeyCLIError("instruction stamper unavailable")
+    if not callable(callback):
+        raise InstructionKeyCLIError("instruction stamper unavailable")
+    context = getattr(module, "rotation_context", None)
+    if callable(context):
+        try:
+            callback._iris_rotation_context = context
+        except (AttributeError, TypeError):
+            pass
+    return callback
+
+
+def resolve_default_producer():
+    try:
+        module = importlib.import_module("instruction_stamper")
+        callback = getattr(module, "initialize_producer")
+    except Exception:
+        raise InstructionKeyCLIError("instruction stamper unavailable")
+    if not callable(callback):
+        raise InstructionKeyCLIError("instruction stamper unavailable")
+    return callback
+
+
+def handoff_restamp(callback, device_id, key_id):
+    """Invoke the idempotent Task 13 seam using nonsecret identity only."""
+    if not callable(callback):
+        raise InstructionKeyCLIError("instruction stamper unavailable")
+    try:
+        result = callback(device_id, key_id)
+    except Exception:
+        raise RestampIncomplete(
+            "instruction key rotation persisted; restamping is incomplete")
+    if result is False:
+        raise RestampIncomplete(
+            "instruction key rotation persisted; restamping is incomplete")
+
+
+def rotate_device(device_id, no_overlap=False, restamp=None, now=None):
+    """Commit one rotation, release the secret lock, then request restamping."""
+    if not isinstance(device_id, str) or not device_id:
+        raise InstructionKeyCLIError("invalid device id")
+    try:
+        secrets_store.validate_device_id(device_id)
+    except ValueError:
+        raise InstructionKeyCLIError("invalid device id")
+
+    # Resolve the known integration prerequisite before any destructive
+    # no-overlap mutation. The callback is invoked only after persistence.
+    callback = restamp if restamp is not None else resolve_default_restamp()
+    if not callable(callback):
+        raise InstructionKeyCLIError("instruction stamper unavailable")
+
+    secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+    enc_path = os.environ.get(
+        "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
+    clock = time.time if now is None else now
+
+    context_factory = getattr(callback, "_iris_rotation_context", None)
+    context = (context_factory(device_id) if callable(context_factory)
+               else contextlib.nullcontext())
+    with context:
+        try:
+            with secrets_store.store_lock(secrets_path):
+                try:
+                    store = secrets_store.load(secrets_path)
+                except secrets_store.StoreCorruptError:
+                    raise InstructionKeyCLIError(
+                        "instruction key store unavailable")
+                key_id = secrets_store.rotate_instruction_key(
+                    store, device_id, clock(), no_overlap=no_overlap)
+                try:
+                    secretfs.persist_store(
+                        store, secrets_path,
+                        recipients_csv=recipients, enc_path=enc_path)
+                except Exception:
+                    raise InstructionKeyCLIError(
+                        "instruction key persistence failed")
+        except (InstructionKeyCLIError, secrets_store.InstructionKeyError):
+            raise
+        except Exception:
+            raise InstructionKeyCLIError("instruction key store unavailable")
+
+        handoff_restamp(callback, device_id, key_id)
+    return key_id
+
+
+def restamp_device(device_id, restamp=None):
+    if not isinstance(device_id, str) or not device_id:
+        raise InstructionKeyCLIError("invalid device id")
+    try:
+        secrets_store.validate_device_id(device_id)
+    except ValueError:
+        raise InstructionKeyCLIError("invalid device id")
+    callback = restamp if restamp is not None else resolve_default_restamp()
+    secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    try:
+        with secrets_store.store_lock(secrets_path):
+            store = secrets_store.load(secrets_path)
+            records = store.get("devices", {}).get(device_id)
+            if not isinstance(records, dict):
+                raise InstructionKeyCLIError("instruction key unavailable")
+            record = secrets_store.validate_instruction_key_record(
+                records.get("instr_key"))
+            if record["revoked"]:
+                raise InstructionKeyCLIError("instruction key unavailable")
+            key_id = record["key_id"]
+    except (InstructionKeyCLIError, secrets_store.InstructionKeyError):
+        raise
+    except Exception:
+        raise InstructionKeyCLIError("instruction key unavailable")
+    try:
+        return callback(device_id, key_id)
+    except Exception:
+        raise RestampIncomplete("instruction restamping is incomplete")
+
+
+def main(argv=None, restamp=None, now=None, producer=None):
+    parser = _parser()
+    try:
+        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        return int(exc.code)
+    try:
+        if args.command in ("initialize", "recover"):
+            callback = producer if producer is not None else resolve_default_producer()
+            marker = callback(args.command, now=now)
+            print(json.dumps({
+                "epoch": marker["epoch"], "state": args.command,
+            }, sort_keys=True, separators=(",", ":")))
+            return 0
+        if args.command == "restamp":
+            outcome = restamp_device(args.device_id, restamp=restamp)
+            print(json.dumps({"device_id": args.device_id, "state": outcome},
+                             sort_keys=True, separators=(",", ":")))
+            return 0
+        key_id = rotate_device(
+            args.device_id, no_overlap=args.no_overlap,
+            restamp=restamp, now=now)
+    except (InstructionKeyCLIError, secrets_store.InstructionKeyError) as exc:
+        print("iris-instr-key: %s" % exc, file=sys.stderr)
+        return 1
+    except Exception:
+        print("iris-instr-key: instruction operation failed", file=sys.stderr)
+        return 1
+    print(json.dumps({
+        "device_id": args.device_id,
+        "key_id": key_id,
+        "state": "rotated",
+    }, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

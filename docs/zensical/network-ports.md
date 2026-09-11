@@ -29,25 +29,28 @@ shared device image; their connectivity differs by platform.
 
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
-| 22 | TCP | Server tier or manual installer host -> device IOS | SSH/SCP | Drive onboarding. IOx and IOS-XR packages are pushed over SCP; Guest Shell uses SSH to configure IOS. |
+| 22 | TCP | Server tier or manual installer host -> device IOS | SSH/SCP | Drive onboarding. Guest Shell and IOx are configured over SSH and fetch their own files (below); only the IOS-XR package is pushed over SCP. |
 | 8000 | TCP | Guest Shell device IOS -> artifact server | HTTPS capability URL | Guest Shell bootstrap, bundle, certificate, and short-lived per-install configuration fetch. |
+| 8000 | TCP | IOx device IOS -> artifact server | Authenticated HTTPS | `copy https:` of the IOx package, catalog certificate and per-device instruction envelope, HTTP Basic (device id + enrollment token) over the catalog trustpoint. |
 | 8000 | TCP | Explicit artifact API client -> server tier | Authenticated HTTPS | Optional resource-bound `/v1/devices/.../artifacts/...` GET/HEAD. |
 
 The Console and artifact server are separate. Console onboarding asks the
 server-tier management API to stage Guest Shell's per-install files beside the
 artifact server; no artifacts or device state are mounted into the Console.
-For Guest Shell, the server-side installer sends
+For Guest Shell and IOx, the server-side installer sends
 verified `copy https:` commands through SSH after installing the catalog
-trustpoint. IOx and XR package delivery use authenticated, host-key-checked SCP;
-their passwords reach `sshpass` through the environment, never a URL, argument,
-or log. A remote stage-host hop exists only for a manual Guest Shell installer
-run; the Console has no UI for it.
+trustpoint; an IOx copy additionally carries the device's own HTTP Basic
+credential, configured on IOS for the span of that copy and removed after it.
+XR package delivery uses authenticated, host-key-checked SCP; its password
+reaches `sshpass` through the environment, never a URL, argument, or log. A
+remote stage-host hop exists only for a manual Guest Shell installer run; the
+Console has no UI for it.
 
 ## Steady-state operation
 
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
-| 8443 | TCP | Device agent -> catalog | HTTPS | Image policy, assignment, enrollment-token refresh, heartbeats, and reports. |
+| 8443 | TCP | Device agent -> catalog | HTTPS | Image policy, sealed instructions/keylist, assignment, enrollment-token refresh, heartbeats, and reports. |
 | 6969 | TCP | Device or server seeder -> tracker | Authenticated HTTPS | Private BitTorrent announces. IOx/XR use a bearer header; Guest Shell uses its personalized query credential inside TLS. All agents and the origin seeder pin the server certificate; neither credential form is logged. |
 | 6881 | TCP | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
@@ -64,6 +67,14 @@ swarm JSON is reached by the Console through the authenticated management API.
 See
 [Telemetry variables](reference.md#telemetry-variables) for which variable does
 what.
+
+Phase 1 adds **no new listener, port, network path, or firewall flow**.
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` are new authenticated
+application traffic on the existing device-to-catalog HTTPS connection on TCP
+port 8443. TCP 9443 remains Console-to-server management-only and never serves device
+instructions. Tracker policy uses existing 6969; origin QoS uses loopback-only
+aria2 RPC. No Kubernetes Secret, Service or NetworkPolicy rule is added.
 
 The server management API reads its local telemetry state, so 9101 needs
 **external** reachability only for authenticated Prometheus scraping or
@@ -133,9 +144,9 @@ to IRIS and is not published by the Compose stack.
 - For **inband** devices, these flows traverse the existing operator-owned
   management VLAN and its SVI; IRIS adds no VLAN, SVI, gateway, route, or VRF.
   Preflight checks prerequisites over SSH from the server; it does not prove
-  the agent's route back to the server. Guest Shell enrollment fetches temporary
-  install files from the HTTPS artifact listener; IOx packages and runtime
-  trust are delivered over SCP.
+  the agent's route back to the server. Guest Shell enrollment and IOx
+  onboarding fetch their install files from the HTTPS artifact listener (IOx
+  with the device's own credential); only the XR package is delivered over SCP.
   See [Management Type and VLAN Ownership](management-type.md).
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside

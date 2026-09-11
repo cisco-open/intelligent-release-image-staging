@@ -9,28 +9,35 @@ fail-closed semantics are exposed on the versioned ``/internal/v1`` wire
 interface.  The implementation mirrors catalog.py's ThreadingHTTPServer,
 BaseHTTPRequestHandler, and TLS pattern and remains stdlib-only.
 """
+import contextlib
 import email.utils
 import http.cookies
+import copy
 import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
 import shutil
+import signal
 import ssl
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
+import auth
 import audit_export
+import assignment_service
 import bounded_pool
 import bulkhash_refresh
 # aliased: `catalog` is the injected STORE everywhere below
@@ -41,13 +48,24 @@ import gui_auth
 import gui_fleet
 import gui_onboard
 import gui_tls
+import instruction_keys
+import instruction_stamper
+import instructions
+import iox_transport
+import iox_verification
 import live_samples
+import origin_qos
 import otlp
 import peer_endpoints
 import peer_policy
 import peer_enforcement
+import role_csv
+import role_management
+import schedule_runner
+import schedule_validation
 import secretfs
 import secrets_store
+import schedules
 import setup_status
 import telemetry
 import telemetry_destination
@@ -132,7 +150,7 @@ _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing,
 # plus a small field patch comfortably fits well under 64 KiB * 10; generous
 # headroom over the ~700 KB worst case without approaching _MAX_CSV's size
 # (this body is an id LIST, not per-device CSV rows).
-_MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024  # 2 MiB — /api/devices/bulk-credential
+_MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024  # 2 MiB — fleet-id bulk JSON bodies
 _CAS_COMPATIBILITY_HEADERS = (
     ("Deprecation", "true"),
     ("Sunset", "Sat, 04 Sep 2027 00:00:00 GMT"),
@@ -174,6 +192,291 @@ _SECURITY_HEADERS = [
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 ]
+
+_INSTRUCTION_I63_MAX = (1 << 63) - 1
+_INSTRUCTION_DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_INSTRUCTION_REJECTED_STATES = frozenset((
+    "rollback_rejected", "audience_mismatch", "key_rejected",
+    "tamper_rejected", "lkg_rejected", "oversize",
+))
+_INSTRUCTION_STALE_STATES = frozenset((
+    "stale_expired", "allowlist_expired",
+))
+_INSTRUCTION_UNAVAILABLE_LABELS = {
+    "verifier_missing": "verifier unavailable",
+    "lkg_unreadable": "LKG unavailable",
+    "instr_unavailable": "unavailable",
+}
+
+
+def _instruction_i63(value):
+    """Return one exact bounded wire integer, otherwise None."""
+    return value if type(value) is int and 0 <= value <= _INSTRUCTION_I63_MAX \
+        else None
+
+
+def _instruction_timestamp(value):
+    """Return one finite, nonnegative timestamp in the bounded wire range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > _INSTRUCTION_I63_MAX:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _instruction_report_age(heartbeat, observed_at):
+    last_seen = heartbeat.get("last_seen") if isinstance(heartbeat, dict) else None
+    last_seen = _instruction_timestamp(last_seen)
+    observed_at = _instruction_timestamp(observed_at)
+    if last_seen is None or observed_at is None:
+        return None
+    if last_seen > observed_at:
+        return None
+    age = int(observed_at - last_seen)
+    return age if age <= _INSTRUCTION_I63_MAX else None
+
+
+def _instruction_raw_state(heartbeat):
+    """Validate the closed state/reason unit again at the management edge."""
+    if not isinstance(heartbeat, dict):
+        return None, None
+    state = heartbeat.get("instr_state")
+    if not isinstance(state, str) or state not in instructions.INSTR_STATES:
+        return None, None
+    if state == "key_rejected":
+        reason = heartbeat.get("instr_reason")
+        return (state, reason) if isinstance(reason, str) \
+            and reason in instructions.INSTR_REASONS \
+            else (None, None)
+    if "instr_reason" in heartbeat:
+        return None, None
+    return state, None
+
+
+def _instruction_qos_drift_count(heartbeat, supported):
+    if not supported or not isinstance(heartbeat, dict):
+        return None
+    if "qos_drift" not in heartbeat:
+        return 0
+    clean = instructions.sanitize_instruction_attestation({
+        "qos_drift": heartbeat.get("qos_drift")})
+    drift = clean.get("qos_drift")
+    if drift is None:
+        return None
+    return (len(drift.get("options", ()))
+            + int("blocklist_revision" in drift)
+            + int("blocklist_rules" in drift))
+
+
+def _instruction_device_projection(heartbeat, revoked, observed_at,
+                                   heartbeat_available=True):
+    """Return the bounded instruction status used by rows and roll-ups.
+
+    ``revoked`` is deliberately tri-state.  None means the durable revocation
+    snapshot was unavailable, so the primary classification is unknown while
+    the bounded underlying agent report remains visible.
+    """
+    heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
+    marker_present = "instr_protocol" in heartbeat
+    marker = heartbeat.get("instr_protocol")
+    supported = type(marker) is int and marker == 1
+    state, reason = _instruction_raw_state(heartbeat)
+    serial = _instruction_i63(heartbeat.get("instr_serial"))
+    identity_values = (
+        _instruction_i63(heartbeat.get("instr_epoch")), serial,
+        _instruction_i63(heartbeat.get("instr_policy_revision")),
+    )
+    identity = None
+    if supported and all(value is not None for value in identity_values):
+        identity = {
+            "epoch": identity_values[0], "instr_serial": identity_values[1],
+            "policy_revision": identity_values[2],
+        }
+
+    if state in ("applied", "reasserted"):
+        underlying_display = "applied" if identity is not None else "unknown"
+        underlying_label = ("applied r%d" % identity["instr_serial"]
+                            if identity is not None else "unknown")
+    elif state == "lkg":
+        underlying_display = "lkg" if identity is not None else "unknown"
+        underlying_label = "lkg" if identity is not None else "unknown"
+    elif state in _INSTRUCTION_STALE_STATES:
+        underlying_display, underlying_label = "stale", "stale"
+    elif state in _INSTRUCTION_REJECTED_STATES:
+        underlying_display, underlying_label = "rejected", "rejected"
+    elif state in _INSTRUCTION_UNAVAILABLE_LABELS:
+        underlying_display = "unavailable"
+        underlying_label = _INSTRUCTION_UNAVAILABLE_LABELS[state]
+    elif state == "tracker-only":
+        underlying_display, underlying_label = "tracker-only", "tracker-only"
+    elif state == "instr_pending":
+        underlying_display, underlying_label = "pending", "pending"
+    elif state == "instr_forbidden":
+        underlying_display, underlying_label = "forbidden", "forbidden"
+    elif state == "floor_reset":
+        underlying_display, underlying_label = "floor_reset", "floor reset"
+    elif state == "none":
+        underlying_display, underlying_label = "none", "no accepted instruction"
+    else:
+        underlying_display, underlying_label = "unknown", "unknown"
+
+    age = _instruction_report_age(heartbeat, observed_at)
+    report_stale = age >= _HEARTBEAT_FRESH if age is not None else None
+    if revoked is True:
+        display, label, evidence = "revoked", "revoked", "server-observed"
+    elif revoked is None:
+        display, label, evidence = "unknown", "unknown", "server-observed"
+    elif not heartbeat_available:
+        display, label, evidence = "unknown", "unknown", "server-observed"
+    elif not marker_present:
+        display, label, evidence = (
+            "pre-instructions", "pre-instructions", "agent-asserted")
+    elif not supported:
+        display, label, evidence = "unknown", "unknown", "agent-asserted"
+    elif underlying_display == "stale":
+        display, label, evidence = (
+            underlying_display, underlying_label, "agent-asserted")
+    elif age is None:
+        display, label, evidence = "unknown", "unknown", "server-observed"
+    elif report_stale:
+        display = "stale"
+        label = "stale · last reported %s" % underlying_label
+        evidence = "server-observed"
+    else:
+        display, label, evidence = (
+            underlying_display, underlying_label, "agent-asserted")
+
+    pointer_skew = heartbeat.get("pointer_skew")
+    if not supported or not isinstance(pointer_skew, bool):
+        pointer_skew = None
+    verify_level = heartbeat.get("verify_level")
+    if verify_level not in ("sig", "none"):
+        verify_level = None
+    return {
+        "display_state": display, "label": label, "evidence": evidence,
+        "underlying_state": state, "underlying_label": underlying_label,
+        "underlying_evidence": "agent-asserted",
+        "reason": reason, "reported_instr_serial": serial,
+        "accepted_identity": identity, "verify_level": verify_level,
+        "pointer_skew": pointer_skew,
+        "qos_drift_count": _instruction_qos_drift_count(
+            heartbeat, supported),
+        "report_age_seconds": age, "report_stale": report_stale,
+        "revoked": revoked, "revocation_evidence": "server-observed",
+    }
+
+
+def _instruction_fleet_projection(inventory_rows, heartbeat_rows,
+                                  raw_policies, revoked_principals,
+                                  observed_at):
+    """Build one O(n), count-only fleet projection from bulk snapshots."""
+    heartbeat_available = isinstance(heartbeat_rows, list)
+    heartbeat_by_id = {}
+    if heartbeat_available:
+        for row in heartbeat_rows:
+            if isinstance(row, dict) and isinstance(row.get("device_id"), str):
+                heartbeat_by_id[row["device_id"]] = row
+    revocation_available = isinstance(revoked_principals, (set, frozenset))
+
+    states, applied = {}, {}
+    pointer_skew = 0 if heartbeat_available else None
+    inventory_ids = []
+    for inventory_row in inventory_rows if isinstance(inventory_rows, list) else ():
+        device_id = (inventory_row.get("device_id")
+                     if isinstance(inventory_row, dict) else None)
+        if (not isinstance(device_id, str)
+                or _INSTRUCTION_DEVICE_ID.fullmatch(device_id) is None):
+            continue
+        inventory_ids.append(device_id)
+        heartbeat = heartbeat_by_id.get(device_id, {})
+        revoked = ("device:%s" % device_id in revoked_principals
+                   if revocation_available and isinstance(device_id, str)
+                   else None)
+        projected = _instruction_device_projection(
+            heartbeat, revoked, observed_at,
+            heartbeat_available=heartbeat_available)
+        key = projected["display_state"]
+        states[key] = states.get(key, 0) + 1
+        identity = projected["accepted_identity"]
+        if identity is not None:
+            revision = str(identity["policy_revision"])
+            applied[revision] = applied.get(revision, 0) + 1
+        if pointer_skew is not None and projected["pointer_skew"] is True:
+            pointer_skew += 1
+
+    issued_revision = None
+    instr_stamp_missing = None
+    if isinstance(raw_policies, dict):
+        missing = 0
+        valid = True
+        for device_id in inventory_ids:
+            row = raw_policies.get(device_id)
+            if row is None:
+                missing += 1
+                continue
+            if not isinstance(row, dict):
+                valid = False
+                break
+            if "instr" not in row:
+                missing += 1
+                continue
+            try:
+                stamp = instructions.validate_stamp(row["instr"])
+            except (instructions.InstructionError, TypeError, ValueError,
+                    RecursionError, OverflowError):
+                valid = False
+                break
+            revision = stamp["policy_revision"]
+            issued_revision = revision if issued_revision is None \
+                else max(issued_revision, revision)
+        if valid:
+            instr_stamp_missing = missing
+        else:
+            issued_revision = None
+
+    return {
+        "fleet_rollup": {
+            "issued_revision": issued_revision,
+            "applied": applied,
+            "states": {key: states[key] for key in sorted(states)},
+        },
+        "instruction_status": {
+            "observed_at": observed_at,
+            "instr_stamp_missing": instr_stamp_missing,
+            "pointer_skew": pointer_skew,
+            "issued_revision_label": ("r%d" % issued_revision
+                                      if issued_revision is not None else None),
+        },
+    }
+
+
+def _instruction_revoked_principals(store):
+    """Validate the durable snapshot before the canonical revocation rule."""
+    if not isinstance(store, dict):
+        return None
+    devices = store.get("devices")
+    if not isinstance(devices, dict) or len(devices) > 20000:
+        return None
+    for device_id, records in devices.items():
+        if (not isinstance(device_id, str)
+                or _INSTRUCTION_DEVICE_ID.fullmatch(device_id) is None
+                or not isinstance(records, dict) or len(records) > 16):
+            return None
+        for secret_name, record in records.items():
+            if (not isinstance(secret_name, str) or len(secret_name) > 64
+                    or not isinstance(record, dict)
+                    or ("revoked" in record
+                        and not isinstance(record["revoked"], bool))):
+                return None
+    return secrets_store.revoked_device_principals(store)
+
+
+def instruction_custody_view(state_dir):
+    """Return the durable count/state/age custody status, if available."""
+    return instruction_keys.read_status_file(os.path.join(
+        state_dir, "instruction-key-status.json"))
 # Public, non-configurable default first-run credential, retained for
 # compatibility. A fresh Console must stay on a trusted network until claimed.
 # The pair is accepted only while no administrator exists and mints a
@@ -439,19 +742,21 @@ def _swarm_page(body, limit, offset):
 
 
 # ---- server-side filter parity for the Devices table (issue #112) --------
-# The console's filter bar offers seven controls: free-text q (already
-# server-side, above) plus six column filters -- management type, agent
-# install (platform), credential, telemetry, peer-quarantine and status --
+# The console's filter bar offers ten controls: free-text q (already
+# server-side, above) plus nine column filters -- management type, agent
+# install (platform), credential, telemetry, peer-quarantine, role, model
+# family, OS family and status --
 # and app.js filters every one of them client-side over the whole fleet
 # (deviceMatchesFilters, webroot/app.js). A paged table can only offer a
 # filter the server can also apply -- otherwise a page would silently
 # disagree with what the filter bar promises. _device_filter_params reads
-# the six off the query string; Handler._row_matches_extra_filters (below,
+# the nine off the query string; Handler._row_matches_extra_filters (below,
 # next to _row_matches_q) applies them, deliberately mirroring
 # deviceMatchesFilters condition-for-condition so the two can never decide
 # a row differently.
 _DEVICE_FILTER_PARAM_NAMES = ("management_type", "platform", "cred",
-                              "telemetry", "peer", "status")
+                              "telemetry", "peer", "role", "model_family",
+                              "os_family", "status")
 
 
 def _device_filter_params(qs):
@@ -466,6 +771,139 @@ def _device_filter_params(qs):
         if raw:
             out[name] = raw
     return out
+
+
+def trusted_target_projection(fleet_row, deployment_type=None):
+    """Derive scheduling facts from server-owned inventory/record inputs.
+
+    The intentionally narrow signature has no heartbeat argument. A caller
+    may pass a row that happens to contain display-only heartbeat fields, but
+    they are ignored and cannot influence any returned targeting fact.
+    """
+    deployment_type = deployment_type or {}
+    return {
+        "model_family": gui_onboard.family(fleet_row.get("model")),
+        "os_family": (fleet_row.get("os_family") or
+                      deployment_type.get("os_family") or ""),
+        "platform_resolved": (deployment_type.get("platform") or
+                              fleet_row.get("platform") or ""),
+    }
+
+
+def deployment_target_snapshot(records):
+    """Project one newest live deployment type per device from a bulk read."""
+    live_states = frozenset((
+        "planned", "applying", "active", "unknown", "drifted",
+        "needs-reconcile",
+    ))
+    newest = {}
+    for position, record in enumerate(records):
+        if not isinstance(record, dict) or record.get("state") not in live_states:
+            continue
+        device_id = record.get("device_id")
+        resolved = record.get("resolved")
+        if not isinstance(device_id, str) or not isinstance(resolved, dict):
+            continue
+        timestamps = record.get("timestamps")
+        timestamps = timestamps if isinstance(timestamps, dict) else {}
+        planned_at = timestamps.get("planned_at")
+        planned_at = planned_at if type(planned_at) is int else -1
+        rank = (planned_at, position)
+        if device_id not in newest or rank > newest[device_id][0]:
+            newest[device_id] = (rank, {
+                "platform": resolved.get("platform"),
+                "os_family": resolved.get("os_family"),
+            })
+    return {device_id: value
+            for device_id, (_rank, value) in newest.items()}
+
+
+_TARGET_CONTEXT_OMITTED = object()
+
+
+def target_row_matches(row, filters, *, now,
+                       quarantined_ids=_TARGET_CONTEXT_OMITTED,
+                       status_key_fn=None, status_level_fn=None,
+                       offline_fn=None):
+    """Pure target-expression predicate shared by HTTP and schedulers.
+
+    Fleet/record projections supply role, model_family, os_family and
+    platform_resolved. Peer and status evaluation need explicit context so a
+    caller cannot accidentally substitute device-authored or client-local
+    state for the server-owned targeting facts.
+    """
+    mtype = filters.get("management_type")
+    if mtype:
+        raw = row.get("management_type")
+        actual = "legacy" if (raw == "legacy_routed" or not raw) else raw
+        if actual != mtype:
+            return False
+    platform = filters.get("platform")
+    if platform:
+        actual = row.get("platform_resolved") or row.get("platform") or ""
+        if platform == "__none":
+            if actual:
+                return False
+        elif actual != platform:
+            return False
+    cred = filters.get("cred")
+    if cred:
+        actual = row.get("credential_profile_id") or ""
+        if cred == "__none":
+            if actual:
+                return False
+        elif actual != cred:
+            return False
+    telemetry = filters.get("telemetry")
+    if telemetry:
+        if row.get("telemetry_enabled") is False:
+            actual = "off"
+        elif (row.get("telemetry_enabled") is True
+              or isinstance(row.get("telemetry_stream_enabled"), bool)):
+            actual = "on"
+        else:
+            actual = "unknown"
+        if actual != telemetry:
+            return False
+    peer = filters.get("peer")
+    if peer:
+        if (quarantined_ids is _TARGET_CONTEXT_OMITTED
+                or quarantined_ids is None):
+            raise ValueError("peer targeting requires quarantine assignments")
+        actual = ("quarantined"
+                  if row.get("device_id") in quarantined_ids
+                  else "not-quarantined")
+        if actual != peer:
+            return False
+    role = filters.get("role")
+    if role:
+        declared = row.get("role") or ""
+        if role == "__none":
+            if declared:
+                return False
+        elif declared != role:
+            return False
+    model_family = filters.get("model_family")
+    if model_family and row.get("model_family") != model_family:
+        return False
+    os_family = filters.get("os_family")
+    if os_family and (row.get("os_family") or "") != os_family:
+        return False
+    status = filters.get("status")
+    if status:
+        if not all((status_key_fn, status_level_fn, offline_fn)):
+            raise ValueError("status targeting requires server status evaluators")
+        if status == "offline":
+            if not offline_fn(row, now):
+                return False
+        elif status == "__attention":
+            key = status_key_fn(row)
+            if status_level_fn(row, key) not in (
+                    "negative", "severe", "warning"):
+                return False
+        elif status_key_fn(row) != status:
+            return False
+    return True
 
 
 # Mirrors app.js's STATUS_LEVELS (the 12-level Magnetic mapping) just far
@@ -483,6 +921,340 @@ _STATUS_LEVELS = {
     "unassigned": "inactive", "not-enrolled": "inactive",
     "offline": "inactive",
 }
+
+
+class ScheduleTargetError(RuntimeError):
+    """Stable public failure for an unavailable targeting authority."""
+
+    def __init__(self, message, *, code="schedule_target_unavailable",
+                 status=503):
+        self.code = code
+        self.status = status
+        super().__init__(message)
+
+
+def _iox_credential_projection(creds):
+    """Hand the IOx controller only the credential fields it admits.
+
+    CredentialStore.get_secrets returns the stored profile whole, and that
+    record carries bookkeeping the controller's closed field set does not
+    admit -- `created_at`, written by set_profile on every profile. Wiring
+    it through unprojected failed EVERY IOx onboard and undeploy with
+    "credential resolver returned unknown fields". Project here rather than
+    widen the controller's allowlist: refusing an unexpected field is the
+    behaviour that should be preserved, and the controller has no business
+    seeing bookkeeping it does not use.
+    """
+    def resolve(reference):
+        record = creds.get_secrets(reference)
+        if not isinstance(record, dict):
+            return record
+        # Empty means absent, and must be dropped rather than forwarded.
+        # CredentialStore stores an unconfigured enable_secret as "", and the
+        # controller's syntax check refuses an empty string outright ("if
+        # value is not None and (not value or ...)") instead of reading it as
+        # unset -- so a profile with no enable secret, which is the normal
+        # case, failed every IOx operation with "invalid IOx credential
+        # syntax". A genuinely missing device_user/device_pass still fails,
+        # correctly, as incomplete credentials.
+        return dict(
+            (key, record[key]) for key in
+            ("name", "device_user", "device_pass", "enable_secret")
+            if record.get(key) not in (None, ""))
+    return resolve
+
+
+def _resolved_with_resources(resolved, resources):
+    """The bound plan a job hands the platform, carrying the record's own
+    ownership claim.
+
+    Only the record used to hold `resources`; the resolved plan a job builds
+    its install request from did not. For IOx that request is validated
+    against a closed field set that REQUIRES the claim, so every install was
+    refused as an incomplete target plan. Copied, never aliased: the record
+    keeps its own list.
+    """
+    # IOx only. The bound plan is also what _bind_evidence rebuilds the
+    # installer environment from, so every other platform keeps the exact
+    # plan it always got; the IOx controller is the one consumer that
+    # requires the claim inside its target.
+    if resolved.get("platform") != "iox":
+        return resolved
+    bound = dict(resolved)
+    bound["resources"] = copy.deepcopy(resources)
+    return bound
+
+
+@contextlib.contextmanager
+def _runner_schedule_role_guard(guard, schedule):
+    """Translate expected role-authority refusals into runner-safe reasons."""
+    if guard is None:
+        raise schedule_runner.ExecutionRefused("role_authority_unavailable")
+    try:
+        with guard(schedule) as policy:
+            yield policy
+    except role_management.RoleManagementError as exc:
+        reason = exc.code if isinstance(exc.code, str) and re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", exc.code) else "role_authority_unavailable"
+        raise schedule_runner.ExecutionRefused(reason) from None
+
+
+def _target_row_assigned_ids(row):
+    ids = row.get("assigned_image_ids")
+    if ids:
+        return ids
+    single = row.get("assigned_image_id")
+    return [single] if single else []
+
+
+def _target_row_has_staged(row, image_id):
+    if image_id in (row.get("errored_image_ids") or ()):
+        return False
+    staged = row.get("staged_image_ids")
+    if staged is not None:
+        return image_id in staged
+    return (row.get("stage_state") == "ready"
+            and row.get("current_image_id") == image_id)
+
+
+def wave_swarm_contradictions(document, info_hashes):
+    """Map device ids seen in *info_hashes* to whether the tracker agrees
+    their download finished.
+
+    False means the tracker still sees bytes outstanding for one of those
+    torrents; True means it saw the device complete every torrent it appears
+    in. A device the tracker has not seen at all is simply absent from the
+    map: the registry is in-memory and empty for one prune horizon after a
+    restart, so its silence is not a claim about that device.
+    """
+    out = {}
+    images = document.get("images") if isinstance(document, dict) else None
+    for image in images if isinstance(images, list) else ():
+        if not isinstance(image, dict) or image.get("info_hash") not in info_hashes:
+            continue
+        peers = image.get("peers")
+        for peer in peers if isinstance(peers, list) else ():
+            if not isinstance(peer, dict):
+                continue
+            device_id = peer.get("device_id")
+            state = peer.get("tracker")
+            if not isinstance(device_id, str) or not isinstance(state, dict):
+                continue
+            left = state.get("left")
+            if type(left) is int and left > 0:
+                out[device_id] = False
+            else:
+                out.setdefault(device_id, True)
+    return out
+
+
+def wave_device_state(kind, heartbeat, image_ids, outcome, corroborated, *,
+                      now):
+    """Classify one preceding-wave target from the evidence that exists.
+
+    Returns "staged", "errored", "missing" or "in_flight". Missing is
+    deliberately not errored: a powered-off or slow-cadence device produces
+    no evidence at all, and counting that as a failure would either raise an
+    alarm nobody can act on or let one dark device hold a wave chain open
+    forever. Corroboration may contradict a staged claim but can never
+    create one, and its absence is never read as "not staged".
+    """
+    if outcome == "error":
+        return "errored"
+    if heartbeat is None:
+        return "missing"
+    if kind == "onboard":
+        # An onboarding wave stages nothing itself; its own outcome is the
+        # only honest completion evidence for the device.
+        if outcome == "ok":
+            return "staged"
+    else:
+        if any(image_id in (heartbeat.get("errored_image_ids") or ())
+               for image_id in image_ids):
+            return "errored"
+        if image_ids and corroborated is not False and all(
+                _target_row_has_staged(heartbeat, image_id)
+                for image_id in image_ids):
+            return "staged"
+    if outcome == "skipped" or not heartbeat.get("last_seen") \
+            or _target_is_offline(heartbeat, now):
+        return "missing"
+    return "in_flight"
+
+
+def _target_status_key(row):
+    onboard_finished_at = row.get("onboard_finished_at")
+    last_seen = row.get("last_seen")
+    job_fresh = bool(onboard_finished_at) and (
+        not last_seen or last_seen < onboard_finished_at)
+    onboard_state = row.get("onboard_state")
+    onboard_action = row.get("onboard_action")
+    if onboard_state in ("queued", "running"):
+        return "undeploying" if onboard_action == "undeploy" else "onboarding"
+    if onboard_state == "done" and onboard_action == "onboard" and job_fresh:
+        return "waiting-heartbeat"
+    if onboard_state == "error" and job_fresh:
+        return "undeploy-failed" if onboard_action == "undeploy" else "onboard-failed"
+    assigned_ids = _target_row_assigned_ids(row)
+    errored_ids = [item for item in (row.get("errored_image_ids") or [])
+                   if item in assigned_ids]
+    if (assigned_ids and not errored_ids and
+            all(_target_row_has_staged(row, item) for item in assigned_ids)):
+        return "deployed"
+    if errored_ids:
+        return "image-failed"
+    if row.get("stage_error") or row.get("stage_state") in ("error", "copy_failed"):
+        return "placement-failed"
+    if row.get("stage_state") == "transferring_to_ios":
+        return "copying"
+    if row.get("stage_state") in ("unassigned", "ready"):
+        return "waiting-staging" if assigned_ids else "unassigned"
+    if row.get("stage_state"):
+        return "staging"
+    if last_seen and not assigned_ids:
+        return "unassigned"
+    if last_seen:
+        return "enrolled"
+    return "not-enrolled"
+
+
+def _target_status_level(row, key):
+    if key == "image-failed":
+        assigned = _target_row_assigned_ids(row)
+        errored = [item for item in (row.get("errored_image_ids") or [])
+                   if item in assigned]
+        ratio = (len(errored) / len(assigned)) if assigned else 0
+        return "severe" if ratio >= 0.5 else "warning"
+    return _STATUS_LEVELS.get(key, "inactive")
+
+
+def _target_is_offline(row, now):
+    return bool(row.get("last_seen")) and (now - row["last_seen"]) >= 600
+
+
+def _merge_target_row(device, policies, heartbeat_by_id, jobs, observed_at,
+                      heartbeat_available, revoked_principals,
+                      deployment_type=None):
+    """Join one trusted targeting row from bounded authority snapshots."""
+    device_id = device.get("device_id")
+    policy = policies.get(device_id, {})
+    heartbeat = heartbeat_by_id.get(device_id, {})
+    row = dict(device)
+    row.update(trusted_target_projection(device, deployment_type))
+    row["assigned_image_id"] = policy.get("approved_image_id")
+    row["assigned_image_ids"] = policy.get("approved_image_ids")
+    for name in ("last_seen", "stage_state", "stage_error", "current_image_id",
+                 "staged_image_ids", "errored_image_ids", "target_fs",
+                 "telemetry_enabled", "telemetry_stream_enabled"):
+        row[name] = heartbeat.get(name)
+    row["heartbeat_model"] = heartbeat.get("model")
+    revocation_available = isinstance(revoked_principals, (set, frozenset))
+    revoked = ("device:%s" % device_id in revoked_principals
+               if revocation_available and isinstance(device_id, str) else None)
+    row["instruction"] = _instruction_device_projection(
+        heartbeat, revoked, observed_at,
+        heartbeat_available=heartbeat_available)
+    job = jobs.get(device_id)
+    if job:
+        row["onboard_action"] = job["action"]
+        row["onboard_state"] = job["state"]
+        row["onboard_finished_at"] = job["finished_at"]
+    return row
+
+
+def resolve_schedule_target(target, *, fleet, catalog, record_store,
+                            role_policy, now, jobs=None,
+                            heartbeat_rows=None, revoked_principals=None):
+    """Resolve a normalized target from one snapshot of each authority.
+
+    The returned diagnostic fields are transient. Callers persist only
+    revision, now, and device_ids in a schedule preview/target snapshot.
+    These independent stores do not provide a cross-store transaction.
+    """
+    if not isinstance(target, dict):
+        raise schedules.ScheduleValidationError("invalid target fields")
+    filters = target.get("filters")
+    explicit = target.get("device_ids")
+    if not isinstance(filters, dict) or not isinstance(explicit, list):
+        raise schedules.ScheduleValidationError("invalid target fields")
+    heartbeat_dependent = bool(set(filters).intersection(
+        ("q", "telemetry", "status")))
+    if "status" in filters and jobs is None:
+        raise ScheduleTargetError(
+            "status targeting requires the management job authority",
+            code="schedule_target_status_unavailable")
+    if heartbeat_dependent and catalog is None:
+        raise ScheduleTargetError(
+            "targeting requires the heartbeat authority",
+            code="schedule_target_heartbeat_unavailable")
+    if role_policy.fail_closed or role_policy.degraded:
+        raise ScheduleTargetError("peer policy is unavailable",
+                                  code="schedule_target_policy_unavailable")
+
+    revision, devices = fleet.snapshot()
+    devices = sorted(devices, key=lambda row: str(row.get("device_id") or ""))
+    records = record_store.list(strict=True) if record_store is not None else []
+    deployment_types = deployment_target_snapshot(records)
+    policies = catalog.list_policies() if catalog is not None else {}
+    if heartbeat_rows is None:
+        heartbeat_rows = catalog.list_devices() if catalog is not None else []
+    heartbeat_available = isinstance(heartbeat_rows, list)
+    if heartbeat_dependent and not heartbeat_available:
+        raise ScheduleTargetError(
+            "targeting requires the heartbeat authority",
+            code="schedule_target_heartbeat_unavailable")
+    heartbeat_by_id = {
+        row.get("device_id"): row for row in (heartbeat_rows or [])
+        if isinstance(row, dict) and isinstance(row.get("device_id"), str)}
+    jobs = jobs or {}
+    quarantined = frozenset(peer_policy.quarantine_device_ids(
+        role_policy.document))
+    drift = role_management.drift_report(
+        fleet, role_policy,
+        limit=len(devices) + len(role_policy.roles.role_of), rows=devices)
+    drift_ids = frozenset(drift["device_ids"])
+    q = filters.get("q")
+    q = q.lower() if isinstance(q, str) and q else None
+    column_filters = {key: value for key, value in filters.items() if key != "q"}
+    explicit_ids = frozenset(explicit)
+
+    def matches(row, chosen_filters):
+        if explicit_ids and row.get("device_id") not in explicit_ids:
+            return False
+        if q:
+            haystack = " ".join(str(row.get(key) or "") for key in
+                                ("device_id", "device_ip", "model",
+                                 "heartbeat_model")).lower()
+            if q not in haystack:
+                return False
+        return target_row_matches(
+            row, chosen_filters, now=now, quarantined_ids=quarantined,
+            status_key_fn=_target_status_key,
+            status_level_fn=_target_status_level,
+            offline_fn=_target_is_offline)
+
+    matched = []
+    missing_os_family = 0
+    role_drift = 0
+    without_os = {key: value for key, value in column_filters.items()
+                  if key != "os_family"}
+    for device in devices:
+        row = _merge_target_row(
+            device, policies, heartbeat_by_id, jobs, now,
+            heartbeat_available, revoked_principals,
+            deployment_types.get(device.get("device_id"), {}))
+        if not row.get("os_family") and matches(row, without_os):
+            missing_os_family += 1
+        if not matches(row, column_filters):
+            continue
+        device_id = row["device_id"]
+        matched.append(device_id)
+        if device_id in drift_ids:
+            role_drift += 1
+    return {"revision": revision, "now": int(now), "device_ids": matched,
+            "missing_os_family": missing_os_family,
+            "role_drift": role_drift,
+            "quarantined_ids": sorted(quarantined.intersection(matched))}
 
 
 # ---- persisted deploy logs (written by OnboardService._persist_log) -------
@@ -963,11 +1735,1316 @@ class _ConsoleServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
         super().process_request_thread(request, client_address)
 
 
+class _OnboardSubmissionAdapter(object):
+    """One admission path for browser and authenticated local submissions."""
+
+    _HEX16 = re.compile(r"^[0-9a-f]{16}$")
+    _HEX32 = re.compile(r"^[0-9a-f]{32}$")
+    _RECORD_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+    _TERMINAL = frozenset(("done", "error", "cancelled"))
+
+    def __init__(self, fleet, creds, record_store, onboard, iox_controller,
+                 plan_fn, apply_preflight_fn, owned_resources_fn,
+                 teardown_resolved_fn, audit_path, now_fn, teardown_plan_fn=None):
+        self.fleet = fleet
+        self.creds = creds
+        self.record_store = record_store
+        self.onboard = onboard
+        self.iox_controller = iox_controller
+        self._plan = plan_fn
+        self._teardown_plan = teardown_plan_fn or plan_fn
+        self._apply_preflight = apply_preflight_fn
+        self._owned_resources = owned_resources_fn
+        self._teardown_resolved = teardown_resolved_fn
+        self.audit_path = audit_path
+        self._now = now_fn
+
+    @staticmethod
+    def _bounded_identifier(value, limit):
+        if not isinstance(value, str) or not value:
+            return False
+        try:
+            raw = value.encode("utf-8")
+        except UnicodeError:
+            return False
+        return (len(raw) <= limit and
+                not any(ord(character) < 32 or 127 <= ord(character) <= 159
+                        for character in value))
+
+    def _audit(self, event, category, action=None, target=None, detail=None,
+               actor=None, result="ok"):
+        if self.audit_path is None:
+            return
+        try:
+            audit.append_event(
+                self.audit_path, event, actor=actor, category=category,
+                action=action, target=target, detail=detail, result=result)
+        except Exception:
+            pass
+
+    def prevalidate_device(self, device_id, action, actor=None, audit_fn=None):
+        audit_emit = audit_fn or self._audit
+
+        def reject(status, error):
+            audit_emit(
+                "%s_start" % action, "onboard", action="start",
+                target=device_id, actor=actor, result="fail", detail=error)
+            return status, {"error": error}
+
+        if self.onboard is None:
+            return 404, {"error": "not found"}
+        if action not in ("onboard", "undeploy"):
+            return reject(400, "invalid action")
+        if not self._bounded_identifier(device_id, 128):
+            return reject(400, "bad device id")
+        if self.fleet is None or self.fleet.get_device(device_id) is None:
+            return reject(404, "no such device")
+        return None
+
+    def submit_device(self, device_id, action, body, actor=None, audit_fn=None,
+                      require_iox=False):
+        """Validate authority, prepare callbacks, and enqueue exactly once.
+
+        The returned pair is the existing HTTP status and JSON body. Local
+        control uses the same pair and only changes its wire projection.
+        """
+        audit_emit = audit_fn or self._audit
+
+        def reject(status, error):
+            audit_emit(
+                "%s_start" % action, "onboard", action="start",
+                target=device_id, actor=actor, result="fail", detail=error)
+            return status, {"error": error}
+
+        invalid = self.prevalidate_device(
+            device_id, action, actor=actor, audit_fn=audit_emit)
+        if invalid is not None:
+            return invalid
+        device = self.fleet.get_device(device_id)
+        if not isinstance(body, dict):
+            return reject(400, "request body must be an object")
+
+        if "log" in body and type(body["log"]) is not bool:
+            return reject(400, "log must be a bool")
+        log = "on" if body.get("log", False) else "off"
+        if "force" in body and type(body["force"]) is not bool:
+            return reject(400, "force must be a bool")
+        force = body.get("force", False) is True
+        if action == "onboard" and force:
+            return reject(400, "force is valid only for undeploy")
+        telemetry = body.get("telemetry", True) is not False
+        stream = body.get("telemetry_stream", False) is True
+        env_extra = {
+            "TELEMETRY": "on" if telemetry else "off",
+            "TELEMETRY_STREAM": "on" if stream else "off",
+            "IRIS_LOG": log,
+        }
+        env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
+        env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
+        undeploy_env = {"IRIS_LOG": log}
+        resolved = None
+        record_ref = {}
+        selected_record_id = None
+        prepare = None
+        pre_apply = None
+        on_success = None
+
+        if action == "onboard":
+            if self.record_store is not None:
+                try:
+                    plan = self._plan(device_id, device)
+                except ValueError as exc:
+                    return reject(409, str(exc))
+                if require_iox and plan["resolved"].get("platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+                if plan["resolved"].get("platform") == "router":
+                    try:
+                        existing = self.record_store.recoverable_for_device(
+                            device_id, strict=True)
+                    except deployment_records.RecordStoreUnreadable as exc:
+                        return reject(
+                            503, "%s; the console cannot safely inspect "
+                            "deployment authority" % exc)
+                    except ValueError as exc:
+                        return reject(409, str(exc))
+                    if existing is not None:
+                        return reject(
+                            409, "router already has a %s deployment record; "
+                            "undeploy it before onboarding again — if this "
+                            "device was replaced, undeploy with force, or "
+                            "delete and re-add it" %
+                            existing.get("state", "recorded"))
+                resolved = plan["resolved"]
+
+                def prepare():
+                    record_id = self.record_store.create({
+                        "controller_id": "iris", "device_id": device_id,
+                        "inventory_revision": self.fleet.revision(),
+                        "plan_hash": plan["plan_hash"],
+                        "resolved": plan["resolved"],
+                        "preflight": {"status": "pending"},
+                        "resources": self._owned_resources(
+                            plan["resolved"]),
+                    })["record_id"]
+                    record_ref["id"] = record_id
+                    return record_id
+
+                def pre_apply(evidence):
+                    final_plan = self._apply_preflight(plan, evidence)
+                    record_id = record_ref.get("id")
+                    if not record_id:
+                        raise ValueError("planned record is unavailable")
+                    resources = self._owned_resources(final_plan["resolved"])
+                    self.record_store.update_planned(
+                        record_id, plan_hash=final_plan["plan_hash"],
+                        resolved=final_plan["resolved"], preflight=evidence,
+                        resources=resources)
+                    # The IOx controller admits an install target only with the
+                    # ownership claim its record holds, and the bound plan is
+                    # what the request is built from -- so it has to carry the
+                    # resources, not just the record. Without this the install
+                    # request went out with no resources at all and the
+                    # controller refused it as an incomplete target plan.
+                    return _resolved_with_resources(
+                        final_plan["resolved"], resources)
+            else:
+                try:
+                    degraded_plan = self._plan(device_id, device)
+                except ValueError as exc:
+                    return reject(409, str(exc))
+                if require_iox and degraded_plan["resolved"].get(
+                        "platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+                if degraded_plan["resolved"].get("platform") == "router":
+                    return reject(
+                        503, "router onboarding requires the deployment "
+                        "record store")
+        elif self.record_store is not None:
+            if force:
+                try:
+                    degraded_plan = self._teardown_plan(device_id, device)
+                except ValueError as exc:
+                    return reject(409, str(exc))
+                resolved = degraded_plan["resolved"]
+                if require_iox and resolved.get("platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+                undeploy_env["IRIS_FORCE_AGENT_ONLY"] = "1"
+                if resolved.get("platform") != "iox":
+                    def on_success():
+                        self.record_store.retire_device(
+                            device_id,
+                            "forced agent-only teardown; the record no longer "
+                            "describes this device")
+                audit_emit(
+                    "undeploy_forced", "onboard", action="start",
+                    target=device_id, actor=actor, result="ok",
+                    detail="forced agent-footprint teardown; VPG/NAT left "
+                           "untouched, any deployment record abandoned once "
+                           "the teardown succeeds")
+            else:
+                try:
+                    record = self.record_store.recoverable_for_device(
+                        device_id, strict=True)
+                except deployment_records.RecordStoreUnreadable as exc:
+                    return reject(
+                        503, "%s; the console cannot tell whether this device "
+                        "has a deployment until the file is repaired" % exc)
+                except ValueError as exc:
+                    return reject(
+                        409, "%s; retry with force to remove the agent "
+                        "footprint only" % exc)
+                if record is None:
+                    return reject(
+                        409, "no deployment record for this device; adopt it "
+                        "first, then undeploy, or retry with force to remove "
+                        "the agent footprint only")
+                selected_record_id = record["record_id"]
+                try:
+                    resolved = self._teardown_resolved(record)
+                except ValueError as exc:
+                    try:
+                        self.record_store.transition(
+                            record["record_id"], "needs-reconcile")
+                    except ValueError:
+                        pass
+                    return reject(409, str(exc))
+                if require_iox and resolved.get("platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+
+                def prepare():
+                    record_ref["id"] = record["record_id"]
+                    return record["record_id"]
+        else:
+            try:
+                degraded_plan = self._teardown_plan(device_id, device)
+            except ValueError as exc:
+                return reject(409, str(exc))
+            if require_iox and degraded_plan["resolved"].get(
+                    "platform") != "iox":
+                return reject(409, "device is not an IOx target")
+            if degraded_plan["resolved"].get("platform") == "router":
+                return reject(
+                    503, "router undeploy requires an active deployment "
+                    "record")
+
+        # The IOx controller validates its request target against a closed
+        # field set that REQUIRES the ownership claim -- and that target is
+        # built from this resolved plan BEFORE the controller ever calls
+        # prepare/pre_apply. Attaching the claim in pre_apply was too late:
+        # it ran inside the controller, after validation had already refused
+        # the request as an incomplete target plan. Every onboard and
+        # undeploy path converges here, including a forced teardown with no
+        # record to read the claim back from.
+        if resolved is not None and resolved.get("platform") == "iox":
+            resolved = _resolved_with_resources(
+                resolved, self._owned_resources(resolved))
+        try:
+            job_id = self.onboard.start(
+                device_id, action=action, resolved=resolved, prepare=prepare,
+                pre_apply=pre_apply, on_success=on_success,
+                record_id=selected_record_id,
+                teardown_mode=(
+                    "none" if action == "onboard" else
+                    "force_agent_only" if force else "recorded"),
+                env_extra=(env_extra if action == "onboard" else undeploy_env))
+        except ValueError as exc:
+            if record_ref.get("id") and action == "onboard":
+                try:
+                    self.record_store.transition(
+                        record_ref["id"], "needs-reconcile")
+                except ValueError:
+                    pass
+            return reject(409, str(exc))
+        audit_emit(
+            "%s_start" % action, "onboard", action="start",
+            target=device_id, actor=actor, detail="job %s" % job_id)
+        return 200, {"job_id": job_id}
+
+    def _credential_ref(self, device_id):
+        device = self.fleet.get_device(device_id) if self.fleet else None
+        if device is None:
+            raise ValueError("no such device")
+        reference = device.get("credential_profile_id") or ""
+        profiles = self.creds.list_profiles() if self.creds is not None else []
+        if (not self._bounded_identifier(reference, 256) or
+                not any(isinstance(profile, dict) and
+                        profile.get("id") == reference for profile in profiles)):
+            raise ValueError("device has no credential profile")
+        return reference
+
+    @staticmethod
+    def _job_response(job, accepted=False, timed_out=False):
+        if job["state"] in _OnboardSubmissionAdapter._TERMINAL:
+            result_code = job.get("result_code")
+            allowed = frozenset((0, 2, 3, 4, 5, 130))
+            recovery_code = job.get("recovery_code")
+            returncode = job.get("returncode")
+            if (type(result_code) is not int or result_code not in allowed or
+                    (job["state"] == "done") != (result_code == 0) or
+                    (job["state"] == "cancelled") != (result_code == 130) or
+                    (returncode is not None and type(returncode) is not int) or
+                    (recovery_code is not None and
+                     (type(recovery_code) is not int or
+                      recovery_code not in allowed))):
+                raise ValueError("invalid terminal job result")
+            return {
+                "terminal": True, "state": job["state"],
+                "job_id": job["id"], "record_id": job.get("record_id"),
+                "result_code": result_code,
+                "returncode": returncode,
+                "recovery_code": recovery_code,
+            }
+        response = {
+            "job_id": job["id"], "state": job["state"],
+            "terminal": False, "record_id": job.get("record_id"),
+            "result_code": None,
+        }
+        if accepted:
+            response = {"accepted": True, **response}
+        if timed_out:
+            response["wait_timed_out"] = True
+        return response
+
+    def _observe_job(self, job_id, wait, timeout, accepted=False):
+        deadline = time.monotonic() + timeout
+        while True:
+            job = self.onboard.get_job(job_id) if self.onboard else None
+            if job is None:
+                return {"error": "job not found", "job_id": job_id}
+            if job["state"] in self._TERMINAL:
+                return self._job_response(job)
+            if not wait:
+                return self._job_response(job, accepted=accepted)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._job_response(job, timed_out=True)
+            time.sleep(min(0.05, remaining))
+
+    def _validate_control_request(self, request):
+        if not isinstance(request, dict):
+            raise ValueError("invalid request")
+        operation = request.get("operation")
+        required = {"operation", "wait"}
+        optional = set()
+        if operation in ("submit-install", "submit-uninstall", "recover"):
+            required.add("device_id")
+            if operation == "submit-uninstall":
+                optional.add("force_agent_only")
+        elif operation == "job":
+            required.add("job_id")
+        elif operation == "reconcile-enabled":
+            required.update(("record_id", "transaction_id", "revision",
+                             "acknowledge_external_resolution"))
+        else:
+            raise ValueError("unknown operation")
+        if request.get("wait") is True:
+            optional.add("wait_timeout")
+        if set(request) - required - optional or required - set(request):
+            raise ValueError("invalid request shape")
+        if type(request["wait"]) is not bool:
+            raise ValueError("invalid wait flag")
+        if "wait_timeout" in request:
+            value = request["wait_timeout"]
+            if type(value) is not int or not 1 <= value <= 7200:
+                raise ValueError("invalid wait timeout")
+        if "device_id" in request and not self._bounded_identifier(
+                request["device_id"], 128):
+            raise ValueError("invalid device id")
+        if "job_id" in request and (not isinstance(request["job_id"], str)
+                or not self._HEX16.fullmatch(request["job_id"])):
+            raise ValueError("invalid job id")
+        if "record_id" in request and (not isinstance(request["record_id"], str)
+                or not self._RECORD_ID.fullmatch(request["record_id"])):
+            raise ValueError("invalid record id")
+        if "transaction_id" in request and (
+                not isinstance(request["transaction_id"], str) or
+                not self._HEX32.fullmatch(request["transaction_id"])):
+            raise ValueError("invalid transaction id")
+        if "revision" in request and (
+                type(request["revision"]) is not int or
+                request["revision"] < 0):
+            raise ValueError("invalid revision")
+        if "force_agent_only" in request and request["force_agent_only"] is not True:
+            raise ValueError("invalid force flag")
+        if operation == "reconcile-enabled" and request[
+                "acknowledge_external_resolution"] is not True:
+            raise ValueError("reconciliation acknowledgement is required")
+        return operation
+
+    def dispatch(self, request):
+        """Validate one closed local request and return its exact projection."""
+        try:
+            operation = self._validate_control_request(request)
+            wait = request["wait"]
+            timeout = request.get("wait_timeout", 7200)
+            if operation == "job":
+                return self._observe_job(
+                    request["job_id"], wait, timeout, accepted=False)
+            if operation in ("submit-install", "submit-uninstall"):
+                action = ("onboard" if operation == "submit-install" else
+                          "undeploy")
+                status, response = self.submit_device(
+                    request["device_id"], action,
+                    {"force": request.get("force_agent_only", False)},
+                    actor="local-control", require_iox=True)
+                if status != 200:
+                    return {"error": response.get("error", "request rejected")}
+                return self._observe_job(
+                    response["job_id"], wait, timeout, accepted=not wait)
+            if operation == "recover":
+                device_id = request["device_id"]
+                credential_ref = self._credential_ref(device_id)
+                authority = self.iox_controller.summary_for_device(device_id)
+                sources = (authority.get("iox_verification_obligations", []) +
+                           authority.get("iox_sessions", []))
+                boards = {
+                    item.get("board_identity") for item in sources
+                    if isinstance(item, dict) and item.get("board_identity")}
+                if len(boards) != 1:
+                    raise ValueError("recovery target board is ambiguous")
+                board = next(iter(boards))
+                historical_records = set()
+                for item in sources:
+                    if (not isinstance(item, dict) or
+                            item.get("board_identity") != board):
+                        continue
+                    value = item.get("record_id")
+                    if value is None:
+                        continue
+                    if (not isinstance(value, str) or
+                            self._RECORD_ID.fullmatch(value) is None):
+                        raise ValueError("invalid recovery record")
+                    historical_records.add(value)
+                if len(historical_records) > 1:
+                    raise ValueError("recovery target record is ambiguous")
+                historical_record = (next(iter(historical_records))
+                                     if historical_records else None)
+                job_id = self.onboard.start_iox_recovery(
+                    device_id, credential_ref, board,
+                    record_id=historical_record)
+            else:
+                record = self.record_store.get(request["record_id"], strict=True)
+                if record is None:
+                    raise ValueError("unknown record")
+                journal = record.get("iox_verification")
+                if (not isinstance(journal, dict) or
+                        journal.get("record_id") != request["record_id"] or
+                        journal.get("controller_id") != getattr(
+                            self.iox_controller, "controller_id", None) or
+                        journal.get("transaction_id") != request["transaction_id"] or
+                        journal.get("revision") != request["revision"] or
+                        journal.get("phase") != "indeterminate"):
+                    raise ValueError("stale reconciliation binding")
+                device_id = record.get("device_id")
+                credential_ref = self._credential_ref(device_id)
+                board = journal.get("board_identity")
+                if not self._bounded_identifier(board, 128):
+                    raise ValueError("invalid reconciliation board")
+                job_id = self.onboard.start_iox_reconciliation(
+                    device_id, credential_ref, board, request["record_id"],
+                    request["transaction_id"], request["revision"], True)
+            return self._observe_job(job_id, wait, timeout, accepted=not wait)
+        except (KeyError, TypeError, ValueError,
+                deployment_records.RecordStoreUnreadable):
+            return {"error": "request rejected"}
+        except Exception:
+            return {"error": "authority unavailable"}
+
+
+class _ScheduledExecutor(object):
+    """Execute the two stage-only schedule verbs against live authorities."""
+
+    _ACTIVE_OCCURRENCES = frozenset(("pending", "running", "interrupted"))
+    _ACTIVE_JOBS = frozenset(("queued", "running"))
+    _TERMINAL_RECORDS = frozenset(("removed", "superseded", "abandoned"))
+    _UNBOUND = object()
+
+    def __init__(self, *, schedule_store, occurrence_store, receipt_store,
+                 role_guard, role_policy_snapshot, fleet, secrets_path,
+                 assignment_writer, submission, onboard, record_store,
+                 now_fn=time.time, catalog=None, heartbeat_fn=None,
+                 swarm_fn=None):
+        self.schedule_store = schedule_store
+        self.occurrences = occurrence_store
+        self.receipts = receipt_store
+        self.role_guard = role_guard
+        self.role_policy_snapshot = role_policy_snapshot
+        self.fleet = fleet
+        self.secrets_path = secrets_path
+        self.assignment_writer = assignment_writer
+        self.submission = submission
+        self.onboard = onboard
+        self.record_store = record_store
+        self._now = now_fn
+        # Wave-gate evidence only. The heartbeat authority is required to
+        # count staging at all; the swarm view is optional corroboration.
+        self.catalog = catalog
+        self.heartbeat_fn = heartbeat_fn
+        self.swarm_fn = swarm_fn
+        self.local_validator = schedule_validation.LocalScheduleValidator(
+            fleet=fleet,
+            plan_fn=(submission._plan if submission is not None
+                     else lambda _device_id, _device: {}),
+            artifacts_dir=(getattr(onboard, "artifacts_dir", "")
+                           if onboard is not None else ""),
+            max_concurrent=(getattr(onboard, "max_concurrent", 0)
+                            if onboard is not None else 0),
+            service_available=(onboard is not None and submission is not None))
+
+    def _iox_artifact_reason(self, device_id, plan):
+        return self.local_validator._iox_artifact_reason(device_id, plan)
+
+    def _annotate_quarantine(self, schedule, snapshot, device_ids):
+        occurrence_id = snapshot.get("occurrence_id")
+        if not occurrence_id or not device_ids:
+            return
+        quarantined = set(snapshot.get("quarantined_ids") or ())
+        # Early-bound targets may no longer match the fire-time filter. Read
+        # the complete quarantine authority so their occurrence fact remains
+        # accurate too; per-device admission still rechecks under the role lock.
+        try:
+            policy = self.role_policy_snapshot()
+            quarantined = set(peer_policy.quarantine_device_ids(
+                policy.document))
+        except Exception:
+            pass
+        if set(device_ids) <= quarantined:
+            self.occurrences.annotate_all_targets_quarantined(
+                occurrence_id, len(device_ids), now=int(self._now()))
+
+    def _preceding_occurrence(self, schedule_id, not_after):
+        """The preceding schedule's newest occurrence at or before this slot.
+
+        Missed slots never bound a target and never ran, so they carry no
+        evidence and are skipped rather than counted as an empty success.
+        """
+        rows = [row for row in self.occurrences.list(schedule_id)
+                if row["state"] != "missed" and row["scheduled_at"] <= not_after]
+        return rows[-1] if rows else None
+
+    def _wave_heartbeats(self):
+        rows = self.heartbeat_fn() if callable(self.heartbeat_fn) else None
+        if not isinstance(rows, list):
+            raise schedule_runner.ExecutionRefused(
+                "staging_evidence_unavailable")
+        return {row.get("device_id"): row for row in rows
+                if isinstance(row, dict) and isinstance(row.get("device_id"), str)}
+
+    def _wave_corroboration(self, image_ids):
+        """The tracker's own view of the wave's torrents, when it has one.
+
+        Every failure here is silence, not a verdict: an unreadable catalog
+        entry, an unreachable tracker or an unparsable document all mean the
+        gate simply has nothing to corroborate with.
+        """
+        if not image_ids or not callable(self.swarm_fn) or self.catalog is None:
+            return {}
+        wanted = set()
+        try:
+            for image_id in image_ids:
+                entry = self.catalog.get_image(image_id)
+                info_hash = (entry or {}).get("info_hash_hex")
+                if info_hash:
+                    wanted.add(info_hash)
+            if not wanted:
+                return {}
+            document = self.swarm_fn()
+            if isinstance(document, (bytes, bytearray, str)):
+                document = json.loads(document)
+        except (OSError, TypeError, ValueError, RecursionError, OverflowError):
+            return {}
+        return wave_swarm_contradictions(document, wanted)
+
+    def wave_counts(self, schedule, occurrence):
+        """Count how much of a gate's preceding occurrence actually landed.
+
+        This is an operational signal, not a security boundary. It reads the
+        heartbeat authority the Devices table already reads and, where the
+        tracker can corroborate it, the swarm's own view of the same
+        torrents. Without the heartbeat authority it refuses instead of
+        guessing; without the tracker it still counts, because absent
+        corroboration is not evidence against staging.
+        """
+        after = schedule["after"]
+        counts = {"schedule_id": after["schedule_id"], "occurrence_id": None,
+                  "total": 0, "staged": 0, "errored": 0, "missing": 0}
+        preceding = self._preceding_occurrence(
+            after["schedule_id"], occurrence["scheduled_at"])
+        if preceding is None:
+            return counts
+        targets = preceding["target_snapshot"]["device_ids"]
+        counts["occurrence_id"] = preceding["id"]
+        counts["total"] = len(targets)
+        kind = preceding["schedule"]["kind"]
+        image_ids = list(preceding["schedule"]["payload"].get("image_ids") or ())
+        heartbeats = self._wave_heartbeats()
+        corroborated = self._wave_corroboration(image_ids)
+        now = int(self._now())
+        for device_id in targets:
+            outcome = self.receipts.get(preceding["id"], device_id)
+            state = wave_device_state(
+                kind, heartbeats.get(device_id), image_ids,
+                (outcome or {}).get("status"), corroborated.get(device_id),
+                now=now)
+            if state in schedules.WAVE_COUNTS:
+                counts[state] += 1
+        return counts
+
+    def validate(self, schedule, snapshot, phase):
+        """Validate local blast radius and artifacts without device I/O."""
+        device_ids = self.local_validator._ids(snapshot)
+        self._annotate_quarantine(schedule, snapshot, device_ids)
+        return self.local_validator.validate(schedule, snapshot, phase)
+
+    @staticmethod
+    def _provenance(schedule, occurrence, device_id):
+        return deployment_records.validate_schedule_provenance({
+            "schema_version": 1,
+            "schedule_id": schedule["id"],
+            "schedule_rev": occurrence["schedule_rev"],
+            "occurrence_id": occurrence["id"],
+            "device_id": device_id,
+        }, device_id)
+
+    def _strict_revocation(self):
+        try:
+            state = secrets_store.load(
+                self.secrets_path, require_existing=True)
+            revoked = _instruction_revoked_principals(state)
+        except (OSError, TypeError, ValueError, RecursionError,
+                OverflowError) as exc:
+            raise schedule_runner.ExecutionRefused(
+                "revocation_unavailable") from exc
+        if not isinstance(revoked, (set, frozenset)):
+            raise schedule_runner.ExecutionRefused(
+                "revocation_unavailable")
+        return frozenset(revoked)
+
+    @staticmethod
+    def _plan_authority_projection(plan):
+        return {key: copy.deepcopy(value) for key, value in plan.items()
+                if key not in ("inventory_revision", "plan_hash")}
+
+    @classmethod
+    def _same_authoritative_plan(cls, current, expected):
+        """Allow stored preflight evidence while binding every base input."""
+        current = cls._plan_authority_projection(current)
+        expected = cls._plan_authority_projection(expected)
+        for key, value in current.items():
+            if key == "resolved":
+                resolved = expected.get("resolved")
+                if not isinstance(value, dict) or not isinstance(resolved, dict):
+                    return False
+                if any(resolved.get(name) != item
+                       for name, item in value.items()):
+                    return False
+            elif expected.get(key) != value:
+                return False
+        return True
+
+    def _check_live(self, schedule, occurrence, device_id, attempt,
+                    policy, revoked, expected_plan=None,
+                    expected_registered_at=_UNBOUND,
+                    expected_registration_id=_UNBOUND):
+        now = int(self._now())
+        if now < occurrence["scheduled_at"]:
+            raise schedule_runner.ExecutionRefused("window_not_open")
+        if now >= occurrence["window_end"]:
+            raise schedule_runner.ExecutionRefused("window_closed")
+        live = self.schedule_store.get(schedule["id"])
+        if (live is None
+                or live["generation"] != occurrence["schedule_generation"]
+                or any(live.get(key) != schedule.get(key)
+                       for key in schedules.DEFINITION_KEYS)):
+            raise schedule_runner.ExecutionRefused("schedule_changed")
+        current = self.occurrences.get(occurrence["id"])
+        if (current is None or current["state"] not in self._ACTIVE_OCCURRENCES
+                or current["schedule_generation"] !=
+                    occurrence["schedule_generation"]
+                or device_id not in current["target_snapshot"]["device_ids"]):
+            raise schedule_runner.ExecutionRefused("schedule_changed")
+        receipt = self.receipts.get(occurrence["id"], device_id)
+        if (receipt is None or receipt["attempt"] != attempt
+                or receipt["status"] in schedules.TERMINAL_RECEIPT_STATES):
+            raise schedule_runner.ExecutionRefused("conflict")
+        device = self.fleet.get_device(device_id) if self.fleet else None
+        if device is None:
+            raise schedule_runner.ExecutionRefused("vanished")
+        if "device:" + device_id in revoked:
+            raise schedule_runner.ExecutionRefused("device_revoked")
+        if (expected_registration_id is not self._UNBOUND
+                and device.get("registration_id") != expected_registration_id):
+            raise schedule_runner.ExecutionRefused("conflict")
+        if (expected_registration_id is self._UNBOUND
+                and expected_registered_at is not self._UNBOUND
+                and device.get("registered_at") != expected_registered_at):
+            raise schedule_runner.ExecutionRefused("conflict")
+        if expected_plan is not None:
+            try:
+                current_plan = self.submission._plan(device_id, device)
+            except ValueError:
+                raise schedule_runner.ExecutionRefused("conflict") from None
+            if not self._same_authoritative_plan(current_plan, expected_plan):
+                raise schedule_runner.ExecutionRefused("conflict")
+            artifact_reason = self._iox_artifact_reason(
+                device_id, current_plan)
+            if artifact_reason is not None:
+                raise schedule_runner.ExecutionRefused(artifact_reason)
+        return device
+
+    @staticmethod
+    def _target_registration_id(occurrence, device_id, prior=None, record=None):
+        """Return the identity frozen with a new occurrence target.
+
+        A legacy occurrence can recover an already prepared receipt or
+        deployment record that has its own durable identity. It cannot safely
+        admit fresh work after a delete/re-add, so callers must record an
+        explicit identity-unavailable refusal instead of learning a
+        replacement.
+        """
+        bindings = occurrence.get("target_snapshot", {}).get(
+            "registration_ids")
+        value = ((bindings or {}).get(device_id)
+                 if isinstance(bindings, dict) else None)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+        for row in (prior or {}, record or {}):
+            value = row.get("fleet_registration_id")
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+                return value
+        return None
+
+    @contextlib.contextmanager
+    def _authority(self, schedule, occurrence, device_id, attempt):
+        if self.role_guard is None or self.fleet is None or not self.secrets_path:
+            raise schedule_runner.ExecutionRefused(
+                "schedule_authority_unavailable")
+        with self.role_guard(schedule) as policy:
+            with assignment_service.membership_guard(self.fleet):
+                with secrets_store.store_lock(self.secrets_path):
+                    revoked = self._strict_revocation()
+                    yield policy, revoked
+
+    @staticmethod
+    def _map_exception(exc):
+        if isinstance(exc, schedule_runner.ExecutionRefused):
+            return exc.reason
+        if isinstance(exc, assignment_service.MissingFleetDevice):
+            return "vanished"
+        if isinstance(exc, assignment_service.AssignmentAuthorityUnavailable):
+            return "assignment_authority_unavailable"
+        if isinstance(exc, deployment_records.RecordStoreUnreadable):
+            return "deployment_authority_unavailable"
+        return "execution_failed"
+
+    @staticmethod
+    def _terminal(reason, *, error=False, **metadata):
+        return {"status": "error" if error else "skipped",
+                "reason": reason, **metadata}
+
+    @staticmethod
+    def _assignment_outcome(result, prior, *, peer_quarantined=False):
+        if isinstance(result, assignment_service.ScheduledAssignmentRefusal):
+            before = prior.get("before_image_ids", [])
+            return _ScheduledExecutor._terminal(
+                result.reason, error=result.reason == "execution_failed",
+                after_image_ids=result.after_ids,
+                removed_image_ids=[image_id for image_id in before
+                                   if image_id not in result.after_ids])
+        return {
+            "status": "ok",
+            "reason": ("unchanged" if result.before_ids == result.after_ids
+                       else "assigned"),
+            "after_image_ids": result.after_ids,
+            "removed_image_ids": [
+                image_id for image_id in prior.get("before_image_ids", ())
+                if image_id not in result.after_ids],
+            **({"notes": ["peer_quarantined"]}
+               if peer_quarantined else {}),
+        }
+
+    def _dispatch_assignment(self, schedule, occurrence, device_id, prior):
+        actor = "schedule:" + schedule["id"]
+        target_registration_id = self._target_registration_id(
+            occurrence, device_id, prior)
+        if target_registration_id is None:
+            return self._terminal("identity_unavailable")
+        if "manual_generation" not in prior:
+            try:
+                with self.role_guard(schedule) as policy:
+                    captured = self.assignment_writer.capture_schedule_state(
+                        device_id)
+                    peer_quarantined = device_id in set(
+                        peer_policy.quarantine_device_ids(policy.document))
+            except Exception as exc:
+                reason = self._map_exception(exc)
+                return self._terminal(
+                    reason, error=reason.endswith("unavailable"))
+            if captured["fleet_registration_id"] != target_registration_id:
+                return self._terminal("conflict")
+            return {"status": "prepared", "reason": "assignment_prepared",
+                    "manual_generation": captured["manual_generation"],
+                    "fleet_registered_at": captured["fleet_registered_at"],
+                    "fleet_registration_id": captured[
+                        "fleet_registration_id"],
+                    "before_image_ids": captured["before_image_ids"],
+                    **({"notes": ["peer_quarantined"]}
+                       if peer_quarantined else {})}
+
+        policy_holder = {}
+
+        @contextlib.contextmanager
+        def commit_guard():
+            try:
+                with secrets_store.store_lock(self.secrets_path):
+                    revoked = self._strict_revocation()
+                    self._check_live(
+                        schedule, occurrence, device_id, prior["attempt"],
+                        policy_holder.get("policy"), revoked,
+                        expected_registered_at=prior.get(
+                            "fleet_registered_at"),
+                        expected_registration_id=prior.get(
+                            "fleet_registration_id", self._UNBOUND))
+                    yield
+            except schedule_runner.ExecutionRefused:
+                raise
+
+        context = assignment_service.ScheduledAssignmentContext(
+            schedule_id=schedule["id"], schedule_rev=occurrence["schedule_rev"],
+            occurrence_id=occurrence["id"],
+            expected_manual_generation=prior["manual_generation"],
+            fleet_registered_at=prior.get("fleet_registered_at"),
+            fleet_registration_id=prior.get("fleet_registration_id"),
+            commit_guard=commit_guard,
+            require_existing_authority=True)
+        try:
+            with self.role_guard(schedule) as policy:
+                policy_holder["policy"] = policy
+                result = self.assignment_writer.apply(
+                    device_id, schedule["payload"]["image_ids"], actor=actor,
+                    mode=schedule["payload"]["mode"],
+                    expect_image_ids=prior.get("before_image_ids"),
+                    retry_conflict=True, plural=True,
+                    scheduled_context=context)
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(
+                reason, error=reason.endswith("unavailable")
+                or reason == "execution_failed")
+        return self._assignment_outcome(
+            result, prior, peer_quarantined=(
+                "peer_quarantined" in prior.get("notes", ())))
+
+    def _job_result(self, job, *, closed_reason=None):
+        if job is None:
+            return None
+        metadata = {"job_id": job["id"]}
+        if job.get("record_id"):
+            metadata["record_id"] = job["record_id"]
+        state = job.get("state")
+        if state == "queued":
+            return {"status": "submitted", "reason": "queued", **metadata}
+        if state == "running":
+            return {"status": "running", "reason": "running", **metadata}
+        if state == "done":
+            return {"status": "ok", "reason": "onboarded", **metadata}
+        reason = job.get("admission_reason")
+        if not isinstance(reason, str) or not re.fullmatch(
+                r"[a-z][a-z0-9_]{0,63}", reason):
+            reason = closed_reason if state == "cancelled" and closed_reason \
+                else "cancelled" if state == "cancelled" \
+                else "onboarding_failed"
+        return {"status": "skipped" if state == "cancelled" else "error",
+                "reason": reason, **metadata}
+
+    def _records_for_provenance(self, provenance):
+        if self.record_store is None:
+            raise deployment_records.RecordStoreUnreadable(
+                "deployment record authority unavailable")
+        rows = self.record_store.list(provenance["device_id"], strict=True)
+        return [row for row in rows
+                if row.get("schedule_provenance") == provenance]
+
+    @staticmethod
+    def _current_owned_record(rows):
+        current = [row for row in rows if row.get("state") not in
+                   _ScheduledExecutor._TERMINAL_RECORDS]
+        if len(current) > 1:
+            raise ValueError("multiple occurrence-owned deployment records")
+        return current[0] if current else None
+
+    def _onboard_callbacks(self, schedule, occurrence, device_id, prior,
+                           provenance, plan, resume_record_id,
+                           fleet_registered_at,
+                           fleet_registration_id=_UNBOUND):
+        local = threading.local()
+        record_ref = {}
+
+        @contextlib.contextmanager
+        def authority_guard(phase):
+            try:
+                with self._authority(
+                        schedule, occurrence, device_id,
+                        prior["attempt"]) as authority:
+                    local.phase = phase
+                    local.authority = authority
+                    local.checked = False
+                    yield
+            except schedule_runner.ExecutionRefused as exc:
+                raise gui_onboard.ScheduledAdmissionError(exc.reason) from None
+            except gui_onboard.ScheduledAdmissionError:
+                raise
+            except Exception as exc:
+                raise gui_onboard.ScheduledAdmissionError(
+                    self._map_exception(exc)) from None
+            finally:
+                for name in ("phase", "authority", "checked"):
+                    if hasattr(local, name):
+                        delattr(local, name)
+
+        def authority_check(phase):
+            if getattr(local, "phase", None) != phase:
+                raise gui_onboard.ScheduledAdmissionError(
+                    "schedule_authority_unavailable")
+            policy, revoked = local.authority
+            try:
+                self._check_live(
+                        schedule, occurrence, device_id, prior["attempt"],
+                        policy, revoked, expected_plan=plan,
+                        expected_registered_at=fleet_registered_at,
+                        expected_registration_id=fleet_registration_id)
+            except schedule_runner.ExecutionRefused as exc:
+                raise gui_onboard.ScheduledAdmissionError(exc.reason) from None
+            local.checked = True
+
+        def authorize(tag, attempt, existing):
+            if (not getattr(local, "checked", False)
+                    or tag != provenance or attempt != prior["attempt"]):
+                return "conflict"
+            if int(self._now()) >= occurrence["window_end"]:
+                return "window_closed"
+            if (resume_record_id is not None and
+                    (existing or {}).get("record_id") != resume_record_id):
+                return "conflict"
+            return None
+
+        candidate = {
+            "controller_id": "iris", "device_id": device_id,
+            "fleet_registered_at": fleet_registered_at,
+            "inventory_revision": plan["inventory_revision"],
+            "plan_hash": plan["plan_hash"],
+            "resolved": plan["resolved"],
+            "preflight": {"status": "pending"},
+            "resources": self.submission._owned_resources(plan["resolved"]),
+        }
+        if fleet_registration_id is not self._UNBOUND \
+                and fleet_registration_id is not None:
+            candidate["fleet_registration_id"] = fleet_registration_id
+
+        def prepare():
+            admitted = self.record_store.admit_scheduled(
+                candidate, provenance=provenance, attempt=prior["attempt"],
+                authorize=authorize, resume_record_id=resume_record_id,
+                router=plan["resolved"].get("platform") == "router")
+            if admitted["status"] not in ("created", "resumed"):
+                raise gui_onboard.ScheduledAdmissionError(
+                    admitted.get("reason") or "record_recovery_required")
+            record = admitted["record"]
+            record_ref["id"] = record["record_id"]
+            record_ref["recovered_applying"] = (
+                record.get("state") == "unknown" and
+                (record.get("recovery") or {}).get("interrupted_from") ==
+                "applying")
+            if admitted.get("predecessor_record_id"):
+                record_ref["predecessor"] = admitted[
+                    "predecessor_record_id"]
+            return record["record_id"]
+
+        def pre_apply(evidence):
+            final_plan = self.submission._apply_preflight(plan, evidence)
+            record_id = record_ref.get("id")
+            if not record_id:
+                raise ValueError("planned record is unavailable")
+            update = (self.record_store.update_scheduled_recovery
+                      if record_ref.get("recovered_applying") else
+                      self.record_store.update_planned)
+            resources = self.submission._owned_resources(
+                final_plan["resolved"])
+            kwargs = {
+                "plan_hash": final_plan["plan_hash"],
+                "resolved": final_plan["resolved"],
+                "preflight": evidence,
+                "resources": resources,
+            }
+            if record_ref.get("recovered_applying"):
+                kwargs["provenance"] = provenance
+            update(record_id, **kwargs)
+            return _resolved_with_resources(
+                final_plan["resolved"], resources)
+
+        return authority_guard, authority_check, prepare, pre_apply, record_ref
+
+    def _onboard_precondition(self, device_id, occurrence_id):
+        device = self.fleet.get_device(device_id) if self.fleet else None
+        if device is None:
+            return None, None, "vanished"
+        ensure_registration_id = getattr(
+            self.fleet, "ensure_registration_id", None)
+        if callable(ensure_registration_id):
+            device = ensure_registration_id(device_id)
+        if device.get("management_type", "legacy_routed") == "legacy_routed":
+            return device, None, "unclassified_management_type"
+        own_jobs = (self.onboard.jobs_for_occurrence(
+            occurrence_id, device_id) if self.onboard else [])
+        if own_jobs:
+            return device, None, self._job_result(own_jobs[-1])
+        latest = (self.onboard.latest_jobs_by_device().get(device_id)
+                  if self.onboard else None)
+        if latest and latest.get("state") in self._ACTIVE_JOBS:
+            return device, None, "device_busy"
+        try:
+            plan = self.submission._plan(device_id, device)
+            self.submission._credential_ref(device_id)
+        except ValueError as exc:
+            reason = ("unclassified_management_type"
+                      if str(exc) == "unclassified_management_type"
+                      else "credential_unavailable"
+                      if "credential profile" in str(exc)
+                      else "invalid_onboard_target")
+            return device, None, reason
+        if not self.onboard.host_ip:
+            return device, None, "server_address_unconfigured"
+        reason = self._iox_artifact_reason(device_id, plan)
+        return device, plan, reason
+
+    def _dispatch_onboard(self, schedule, occurrence, device_id, prior):
+        provenance = self._provenance(schedule, occurrence, device_id)
+        try:
+            rows = self._records_for_provenance(provenance)
+            owned = self._current_owned_record(rows)
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(reason, error=True)
+        if owned is not None and owned.get("state") == "active":
+            result = {"status": "ok", "reason": "onboarded",
+                      "record_id": owned["record_id"]}
+            for field in ("fleet_registered_at", "fleet_registration_id"):
+                if field in owned:
+                    result[field] = owned[field]
+            return result
+        if self.onboard is None or self.submission is None \
+                or self.record_store is None:
+            return self._terminal("onboarding_service_unavailable", error=True)
+        target_registration_id = self._target_registration_id(
+            occurrence, device_id, prior, owned)
+        if target_registration_id is None:
+            return self._terminal("identity_unavailable")
+        device, plan, problem = self._onboard_precondition(
+            device_id, occurrence["id"])
+        if isinstance(problem, dict):
+            return problem
+        if problem is not None:
+            return self._terminal(problem)
+        resume_record_id = (owned["record_id"] if owned is not None and
+                            owned.get("state") in ("planned", "unknown")
+                            else None)
+        fleet_registered_at = device.get("registered_at")
+        fleet_registration_id = device.get("registration_id")
+        receipt_registration_id = prior.get(
+            "fleet_registration_id", self._UNBOUND)
+        record_registration_id = (owned or {}).get(
+            "fleet_registration_id", self._UNBOUND)
+        for bound_registration_id in (
+                target_registration_id,
+                receipt_registration_id, record_registration_id):
+            if (bound_registration_id is not self._UNBOUND and
+                    bound_registration_id != fleet_registration_id):
+                return self._terminal("conflict")
+        receipt_registered_at = prior.get(
+            "fleet_registered_at", self._UNBOUND)
+        record_registered_at = (owned or {}).get(
+            "fleet_registered_at", self._UNBOUND)
+        if (receipt_registration_id is self._UNBOUND and
+                receipt_registered_at is not self._UNBOUND and
+                receipt_registered_at != fleet_registered_at):
+            return self._terminal("conflict")
+        if (owned is not None and
+                record_registration_id is self._UNBOUND and
+                record_registered_at != fleet_registered_at):
+            return self._terminal("conflict")
+        if (owned is None and
+                receipt_registration_id is self._UNBOUND and
+                receipt_registered_at is self._UNBOUND):
+            result = {
+                "status": "prepared", "reason": "onboard_prepared",
+                "fleet_registered_at": fleet_registered_at,
+            }
+            if fleet_registration_id is not None:
+                result["fleet_registration_id"] = fleet_registration_id
+            return result
+        expected_registration_id = (
+            receipt_registration_id
+            if receipt_registration_id is not self._UNBOUND else
+            record_registration_id
+            if record_registration_id is not self._UNBOUND else
+            target_registration_id)
+        if resume_record_id is not None:
+            interrupted_from = (owned.get("recovery") or {}).get(
+                "interrupted_from")
+            if interrupted_from == "applying":
+                admitted_plan = copy.deepcopy(plan)
+                admitted_plan["inventory_revision"] = owned[
+                    "inventory_revision"]
+                admitted_plan["plan_hash"] = owned["plan_hash"]
+                admitted_plan["resolved"] = copy.deepcopy(owned["resolved"])
+                if not self._same_authoritative_plan(plan, admitted_plan):
+                    return self._terminal("conflict")
+                plan = admitted_plan
+        callbacks = self._onboard_callbacks(
+            schedule, occurrence, device_id, prior, provenance, plan,
+            resume_record_id, fleet_registered_at,
+            expected_registration_id)
+        authority_guard, authority_check, prepare, pre_apply, record_ref = callbacks
+        try:
+            scheduled_resolved = plan["resolved"]
+            if scheduled_resolved.get("platform") == "iox":
+                scheduled_resolved = _resolved_with_resources(
+                    scheduled_resolved,
+                    self.submission._owned_resources(scheduled_resolved))
+            job_id = self.onboard.start(
+                device_id, action="onboard", resolved=scheduled_resolved,
+                prepare=prepare, pre_apply=pre_apply,
+                env_extra={
+                    "TELEMETRY": ("on" if schedule["payload"]["telemetry"]
+                                  else "off"),
+                    "TELEMETRY_STREAM": (
+                        "on" if schedule["payload"]["telemetry_stream"]
+                        else "off"),
+                    "IRIS_TELEMETRY": (
+                        "on" if schedule["payload"]["telemetry"] else "off"),
+                    "IRIS_TELEMETRY_STREAM": (
+                        "on" if schedule["payload"]["telemetry_stream"]
+                        else "off"),
+                }, teardown_mode="none", schedule_context=provenance,
+                authority_guard=authority_guard,
+                authority_check=authority_check)
+        except gui_onboard.ScheduledAdmissionError as exc:
+            if exc.reason == "queue_full":
+                return {"status": "deferred", "reason": exc.reason,
+                        "retry_at": int(self._now()) + 1}
+            return self._terminal(
+                exc.reason, error=exc.reason.endswith("unavailable")
+                or exc.reason == "execution_failed")
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(reason, error=True)
+        context = self.onboard.get_schedule_context(job_id)
+        if context != provenance:
+            return self._terminal("device_busy")
+        result = self._job_result(self.onboard.get_job(job_id))
+        if result is None:
+            return {"status": "deferred", "reason": "job_state_unavailable",
+                    "retry_at": int(self._now()) + 1}
+        if record_ref.get("predecessor"):
+            result["predecessor_record_id"] = record_ref["predecessor"]
+        result["fleet_registered_at"] = fleet_registered_at
+        if fleet_registration_id is not None:
+            result["fleet_registration_id"] = fleet_registration_id
+        return result
+
+    def dispatch(self, schedule, occurrence, device_id, prior_receipt):
+        if schedule.get("kind") == "assign":
+            return self._dispatch_assignment(
+                schedule, occurrence, device_id, prior_receipt)
+        if schedule.get("kind") == "onboard":
+            return self._dispatch_onboard(
+                schedule, occurrence, device_id, prior_receipt)
+        raise schedule_runner.ExecutionRefused("invalid_schedule_kind")
+
+    def _closed_reason(self, occurrence):
+        now = int(self._now())
+        if now >= occurrence["window_end"]:
+            return "window_closed"
+        live = self.schedule_store.get(occurrence["schedule_id"])
+        if (live is None or
+                live["generation"] != occurrence["schedule_generation"] or
+                any(live.get(key) != occurrence["schedule"].get(key)
+                    for key in schedules.DEFINITION_KEYS)):
+            return "schedule_changed"
+        return None
+
+    def _reconcile_onboard(self, receipt, occurrence):
+        provenance = self._provenance(
+            occurrence["schedule"], occurrence, receipt["device_id"])
+        try:
+            rows = self._records_for_provenance(provenance)
+            owned = self._current_owned_record(rows)
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(reason, error=True)
+        if owned is not None:
+            state = owned.get("state")
+            if state == "active":
+                result = {"status": "ok", "reason": "onboarded",
+                          "record_id": owned["record_id"]}
+                for field in (
+                        "fleet_registered_at", "fleet_registration_id"):
+                    if field in owned:
+                        result[field] = owned[field]
+                return result
+            if state in ("planned", "unknown"):
+                if (state == "unknown" and
+                        owned.get("resolved", {}).get("platform") == "router"):
+                    return self._terminal("router_requires_undeploy")
+                return {"status": "retry", "reason": "resume_required",
+                        "manual_generation": 0,
+                        "predecessor_record_id": owned["record_id"]}
+            if state == "applying":
+                return {"status": "deferred", "reason": "record_in_progress",
+                        "retry_at": int(self._now()) + 1}
+            return self._terminal("existing_deployment")
+        foreign = [row for row in self.record_store.list(
+            receipt["device_id"], strict=True)
+            if row.get("state") not in self._TERMINAL_RECORDS]
+        if any(row.get("state") == "unknown" for row in foreign):
+            return self._terminal("foreign_interrupted_record")
+        if foreign:
+            return self._terminal("existing_deployment")
+        return {"status": "retry", "reason": "no_admitted_work",
+                "manual_generation": 0}
+
+    def poll(self, receipt):
+        occurrence = self.occurrences.get(receipt["occurrence_id"])
+        if occurrence is None:
+            return self._terminal("schedule_state_unavailable", error=True)
+        if occurrence["schedule"]["kind"] == "assign":
+            if ("manual_generation" not in receipt
+                    or "before_image_ids" not in receipt):
+                return self._terminal("conflict", error=True)
+            schedule = occurrence["schedule"]
+            context = assignment_service.ScheduledAssignmentContext(
+                schedule_id=schedule["id"],
+                schedule_rev=occurrence["schedule_rev"],
+                occurrence_id=occurrence["id"],
+                expected_manual_generation=receipt["manual_generation"],
+                fleet_registered_at=receipt.get("fleet_registered_at"),
+                fleet_registration_id=receipt.get("fleet_registration_id"),
+                require_existing_authority=True)
+            try:
+                result = self.assignment_writer.reconcile_schedule_result(
+                    receipt["device_id"], schedule["payload"]["image_ids"],
+                    mode=schedule["payload"]["mode"],
+                    expect_image_ids=receipt["before_image_ids"],
+                    retry_conflict=True, scheduled_context=context)
+            except Exception as exc:
+                reason = self._map_exception(exc)
+                return self._terminal(
+                    reason, error=reason.endswith("unavailable")
+                    or reason == "execution_failed")
+            if result is None:
+                # The runner supplies its exact closure/refusal reason when it
+                # handles this retry. No claim means no assignment was admitted.
+                return {"status": "retry", "reason": "no_admitted_work",
+                        "manual_generation": receipt["manual_generation"],
+                        "before_image_ids": receipt["before_image_ids"]}
+            return self._assignment_outcome(
+                result, receipt,
+                peer_quarantined=(
+                    "peer_quarantined" in receipt.get("notes", ())))
+        if occurrence["schedule"]["kind"] != "onboard":
+            return self._terminal("conflict", error=True)
+        job = self.onboard.get_job(receipt.get("job_id")) \
+            if self.onboard is not None and receipt.get("job_id") else None
+        if job is None and self.onboard is not None:
+            matches = self.onboard.jobs_for_occurrence(
+                receipt["occurrence_id"], receipt["device_id"])
+            job = matches[-1] if matches else None
+        if job is not None:
+            return self._job_result(
+                job, closed_reason=self._closed_reason(occurrence))
+        return self._reconcile_onboard(receipt, occurrence)
+
+    def cancel_queued(self, occurrence_id, job_ids):
+        if self.onboard is not None:
+            self.onboard.cancel_queued(
+                set(job_ids), occurrence_id=occurrence_id)
+
+    def acknowledge(self, receipt):
+        occurrence = self.occurrences.get(receipt["occurrence_id"])
+        if (occurrence is None or occurrence["schedule"]["kind"] != "assign"
+                or "manual_generation" not in receipt):
+            return
+        self.assignment_writer.acknowledge_schedule_result(
+            receipt["occurrence_id"], receipt["device_id"],
+            terminal_status=receipt["status"])
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time, keyfile=None,
                  management_token_file=None,
-                 management_previous_token_file=None):
+                 management_previous_token_file=None, iox_controller=None,
+                 schedule_wake=None):
     login_limiter = gui_auth.LoginRateLimiter()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
@@ -1000,17 +3077,102 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 os.path.join(state_dir, "peer-policy.lkg.json"),
                 os.path.join(state_dir, "peer-enforcement.json"))
 
+    schedule_store = schedules.ScheduleStore(policy_state_dir())
+    schedule_occurrence_store = schedules.OccurrenceStore(policy_state_dir())
+    schedule_receipt_store = schedules.ReceiptStore(policy_state_dir())
+    scheduled_executor = None
+
+    def wake_schedule_runner():
+        if schedule_wake is not None:
+            try:
+                schedule_wake()
+            except Exception:
+                # The durable mutation already committed. The runner's bounded
+                # idle recheck remains authoritative if an in-process wake
+                # notification fails.
+                pass
+
+    def role_coordinator():
+        """Build the shared direct-store coordinator for this state owner."""
+        if fleet is None:
+            return None
+        auth_path, lkg_path, enforcement_path = policy_paths()
+
+        def acked_revision():
+            status = peer_enforcement.read_status(enforcement_path) or {}
+            return status
+
+        return role_management.RoleCoordinator(
+            fleet, auth_path, lkg_path, now_fn=now_fn,
+            acked_revision_fn=acked_revision, schedule_store=schedule_store)
+
+    def instruction_heartbeat_snapshot(unavailable_ok=True):
+        if catalog is None:
+            return None
+        if not unavailable_ok:
+            return catalog.list_devices()
+        try:
+            return catalog.list_devices()
+        except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
+                RecursionError, OverflowError):
+            return None
+
+    def instruction_heartbeat_for_device(device_id):
+        """Read one heartbeat shard without turning evidence loss into 5xx."""
+        if catalog is None:
+            return {}, False
+        reader = getattr(catalog, "get_device", None)
+        if not callable(reader):
+            return {}, False
+        try:
+            heartbeat = reader(device_id)
+        except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
+                RecursionError, OverflowError):
+            return {}, False
+        if heartbeat is None:
+            return {}, True
+        if not isinstance(heartbeat, dict):
+            return {}, False
+        return heartbeat, True
+
+    def instruction_raw_policy_snapshot(unavailable_ok=True):
+        if catalog is None:
+            return None
+        reader = getattr(catalog, "list_raw_policies", None)
+        if not unavailable_ok:
+            return reader() if callable(reader) else catalog.list_policies()
+        try:
+            # list_raw_policies is the Task 19 public bulk seam.  The fallback
+            # keeps this isolated commit usable before the producer commit is
+            # integrated; the final tree always takes the raw branch.
+            return reader() if callable(reader) else catalog.list_policies()
+        except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
+                RecursionError, OverflowError):
+            return None
+
+    def instruction_revocation_snapshot():
+        try:
+            return _instruction_revoked_principals(
+                secrets_store.load(app.secrets_path))
+        except (secrets_store.StoreCorruptError, OSError, TypeError,
+                ValueError, RecursionError, OverflowError):
+            return None
+
     def policy_view():
         """Return the GUI-safe, count-only policy and tracker-status view."""
         auth_path, lkg_path, enforcement_path = policy_paths()
         result = peer_policy.load_policy(auth_path, lkg_path)
         doc = result.document
         status = peer_enforcement.read_status(enforcement_path) or {}
+        preflight = peer_enforcement.mutual_origin_from_status(status)
+        origin_status = origin_qos.read_status(os.path.join(
+            policy_state_dir(), "origin-qos.json")) or {}
         conflicts = status.get("conflicts")
         if not isinstance(conflicts, list):
             conflicts = []
-        types = sorted({str(c.get("reason")) for c in conflicts
-                        if isinstance(c, dict) and isinstance(c.get("reason"), str)})
+        types = sorted({c["reason"] for c in conflicts
+                        if isinstance(c, dict) and isinstance(c.get("reason"), str) and c.get("reason") in
+                        {"shared_permit_deny"}})
         effect = status.get("last_effect")
         # Reconciler effects are aggregate counters. Do not pass through an
         # arbitrary tracker document (which could accidentally grow an address).
@@ -1043,31 +3205,132 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "conflict_count": len(conflicts), "conflict_types": types,
             "last_effect": safe_effect,
             "last_error": status.get("last_error")
-                if isinstance(status.get("last_error"), str) else None,
-            "last_operation_exported_revision": status.get("last_operation_exported_revision")
-                if isinstance(status.get("last_operation_exported_revision"), int)
-                and not isinstance(status.get("last_operation_exported_revision"), bool) else 0,
+                if isinstance(status.get("last_error"), str) and re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{0,63}", status["last_error"]) else None,
+            "last_operation_exported_revision": peer_policy.effective_acked(doc, status),
+            "mutual_origin": {
+                "mode": preflight["mode"],
+                "newly_denied_device_count": preflight[
+                    "newly_denied_device_count"],
+            },
         }
+
+        def origin_count(name):
+            value = origin_status.get(name)
+            return value if isinstance(value, int) \
+                and not isinstance(value, bool) and value >= 0 else 0
+
+        origin_last_reconciled = origin_status.get("last_reconciled_at")
+        if not isinstance(origin_last_reconciled, (int, float)) \
+                or isinstance(origin_last_reconciled, bool):
+            origin_last_reconciled = None
+        try:
+            origin_last_error = origin_qos.validate_error_code(
+                origin_status.get("last_error"))
+        except origin_qos.OriginQosError:
+            origin_last_error = None
+        origin_view = {
+            "state": origin_status.get("state")
+                if origin_status.get("state") in origin_qos.STATES else None,
+            "global_option_count": origin_count("global_option_count"),
+            "target_download_count": origin_count("target_download_count"),
+            "applied_download_count": origin_count("applied_download_count"),
+            "last_reconciled_at": origin_last_reconciled,
+            "last_error": origin_last_error,
+        }
+        compiled_roles = result.roles
+        role_members = {name: len(compiled_roles.members_by_role[name])
+                        for name in sorted(compiled_roles.members_by_role)}
+        rows = fleet.snapshot()[1] if fleet is not None else []
+        drift = (role_management.drift_report(fleet, result, rows=rows)
+                 if fleet is not None
+                 else {"count": 0, "device_ids": [], "truncated": False})
+        acked = peer_policy.effective_acked(doc, status)
+        pending = sum(event["revision"] > acked
+                      for event in doc.get("operation_outbox", []))
+        heartbeat_rows = instruction_heartbeat_snapshot()
+        raw_policies = instruction_raw_policy_snapshot()
+        revoked_principals = instruction_revocation_snapshot()
+        custody = instruction_custody_view(policy_state_dir())
+        observed_at = now_fn()
+        instruction = _instruction_fleet_projection(
+            rows, heartbeat_rows, raw_policies, revoked_principals, observed_at)
         return {"schema": doc.get("schema"), "revision": doc.get("revision"),
                 "degraded": result.degraded, "fail_closed": result.fail_closed,
                 "quarantine": {"reserved": True,
                                "description": "reserved: fully isolate an assigned device"},
                 "quarantine_assignments": sorted(
-                    device_id for device_id, acl in doc.get("assignments", {}).items()
-                    if acl == peer_policy.RESERVED_QUARANTINE),
-                "enforcement": enforcement}
+                    peer_policy.quarantine_device_ids(doc)),
+                "roles_supported": True,
+                "roles_present": doc.get("roles_present", False),
+                "roles": {"defined": len(role_members),
+                          "restricted": len(compiled_roles.restricted),
+                          "members": role_members},
+                "role_drift": drift,
+                "outbox": {"unacknowledged": pending,
+                           "capacity": peer_policy.OUTBOX_CAP},
+                "fleet_rollup": instruction["fleet_rollup"],
+                "instruction_status": instruction["instruction_status"],
+                "enforcement": enforcement, "origin_qos": origin_view,
+                "instruction_keys": custody}
 
-    def quarantine_assignment_ids():
-        """The bare set of device ids under quarantine intent -- what the
-        console's peer-policy filter (?peer=quarantined/not-quarantined)
-        needs, without policy_view()'s enforcement-status read. Read ONLY
-        when a caller actually asks for the peer filter (_device_page), so a
-        /api/devices poll that never touches it costs nothing extra."""
+    def role_policy_snapshot():
+        """The authoritative policy result used by preview drift checks."""
         auth_path, lkg_path, _ = policy_paths()
-        result = peer_policy.load_policy(auth_path, lkg_path)
-        return {device_id for device_id, acl in
-                result.document.get("assignments", {}).items()
-                if acl == peer_policy.RESERVED_QUARANTINE}
+        return peer_policy.load_policy(auth_path, lkg_path)
+
+    def deployment_type_snapshot():
+        """One bulk read of live deployment facts, keyed by device id.
+
+        The newest applicable record wins. Terminal removed, superseded and
+        abandoned records describe history and cannot classify a current
+        targeting row. Only the small trusted type projection crosses into
+        the Devices response.
+        """
+        if record_store is None:
+            return {}
+        records = record_store.list(strict=True)
+        return deployment_target_snapshot(records)
+
+    def schedule_target_resolver(target, role_policy=None):
+        """Resolve through the same authorities as the Devices filter bar."""
+        if fleet is None:
+            raise ScheduleTargetError("fleet state is unavailable")
+        return resolve_schedule_target(
+            target, fleet=fleet, catalog=catalog, record_store=record_store,
+            role_policy=role_policy or role_policy_snapshot(),
+            now=int(now_fn()),
+            jobs=(onboard.latest_jobs_by_device()
+                  if onboard is not None else None),
+            heartbeat_rows=instruction_heartbeat_snapshot(unavailable_ok=False),
+            revoked_principals=instruction_revocation_snapshot())
+
+    def runner_schedule_target_resolver(schedule):
+        """Runner seam: accept a complete stored schedule, return rich facts."""
+        if not isinstance(schedule, dict) or not isinstance(
+                schedule.get("target"), dict):
+            raise schedules.ScheduleValidationError("invalid schedule target")
+        resolved = schedule_target_resolver(copy.deepcopy(schedule["target"]))
+        # schedule_role_guard holds the membership guard across this resolver
+        # and ScheduleRunner's durable claim.  Bind each fired target to its
+        # current registration identity before that guard is released, so a
+        # later delete/re-add cannot turn an already-claimed occurrence into
+        # work for the replacement device.
+        device_ids = (schedule["preview"]["device_ids"]
+                      if schedule["target"].get("bind") == "early"
+                      else resolved["device_ids"])
+        bindings = {}
+        ensure_registration_id = getattr(fleet, "ensure_registration_id", None)
+        for device_id in device_ids:
+            device = fleet.get_device(device_id)
+            if device is not None and callable(ensure_registration_id):
+                device = ensure_registration_id(device_id)
+            registration_id = (device or {}).get("registration_id")
+            bindings[device_id] = (
+                registration_id if isinstance(registration_id, str)
+                and re.fullmatch(r"[0-9a-f]{32}", registration_id) else None)
+        resolved["registration_ids"] = bindings
+        return resolved
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
@@ -1100,6 +3363,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self.close_connection = True
                     return False
                 requested_path = urlsplit(self.path).path
+                self._iris_management_wire = requested_path.startswith(
+                    "/internal/v1/")
                 management_only = (self.command, requested_path) in (
                     ("GET", "/internal/v1/console-certificate"),
                     ("POST", "/internal/v1/authorizations"))
@@ -1135,6 +3400,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      "Route not found")
                     self.close_connection = True
                     return False
+                route = api_routes.match("management", self.command, self.path)
+                self._task7_session_contract = (self.command, route.path) in {
+                    ("GET", "/internal/v1/peer-policy"),
+                    ("GET", "/internal/v1/peer-policy/roles"),
+                    ("GET", "/internal/v1/peer-policy/roles/export-csv"),
+                    ("POST", "/internal/v1/peer-policy/roles/import-csv"),
+                    ("GET", "/internal/v1/peer-policy/explain"),
+                    ("GET", "/internal/v1/devices/{device_id}/effective-qos"),
+                    ("PUT", "/internal/v1/peer-policy/roles/{name}"),
+                    ("DELETE", "/internal/v1/peer-policy/roles/{name}"),
+                    ("PUT", "/internal/v1/peer-policy/qos"),
+                    ("POST", "/internal/v1/devices/{device_id}/role"),
+                    ("POST", "/internal/v1/devices/bulk-role"),
+                }
                 self.path = mapped
             # A background view poll (GET + "X-IRIS-Poll: 1", sent by app.js's
             # periodic refreshers) validates the session WITHOUT refreshing its
@@ -1236,8 +3515,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             except Exception:
                 pass
 
-        def _plan(self, device_id, device):
+        def _plan(self, device_id, device, onboarding=True):
             """Resolve immutable, non-secret installer input before token minting."""
+            if onboarding:
+                device = gui_onboard.validate_legacy_onboard_target(device, device_id)
             management_type = device.get("management_type", "legacy_routed")
             if management_type == "legacy_routed":
                 management_type = "routed"
@@ -1251,9 +3532,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     and not router_management_type:
                 raise ValueError("Catalyst 8000 models require management_type "
                                  "router-routed or router-nat")
-            if (platform == "router") != router_management_type:
+            if platform == "router" and not router_management_type:
                 raise ValueError("platform router requires management_type "
                                  "router-routed or router-nat")
+            # Guest Shell (router) or the IOx app: both attach to the
+            # IRIS-owned VirtualPortGroup, so either may plan a router row.
+            # Nothing else has a VPG recipe.
+            if router_management_type and platform not in ("router", "iox"):
+                raise ValueError("management_type %s requires platform router "
+                                 "or iox" % management_type)
             if platform == "router" and device.get("model") and not re.match(
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
                 raise ValueError("router modes support the Catalyst 8000 family only; "
@@ -1357,6 +3644,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             directory. Every other management type here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
+            iox = resolved.get("platform") == "iox"
+            if iox and resolved.get("management_type") not in (
+                    "router-routed", "router-nat"):
+                return [{"kind": "iox-app", "ownership": "iris-created"}]
             management_type = resolved["management_type"]
             if management_type == "xr-host":
                 # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
@@ -1409,6 +3700,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                    if resolved.get("file_prompt_quiet_preexisting") == "1"
                                    else "iris-added-preserved")},
                 ] + resources
+                if iox:
+                    # An IOx app on a router rides the same IRIS-owned
+                    # VirtualPortGroup and NAT footprint, but
+                    # device/iox/install.sh writes no EEM applets,
+                    # guest-share files or logging discriminator and runs no
+                    # Guest Shell, so the record claims the app instead of
+                    # those -- exactly what device/iox/uninstall.sh removes.
+                    resources = [
+                        resource for resource in resources
+                        if resource["kind"] not in (
+                            "eem-applets", "agent-files",
+                            "logging-discriminator", "guestshell")
+                    ] + [{"kind": "iox-app", "ownership": "iris-created"}]
                 if management_type == "router-nat":
                     outside_ownership = ("iris-created"
                                          if resolved.get("nat_outside_owned") in (True, 1, "1")
@@ -1429,6 +3733,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             """Authorize router teardown strictly from record-owned resources."""
             resolved = dict(record.get("resolved") or {})
             if resolved.get("platform") != "router":
+                if resolved.get("platform") == "iox":
+                    # The controller's final recorded-uninstall authorization
+                    # compares this immutable ownership binding after live
+                    # board discovery and predecessor recovery.
+                    resolved["resources"] = copy.deepcopy(
+                        record.get("resources") or [])
                 return resolved
             # A raw KeyError here would escape do_POST as an unhandled 500
             # instead of the clean 409 + needs-reconcile transition the
@@ -1617,6 +3927,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     pass
             return self.client_address[0]
 
+        def _session_refusal(self):
+            if getattr(self, "_task7_session_contract", False):
+                api_problem.send(self, 401, "console-session-required", "Console session required")
+            else:
+                self._json(401, {"error": "unauthorized"})
+
         def _require_session_csrf(self, unread_body=0):
             """Return the session info for a valid session+CSRF request, else send
             the error response and return None. *unread_body* is the declared
@@ -1626,7 +3942,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             info = app.session_info(self._sid())
             if info is None:
                 self._drain_body(unread_body)
-                self._json(401, {"error": "unauthorized"})
+                self._session_refusal()
                 return None
             if not _csrf_ok(self.headers.get("X-CSRF-Token", ""), info["csrf"]):
                 self._drain_body(unread_body)
@@ -1649,6 +3965,371 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(400, {"error": "bad json"})
                 return None
             return data
+
+        def _schedule_problem(self, status, code, title, *, headers=None,
+                              **extensions):
+            api_problem.send(self, status, code, title, headers=headers,
+                             **extensions)
+
+        def _schedule_session(self, *, mutation=False, unread_body=0):
+            try:
+                info = app.session_info(self._sid())
+            except (secrets_store.StoreCorruptError, OSError, ValueError,
+                    TypeError, RecursionError, OverflowError):
+                self._drain_body(unread_body)
+                self._schedule_problem(503, "credential-store-unavailable",
+                                       "Credential store unavailable")
+                return None
+            if info is None:
+                self._drain_body(unread_body)
+                self._schedule_problem(401, "console-session-required",
+                                       "Console session required")
+                return None
+            if mutation and not _csrf_ok(
+                    self.headers.get("X-CSRF-Token", ""), info["csrf"]):
+                self._drain_body(unread_body)
+                self._schedule_problem(403, "csrf-validation-failed",
+                                       "CSRF validation failed")
+                return None
+            return info
+
+        def _schedule_json_body(self, raw):
+            try:
+                data = json.loads(raw or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                self._schedule_problem(400, "invalid-request",
+                                       "Invalid request")
+                return None
+            if not isinstance(data, dict):
+                self._schedule_problem(400, "invalid-request",
+                                       "Invalid request")
+                return None
+            return data
+
+        @staticmethod
+        def _schedule_target_facts(resolved):
+            if resolved is None:
+                return None
+            return {key: resolved[key] for key in
+                    ("missing_os_family", "role_drift", "quarantined_ids")}
+
+        @staticmethod
+        def _schedule_actor_exists(actor, admin):
+            if actor == "cli:iris-schedule":
+                return True
+            if actor.startswith("console:") and admin is not None:
+                return actor[len("console:"):] == admin.get("username")
+            return False
+
+        def _schedule_views(self, rows):
+            admin = gui_auth.get_admin(app._load())
+            now = int(now_fn())
+            views = []
+            for row in rows:
+                view = dict(row)
+                view["etag"] = schedules.schedule_etag(row)
+                view["creator_exists"] = self._schedule_actor_exists(
+                    row["created_by"], admin)
+                # The current or next slot, computed by the same authority the
+                # runner fires from. A console that recomputed weekly local
+                # time itself would be a second, quietly divergent answer to
+                # the one question an operator plans a window from.
+                view["next_fire"] = schedules.occurrence_slot(row, now)
+                views.append(view)
+            return views
+
+        def _schedule_error(self, exc, *, raced=False):
+            if raced and isinstance(exc, schedules.ScheduleNotFound):
+                self._schedule_problem(412, "precondition_failed",
+                                       "Precondition failed")
+                return
+            if isinstance(exc, schedules.ScheduleRevisionConflict):
+                try:
+                    row = schedule_store.get(exc.schedule_id)
+                except Exception:
+                    self._schedule_problem(503, "schedule_state_unavailable",
+                                           "Schedule state unavailable")
+                    return
+                headers = ([('ETag', schedules.schedule_etag(row))]
+                           if row is not None else None)
+                self._schedule_problem(412, "precondition_failed",
+                                       "Precondition failed", headers=headers)
+                return
+            if isinstance(exc, role_management.RoleManagementError):
+                safe = {key: value for key, value in exc.result.items()
+                        if key not in ("ok", "error", "partial")}
+                self._schedule_problem(exc.status, exc.code,
+                                       exc.code.replace("_", " ").title(),
+                                       **safe)
+                return
+            if isinstance(exc, (schedules.ScheduleValidationError,
+                                schedules.ScheduleConflict,
+                                schedules.ScheduleNotFound,
+                                schedules.ScheduleStateError,
+                                ScheduleTargetError)):
+                code = exc.code
+                self._schedule_problem(
+                    exc.status, code, code.replace("_", " ").title())
+                return
+            self._schedule_problem(503, "schedule_state_unavailable",
+                                   "Schedule state unavailable")
+
+        def _schedule_existing(self, schedule_id):
+            try:
+                row = schedule_store.get(schedule_id)
+            except Exception as exc:
+                self._schedule_error(exc)
+                return None
+            if row is None:
+                self._schedule_problem(404, "schedule_not_found",
+                                       "Schedule not found")
+                return None
+            return row
+
+        def _schedule_precondition(self, row):
+            current = schedules.schedule_etag(row)
+            values = self.headers.get_all("If-Match") or []
+            if not values:
+                self._schedule_problem(
+                    428, "precondition_required", "Precondition required",
+                    headers=(("ETag", current),))
+                return None
+            if len(values) != 1 or values[0] not in ("*", current):
+                self._schedule_problem(
+                    412, "precondition_failed", "Precondition failed",
+                    headers=(("ETag", current),))
+                return None
+            return "*" if values[0] == "*" else row["rev"]
+
+        def _schedule_get(self, path):
+            info = self._schedule_session()
+            if info is None:
+                return
+            try:
+                if path == "/api/schedules":
+                    if urlsplit(self.path).query:
+                        raise schedules.ScheduleValidationError(
+                            "schedule list has no query parameters")
+                    rows = schedule_store.list()
+                    views = self._schedule_views(rows)
+                    self._json(200, {"schedules": views, "total": len(views)})
+                    return
+                history_match = re.fullmatch(
+                    r"/api/schedules/([^/]+)/(occurrences|receipts)", path)
+                if history_match:
+                    schedule_id = unquote(history_match.group(1))
+                    resource = history_match.group(2)
+                    row = schedule_store.get(schedule_id)
+                    # Definitions may be deleted while their occurrence and
+                    # receipt evidence is intentionally retained. History
+                    # stays readable until both authorities are absent.
+                    if (row is None and not
+                            schedule_occurrence_store.list(schedule_id)):
+                        raise schedules.ScheduleNotFound("no such schedule")
+                    query = parse_qs(urlsplit(self.path).query,
+                                     keep_blank_values=True)
+                    if set(query) - {"limit", "offset"} or any(
+                            len(values) != 1 for values in query.values()):
+                        raise schedules.ScheduleValidationError(
+                            "invalid schedule history pagination")
+                    default_limit = (schedules.MAX_OCCURRENCE_PAGE
+                                     if resource == "occurrences" else
+                                     schedules.MAX_RECEIPT_PAGE)
+                    raw_limit = (query.get("limit") or
+                                 [str(default_limit)])[0]
+                    raw_offset = (query.get("offset") or ["0"])[0]
+                    if not raw_limit.isdecimal() or not raw_offset.isdecimal():
+                        raise schedules.ScheduleValidationError(
+                            "invalid schedule history pagination")
+                    history = (schedules.list_schedule_occurrences
+                               if resource == "occurrences" else
+                               schedules.list_schedule_receipts)
+                    self._json(200, history(schedule_store.state_dir,
+                                            schedule_id,
+                                            limit=int(raw_limit),
+                                            offset=int(raw_offset)))
+                    return
+                item_match = re.fullmatch(r"/api/schedules/([^/]+)", path)
+                if item_match:
+                    schedule_id = unquote(item_match.group(1))
+                    row = schedule_store.get(schedule_id)
+                    if row is None:
+                        raise schedules.ScheduleNotFound("no such schedule")
+                    view = self._schedule_views([row])[0]
+                    self._json(200, {"schedule": view},
+                               extra_headers=(("ETag", view["etag"]),))
+                    return
+            except Exception as exc:
+                self._schedule_error(exc)
+                return
+            self._schedule_problem(404, "route-not-found", "Route not found")
+
+        @staticmethod
+        def _normalized_schedule_patch(row, patch):
+            if not isinstance(patch, dict) or set(patch) - schedules.DEFINITION_KEYS:
+                raise schedules.ScheduleValidationError(
+                    "invalid schedule patch fields")
+            definition = {key: row[key] for key in schedules.DEFINITION_KEYS
+                          if key in row}
+            definition.update(copy.deepcopy(patch))
+            if definition.get("after", False) is None:
+                definition.pop("after")
+            normalized = schedules.normalize_definition(definition)
+            out = {}
+            for key in patch:
+                if key == "after" and patch[key] is None:
+                    out[key] = None
+                else:
+                    out[key] = normalized[key]
+            return out
+
+        def _schedule_mutation(self, method, path, raw, info):
+            actor = "console:" + info["username"]
+            try:
+                if method == "POST" and path == "/api/schedules":
+                    body = self._schedule_json_body(raw)
+                    if body is None:
+                        return
+                    schedule_id = body.get("id")
+                    definition = {key: value for key, value in body.items()
+                                  if key != "id"}
+                    definition = schedules.normalize_definition(definition)
+                    # Validate the key and detect an existing row before any
+                    # fleet/policy authority read. The atomic create still
+                    # owns the race with another writer.
+                    if schedule_store.get(schedule_id) is not None:
+                        raise schedules.ScheduleConflict(
+                            "schedule already exists")
+                    coordinator = role_coordinator()
+                    if coordinator is None:
+                        raise ScheduleTargetError("fleet state is unavailable")
+
+                    def validated_resolver(target, role_policy=None):
+                        resolved = schedule_target_resolver(
+                            target, role_policy=role_policy)
+                        if scheduled_executor is None:
+                            raise ScheduleTargetError(
+                                "schedule executor is unavailable")
+                        scheduled_executor.validate(
+                            definition, resolved, "creation")
+                        return resolved
+
+                    row, resolved = coordinator.create_schedule(
+                        schedule_id, definition, actor=actor, now=int(now_fn()),
+                        resolve_target=validated_resolver)
+                    wake_schedule_runner()
+                    view = self._schedule_views([row])[0]
+                    self._json(201, {
+                        "schedule": view,
+                        "target_facts": self._schedule_target_facts(resolved),
+                    }, extra_headers=((
+                        "Location",
+                        ("/internal/v1/schedules/" if getattr(
+                            self, "_iris_management_wire", False)
+                         else "/api/schedules/") + row["id"]),
+                                      ("ETag", view["etag"])))
+                    return
+
+                reaffirm_match = re.fullmatch(
+                    r"/api/schedules/([^/]+)/reaffirm", path)
+                item_match = re.fullmatch(r"/api/schedules/([^/]+)", path)
+                match = reaffirm_match or item_match
+                if match is None:
+                    self._schedule_problem(404, "route-not-found",
+                                           "Route not found")
+                    return
+                schedule_id = unquote(match.group(1))
+                before = self._schedule_existing(schedule_id)
+                if before is None:
+                    return
+                expected = self._schedule_precondition(before)
+                if expected is None:
+                    return
+
+                if method == "DELETE" and item_match:
+                    coordinator = role_coordinator()
+                    if coordinator is None:
+                        raise ScheduleTargetError("fleet state is unavailable")
+                    coordinator.delete_schedule(
+                        schedule_id, expected_rev=expected)
+                    wake_schedule_runner()
+                    self._send(204, "application/json", b"",
+                               (("ETag", schedules.schedule_etag(before)),))
+                    return
+                body = self._schedule_json_body(raw)
+                if body is None:
+                    return
+                if method == "POST" and reaffirm_match:
+                    if body:
+                        raise schedules.ScheduleValidationError(
+                            "reaffirm body must be empty")
+                    row = schedule_store.reaffirm(
+                        schedule_id, actor, expected_rev=expected)
+                    wake_schedule_runner()
+                    view = self._schedule_views([row])[0]
+                    self._json(200, {"schedule": view},
+                               extra_headers=(("ETag", view["etag"]),))
+                    return
+                coordinator = role_coordinator()
+                if coordinator is None:
+                    raise ScheduleTargetError("fleet state is unavailable")
+                if method == "PUT" and item_match:
+                    definition = schedules.normalize_definition(body)
+
+                    def validated_resolver(target, role_policy=None):
+                        resolved = schedule_target_resolver(
+                            target, role_policy=role_policy)
+                        if scheduled_executor is None:
+                            raise ScheduleTargetError(
+                                "schedule executor is unavailable")
+                        scheduled_executor.validate(
+                            definition, resolved, "creation")
+                        return resolved
+
+                    row, resolved = coordinator.put_schedule(
+                        schedule_id, definition, expected_rev=expected,
+                        resolve_target=validated_resolver)
+                elif method == "PATCH" and item_match:
+                    patch = self._normalized_schedule_patch(before, body)
+                    definition = {
+                        key: copy.deepcopy(before[key])
+                        for key in schedules.DEFINITION_KEYS if key in before}
+                    definition.update(copy.deepcopy(patch))
+                    if definition.get("after", False) is None:
+                        definition.pop("after")
+                    definition = schedules.normalize_definition(definition)
+
+                    def validated_resolver(target, role_policy=None):
+                        resolved = schedule_target_resolver(
+                            target, role_policy=role_policy)
+                        if scheduled_executor is None:
+                            raise ScheduleTargetError(
+                                "schedule executor is unavailable")
+                        scheduled_executor.validate(
+                            definition, resolved, "creation")
+                        return resolved
+
+                    # Force the coordinator's existing target-resolution path
+                    # for payload-only patches too; the identical target does
+                    # not reset the durable creation preview.
+                    patch.setdefault("target", copy.deepcopy(before["target"]))
+                    row, resolved = coordinator.patch_schedule(
+                        schedule_id, patch, expected_rev=expected,
+                        resolve_target=validated_resolver)
+                else:
+                    self._schedule_problem(404, "route-not-found",
+                                           "Route not found")
+                    return
+                wake_schedule_runner()
+                view = self._schedule_views([row])[0]
+                self._json(200, {
+                    "schedule": view,
+                    "target_facts": self._schedule_target_facts(resolved),
+                }, extra_headers=(("ETag", view["etag"]),))
+            except schedules.ScheduleNotFound as exc:
+                self._schedule_error(exc, raced=True)
+            except Exception as exc:
+                self._schedule_error(exc)
 
         def _body_reader(self, remaining):
             """Return a zero-arg reader() streaming up to *remaining* bytes from
@@ -1741,6 +4422,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
+            if path == "/api/schedules" or path.startswith("/api/schedules/"):
+                self._schedule_get(path)
+                return
             if path == "/__management/console-certificate" and \
                     management_token_file is not None:
                 # The state-free console keeps no durable TLS key.  Its only
@@ -1781,9 +4465,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             ("X-IRIS-Certificate-Source",
                              "custom" if override else "built-in")))
                 return
+            if path == "/api/peer-policy/roles/export-csv":
+                # The Console's role export is the iris-role export grammar
+                # byte for byte, so a file from either surface imports in the
+                # other. Degraded/fail-closed policy is refused rather than
+                # exported: an LKG fallback is not the operator's definitions.
+                if app.session_info(self._sid()) is None:
+                    self._session_refusal()
+                    return
+                auth_path, lkg_path, _ = policy_paths()
+                policy = peer_policy.load_policy(auth_path, lkg_path)
+                revision = policy.document["revision"]
+                if policy.degraded or policy.fail_closed:
+                    self._policy_problem(503, "policy_unavailable", revision)
+                    return
+                body = role_csv.export_roles_csv(policy.document).encode("utf-8")
+                self._send(200, "text/csv; charset=utf-8", body, extra_headers=[
+                    ("Content-Disposition", "attachment; filename=roles.csv"),
+                    ("ETag", _revision_etag("peer-policy", revision))])
+                return
+            if path in ("/api/peer-policy/roles", "/api/peer-policy/explain") or (
+                    path.startswith("/api/devices/") and path.endswith("/effective-qos")):
+                self._policy_read(path)
+                return
             if path == "/api/peer-policy":
                 if app.session_info(self._sid()) is None:
-                    self._json(401, {"error": "unauthorized"}); return
+                    self._session_refusal(); return
                 view = policy_view()
                 self._json(200, view, extra_headers=[
                     ("ETag", _revision_etag("peer-policy", view["revision"]))])
@@ -1906,15 +4613,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if q is not None:
                     q = q.strip().lower() or None
                 filters = _device_filter_params(qs)
-                rows, total, revision = self._device_page(limit, offset, q, filters)
+                try:
+                    rows, total, revision, target_facts = self._device_page(
+                        limit, offset, q, filters)
+                except deployment_records.RecordStoreUnreadable:
+                    self._json(503, {
+                        "error": "deployment targeting facts unavailable"})
+                    return
                 # "now" rides along so last_seen freshness is computed
                 # server-clock-to-server-clock in the UI (skewed lab VMs).
                 # total/revision ride along on EVERY response, paged or not:
                 # a client that never pages still needs to be able to tell
                 # that what it holds is the whole fleet.
-                self._json(200, {"devices": rows, "now": int(time.time()),
+                target_warnings = []
+                if target_facts["missing_os_family"]:
+                    target_warnings.append(
+                        "%d devices have no os_family yet" %
+                        target_facts["missing_os_family"])
+                if target_facts["role_drift"]:
+                    target_warnings.append(
+                        "%d devices have declared role drift" %
+                        target_facts["role_drift"])
+                self._json(200, {"devices": rows, "now": int(now_fn()),
                                  "total": total, "offset": offset,
-                                 "limit": limit, "revision": revision},
+                                 "limit": limit, "revision": revision,
+                                 "target_facts": target_facts,
+                                 "target_warnings": target_warnings},
                            extra_headers=[
                                ("ETag", _revision_etag("fleet", revision))])
                 return
@@ -1968,21 +4692,60 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if record_store is None:
                     self._json(404, {"error": "records unavailable"}); return
                 did = unquote(path[len("/api/devices/"):-len("/deployment")])
-                records = record_store.list(did)
-                # The record that best describes the device: the active one,
-                # else the recoverable teardown-authorizing one — both can
-                # raise on ambiguity (duplicate records), and this is a
-                # read-only visibility panel, so fall back to the newest
-                # record rather than erroring it.
+                if iox_controller is None:
+                    self._json(503, {
+                        "error": "IOx authority is unavailable"}); return
                 try:
-                    record = record_store.recoverable_for_device(did)
-                except ValueError:
-                    record = None
+                    authority = iox_controller.summary_for_device(did)
+                    if (not isinstance(authority, dict) or
+                            set(authority) != {
+                                "iox_verification_obligations",
+                                "iox_sessions"} or
+                            not isinstance(
+                                authority["iox_verification_obligations"],
+                                list) or
+                            not isinstance(authority["iox_sessions"], list)):
+                        raise ValueError("invalid IOx authority projection")
+                    records = record_store.list(did, strict=True)
+                    # The record that best describes the device: the active
+                    # one, else the recoverable teardown-authorizing one.
+                    # Duplicate valid candidates retain the established
+                    # read-only fallback to the newest record; unreadable
+                    # authority is handled by the outer 503 path.
+                    try:
+                        record = record_store.recoverable_for_device(
+                            did, strict=True)
+                    except ValueError:
+                        record = None
+                except Exception:
+                    # Authority errors can contain private paths or transport
+                    # detail. The browser receives only this bounded fault;
+                    # operators can use the server log for diagnosis.
+                    self._json(503, {
+                        "error": "IOx authority is unreadable"}); return
                 if record is None and records:
                     record = max(records,
                                  key=lambda r: (r.get("timestamps") or {})
                                  .get("planned_at") or 0)
-                self._json(200, {"record": record, "total": len(records)})
+                try:
+                    public_record = copy.deepcopy(record)
+                    if (public_record is not None and
+                            public_record.get("iox_verification") is not None):
+                        public_record["iox_verification"] = (
+                            deployment_records.DeploymentRecordStore
+                            ._iox_safe_summary(
+                                public_record["iox_verification"]))
+                except Exception:
+                    self._json(503, {
+                        "error": "IOx authority is unreadable"}); return
+                self._json(200, {
+                    "record": public_record,
+                    "total": len(records),
+                    "iox_verification_obligations": copy.deepcopy(
+                        authority["iox_verification_obligations"]),
+                    "iox_sessions": copy.deepcopy(
+                        authority["iox_sessions"]),
+                })
                 return
             if path == "/api/credentials":
                 if app.session_info(self._sid()) is None:
@@ -2160,7 +4923,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
                     *_telemetry_status_args(),
-                    image_verification_last_run=_image_verification_last_run()))
+                    image_verification_last_run=_image_verification_last_run(),
+                    provision_status_path=os.path.join(
+                        os.environ.get("IRIS_RUN", "/run/iris"), "served-bundle.json"),
+                    provision_startup_state=os.environ.get(
+                        "_IRIS_SERVED_BUNDLE_STARTUP")))
                 return
             if path == "/api/settings/image-verification":
                 # KGV reconciler Task 4: schedule config + last_run, its own
@@ -2207,10 +4974,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return self._device_page()[0]
 
         def _device_page(self, limit=None, offset=0, q=None, filters=None):
-            """(rows, total, revision) for the merged device projection.
+            """(rows, total, revision, target_facts) for the device projection.
 
             *limit*/*offset* page it; *q* and *filters* (see _row_matches_q
-            and _row_matches_extra_filters -- the six column filters the
+            and _row_matches_extra_filters -- the nine column filters the
             issue #112 prerequisite requires parity for) narrow it. With
             everything at its default this is the full fleet in store order,
             exactly what the console has always received.
@@ -2233,15 +5000,44 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             paging = limit is not None or offset or active_filter
             if paging:
                 devs.sort(key=lambda d: str(d.get("device_id") or ""))
-            hb = {d.get("device_id"): d for d in (catalog.list_devices()
-                                                  if catalog else [])}
+            heartbeat_rows = instruction_heartbeat_snapshot(unavailable_ok=False)
+            heartbeat_available = isinstance(heartbeat_rows, list)
+            hb = {d.get("device_id"): d for d in (heartbeat_rows or [])
+                  if isinstance(d, dict) and isinstance(d.get("device_id"), str)}
             # each device's latest onboard/undeploy job, so the UI can show
             # "onboarding…" / "waiting for heartbeat" instead of a misleading
             # "not enrolled" before the fresh agent's first heartbeat lands
             jobs = onboard.latest_jobs_by_device() if onboard else {}
             # one policy.json read for the whole table — get_policy() re-parses
             # the file per call, which multiplies badly on the polled endpoints
+            # Keep the established strict policy projection for assignments.
+            # Raw policy rows exist only for policy_view's stamp aggregate.
             policies = catalog.list_policies() if catalog else {}
+            revoked_principals = instruction_revocation_snapshot()
+            observed_at = now_fn()
+            deployment_types = deployment_type_snapshot()
+            role_policy = role_policy_snapshot()
+            role_report = role_management.drift_report(
+                fleet, role_policy,
+                limit=len(devs) + len(role_policy.roles.role_of), rows=devs)
+            role_drift_ids = frozenset(role_report["device_ids"])
+
+            def merge(device):
+                return self._merge_device_row(
+                    device, policies, hb, jobs, observed_at,
+                    heartbeat_available, revoked_principals,
+                    deployment_types.get(device.get("device_id"), {}))
+
+            def role_drift(row):
+                return row.get("device_id") in role_drift_ids
+
+            def matches_without_os(row):
+                if q is not None and not self._row_matches_q(row, q):
+                    return False
+                other_filters = {key: value for key, value in filters.items()
+                                 if key != "os_family"}
+                return (not other_filters or self._row_matches_extra_filters(
+                    row, other_filters, observed_at, quarantined_ids))
 
             if not active_filter:
                 # Nothing to count that the inventory does not already know,
@@ -2251,28 +5047,53 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 total = len(devs)
                 window = devs[offset:] if limit is None else \
                     devs[offset:offset + limit]
-                return ([self._merge_device_row(d, policies, hb, jobs)
-                         for d in window], total, revision)
+                rows = [merge(d) for d in window]
+                # These facts describe the whole match set, never just the
+                # requested page. They need only trusted fleet/record fields,
+                # so the fast path still avoids merging heartbeat and catalog
+                # state for rows it will not render.
+                fact_rows = []
+                for device in devs:
+                    resolved = deployment_types.get(device.get("device_id"), {})
+                    fact_row = dict(device)
+                    fact_row.update(trusted_target_projection(device, resolved))
+                    fact_rows.append(fact_row)
+                facts = {
+                    "missing_os_family": sum(
+                        not row.get("os_family") for row in fact_rows),
+                    "role_drift": sum(role_drift(row) for row in fact_rows),
+                }
+                return rows, total, revision, facts
 
             # A filter reaches merged fields (heartbeat_model, status), so
             # every row is merged to be counted; only the window is
-            # retained. The peer-quarantine assignment set is read at most
-            # ONCE per call, and only when the peer filter is actually used.
-            quarantined_ids = (quarantine_assignment_ids()
+            # retained. Peer and role-drift facts come from the same policy
+            # snapshot, so one preview cannot mix policy revisions.
+            quarantined_ids = (peer_policy.quarantine_device_ids(
+                                   role_policy.document)
                                if "peer" in filters else None)
-            now = time.time()
+            now = observed_at
             rows, total = [], 0
+            missing_os_family = 0
+            drift = 0
             for d in devs:
-                row = self._merge_device_row(d, policies, hb, jobs)
+                row = merge(d)
+                if not row.get("os_family") and matches_without_os(row):
+                    missing_os_family += 1
                 if q is not None and not self._row_matches_q(row, q):
                     continue
                 if filters and not self._row_matches_extra_filters(
                         row, filters, now, quarantined_ids):
                     continue
+                if role_drift(row):
+                    drift += 1
                 total += 1
                 if total > offset and (limit is None or len(rows) < limit):
                     rows.append(row)
-            return rows, total, revision
+            return rows, total, revision, {
+                "missing_os_family": missing_os_family,
+                "role_drift": drift,
+            }
 
         @staticmethod
         def _row_matches_q(row, q):
@@ -2293,64 +5114,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             (issue #112 prerequisite 1). quarantined_ids is the peer-policy
             quarantine-assignment set, or None when the peer filter is not
             in play (it is never consulted in that case)."""
-            mtype = filters.get("management_type")
-            if mtype:
-                # Mirrors managementTypeLabel/deviceMatchesFilters' own
-                # legacy_routed/legacy equivalence: the wire value for an
-                # unclassified device is always the truthy "legacy_routed".
-                raw = row.get("management_type")
-                actual = "legacy" if (raw == "legacy_routed" or not raw) else raw
-                if actual != mtype:
-                    return False
-            platform = filters.get("platform")
-            if platform:
-                plat = row.get("platform") or ""
-                if platform == "__none":
-                    if plat != "":
-                        return False
-                elif plat != platform:
-                    return False
-            cred = filters.get("cred")
-            if cred:
-                c = row.get("credential_profile_id") or ""
-                if cred == "__none":
-                    if c != "":
-                        return False
-                elif c != cred:
-                    return False
-            telemetry = filters.get("telemetry")
-            if telemetry:
-                # Same tri-state as the console's telemetryCell/filter:
-                # "on" only once the device has actually reported it.
-                if row.get("telemetry_enabled") is False:
-                    tel = "off"
-                elif (row.get("telemetry_enabled") is True
-                      or isinstance(row.get("telemetry_stream_enabled"), bool)):
-                    tel = "on"
-                else:
-                    tel = "unknown"
-                if tel != telemetry:
-                    return False
-            peer = filters.get("peer")
-            if peer:
-                q = ("quarantined"
-                     if row.get("device_id") in (quarantined_ids or ())
-                     else "not-quarantined")
-                if q != peer:
-                    return False
-            status = filters.get("status")
-            if status:
-                if status == "offline":
-                    if not self._device_is_offline(row, now):
-                        return False
-                elif status == "__attention":
-                    key = self._device_status_key(row)
-                    level = self._device_status_level(row, key)
-                    if level not in ("negative", "severe", "warning"):
-                        return False
-                elif self._device_status_key(row) != status:
-                    return False
-            return True
+            return target_row_matches(
+                row, filters, now=now, quarantined_ids=quarantined_ids,
+                status_key_fn=self._device_status_key,
+                status_level_fn=self._device_status_level,
+                offline_fn=self._device_is_offline)
 
         def _device_status_key(self, row):
             """Server-side mirror of app.js deviceStatus()'s KEY derivation,
@@ -2416,12 +5184,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return bool(row.get("last_seen")) and (now - row["last_seen"]) >= 600
 
         @staticmethod
-        def _merge_device_row(d, policies, hb, jobs):
+        def _merge_device_row(d, policies, hb, jobs, observed_at,
+                              heartbeat_available, revoked_principals,
+                              deployment_type=None):
             """One inventory record joined with policy, heartbeat and job."""
             did = d.get("device_id")
             pol = policies.get(did, {})
             h = hb.get(did, {})
             row = dict(d)
+            row.update(trusted_target_projection(d, deployment_type))
+            # The installs this row can take, from the same rules the fleet
+            # store enforces, so the Console offers only those instead of a
+            # choice the server refuses and the table then snaps back from.
+            row["install_options"] = gui_fleet.install_options_for_record(d)
             row["assigned_image_id"] = pol.get("approved_image_id")
             row["assigned_image_ids"] = pol.get("approved_image_ids")
             row["last_seen"] = h.get("last_seen")
@@ -2446,6 +5221,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             row["telemetry_enabled"] = h.get("telemetry_enabled")
             row["telemetry_stream_enabled"] = h.get(
                 "telemetry_stream_enabled")
+            revocation_available = isinstance(
+                revoked_principals, (set, frozenset))
+            revoked = ("device:%s" % did in revoked_principals
+                       if revocation_available and isinstance(did, str)
+                       else None)
+            row["instruction"] = _instruction_device_projection(
+                h, revoked, observed_at,
+                heartbeat_available=heartbeat_available)
             j = jobs.get(did)
             if j:
                 row["onboard_action"] = j["action"]
@@ -2831,8 +5614,355 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        def _policy_problem(self, status, code, revision=None, **details):
+            self._finish_idempotency(None)
+            for key in ("code", "type", "title", "status", "error"):
+                details.pop(key, None)
+            headers = list(getattr(self, "_response_headers", ()))
+            if revision is not None:
+                headers.append(("ETag", _revision_etag("peer-policy", revision)))
+                details["revision"] = revision
+            api_problem.send(self, status, code, code.replace("_", " ").capitalize(),
+                             headers=headers, error=code, **details)
+
+        def _policy_failure(self, exc, actor=None, dry_run=False):
+            auth_path, lkg_path, _ = policy_paths()
+            current = peer_policy.load_policy(auth_path, lkg_path)
+            revision = current.document["revision"]
+            details = {}
+            if isinstance(exc, role_management.RoleManagementError):
+                code, status, details = exc.code, exc.status, dict(exc.result)
+                revision = details.pop("revision", revision)
+            elif isinstance(exc, peer_policy.RevisionConflict):
+                code, status, revision = "revision_conflict", 409, exc.revision
+            elif isinstance(exc, peer_policy.OperationBacklogFull):
+                code, status = "operation_backlog_full", 409
+            elif isinstance(exc, peer_policy.PolicyError):
+                code, status, details = exc.code, 422, dict(exc.details)
+            else:
+                code, status = "policy_unavailable", 503
+            if code in ("role_in_use", "role_isolated", "role_reserved_name",
+                        "role_shadowed_by_assignment", "operation_backlog_full"):
+                status = 409
+            elif code in ("role_not_found", "unknown_role", "device_not_found"):
+                status = 404
+            elif code == "confirmation_required":
+                status = 428
+            elif code in ("policy_fail_closed", "policy_write_failed", "policy_error") or \
+                    isinstance(exc, peer_policy.PolicyDegradedError) or \
+                    current.degraded or current.fail_closed:
+                code, status = "policy_unavailable", 503
+            elif status == 400:
+                status = 422
+            if code == "operation_backlog_full":
+                details.update(policy_view()["outbox"])
+            if actor is not None and not dry_run:
+                path = urlsplit(self.path).path
+                if path == "/api/devices/bulk-role":
+                    event, target = "device_role_bulk_change", "roles"
+                elif path.startswith("/api/devices/") and path.endswith("/role"):
+                    event = "device_role_change"
+                    target = unquote(path[len("/api/devices/"):-len("/role")])
+                else:
+                    event, target = "peer_policy_change", path.rsplit("/", 1)[-1]
+                self._audit(event, "device", action="role", target=target,
+                            actor=actor, result="fail", detail=code)
+            self._policy_problem(status, code, revision, **details)
+
+        def _policy_mutation(self, path, actor, raw=None):
+            """All new policy writes share strong CAS and bounded JSON parsing."""
+            auth_path, lkg_path, _ = policy_paths()
+            loaded = peer_policy.load_policy(auth_path, lkg_path)
+            revision = loaded.document["revision"]
+            match = self.headers.get_all("If-Match", [])
+            if not match:
+                self._policy_problem(428, "precondition_required", revision)
+                return
+            if match != [_revision_etag("peer-policy", revision)]:
+                self._policy_problem(412, "precondition_failed", revision)
+                return
+            if loaded.degraded or loaded.fail_closed:
+                self._policy_problem(503, "policy_unavailable", revision)
+                return
+            dry_run = False
+            try:
+                qs = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(qs) - {"dry_run"} or qs.get("dry_run", ["0"]) not in (["0"], ["1"]):
+                    raise peer_policy.PolicyError("bad query", code="invalid_policy_request")
+                dry_run = qs.get("dry_run") == ["1"]
+                if raw is None:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                    if length < 0 or length > _MAX_BODY:
+                        self._policy_problem(413, "payload-too-large", revision)
+                        return
+                    raw = self.rfile.read(length) if length else b""
+                body = json.loads(raw) if raw else {}
+                if not isinstance(body, dict):
+                    raise ValueError("object required")
+                token = body.get("confirm_token")
+                if token is not None and not isinstance(token, str):
+                    raise ValueError("bad token")
+                preview = {}
+                def precommit(prior, candidate):
+                    blast = peer_policy.blast_radius(
+                        prior, candidate, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD)
+                    preview.update(role_management.RoleCoordinator._blast_details(blast))
+                    if not dry_run and not peer_policy.confirm_blast_radius(
+                            prior, candidate, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD, token):
+                        raise peer_policy.PolicyError("confirmation required",
+                            code="confirmation_required", **preview)
+                options = dict(expected_revision=revision, dry_run=dry_run,
+                               precommit=precommit)
+                coordinator = role_coordinator()
+                extra = {}
+                if path == "/api/peer-policy/roles/import-csv":
+                    # One atomic replacement of every definition, exactly as
+                    # ``iris-role import``: the whole role graph is validated
+                    # before anything is written, and a role a device still
+                    # declares cannot be dropped (role_in_use). The grammar
+                    # message names the offending row or field so the
+                    # operator can fix the file without reading server logs.
+                    if set(body) - {"csv", "confirm_token"} or \
+                            not isinstance(body.get("csv"), str):
+                        raise ValueError("bad import fields")
+                    try:
+                        definitions = role_csv.parse_roles_csv(body["csv"])
+                    except role_csv.RolesCsvError as exc:
+                        raise peer_policy.PolicyError(
+                            str(exc), code="invalid_roles_csv", detail=str(exc))
+                    except peer_policy.PolicyError as exc:
+                        exc.details.setdefault("detail", str(exc))
+                        raise
+                    committed = coordinator.replace_definitions(
+                        definitions, actor, **options)
+                    extra["roles"] = len(definitions)
+                elif path.startswith("/api/peer-policy/roles/"):
+                    name = unquote(path[len("/api/peer-policy/roles/"):])
+                    if self.command == "DELETE":
+                        if set(body) - {"confirm_token"}:
+                            raise ValueError("bad delete fields")
+                        committed = coordinator.delete_role(name, actor, **options)
+                    else:
+                        definition = {key: value for key, value in body.items()
+                                      if key != "confirm_token"}
+                        committed = coordinator.define_role(name, definition, actor, **options)
+                elif path == "/api/peer-policy/qos":
+                    if set(body) - {"qos", "qos_state", "role", "confirm_token"} or \
+                            not ({"qos", "qos_state"} & set(body)):
+                        raise ValueError("bad qos fields")
+                    role = body.get("role")
+                    if role is not None:
+                        peer_policy.validate_role_name(role)
+                    qos = body.get("qos")
+                    if "qos" in body and not isinstance(qos, dict):
+                        raise peer_policy.PolicyError("bad qos")
+                    qos_options = dict(options, role=role)
+                    if "qos_state" in body:
+                        if not isinstance(body["qos_state"], dict):
+                            raise peer_policy.PolicyError("bad qos state")
+                        qos_options["qos_state"] = body["qos_state"]
+                    committed = coordinator.set_qos(qos, actor, **qos_options)
+                else:
+                    bulk = path == "/api/devices/bulk-role"
+                    if set(body) - ({"device_ids", "role", "confirm_token"} if bulk
+                                   else {"role", "confirm_token"}) or "role" not in body:
+                        raise ValueError("bad role fields")
+                    ids = body.get("device_ids") if bulk else [unquote(
+                        path[len("/api/devices/"):-len("/role")])]
+                    if not isinstance(ids, list) or not ids or \
+                            len(ids) > peer_endpoints.SUPPORTED_DEVICES or not all(
+                                isinstance(did, str) and did and did == did.strip()
+                                and "/" not in did for did in ids):
+                        raise ValueError("bad device ids")
+                    role_options = dict(expected_revision=revision, dry_run=dry_run,
+                                        require_confirmation=True, confirm_token=token)
+                    if bulk:
+                        result = coordinator.set_roles(
+                            {did: body["role"] for did in sorted(set(ids))},
+                            actor=actor, **role_options)
+                    else:
+                        result = coordinator.set_role(ids[0], body["role"], actor=actor,
+                                                      **role_options)
+                    result_revision = result.get("candidate_revision", result["revision"]) \
+                        if dry_run else result["revision"]
+                    result["revision"] = result_revision
+                    if not dry_run:
+                        self._audit("device_role_bulk_change" if bulk else "device_role_change",
+                            "device", action="role", actor=actor,
+                            target="role:" + (body["role"] or "") if bulk else ids[0],
+                            result="ok" if result.get("ok") else "fail",
+                            detail="applied %d; failed %d" %
+                                (result["applied"], len(result.get("failed", {}))))
+                    self._json(200, result, extra_headers=[
+                        ("ETag", _revision_etag("peer-policy", result_revision))])
+                    return
+                result = {"ok": True, "revision": committed["revision"],
+                          "candidate_revision": committed["revision"],
+                          "dry_run": dry_run, **preview, **extra}
+                headers = [("ETag", _revision_etag("peer-policy", committed["revision"]))]
+                if not dry_run:
+                    self._audit("peer_policy_change", "device", actor=actor,
+                        action=self.command.lower(), target=path.rsplit("/", 1)[-1],
+                        detail="policy revision %d" % committed["revision"])
+                if self.command == "DELETE" and not dry_run:
+                    self._send(204, "application/json", b"", headers)
+                else:
+                    self._json(200, result, extra_headers=headers)
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                if isinstance(exc, peer_policy.PolicyError):
+                    self._policy_failure(exc, actor=actor, dry_run=dry_run)
+                else:
+                    self._policy_problem(422, "invalid_policy_request", revision)
+            except Exception as exc:
+                self._policy_failure(exc, actor=actor, dry_run=dry_run)
+
+        def _policy_read(self, path):
+            if app.session_info(self._sid()) is None:
+                self._session_refusal()
+                return
+            auth_path, lkg_path, _ = policy_paths()
+            policy = peer_policy.load_policy(auth_path, lkg_path)
+            doc, compiled = policy.document, policy.roles
+            revision = doc["revision"]
+            result = {"revision": revision, "degraded": policy.degraded,
+                      "fail_closed": policy.fail_closed}
+            try:
+                if path == "/api/peer-policy/roles":
+                    roles = doc.get("roles", {})
+                    definitions = roles.get("defs", {})
+                    if "qos_state_default" in roles:
+                        result["qos_state_default"] = roles["qos_state_default"]
+                    result["roles"] = {name: definitions[name] for name in sorted(definitions)}
+                elif path.endswith("/effective-qos"):
+                    did = unquote(path[len("/api/devices/"):-len("/effective-qos")])
+                    if fleet is None or fleet.get_device(did) is None:
+                        self._policy_problem(404, "device_not_found", revision)
+                        return
+                    query = parse_qs(urlsplit(self.path).query,
+                                     keep_blank_values=True)
+                    if query and (set(query) != {"tracker_state"} or
+                                  query["tracker_state"] not in
+                                  (["seeder"], ["leecher"])):
+                        self._policy_problem(
+                            422, "invalid_policy_request", revision)
+                        return
+                    qos = peer_policy.explain_qos(doc, did)
+                    # These are pinned aria2 client constraints, not tracker caps:
+                    # DefaultBtAnnounce.cc emits 50 or 0; the peerless leecher
+                    # overrides min interval with BtAnnounce's 2 minute default.
+                    qos["numwant"].update(effective_ceiling=min(qos["numwant"]["value"], 50),
+                        runtime_request_zero="disabled", constraint_source="pinned-aria2-client")
+                    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
+                        constraint_source="pinned-aria2-client")
+                    qos["catalog_tick_s"].update(offline_horizon_s=_HEARTBEAT_FRESH,
+                                                heartbeat_always=True)
+                    heartbeat, heartbeat_available = \
+                        instruction_heartbeat_for_device(did)
+                    revoked_principals = instruction_revocation_snapshot()
+                    revocation_available = isinstance(
+                        revoked_principals, (set, frozenset))
+                    revoked = ("device:%s" % did in revoked_principals
+                               if revocation_available else None)
+                    instruction = _instruction_device_projection(
+                        heartbeat, revoked, now_fn(),
+                        heartbeat_available=heartbeat_available)
+                    result.update(
+                        device_id=did, qos=qos,
+                        delivery_state="pre-instructions",
+                        instruction=instruction)
+                    if query:
+                        tracker_state = query["tracker_state"][0]
+                        tracker_qos = peer_policy.explain_tracker_qos(
+                            doc, did, tracker_state)
+                        tracker_qos["numwant"].update(
+                            effective_ceiling=min(
+                                tracker_qos["numwant"]["value"], 50),
+                            runtime_request_zero="disabled",
+                            constraint_source="pinned-aria2-client")
+                        if tracker_state == "leecher":
+                            tracker_qos["announce_min_interval_s"].update(
+                                peerless_leecher_floor_s=120,
+                                constraint_source="pinned-aria2-client")
+                        result.update(tracker_state=tracker_state,
+                                      tracker_qos=tracker_qos)
+                else:
+                    qs = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                    if set(qs) != {"a", "b"} or any(len(qs[k]) != 1 for k in qs):
+                        raise ValueError("bad principals")
+                    endpoints = peer_endpoints.fresh_endpoints(os.path.join(
+                        policy_state_dir(), "peer-endpoints.json"), now_fn())
+                    owners = {}
+                    for key, row in endpoints.items():
+                        for endpoint in row["endpoints"]:
+                            owners.setdefault(endpoint["ipv4"], set()).add(key)
+                    def resolve(value):
+                        if value == "service:seeder":
+                            principal = auth.Principal("service", "seeder")
+                        else:
+                            did = value[len("device:"):] if value.startswith("device:") else value
+                            if ":" in did or not did or fleet is None or fleet.get_device(did) is None:
+                                raise ValueError("unresolved principal")
+                            principal = auth.Principal("device", did)
+                        key = peer_endpoints.principal_key(principal)
+                        addresses = {ep["ipv4"] for ep in endpoints.get(key, {}).get("endpoints", [])}
+                        if len(addresses) != 1:
+                            raise ValueError("ambiguous endpoint")
+                        address = next(iter(addresses))
+                        if owners[address] != {key}:
+                            raise ValueError("ambiguous attribution")
+                        return principal, address
+                    left, left_ip = resolve(qs["a"][0])
+                    right, right_ip = resolve(qs["b"][0])
+                    def side(owner, subject, subject_ip):
+                        decision, seq = peer_policy.evaluate_for(
+                            doc, owner, subject, subject_ip, compiled=compiled)
+                        role = compiled.role_of.get(owner.id) if owner.type == "device" else None
+                        assignment = peer_policy.ordinary_assignment(doc, owner.id) \
+                            if owner.type == "device" else None
+                        return {"principal": {"type": owner.type, "id": owner.id},
+                            "role": role,
+                            "acl_source": peer_policy.acl_source(doc, owner, compiled=compiled),
+                            "acl_name": peer_policy.effective_acl_name(doc, owner, compiled=compiled),
+                            "decision": "deny" if policy.fail_closed else decision,
+                            "matched_seq": None if policy.fail_closed else seq,
+                            "role_unknown": bool(compiled.acl_by_role.get(role, {}).get("role_unknown")),
+                            "role_shadowed_by": role if role and assignment is not None else None}
+                    result.update(a=side(left, right, right_ip), b=side(right, left, left_ip))
+                    result["mutual"] = all(result[key]["decision"] == "permit" for key in ("a", "b"))
+                self._json(200, result, extra_headers=[("ETag", _revision_etag("peer-policy", revision))])
+            except (ValueError, peer_endpoints.EndpointStoreError):
+                if path == "/api/peer-policy/explain":
+                    self._policy_problem(422, "principal_unresolvable", revision)
+                else:
+                    self._policy_problem(503, "policy_unavailable", revision)
+            except Exception:
+                self._policy_problem(503, "policy_unavailable", revision)
+
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            if re.fullmatch(r"/api/schedules/[^/]+", path):
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                if length < 0 or length > _MAX_BODY:
+                    self._schedule_problem(413, "payload-too-large",
+                                           "Payload too large")
+                    return
+                info = self._schedule_session(mutation=True,
+                                              unread_body=length)
+                if info is None:
+                    return
+                raw = self.rfile.read(length) if length else b""
+                self._schedule_mutation("PUT", path, raw, info)
+                return
+            if path.startswith("/api/peer-policy/roles/") or path == "/api/peer-policy/qos":
+                info = self._require_session_csrf()
+                if info is not None:
+                    self._policy_mutation(path, "console:" + info["username"])
+                return
             quarantine_prefix = "/api/peer-policy/quarantine/"
             if path.startswith(quarantine_prefix):
                 info = self._require_session_csrf()
@@ -2877,34 +6007,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(503, {"error": "policy_fail_closed"}); return
                 if view["degraded"]:
                     self._json(422, {"error": "policy_error"}); return
-                auth_path, lkg_path, enforcement_path = policy_paths()
-                status = peer_enforcement.read_status(enforcement_path) or {}
-                acked = status.get("last_operation_exported_revision", 0)
-                if type(acked) is not int or acked < 0:
-                    acked = 0
                 quarantined = body["quarantined"]
-                def mutate(candidate):
-                    if quarantined:
-                        candidate["assignments"][device_id] = peer_policy.RESERVED_QUARANTINE
-                    else:
-                        candidate["assignments"].pop(device_id, None)
                 try:
-                    committed = peer_policy.commit_mutation(
-                        auth_path, lkg_path,
-                        action="assign" if quarantined else "unassign",
-                        target=device_id, actor="console:" + info["username"],
-                        now=now_fn(), mutate=mutate, acked_revision=acked,
+                    committed = role_coordinator().set_quarantine(
+                        device_id, quarantined,
+                        actor="console:" + info["username"],
                         expected_revision=body["if_revision"])
-                except peer_policy.RevisionConflict as exc:
-                    self._json(409, {"error": "revision_conflict",
-                                     "revision": exc.revision},
-                               extra_headers=[("ETag", _revision_etag(
-                                   "peer-policy", exc.revision))])
+                except role_management.RoleManagementError as exc:
+                    payload = dict(exc.result)
+                    revision = payload.get("revision")
+                    headers = ([('ETag', _revision_etag(
+                        'peer-policy', revision))]
+                        if type(revision) is int else None)
+                    self._json(exc.status, payload, extra_headers=headers)
                     return
-                except peer_policy.OperationBacklogFull:
-                    self._json(503, {"error": "operation_backlog_full"}); return
-                except peer_policy.PolicyError:
-                    self._json(422, {"error": "policy_error"}); return
                 self._json(200, {"ok": True, "revision": committed["revision"],
                                  "quarantined": quarantined},
                            extra_headers=[("ETag", _revision_etag(
@@ -2951,6 +6067,26 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                        detail="%s uploaded, publish job %s started"
                               % (_fmt_bytes(length), job_id))
             self._json(200, {"job_id": job_id})
+
+        def do_PATCH(self):
+            path = self.path.split("?", 1)[0]
+            if not re.fullmatch(r"/api/schedules/[^/]+", path):
+                self._schedule_problem(404, "route-not-found", "Route not found")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                self._schedule_problem(400, "invalid-request", "Invalid request")
+                return
+            if length < 0 or length > _MAX_BODY:
+                self._schedule_problem(413, "payload-too-large",
+                                       "Payload too large")
+                return
+            info = self._schedule_session(mutation=True, unread_body=length)
+            if info is None:
+                return
+            raw = self.rfile.read(length) if length else b""
+            self._schedule_mutation("PATCH", path, raw, info)
 
         def do_POST(self):
             path = self.path.split("?", 1)[0]
@@ -3013,6 +6149,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            if path == "/api/schedules" or re.fullmatch(
+                    r"/api/schedules/[^/]+/reaffirm", path):
+                if length > _MAX_BODY:
+                    self._schedule_problem(413, "payload-too-large",
+                                           "Payload too large")
+                    return
+                info = self._schedule_session(mutation=True,
+                                              unread_body=length)
+                if info is None:
+                    return
+                raw = self.rfile.read(length) if length else b""
+                self._schedule_mutation("POST", path, raw, info)
+                return
             if path == "/api/image-verification/offline":
                 # KGV reconciler Task 4: a large (tens-of-MB) tar upload --
                 # diverted before the generic cap/eager-read below (sized and
@@ -3021,9 +6170,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # rather than held whole in memory.
                 self._handle_offline_refresh(length)
                 return
-            if path == "/api/devices/import-csv":
+            if path in ("/api/devices/import-csv",
+                        "/api/peer-policy/roles/import-csv"):
                 cap = _MAX_CSV
-            elif path == "/api/devices/bulk-credential":
+            elif path in ("/api/devices/bulk-credential",
+                           "/api/devices/bulk-role"):
                 cap = _MAX_BULK_DEVICE_IDS
             else:
                 cap = _MAX_BODY
@@ -3622,17 +6773,27 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 rec = self._json_body(raw)
                 if rec is None:
                     return
-                # Machine-determined fields never come from a client body:
-                # os_family is classified from the device's own 'show
-                # version' banner (a wrong value here wedged planning until
-                # hand-corrected), and registered_at is the store's own
-                # stamp. The same rule the CSV importer already applies.
-                for machine_key in ("os_family", "registered_at"):
-                    rec.pop(machine_key, None)
                 rec_id = str(rec.get("device_id") or "").strip()
                 prev = fleet.get_device(rec_id) if rec_id else None
                 try:
-                    saved = fleet.upsert(rec)
+                    # Reject closed, server-owned and malformed fields before
+                    # role coordination can apply a policy-first relaxation.
+                    # FleetStore.upsert repeats this under its shard lock.
+                    fleet.validate_operator_upsert(rec)
+                    if "role" in rec:
+                        saved = role_coordinator().upsert_device(
+                            rec, actor=actor)["device"]
+                    else:
+                        saved = fleet.upsert(rec)
+                except role_management.RoleManagementError as exc:
+                    self._audit(
+                        "device_upsert", "device", action="update" if prev
+                        else "create", target=rec_id, actor=actor,
+                        result="fail", detail="role coordination refused: %s"
+                        % exc.code)
+                    self._json(exc.status, exc.result); return
+                except gui_fleet.FleetFieldError as exc:
+                    self._json(422, {"error": str(exc)}); return
                 except (ValueError, KeyError) as exc:
                     self._json(400, {"error": str(exc)}); return
                 if prev is None:
@@ -3664,7 +6825,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
                 try:
-                    stats = fleet.import_csv(raw.decode("utf-8"))
+                    result = role_coordinator().import_csv(
+                        raw.decode("utf-8"), actor=actor)
+                    stats = result["stats"]
+                except role_management.RoleManagementError as exc:
+                    self._audit(
+                        "device_csv_import", "device", action="import_csv",
+                        actor=actor, result="fail",
+                        detail="role coordination refused: %s" % exc.code)
+                    self._json(exc.status, exc.result); return
                 except (ValueError, UnicodeDecodeError) as exc:
                     self._json(400, {"error": str(exc)}); return
                 self._audit("device_csv_import", "device", action="import_csv",
@@ -3674,6 +6843,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (stats["imported"], stats["new"],
                                      stats["updated"], stats["skipped"]))
                 self._json(200, stats); return
+            if path in ("/api/devices/bulk-role",
+                        "/api/peer-policy/roles/import-csv"):
+                self._policy_mutation(path, actor, raw)
+                return
             if path == "/api/devices/bulk-credential":
                 # issue #125: the console's "Select all N matching devices"
                 # bulk action used to fire one /api/devices/<id>/credential
@@ -3733,6 +6906,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            result="ok" if applied else "fail")
                 self._json(200, {"ok": True, "applied": applied,
                                  "failed": failed}); return
+            if path.startswith("/api/devices/") and path.endswith("/role"):
+                self._policy_mutation(path, actor, raw)
+                return
             if path.startswith("/api/devices/") and path.endswith("/assign"):
                 did = unquote(path[len("/api/devices/"):-len("/assign")])
                 if not did.strip():
@@ -3780,79 +6956,42 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 else:
                     image_id = str(body.get("image_id") or "")
                     ids = [image_id] if image_id else []
-                if not ids:
-                    # explicit unassign: clear the approval so the agent stops
-                    # staging without deleting the device
-                    old_ids = catalog.get_policy(did).get("approved_image_ids") or []
-                    try:
-                        catalog.set_policy(did, approved_image_ids=[],
-                                           expect_image_ids=expect)
-                    except catalog_mod.PolicyConflict as exc:
-                        self._json(409, {"error": "assignment_conflict",
-                                         "assigned_image_ids": exc.current_ids})
-                        return
-                    # EVERY image this cleared, not just the set's first: the
-                    # audit trail is the record of what was done to the
-                    # device, and naming one of three removed images made it
-                    # read as a far smaller change than it was.
-                    self._audit("device_assign", "device", action="unassign",
-                               target=did, actor=actor,
-                               detail="unassigned (was %s)"
-                                      % (self._audit_image_names(catalog, old_ids)
-                                         or "none"))
-                    self._json(200, {"ok": True}); return
-                entries = {}
-                for iid in ids:
-                    entry = catalog.get_image(iid)
-                    if entry is None:
-                        self._json(400, {"error": "no such image"}); return
-                    entries[iid] = entry
-                old_pol = catalog.get_policy(did)
-                old = old_pol.get("approved_image_id")
-                old_ids = old_pol.get("approved_image_ids") or []
+                service = assignment_service.AssignmentService(
+                    catalog, fleet, audit_path,
+                    authority_path=os.path.join(
+                        schedule_store.state_dir,
+                        "assignment-authority.sqlite3"))
                 try:
-                    # approval is the whole policy: IRIS stages, never installs
-                    catalog.set_policy(did, approved_image_ids=ids,
-                                       expect_image_ids=expect)
+                    # API compatibility remains replacement semantics. The
+                    # shared service holds fleet membership through the
+                    # catalog CAS and writes exactly one success/failure audit.
+                    result = service.apply(
+                        did, ids, actor=actor, mode="replace",
+                        expect_image_ids=expect, retry_conflict=False,
+                        plural=plural)
+                except assignment_service.MissingFleetDevice:
+                    self._json(422, {"error": "no such fleet device"})
+                    return
+                except assignment_service.AssignmentAuthorityUnavailable:
+                    self._json(503, {
+                        "error": "assignment authority unavailable"})
+                    return
                 except catalog_mod.PolicyConflict as exc:
-                    # a lost race, not a bad request: answer with what is
-                    # really stored so the client can show it and decide again
                     self._json(409, {"error": "assignment_conflict",
                                      "assigned_image_ids": exc.current_ids})
                     return
                 except catalog_mod.QuarantinedImage as exc:
-                    # a Cisco Bulk Hash sha512 mismatch blocked this id --
-                    # surface the verdict so the operator sees WHY, not just
-                    # a bare 400 (KGV reconciler).
                     self._json(400, {"error": "image_quarantined",
                                      "image_id": exc.image_id,
                                      "verdict": exc.hash_verification})
                     return
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
-                if plural:
-                    detail = "assigned %d image(s): %s" % (
-                        len(ids), ", ".join(entries[i].get("filename") for i in ids))
-                    # Narrowing a set is an assign, and what it REMOVED is the
-                    # consequential half of that edit: an operator reading
-                    # "assigned 1 image(s): A" had no way to tell it from a
-                    # fresh assignment that dropped nothing.
-                    removed = [i for i in old_ids if i not in ids]
-                    if removed:
-                        detail += "; removed: %s" % self._audit_image_names(
-                            catalog, removed)
-                else:
-                    # singular compat: keep the pre-multi-image detail shape
-                    # (existing audit tests assert this text verbatim)
-                    entry = entries[ids[0]]
-                    detail = "assigned %s (%s) id=%s" % (
-                        entry.get("filename"), _fmt_bytes(entry.get("size")), ids[0])
-                    if old and old != ids[0]:
-                        old_entry = catalog.get_image(old)
-                        detail += ", was %s" % ((old_entry or {}).get("filename") or old)
-                self._audit("device_assign", "device", action="assign", target=did,
-                           detail=detail, actor=actor)
-                self._json(200, {"ok": True}); return
+                self._json(200, {
+                    "ok": True,
+                    "assigned_image_ids": result.after_ids,
+                    "removed_image_ids": result.removed_ids,
+                }); return
             if path.startswith("/api/devices/") and path.endswith("/credential"):
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
@@ -3999,8 +7138,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body.get("acknowledge_adopt") is not True:
                     self._json(400, {"error": "adoption acknowledgement is required"}); return
                 try:
-                    if record_store.active_for_device(did) is not None:
+                    if record_store.active_for_device(
+                            did, strict=True) is not None:
                         self._json(409, {"error": "device already has an active deployment record"}); return
+                except deployment_records.RecordStoreUnreadable:
+                    self._json(503, {
+                        "error": "deployment authority is unreadable"}); return
                 except ValueError as exc:
                     # duplicate actives (legacy store not yet healed) — surface
                     # the reason like the undeploy branch, not a dropped request
@@ -4027,267 +7170,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(404, {"error": "not found"}); return
                 act = "undeploy" if path.endswith("/undeploy") else "onboard"
                 did = unquote(path[len("/api/devices/"):-len("/" + act)])
-                if not did.strip():
-                    self._json(400, {"error": "bad device id"}); return
-
-                def _reject(status, error):
-                    # Every submission refusal from here on is audited under
-                    # the SAME event a successful start uses below (varying
-                    # only result), so the trail never goes quiet after an
-                    # operator hits onboard/undeploy: a rejected router
-                    # preflight, a busy-device conflict, an unreachable
-                    # device, etc. all leave a result=fail onboard_start /
-                    # undeploy_start record naming this device -- never a
-                    # "create" (or a click) followed by nothing.
-                    self._audit("%s_start" % act, "onboard", action="start",
-                               target=did, actor=actor, result="fail",
-                               detail=error)
-                    self._json(status, {"error": error})
-
-                # Reject unknown devices HERE, before start() creates a job +
-                # parked worker thread — junk ids must not accumulate either.
-                if fleet is not None and fleet.get_device(did) is None:
-                    _reject(404, "no such device"); return
-                resolved = None
-                record_ref = {}
-                prepare = None
-                pre_apply = None
-                on_success = None
-                # Telemetry flags from the onboard form (spec 8.1): reports
-                # default on, streaming default off — both installer-style and
-                # IOx-style env names so every platform recipe picks them up.
+                invalid = submission_adapter.prevalidate_device(
+                    did, act, actor=actor, audit_fn=self._audit)
+                if invalid is not None:
+                    self._json(invalid[0], invalid[1]); return
                 body_flags = self._json_body(raw)
                 if body_flags is None:
                     return
-                # Force teardown: an onboard that died after enabling the
-                # agent but before its record was written leaves a router that
-                # cannot be undeployed (no record), cannot be adopted (routers
-                # never can) and cannot be re-onboarded (preflight refuses the
-                # existing Guest Shell). Force removes ONLY the agent footprint.
-                force = body_flags.get("force", False) is True
-                t_on = body_flags.get("telemetry", True) is not False
-                s_on = body_flags.get("telemetry_stream", False) is True
-                env_extra = {"TELEMETRY": "on" if t_on else "off",
-                             "TELEMETRY_STREAM": "on" if s_on else "off"}
-                env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
-                env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
-                # Undeploy carries its own env: the telemetry flags above are
-                # onboard-only, but the force flag below MUST reach the
-                # teardown recipe. env_extra is the only channel into it.
-                undeploy_env = None
-                if act == "onboard":
-                    # With a record store (always in production via main()), an
-                    # onboard resolves an immutable plan and persists a record.
-                    # Without one (embedded/degraded), it stays one-click legacy.
-                    if record_store is not None:
-                        device = fleet.get_device(did)
-                        try:
-                            plan = self._plan(did, device)
-                        except ValueError as exc:
-                            _reject(409, str(exc)); return
-                        if plan["resolved"].get("platform") == "router":
-                            try:
-                                # Any record IRIS already applied blocks a
-                                # re-onboard, not just an active one: the box is
-                                # configured either way, so preflight would fail
-                                # with a confusing "guestshell is already
-                                # enabled" instead of naming the real fix.
-                                existing = record_store.recoverable_for_device(did)
-                            except ValueError as exc:
-                                _reject(409, str(exc)); return
-                            if existing is not None:
-                                _reject(409, "router already has a %s "
-                                        "deployment record; undeploy it before "
-                                        "onboarding again — if this device was "
-                                        "replaced, undeploy with force, or "
-                                        "delete and re-add it"
-                                        % existing.get("state", "recorded")); return
-                        resolved = plan["resolved"]
-
-                        def prepare():
-                            # Runs under the onboard job lock only when a genuinely
-                            # new job is registered, so a concurrent double-onboard
-                            # cannot leave an orphan planned record.
-                            rid = record_store.create({"controller_id": "iris",
-                                "device_id": did, "inventory_revision": fleet.revision(),
-                                "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                # EVERY platform's preflight runs in the bounded
-                                # worker pool, not synchronously in this HTTP
-                                # request (a large selected batch shows queued
-                                # progress immediately), and pre_apply below
-                                # replaces this with the evidence it returns.
-                                # Non-router records used to be created as
-                                # "not-required" and never updated, so they
-                                # misdescribed a check that had in fact run.
-                                "preflight": {"status": "pending"},
-                                "resources": self._owned_resources(plan["resolved"])})["record_id"]
-                            record_ref["id"] = rid
-                            return rid
-
-                        def pre_apply(evidence):
-                            # The job may have waited in the queue. Bind the
-                            # live evidence (board ID, model, router
-                            # ownership) immediately before apply, then
-                            # atomically replace the planned record inputs.
-                            # This is what lets a later undeploy render from
-                            # the record alone: DEVICE_IP and
-                            # EXPECTED_DEVICE_IDENTITY for Guest Shell and IOx
-                            # teardowns come from here, not the live fleet row.
-                            final_plan = self._apply_preflight(plan, evidence)
-                            rid = record_ref.get("id")
-                            if not rid:
-                                raise ValueError("planned record is unavailable")
-                            record_store.update_planned(
-                                rid, plan_hash=final_plan["plan_hash"],
-                                resolved=final_plan["resolved"],
-                                preflight=evidence,
-                                resources=self._owned_resources(
-                                    final_plan["resolved"]))
-                            return final_plan["resolved"]
-                    else:
-                        try:
-                            degraded_plan = self._plan(did, fleet.get_device(did))
-                        except ValueError as exc:
-                            _reject(409, str(exc)); return
-                        if degraded_plan["resolved"].get("platform") == "router":
-                            _reject(503, "router onboarding requires the "
-                                    "deployment record store"); return
-                else:
-                    # Undeploy renders exclusively from an active record so a
-                    # post-deploy inventory edit cannot retarget cleanup. Without
-                    # a record store, fall back to legacy fleet-driven teardown.
-                    if record_store is not None:
-                        # FORCE is decided BEFORE the record is read, because a
-                        # forced teardown never uses a record as authority: it
-                        # strips only what is identifiably IRIS's by name and
-                        # leaves the operator's network exactly as it is. Force
-                        # used to be consulted only on the no-record branch,
-                        # which defeated the one case it exists for — a record
-                        # that describes a device no longer there. A rebuilt VM
-                        # keeps its id and address but gets a new board ID, so
-                        # the teardown recipe's identity guard refused it every
-                        # time, while onboard kept naming that same teardown as
-                        # the fix. Force could not be reached from either end.
-                        if force:
-                            try:
-                                degraded_plan = self._plan(
-                                    did, fleet.get_device(did))
-                            except ValueError as exc:
-                                _reject(409, str(exc)); return
-                            resolved = degraded_plan["resolved"]
-                            undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
-
-                            # Retired only once the box is actually clean (see
-                            # OnboardService.start's on_success). EVERY
-                            # non-terminal record goes, which is also the only
-                            # exit from "multiple recoverable records" — that
-                            # state refuses onboard, undeploy and adopt alike,
-                            # and nothing else in the product resolves it.
-                            def on_success(_did=did):
-                                record_store.retire_device(
-                                    _did, "forced agent-only teardown; the "
-                                    "record no longer describes this device")
-
-                            self._audit("undeploy_forced", "onboard",
-                                        action="start", target=did,
-                                        actor=actor, result="ok",
-                                        detail="forced agent-footprint teardown;"
-                                               " VPG/NAT left untouched, any "
-                                               "deployment record abandoned "
-                                               "once the teardown succeeds")
-                        else:
-                            try:
-                                # Not just the ACTIVE record: a controller
-                                # restart during an onboard leaves the record
-                                # "unknown" while the device is already
-                                # configured, and that record still records
-                                # what IRIS created. Teardown must accept it, or
-                                # the device is stranded — a router cannot be
-                                # adopted and its preflight refuses a re-onboard.
-                                # strict: an unreadable store must NOT read as
-                                # "no record for this device" — see the
-                                # RecordStoreUnreadable branch below.
-                                record = record_store.recoverable_for_device(
-                                    did, strict=True)
-                            except deployment_records.RecordStoreUnreadable as exc:
-                                # The records exist, we just cannot read them.
-                                # Reporting that as "no record" sent the
-                                # operator to adopt a device IRIS may already
-                                # own, writing an unverified record on top of a
-                                # repairable file. Server-state fault -> 503,
-                                # like the other record-store outages here.
-                                _reject(503, "%s; the console cannot tell "
-                                        "whether this device has a deployment "
-                                        "until the file is repaired" % exc)
-                                return
-                            except ValueError as exc:
-                                # duplicate actives should be impossible
-                                # (activation supersedes siblings; startup
-                                # collapses legacy dupes) — but surface the
-                                # reason instead of a 500 if not, and name the
-                                # way out rather than leaving the operator with
-                                # a state the console cannot resolve.
-                                _reject(409, "%s; retry with force to remove "
-                                        "the agent footprint only" % exc); return
-                            if record is None:
-                                _reject(409, "no deployment record for this "
-                                        "device; adopt it first, then undeploy, "
-                                        "or retry with force to remove the "
-                                        "agent footprint only"); return
-                            try:
-                                resolved = self._router_teardown_resolved(record)
-                            except ValueError as exc:
-                                # Best effort: the record may already BE
-                                # needs-reconcile, from an earlier attempt at
-                                # this same broken teardown, and that self-edge
-                                # is not a legal transition. Letting it raise
-                                # turned every retry after the first into an
-                                # unhandled 500 with no JSON body to explain it.
-                                try:
-                                    record_store.transition(record["record_id"],
-                                                        "needs-reconcile")
-                                except ValueError:
-                                    pass
-                                _reject(409, str(exc)); return
-
-                            def prepare():
-                                record_ref["id"] = record["record_id"]
-                                return record["record_id"]
-                    else:
-                        try:
-                            degraded_plan = self._plan(did, fleet.get_device(did))
-                        except ValueError as exc:
-                            _reject(409, str(exc)); return
-                        if degraded_plan["resolved"].get("platform") == "router":
-                            _reject(503, "router undeploy requires an "
-                                    "active deployment record"); return
-                try:
-                    jid = onboard.start(
-                        did, action=act, resolved=resolved, prepare=prepare,
-                        pre_apply=pre_apply, on_success=on_success,
-                        env_extra=(env_extra if act == "onboard"
-                                   else undeploy_env))
-                except ValueError as exc:
-                    if record_ref.get("id") and act == "onboard":
-                        # Best effort, for the same reason as the teardown-
-                        # resolve handler above: start() retires the record
-                        # itself when the work queue is full, so this would be
-                        # removed -> needs-reconcile, which is not a legal edge.
-                        # An illegal transition raised from inside an except
-                        # handler escapes do_POST entirely — the operator gets a
-                        # dropped request instead of the 409 that explains why.
-                        try:
-                            record_store.transition(record_ref["id"],
-                                                "needs-reconcile")
-                        except ValueError:
-                            pass
-                    # the device is busy with the OPPOSITE action
-                    _reject(409, str(exc)); return
-                # Emitted AFTER start() so the job id correlates this start with
-                # its *_finished event when jobs run concurrently.
-                self._audit("%s_start" % act, "onboard", action="start",
-                           target=did, actor=actor, detail="job %s" % jid)
-                self._json(200, {"job_id": jid}); return
+                status, response = submission_adapter.submit_device(
+                    did, act, body_flags, actor=actor, audit_fn=self._audit)
+                self._json(status, response)
+                return
             if path.startswith("/api/onboard/jobs/") and path.endswith("/abort"):
                 if onboard is None:
                     self._json(404, {"error": "not found"}); return
@@ -4344,10 +7237,39 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_DELETE(self):
             path = self.path.split("?", 1)[0]
+            if re.fullmatch(r"/api/schedules/[^/]+", path):
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                if length < 0:
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                if length > _MAX_BODY:
+                    self._schedule_problem(413, "payload-too-large",
+                                           "Payload too large")
+                    return
+                info = self._schedule_session(mutation=True,
+                                              unread_body=length)
+                if info is None:
+                    return
+                if length:
+                    self.rfile.read(length)
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                self._schedule_mutation("DELETE", path, b"", info)
+                return
             info = self._require_session_csrf()
             if info is None:
                 return
             actor = "console:" + info["username"]
+            if path.startswith("/api/peer-policy/roles/"):
+                self._policy_mutation(path, actor)
+                return
             if path == "/api/settings/audit-export" and creds is not None:
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
@@ -4431,59 +7353,51 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # policy + fleet + catalog state. Any failure here is
                 # partial/degraded but CANNOT permit the device.
                 degraded = []
-                # Peer-policy lives in the shared IRIS state dir. Prefer the
-                # catalog's own state_dir (single source of truth, and what the
-                # tracker reconciler reads) so console + tracker agree; fall back
-                # to IRIS_STATE only when no catalog is wired.
-                state_dir = (catalog.state_dir if catalog is not None
-                             else os.environ.get("IRIS_STATE", "/var/lib/iris"))
-                try:
-                    peer_policy.unassign_device(
-                        os.path.join(state_dir, "peer-policy.json"),
-                        os.path.join(state_dir, "peer-policy.lkg.json"),
-                        did, actor=actor, now=time.time())
-                except Exception:
-                    degraded.append("policy")
-                deleted = fleet.delete(did)
-                # Purge catalog-side state (assignment, heartbeat record,
-                # telemetry history, seen-report ledger, pending pull) even when
-                # the fleet row was already gone — a deleted-and-re-added device
-                # must come back unassigned. Endpoints are NOT purged (retained
-                # to TTL); re-onboard clears them before new credentials mint.
-                try:
-                    purged = (catalog.purge_device(did)
-                              if catalog is not None else False)
-                except Exception:
-                    purged = False
-                    degraded.append("catalog")
-                # Retire the deployment records for the same reason the catalog
-                # state goes: a record outlives the fleet row, and the NEXT
-                # device registered under this id inherits it. That strands the
-                # device rather than merely confusing it — onboard refuses while
-                # a recoverable record exists and names undeploy as the fix,
-                # while that teardown refuses the (replaced) box on an identity
-                # mismatch. Abandoned, not dropped: the record stays the account
-                # of what IRIS built there, which an operator who deleted a
-                # still-configured device is the one person who needs.
                 retired = []
-                try:
-                    if record_store is not None:
-                        retired = record_store.retire_device(
-                            did, "device deleted from the fleet")
-                except Exception:
-                    degraded.append("records")
-                # Work in flight outlives the device for the same reason: a job
-                # record is keyed on the device id alone, so one left behind
-                # keeps the busy guard armed against the NEXT device registered
-                # under this name -- refusing the opposite action outright and
-                # silently joining the dead job for the same one.
                 stopped = 0
+                cleanup_degraded = []
+
+                def cleanup_retired_device():
+                    nonlocal retired, stopped
+                    # Keep name-based cleanup inside the coordinator's fleet
+                    # lifetime guard: a replacement may reuse this device id
+                    # only after the old records and jobs have been retired.
+                    try:
+                        if record_store is not None:
+                            retired = record_store.retire_device(
+                                did, "device deleted from the fleet")
+                    except Exception:
+                        cleanup_degraded.append("records")
+                    try:
+                        if onboard is not None:
+                            halted = onboard.cancel_device(did)
+                            stopped = halted["cancelled"] + halted["aborted"]
+                    except Exception:
+                        cleanup_degraded.append("jobs")
+
                 try:
-                    if onboard is not None:
-                        halted = onboard.cancel_device(did)
-                        stopped = halted["cancelled"] + halted["aborted"]
-                except Exception:
-                    degraded.append("jobs")
+                    role_cleanup = role_coordinator().retire_device(
+                        did, actor, catalog=catalog,
+                        cleanup=cleanup_retired_device)
+                except role_management.RoleManagementError as exc:
+                    self._audit(
+                        "device_delete", "device", action="delete", target=did,
+                        actor=actor, result="fail",
+                        detail="secret revoke applied; role cleanup failed: %s"
+                        % exc.code)
+                    self._json(exc.status, exc.result)
+                    return
+                if role_cleanup["policy_degraded"]:
+                    degraded.append("policy")
+                deleted = role_cleanup["deleted"]
+                # The coordinator keeps its membership guard across fleet
+                # deletion and this catalog purge. A concurrent CLI/API assign
+                # therefore resumes only after deletion, observes no fleet row,
+                # and cannot recreate stale policy for a replacement device.
+                purged = role_cleanup["catalog_purged"]
+                if role_cleanup["catalog_degraded"]:
+                    degraded.append("catalog")
+                degraded.extend(cleanup_degraded)
                 result = "ok" if deleted and not degraded else (
                     "fail" if not deleted else "degraded")
                 if deleted:
@@ -4562,7 +7476,49 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         def log_message(self, *args):
             pass
 
+    submission_adapter = _OnboardSubmissionAdapter(
+        fleet, creds, record_store, onboard, iox_controller,
+        plan_fn=lambda device_id, device: Handler._plan(
+            None, device_id, device),
+        apply_preflight_fn=Handler._apply_preflight,
+        owned_resources_fn=Handler._owned_resources,
+        teardown_resolved_fn=Handler._router_teardown_resolved,
+        audit_path=audit_path, now_fn=now_fn,
+        # Removing an existing agent footprint does not require a complete
+        # network plan for creating a new one. Recorded teardown keeps using
+        # its immutable record; only the established fallback needs this path.
+        teardown_plan_fn=lambda device_id, device: Handler._plan(
+            None, device_id, device, onboarding=False))
+    schedule_coordinator = role_coordinator()
+    schedule_role_guard = (schedule_coordinator.schedule_role_guard
+                           if schedule_coordinator is not None else None)
+    assignment_writer = assignment_service.AssignmentService(
+        catalog, fleet, audit_path,
+        authority_path=os.path.join(
+            schedule_store.state_dir, "assignment-authority.sqlite3"))
+    scheduled_executor = _ScheduledExecutor(
+        schedule_store=schedule_store,
+        occurrence_store=schedule_occurrence_store,
+        receipt_store=schedule_receipt_store,
+        role_guard=lambda schedule: _runner_schedule_role_guard(
+            schedule_role_guard, schedule),
+        role_policy_snapshot=role_policy_snapshot,
+        fleet=fleet, secrets_path=getattr(app, "secrets_path", None),
+        assignment_writer=assignment_writer,
+        submission=submission_adapter, onboard=onboard,
+        record_store=record_store, now_fn=now_fn, catalog=catalog,
+        heartbeat_fn=instruction_heartbeat_snapshot,
+        swarm_fn=lambda: (swarm_fetch or _default_swarm_fetch)())
     srv = _ConsoleServer((host, port), Handler)
+    srv.onboard_submission = submission_adapter
+    # Inert runner construction seams. They are the exact instances used by
+    # HTTP handlers and do not start background work.
+    srv.schedule_store = schedule_store
+    srv.schedule_occurrence_store = schedule_occurrence_store
+    srv.schedule_receipt_store = schedule_receipt_store
+    srv.schedule_target_resolver = runner_schedule_target_resolver
+    srv.schedule_role_guard = schedule_role_guard
+    srv.schedule_executor = scheduled_executor
     tls_ctx = None
     if certfile:
         # Startup crash-window guard: the preferred cert file (normally the
@@ -4641,6 +7597,102 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     return srv
 
 
+def _log_peer_policy_startup(state_dir):
+    """State-owner signal; the Console process has no policy state mount.
+
+    A capable binary can detect missing role state via the durable watermark.
+    This cannot add downgrade detection to a binary predating role support.
+    """
+    auth_path = os.path.join(state_dir, "peer-policy.json")
+    try:
+        policy = peer_policy.load_policy(
+            auth_path, os.path.join(state_dir, "peer-policy.lkg.json"))
+        roles_lost = (peer_policy.roles_ever_configured(auth_path) or
+                      policy.document.get("roles_present") is True) and \
+            "roles" not in policy.document
+        if roles_lost:
+            signal = ("WARNING: role state lost; roles were previously configured "
+                      "but the loaded policy has no roles. Restore the policy. "
+                      "Independent quarantine is ignored by older servers. "
+                      "Use a separately reviewed containment and compatibility "
+                      "procedure before a downgrade.")
+        elif policy.fail_closed:
+            signal = "WARNING: peer policy is fail_closed; restore a valid policy."
+        elif policy.degraded:
+            signal = "WARNING: peer policy is degraded; restore authoritative policy state."
+        else:
+            signal = "peer policy is healthy."
+    except (OSError, peer_policy.PolicyError):
+        signal = "WARNING: peer policy is unavailable; check policy state storage."
+    print("iris-management: roles supported; " + signal,
+          file=sys.stderr, flush=True)
+
+
+class _TerminationRequested(BaseException):
+    """Internal unwind used to route container SIGTERM through cleanup."""
+
+
+class _SigtermLatch(object):
+    """Install TERM protection before local admission can begin."""
+
+    def __init__(self):
+        self.pending = False
+        self.armed = False
+        self.previous = None
+        self.installed = False
+
+    def _handle(self, _signum, _frame):
+        self.pending = True
+        if self.armed:
+            # Disarm before raising so a second TERM in the tiny unwind window
+            # is latched instead of interrupting the cleanup finally block.
+            self.armed = False
+            raise _TerminationRequested()
+
+    def install(self):
+        if not self.installed:
+            self.previous = signal.signal(signal.SIGTERM, self._handle)
+            self.installed = True
+
+    def restore(self):
+        if self.installed:
+            signal.signal(signal.SIGTERM, self.previous)
+            self.installed = False
+
+
+def _serve_with_shutdown(server, cleanup, latch=None, start_admission=None):
+    """Serve until return, interruption, or SIGTERM, then drain exactly once.
+
+    ``BaseServer.shutdown()`` cannot be called from the serve_forever thread.
+    Raising a private base exception from Python's main-thread signal handler
+    unwinds that loop directly and guarantees the ordered cleanup callback.
+    A second TERM is ignored while cleanup restores device/controller custody;
+    the container runtime's eventual KILL remains its external hard ceiling.
+    """
+    latch = latch or _SigtermLatch()
+    latch.install()
+    try:
+        if latch.pending:
+            raise _TerminationRequested()
+        latch.armed = True
+        if latch.pending:
+            latch.armed = False
+            raise _TerminationRequested()
+        if start_admission is not None:
+            start_admission()
+        server.serve_forever()
+    except _TerminationRequested:
+        pass
+    finally:
+        latch.armed = False
+        latch.pending = True
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            cleanup()
+        finally:
+            latch.restore()
+
+
 def main():
     import gui_images
     import gui_fleet
@@ -4659,6 +7711,14 @@ def main():
     token_file = os.environ.get("IRIS_MANAGEMENT_API_TOKEN_FILE", "").strip()
     previous_token_file = os.environ.get(
         "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE", "").strip() or None
+    if (not isinstance(state_dir, str) or not state_dir or
+            not os.path.isabs(state_dir) or
+            len(state_dir.encode("utf-8", "surrogatepass")) > 4096 or
+            any(ord(character) < 32 or 127 <= ord(character) <= 159
+                for character in state_dir)):
+        print("iris-management: invalid state root; refusing to start",
+              file=sys.stderr, flush=True)
+        sys.exit(2)
     if not certfile or not os.path.isfile(certfile):
         print("iris-management: management TLS certificate unavailable; "
               "refusing to start", file=sys.stderr, flush=True)
@@ -4677,6 +7737,7 @@ def main():
     # Mint the per-deployment instance id up front so the very first
     # /api/help call already sees the durable value.
     read_instance_id(state_dir)
+    _log_peer_policy_startup(state_dir)
     app = gui_app.GuiApp(secrets_path, recipients_csv=recipients, secrets_enc=secrets_enc)
     def _bg_audit(**kw):
         # audit sink for background jobs (onboard runs, async image publishes)
@@ -4698,6 +7759,8 @@ def main():
         state_dir, audit_path=audit_path,
         seeder_remove_fn=publish_mod.remove_torrent_rpc,
         seeder_add_fn=publish_mod.resume_torrent_rpc)
+    instruction_catalog = catalog_mod.Catalog(
+        catalog, secrets_path, audit_path=audit_path)
     # A Console publish does not become terminal until Cisco Bulk Hash
     # reconciliation has covered the newly catalogued image. Use the fully
     # wired CatalogStore above (not ImageService's lightweight write store),
@@ -4708,40 +7771,166 @@ def main():
         state_dir, images_dir, audit_fn=_bg_audit,
         verification_fn=lambda _entry: bulkhash_refresh.run_refresh(
             "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True))
-    record_store = deployment_records.DeploymentRecordStore(state_dir)
-    record_store.recover_interrupted()
-    onboard = gui_onboard.OnboardService(
-        fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, record_store=record_store,
-        log_dir=os.path.join(state_dir, "deploy-logs"))
+    term_latch = _SigtermLatch()
+    term_latch.install()
+    iox_controller = None
+    control_server = None
+    srv = None
+    onboard = None
+    schedule_wake_event = threading.Event()
+    schedule_service = None
     try:
+        record_store = deployment_records.DeploymentRecordStore(state_dir)
+        record_store.recover_interrupted()
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(server_dir)
+        controller_id = iox_verification._load_or_create_controller_id(
+            record_store, state_dir)
+        catalog_certificate = (
+            os.environ.get("IRIS_CRT_PUBLIC") or
+            os.path.join(os.environ.get("IRIS_CONFIG") or "/etc/iris",
+                         "tls", "crt.pem"))
+        catalog_host = os.environ.get("IRIS_HOST_IP", "")
+        catalog_url = os.environ.get("IRIS_CATALOG_URL") or (
+            "https://%s:8443" % catalog_host if catalog_host else "")
+        # The device-facing artifact server an IOx device fetches its
+        # package, certificate and instruction envelope from with
+        # `copy https:` (server/artifact_server.py, port IRIS_ARTIFACTS_PORT
+        # on the same address devices reach the catalog on), and the
+        # directory it serves, where the controller publishes the per-device
+        # envelope under staging/<device-id>/ for the span of that fetch.
+        artifacts_dir = os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts")
+        artifact_url = ("https://%s:%s" % (
+            catalog_host, os.environ.get("IRIS_ARTIFACTS_PORT", "8000"))
+            if catalog_host else "")
+        iox_controller = iox_verification.IoxController(
+            record_store,
+            {
+                "state_dir": state_dir,
+                "controller_id": controller_id,
+                "record_store": os.path.realpath(record_store.path),
+                "session_seconds": 7200,
+                "restoration_reserve_seconds": 180,
+                "application_id": "iris",
+                "credential_resolver": _iox_credential_projection(creds),
+                "enrollment_token_minter": lambda device_id:
+                    gui_onboard._default_mint(device_id, server_dir),
+                "instruction_bootstrap_materializer":
+                    instruction_catalog.materialize_bootstrap_instruction,
+                "catalog_url": catalog_url,
+                "catalog_certificate_path": catalog_certificate,
+                "artifact_url": artifact_url,
+                "artifacts_dir": artifacts_dir,
+                "recipe_argv_by_action": {
+                    "install": [
+                        "/bin/bash",
+                        os.path.join(repo_root, "device", "iox", "install.sh")],
+                    "uninstall": [
+                        "/bin/bash",
+                        os.path.join(repo_root, "device", "iox", "uninstall.sh")],
+                },
+            },
+            iox_transport.IoxTransport, time.time, time.monotonic)
+        onboard = gui_onboard.OnboardService(
+            fleet, creds, audit_fn=_bg_audit,
+            clear_state_fn=catalog.forget_device, record_store=record_store,
+            log_dir=os.path.join(state_dir, "deploy-logs"),
+            iox_controller=iox_controller, crt_public=catalog_certificate,
+            host_ip=catalog_host, catalog_url=catalog_url,
+            instruction_bootstrap_fn=(
+                instruction_catalog.materialize_bootstrap_instruction))
         srv = make_server(
             host, port, app, images, fleet, creds, catalog, onboard, None,
             certfile=certfile, keyfile=keyfile, audit_path=audit_path,
             record_store=record_store, management_token_file=token_file,
-            management_previous_token_file=previous_token_file)
-    except ConsoleTLSError as exc:
-        print("iris-management: %s" % exc, file=sys.stderr, flush=True)
+            management_previous_token_file=previous_token_file,
+            iox_controller=iox_controller,
+            schedule_wake=schedule_wake_event.set)
+        schedule_service = schedule_runner.ScheduleRunner(
+            srv.schedule_store, srv.schedule_target_resolver,
+            executor=srv.schedule_executor,
+            role_guard=lambda schedule: _runner_schedule_role_guard(
+                srv.schedule_role_guard, schedule),
+            wake_event=schedule_wake_event,
+            error_fn=lambda reason: print(
+                "iris-management: schedule runner pass failed: %s" % reason,
+                file=sys.stderr, flush=True))
+        def control_dispatch(request):
+            if term_latch.pending:
+                return {"error": "service shutting down"}
+            return srv.onboard_submission.dispatch(request)
+
+        control_server = iox_verification.IoxControlServer(
+            state_dir, controller_id, control_dispatch)
+    except Exception:
+        if control_server is not None:
+            try:
+                control_server.close()
+            except Exception:
+                pass
+        if srv is not None:
+            try:
+                srv.server_close()
+            except Exception:
+                pass
+        if onboard is not None:
+            try:
+                onboard.shutdown()
+            except Exception:
+                pass
+        if iox_controller is not None:
+            try:
+                iox_controller.close()
+            except Exception:
+                pass
+        term_latch.restore()
+        # A fatal startup failure with no detail is undebuggable; the operator
+        # sees only "refusing to start" and a crash loop. The exception type
+        # and message name a stale lock, an unreadable record, an already-bound
+        # endpoint. traceback goes to stderr, which the container captures.
+        print("iris-management: controller initialization failed; refusing "
+              "to start", file=sys.stderr, flush=True)
+        traceback.print_exc()
         sys.exit(2)
-    # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
-    # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
-    ca_stop = threading.Event()     # never set in production; loop dies with us
-    threading.Thread(target=ca_trust_refresh_loop,
-                     args=(ca_stop, state_dir, _bg_audit),
-                     daemon=True).start()
-    # Cisco Bulk Hash reconciliation schedule (KGV reconciler Task 3): same
-    # daemon-thread idiom as ca_trust_refresh_loop, immediately above.
-    bulkhash_stop = threading.Event()  # never set in production either
-    threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
-                     args=(bulkhash_stop, state_dir, catalog, _bg_audit),
-                     daemon=True).start()
-    # Daily audit-trail export (F5): same daemon-thread idiom. The password
-    # accessor is passed as a callable so each run reads the current secret.
-    export_stop = threading.Event()  # never set in production either
-    threading.Thread(target=audit_export.export_loop,
-                     args=(export_stop, audit_path, state_dir,
-                           creds.audit_export_secrets, _bg_audit),
-                     daemon=True).start()
+    # Schedule recovery starts only after deployment records were recovered and
+    # all state-owner adapters were constructed. Importing or calling
+    # make_server() remains inert.
+    schedule_stop = threading.Event()
+    schedule_thread = threading.Thread(
+        target=schedule_service.run, args=(schedule_stop,), daemon=True)
+    custody_stop = threading.Event()
+    instruction_stop = threading.Event()
+    ca_stop = threading.Event()
+    bulkhash_stop = threading.Event()
+    export_stop = threading.Event()
+
+    def start_management():
+        # All admission starts under the termination latch. A signal during
+        # construction skips this callback; a signal or failure within it
+        # still enters the same cleanup path with any started work owned.
+        schedule_thread.start()
+        # Maintenance stays in this process, sharing its trusted stores.
+        threading.Thread(
+            target=instruction_keys.status_loop,
+            args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
+            daemon=True).start()
+        threading.Thread(
+            target=instruction_stamper.status_loop,
+            args=(instruction_stop, instruction_stamper.InstructionStamper(
+                fleet=fleet, catalog_store=catalog)),
+            daemon=True).start()
+        threading.Thread(target=ca_trust_refresh_loop,
+                         args=(ca_stop, state_dir, _bg_audit),
+                         daemon=True).start()
+        threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
+                         args=(bulkhash_stop, state_dir, catalog, _bg_audit),
+                         daemon=True).start()
+        # Read export credentials through the accessor at each run.
+        threading.Thread(target=audit_export.export_loop,
+                         args=(export_stop, audit_path, state_dir,
+                               creds.audit_export_secrets, _bg_audit),
+                         daemon=True).start()
+        control_server.start()
     scheme = "https" if srv.tls_active else "http"
     if not srv.tls_active:
         print("iris-gui: WARNING: serving the console over PLAIN HTTP (%s=1): "
@@ -4750,7 +7939,30 @@ def main():
               % _PLAINTEXT_OPT_IN_ENV, file=sys.stderr, flush=True)
     print("iris-management on %s://%s:%d/internal/v1" %
           (scheme, host, port), flush=True)
-    srv.serve_forever()
+    def shutdown_management():
+        for stop in (schedule_stop, custody_stop, instruction_stop, ca_stop,
+                     bulkhash_stop, export_stop):
+            stop.set()
+        schedule_service.stop()
+        if schedule_thread.ident is not None:
+            schedule_thread.join(timeout=10)
+        if schedule_thread.is_alive():
+            print("iris-management: schedule runner did not stop within 10s",
+                  file=sys.stderr, flush=True)
+        try:
+            control_server.close()
+        finally:
+            try:
+                srv.server_close()
+            finally:
+                try:
+                    onboard.shutdown()
+                finally:
+                    iox_controller.close()
+
+    _serve_with_shutdown(
+        srv, shutdown_management, latch=term_latch,
+        start_admission=start_management)
 
 
 if __name__ == "__main__":

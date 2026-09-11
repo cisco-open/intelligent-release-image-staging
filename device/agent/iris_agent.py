@@ -11,6 +11,8 @@ All side effects are injected via Deps so the logic is testable off-box; on-box,
 build_deps() wires the real cli module / aria2 RPC / filesystem."""
 import collections
 import errno
+import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -20,6 +22,8 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 
 import agent_config
 import flashcheck
@@ -38,6 +42,13 @@ _STATE_SCHEMA = 2
 # catalog value can't inject extra IOS config.
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# The IOS filesystems a pre-existing root image may be attested on (native
+# `dir` size + `verify /sha512`) before IRIS decides whether to place a copy at
+# all: the C9300 Guest Shell / C9k IOx boot disks, and sdflash: — the IE-3x00
+# family's IOx staging disk, where the agent's SSH-to-self vty reads it the
+# same way. Anything else is refused as an invalid root path.
+_IOS_ROOT_PREFIXES = ("flash:", "bootflash:", "sdflash:")
+
 # A failed IOS copy can occupy its full 900-second applet budget. Four attempts
 # bound that disruption while still tolerating several transient failures. The
 # first retry runs on the next tick; subsequent retries use a five-minute
@@ -54,6 +65,97 @@ _ROOT_COPY_BACKOFF_MAX = 60 * 60
 # separately scoped per-download Bearer header.
 _TORRENT_TRANSPORT_BEARER_HTTPS = "bearer-https-v2"
 _TORRENT_TRANSPORT_QUERY_HTTPS = "legacy-query-https-v1"
+
+_MAX_I63 = (1 << 63) - 1
+_ARIA_GID_RE = re.compile(r"^[0-9a-f]{16}$")
+_ARIA_GLOBAL_OPTIONS = (
+    ("bt-max-peers", "bt_max_peers"),
+    ("max-upload-limit", "max_upload_limit"),
+    ("max-download-limit", "max_download_limit"),
+    ("max-overall-upload-limit", "overall_up"),
+    ("max-overall-download-limit", "overall_down"),
+    ("bt-request-peer-speed-limit", "request_peer_speed_limit"),
+    ("max-concurrent-downloads", "max_concurrent"),
+)
+_ARIA_LIVE_OPTIONS = _ARIA_GLOBAL_OPTIONS[:3] + (_ARIA_GLOBAL_OPTIONS[5],)
+_FIXED_QOS = {
+    "max_peers": 10,
+    "seed_up_bps": 0,
+    "seed_down_bps": 0,
+    "leech_up_bps": 0,
+    "leech_down_bps": 0,
+    "overall_up_bps": 0,
+    "overall_down_bps": 0,
+    "max_concurrent": 100,
+    "request_peer_speed_limit_bps": 51200,
+}
+_FIXED_CONTROL = {
+    "catalog_tick_s": 60,
+    "telemetry_every_ticks": 1,
+    "telemetry_pause": False,
+}
+_ALLOW_COMPLEMENT_CACHE = {"digest": None, "rules": None}
+
+
+def _normalize_tick_seconds(value):
+    """Return a bounded mechanical launcher tick, compatibly defaulting to 60."""
+    if isinstance(value, bool):
+        return 60
+    if isinstance(value, int):
+        tick_seconds = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        significant = value.lstrip("0") or "0"
+        if len(significant) > 5:
+            return 60
+        tick_seconds = int(significant)
+    else:
+        return 60
+    return tick_seconds if 1 <= tick_seconds <= 86400 else 60
+
+_INSTRUCTION_ARIA_ADD_PROTOCOL = "iris-instruction-aria-add/v1"
+
+
+class _InstructionAriaAdd:
+    """Scope one dependency instance's verified defaults to addTorrent."""
+
+    def __init__(self, function, defaults):
+        self.function = function
+        self.defaults = defaults
+        self.instruction_aria_add_protocol = _INSTRUCTION_ARIA_ADD_PROTOCOL
+
+    def __call__(self, *args, **kwargs):
+        import instr
+        context = instr.torrent_option_context()
+        marker = object()
+        previous = getattr(context, "defaults", marker)
+        context.defaults = self.defaults
+        try:
+            return self.function(*args, **kwargs)
+        finally:
+            if previous is marker:
+                try:
+                    del context.defaults
+                except AttributeError:
+                    pass
+            else:
+                context.defaults = previous
+
+    def with_instruction_defaults(self, defaults):
+        return _InstructionAriaAdd(self.function, defaults)
+
+    def unwrap_instruction_aria_add(self):
+        return self.function
+
+
+def _instruction_aria_add_protocol(value):
+    if (getattr(value, "instruction_aria_add_protocol", None)
+            != _INSTRUCTION_ARIA_ADD_PROTOCOL):
+        return None
+    replace = getattr(value, "with_instruction_defaults", None)
+    unwrap = getattr(value, "unwrap_instruction_aria_add", None)
+    if not callable(replace) or not callable(unwrap):
+        return None
+    return replace, unwrap
 
 
 def _choose_ios_stage_prefix(platform, filesystems, model,
@@ -91,6 +193,20 @@ def _guestshell_root_ios_path(stage_dir, target_prefix, fname):
     root = roots.get(target_prefix)
     if (root is None or stage_dir != root + "/guest-share/iris"
             or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
+        return None
+    return target_prefix + fname
+
+
+def _iox_root_ios_path(target_prefix, fname):
+    """The IOS root path an IOx-app agent attests before placing `fname`.
+
+    The IOx container has no mount of the IOS disk at all (IE-3x00 sdflash:,
+    C9k flash:/bootflash:), so unlike the Guest Shell there is no local
+    mount shape to cross-check — the proved staging prefix (target_fs) and a
+    catalog filename that passes the IOS-command allowlist are the whole
+    contract. None for any other prefix or a non-canonical name."""
+    if (target_prefix not in _IOS_ROOT_PREFIXES or not isinstance(fname, str)
+            or not _FILENAME_RE.fullmatch(fname)):
         return None
     return target_prefix + fname
 
@@ -156,14 +272,67 @@ ROOT_COPY_NOT_ATTEMPTED = object()
 # `rename`, a directory-entry update that moves no data. The probe and its
 # surcharge were removed (scrubber #138); the gate charges exactly the bytes
 # the temp copy actually writes, same as before the crash-safety fix.
-Deps = collections.namedtuple(
+_BaseDeps = collections.namedtuple(
     "Deps", "catalog emit boot_image aria_add file_size verify free_bytes "
             "version copy_to_root purge_others reclaim root_present "
             "remove_stage aria_remove detect_mode target_fs running_image "
             "reclaimable reclaim_bundle model refresh aria_stats aria_peers "
             "io_transfer checkpoint aria_session copy_in_place "
             "root_file_size verify_root")
-Deps.__new__.__defaults__ = (None, None)
+_BaseDeps.__new__.__defaults__ = (None, None)
+
+
+class Deps(_BaseDeps):
+    """Established 29-field dependency tuple with an additive callback view.
+
+    Keep the callback as per-instance metadata so older code that checks the
+    tuple's exact shape remains valid, while new callers can construct and
+    replace ``instruction_step`` as if it were an optional dependency.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        instruction_step = kwargs.pop("instruction_step", None)
+        aria_rpc = kwargs.pop("aria_rpc", None)
+        torrent_defaults = kwargs.pop("torrent_defaults", None)
+        value = _BaseDeps.__new__(cls, *args, **kwargs)
+        value._instruction_step = instruction_step
+        value._aria_rpc = aria_rpc
+        value._torrent_defaults = torrent_defaults
+        return value
+
+    @property
+    def instruction_step(self):
+        return self._instruction_step
+
+    @property
+    def aria_rpc(self):
+        return self._aria_rpc
+
+    @property
+    def torrent_defaults(self):
+        return self._torrent_defaults
+
+    def _replace(self, **kwargs):
+        marker = object()
+        instruction_step = kwargs.pop("instruction_step", marker)
+        aria_rpc = kwargs.pop("aria_rpc", marker)
+        torrent_defaults = kwargs.pop("torrent_defaults", marker)
+        replaced_defaults = torrent_defaults is not marker
+        if instruction_step is marker:
+            instruction_step = self.instruction_step
+        if aria_rpc is marker:
+            aria_rpc = self.aria_rpc
+        if torrent_defaults is marker:
+            torrent_defaults = self.torrent_defaults
+        value = _BaseDeps._replace(self, **kwargs)
+        wrapper = _instruction_aria_add_protocol(value.aria_add)
+        if replaced_defaults and wrapper is not None:
+            value = _BaseDeps._replace(
+                value, aria_add=wrapper[0](torrent_defaults))
+        value._instruction_step = instruction_step
+        value._aria_rpc = aria_rpc
+        value._torrent_defaults = torrent_defaults
+        return value
 
 
 def _atomic_write_state(state_path, state):
@@ -240,7 +409,130 @@ def _heartbeat(image, deps, stage_state="staging", target_fs=None,
     return hb
 
 
-def _send_heartbeat(deps, sid, payload):
+_INSTRUCTION_STATES = frozenset((
+    "none", "applied", "lkg", "stale_expired", "allowlist_expired",
+    "rollback_rejected", "floor_reset", "audience_mismatch", "key_rejected",
+    "tamper_rejected", "verifier_missing", "lkg_rejected", "lkg_unreadable",
+    "oversize", "reasserted", "instr_unavailable", "instr_pending",
+    "instr_forbidden", "tracker-only",
+))
+_INSTRUCTION_REASONS = frozenset(("unknown_key", "bad_mac"))
+_APPLIED_FIELDS = tuple(name for _option, name in _ARIA_GLOBAL_OPTIONS)
+_QOS_DRIFT_MAX_ROWS = 47
+
+
+def _public_i63(value):
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 0 or value > _MAX_I63):
+        raise ValueError("invalid bounded integer")
+    return value
+
+
+def _public_integer_unit(value, fields):
+    if not isinstance(value, dict) or set(value) != set(fields):
+        raise ValueError("invalid bounded unit")
+    return {name: _public_i63(value[name]) for name in fields}
+
+
+def _public_drift_pair(value):
+    pair = _public_integer_unit(value, ("expected", "observed"))
+    if pair["expected"] == pair["observed"]:
+        raise ValueError("not drift")
+    return pair
+
+
+def _public_drift(value):
+    if (not isinstance(value, dict)
+            or not set(value).issubset({
+                "options", "blocklist_revision", "blocklist_rules"})
+            or "options" not in value):
+        raise ValueError("invalid drift")
+    rows = value["options"]
+    if not isinstance(rows, list) or len(rows) > _QOS_DRIFT_MAX_ROWS:
+        raise ValueError("invalid drift rows")
+    clean = {"options": []}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+                "option", "expected", "observed"}:
+            raise ValueError("invalid drift row")
+        if row["option"] not in _APPLIED_FIELDS:
+            raise ValueError("invalid drift option")
+        pair = _public_drift_pair({
+            "expected": row["expected"], "observed": row["observed"]})
+        clean["options"].append(dict(pair, option=row["option"]))
+    for name in ("blocklist_revision", "blocklist_rules"):
+        if name in value:
+            clean[name] = _public_drift_pair(value[name])
+    if not rows and len(clean) == 1:
+        raise ValueError("empty drift")
+    return clean
+
+
+def _heartbeat_with_instruction(payload, attestation):
+    """Copy only the bounded public instruction facts into a heartbeat."""
+    if not isinstance(attestation, dict):
+        attestation = {}
+    # Wire capability is unconditional, including failed instruction/RPC
+    # work. Heartbeat version continues to describe IOS software.
+    clean = {"instr_protocol": 1}
+    if "applied" in attestation:
+        try:
+            clean["applied"] = _public_integer_unit(
+                attestation["applied"], _APPLIED_FIELDS)
+        except (KeyError, TypeError, ValueError):
+            pass
+    instr_state = attestation.get("instr_state")
+    instr_reason = attestation.get("instr_reason")
+    if isinstance(instr_state, str) and instr_state in _INSTRUCTION_STATES:
+        if instr_state == "key_rejected":
+            if (isinstance(instr_reason, str)
+                    and 1 <= len(instr_reason) <= 128
+                    and instr_reason in _INSTRUCTION_REASONS):
+                clean.update(instr_state=instr_state,
+                             instr_reason=instr_reason)
+        elif "instr_reason" not in attestation:
+            clean["instr_state"] = instr_state
+    identity_fields = ("instr_epoch", "instr_serial", "instr_policy_revision")
+    identity = {name: attestation[name] for name in identity_fields
+                if name in attestation}
+    try:
+        clean.update(_public_integer_unit(identity, identity_fields))
+    except (KeyError, TypeError, ValueError):
+        pass
+    if type(attestation.get("pointer_skew")) is bool:
+        clean["pointer_skew"] = attestation["pointer_skew"]
+    verify_level = attestation.get("verify_level")
+    if verify_level in ("sig", "none"):
+        clean["verify_level"] = verify_level
+    if ("blocklist_rules" in attestation
+            or "blocklist_revision" in attestation):
+        pair = {name: attestation[name] for name in (
+            "blocklist_rules", "blocklist_revision")
+            if name in attestation}
+        try:
+            clean.update(_public_integer_unit(
+                pair, ("blocklist_rules", "blocklist_revision")))
+        except (KeyError, TypeError, ValueError):
+            pass
+    if "qos_drift" in attestation:
+        try:
+            clean["qos_drift"] = _public_drift(attestation["qos_drift"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    result = dict(payload)
+    result.update(clean)
+    return result
+
+
+def _instruction_unavailable_fact(state):
+    """Keep detector context without claiming a failed RPC applied policy."""
+    import instr
+    fact = {"instr_state": "instr_unavailable"}
+    fact.update(instr.pointer_skew_fact(state))
+    return fact
+
+
+def _send_heartbeat(deps, sid, payload, instruction_attestation=None):
     """POST a heartbeat, BEST-EFFORT — must never raise out of run_once.
 
     The heartbeat is the LAST step on every path, AFTER the tick has already
@@ -259,9 +551,14 @@ def _send_heartbeat(deps, sid, payload):
     realistic on enterprise networks and would discard progress. Mirrors
     _emit_impl's unconditional best-effort try/except."""
     try:
-        return deps.catalog.heartbeat(sid, payload)
+        return deps.catalog.heartbeat(
+            sid, _heartbeat_with_instruction(payload, instruction_attestation))
     except Exception as e:
-        deps.emit("HEARTBEAT-FAIL", "%s heartbeat failed (ignored): %s" % (sid, e))
+        try:
+            deps.emit("HEARTBEAT-FAIL", "%s heartbeat failed (ignored): %s"
+                      % (sid, type(e).__name__))
+        except Exception:
+            pass
         return None
 
 
@@ -332,7 +629,8 @@ def _not_active_observation(tele_on, now):
         return None
 
 
-def _build_observation(cfg, deps, state, img_id, stage, phase, now):
+def _build_observation(cfg, deps, state, img_id, stage, phase, now,
+                       tick_seconds=60):
     """Build the state-first v2 `telemetry_observation` envelope for an assigned
     heartbeat, and — when the state is `observed` — checkpoint the incremented
     sample_seq BEFORE returning it, so the heartbeat POST that carries the seq
@@ -381,10 +679,12 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now):
         if not telemetry_report.stream_enabled(cfg):
             return state_envelope("paused"), None
         tier = telemetry_report.classify(state, tele.get("avg_bps"))
-        _every, paused = telemetry_report.active_directives(state, now)
+        _every, paused = telemetry_report.active_directives(
+            state, now, tick_seconds=tick_seconds)
         if paused:
             return state_envelope("paused"), None
-        if not telemetry_report.should_sample(state, tele, tier, now):
+        if not telemetry_report.should_sample(
+                state, tele, tier, now, tick_seconds=tick_seconds):
             return state_envelope("not_due"), None
         stats = deps.aria_stats(stage)
         peers = deps.aria_peers(stage)
@@ -515,7 +815,7 @@ def _arm_terminal_report(state, img_id, tele, event, drop_frozen):
 
 
 def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
-                    peers=None):
+                    peers=None, tick_seconds=60):
     """Per-tick telemetry glue (issue #13). phase is which run_once path is
     calling: 'downloading' | 'seeding-only' | 'copied' | 'steady' | 'no-space'.
 
@@ -679,7 +979,8 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                 if tier == "bad":
                     tele["report_attempts"] = tele.get("report_attempts", 0) + 1
                     tele["report_next_ts"] = telemetry_report.next_backoff_ts(
-                        tele["report_attempts"], now)
+                        tele["report_attempts"] - 1, now,
+                        tick_seconds=tick_seconds)
                 elif _send_frozen_report(cfg, deps, state, img_id, now):
                     tele["report_pending"] = False
                     tele["report_sent_ts"] = now
@@ -687,7 +988,8 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                     tele["report_attempts"] = \
                         tele.get("report_attempts", 0) + 1
                     tele["report_next_ts"] = telemetry_report.next_backoff_ts(
-                        tele["report_attempts"], now)
+                        tele["report_attempts"] - 1, now,
+                        tick_seconds=tick_seconds)
     except Exception as e:
         try:
             deps.emit("TELEMETRY-FAIL", "telemetry tick failed (ignored): %s" % e)
@@ -855,20 +1157,39 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
     Returns ``("adopted", None)`` only after the root bytes have the catalog
     size and SHA-512 and any IRIS-reserved ``.iris-tmp`` leftover is confirmed
     gone. ``("absent", None)`` means ordinary copy placement may proceed.
-    ``("not-applicable", None)`` keeps non-Guest-Shell/noncanonical platforms
-    on their existing placement path. Every ambiguous read or content mismatch
-    returns ``("blocked", <operator-facing error>)`` without touching the real
-    destination.
+    ``("not-applicable", None)`` keeps noncanonical Guest Shell mounts and
+    platforms without an IOS CLI (xr-appmgr) on their existing placement
+    path. Every ambiguous read or content mismatch returns ``("blocked",
+    <operator-facing error>)`` without touching the real destination.
+
+    Applies to the Guest Shell AND the IOx app (`device_platform = iox`):
+    both place by copying to a reserved temp name and renaming it over the
+    real name, and IOS-XE `rename` refuses an existing destination outright
+    — observed verbatim on an IE-3400-8T2S running 17.15.4 with `file prompt
+    quiet`, staging to sdflash: (`%Error renaming ... (File exists)`), where
+    every placement attempt re-pushed and re-copied the image only to have
+    Phase 2 refused, until the retry budget ran out. Attesting the existing
+    root file first (native size + SHA-512) adopts a byte-identical one and
+    leaves a different one alone with a precise error, instead of burning
+    four full copies on a rename IOS will never perform.
 
     The only cleanup this path can request is the established guarded reclaim
-    of ``<filename>.iris-tmp``.  It never submits the real filename to an IOS
-    delete or rename command.
+    of ``<filename>.iris-tmp`` — plus, on IOx only, IRIS's own scp-pushed
+    scratch under ``<FS>guest-share/iris/`` once adoption has succeeded (the
+    same source the direct copy path deletes after a verified placement; the
+    swarm seeds from the CAF-persistent stage_dir, so it is a transfer
+    intermediary, not the seeding file). It never submits the real filename
+    to an IOS delete or rename command.
     """
-    if cfg.get("device_platform"):
-        return "not-applicable", None
+    platform = cfg.get("device_platform")
     fname = image["filename"]
-    root_path = _guestshell_root_ios_path(
-        cfg.get("stage_dir"), target_prefix, fname)
+    if platform == "iox":
+        root_path = _iox_root_ios_path(target_prefix, fname)
+    elif platform:
+        return "not-applicable", None
+    else:
+        root_path = _guestshell_root_ios_path(
+            cfg.get("stage_dir"), target_prefix, fname)
     if root_path is None:
         return "not-applicable", None
 
@@ -927,6 +1248,20 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
             deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
             return "blocked", error
 
+    if platform == "iox":
+        # The IOx placement path scp-pushes the staged file to
+        # <FS>guest-share/iris/<fname> ahead of every copy attempt and deletes
+        # it only after a verified placement (_copy_to_root_direct_impl's
+        # delete_source_on_success). Adoption IS that verified placement,
+        # minus the copy, so reclaim the push the same way — otherwise the
+        # failed attempts that led here leave a full duplicate image on the
+        # target FS for good. IRIS's own scratch name, never the real file.
+        # reclaim_bundle on this platform is a plain `delete /force` per
+        # name on the vty; harmless when nothing was pushed.
+        try:
+            deps.reclaim_bundle(target_prefix, ["guest-share/iris/" + fname])
+        except Exception:
+            pass
     deps.emit("ROOTCOPY-ADOPTED",
               "%s already exists at %s with catalog size and SHA-512; "
               "adopted without replacement" % (fname, target_prefix))
@@ -1029,6 +1364,18 @@ def _reclaim_for_mode(deps, mode, target_prefix, image, state):
         if boot:
             protect.add(boot)
         names = deps.reclaimable(target_prefix, protect)
+        if boot.casefold().endswith(".conf"):
+            # The next boot may use an install manifest while the running
+            # image is still a bundle. Its basename alone cannot protect the
+            # packages it references, so keep the whole install set. Unused
+            # bundles and reserved .iris-tmp leftovers remain reclaimable.
+            unused = [name for name in names
+                      if not name.casefold().endswith((".pkg", ".conf"))]
+            if len(unused) != len(names):
+                deps.emit("RECLAIM-KEPT",
+                          "kept .pkg and .conf files because BOOT targets "
+                          "an install manifest")
+            names = unused
         if names:
             deps.reclaim_bundle(target_prefix, names)
             return True
@@ -1051,16 +1398,18 @@ class _ImageTick:
     between the end of the loop and the POST), followed by the same telemetry
     tick with the same response."""
 
-    __slots__ = ("hb", "tele", "stage_state", "stage_error")
+    __slots__ = ("hb", "tele", "stage_state", "stage_error",
+                 "tick_seconds")
 
     # Index of _telemetry_tick()'s hb_resp parameter in the recorded call.
     _HB_RESP_ARG = 6
 
-    def __init__(self):
+    def __init__(self, tick_seconds=60):
         self.hb = None
         self.tele = None
         self.stage_state = None
         self.stage_error = None
+        self.tick_seconds = _normalize_tick_seconds(tick_seconds)
 
     def heartbeat(self, *args, **kwargs):
         """Record this image's _heartbeat() call. Returns None because the
@@ -1075,6 +1424,7 @@ class _ImageTick:
         return None
 
     def telemetry(self, *args, **kwargs):
+        kwargs["tick_seconds"] = self.tick_seconds
         self.tele = (args, kwargs)
 
     def build(self, staged_image_ids=None, errored_image_ids=None):
@@ -1096,7 +1446,8 @@ class _ImageTick:
 # an image record (below) is keyed by image id.
 _RESERVED_STATE_KEYS = frozenset((
     "schema_version", "image_id", "root_file", "stage_fs",
-    "pending_root_deletes", "link", "frozen_pull", "stream_directives"))
+    "pending_root_deletes", "link", "frozen_pull", "stream_directives",
+    "instructions"))
 
 # Fields only a per-image record carries. Membership in the assigned set is
 # not enough to recognise one: the park pass has to find records for images
@@ -1145,40 +1496,41 @@ def _image_filename(deps, entry, img_id):
 
 
 def _root_file_origin(state, fname):
-    """The recorded provenance of the per-image record that placed `fname`
-    at the target-FS root, or None when no record claims it.
+    """Conservative provenance across every record claiming a root filename.
 
     pending_root_deletes carries bare filenames (not image ids), so the
-    owning record has to be found by its root_file field rather than looked
-    up directly. None here means exactly what a found record's missing
-    'origin' means: unproven — every deletion site treats it as adopted."""
+    owning records have to be found by root_file rather than looked up by id.
+    Different image ids may name the same file over time. Any explicit
+    adoption protects it; downloaded is proved only when every claim agrees.
+    None means unproven and retains the caller's platform-specific legacy
+    policy."""
+    origins = []
     for value in state.values():
         if _is_image_entry(value) and value.get("root_file") == fname:
-            return value.get("origin")
-    return None
+            origins.append(value.get("origin"))
+    if "adopted" in origins:
+        return "adopted"
+    return "downloaded" if origins and all(
+        origin == "downloaded" for origin in origins) else None
 
 
-def _protect_adopted_root(deps, entry, fname):
-    """True when `entry` names `fname` as the root-FS placement it made,
-    on a platform where that must never be agent-deleted: a platform whose
-    copy_to_root is attest-in-place (deps.copy_in_place) succeeded WITHOUT
-    this agent writing anything — origin 'adopted', or missing/legacy
-    (fail-safe).
+def _protect_adopted_root(deps, state, fname):
+    """Protect an in-place root if any record leaves its ownership unproven.
 
-    Keyed on `root_file == fname` — the durable fact that THIS record IS
-    the placement about to be deleted — rather than `copied`. `copied` is
-    RECOMPUTED every tick from a fresh root_present() call (the steady-state
-    self-heal) and goes False on nothing more than a transient size drift
-    or a single stat miss, while `root_file`/`origin` do not move with that
-    noise (reviewer PROBE1: keying on `copied` failed OPEN exactly when a
-    placement's provenance was most in doubt). An entry with no root_file
-    at all — never successfully placed, or already cleared — can never
-    match here, which is what preserves ordinary cleanup of an in-progress
-    or failed placement. A platform that physically writes its own root
-    copy (copy_in_place=False) has no adoption path — see xr_deps' module
-    docstring — so it is never protected here."""
-    return bool(deps.copy_in_place and entry.get("root_file") == fname
-               and entry.get("origin") != "downloaded")
+    Parking addresses a filename, so every placement claiming that filename
+    participates, including already parked records and other image ids. A
+    downloaded record cannot override another record's adoption or unknown
+    origin. Use root_file rather than copied: transient presence/size failures
+    can clear copied without changing the placement's durable provenance.
+
+    Without any matching root_file, an unfinished download remains ordinary
+    owned scratch that park can clean up. On platforms with a separate stage
+    directory, park removes only that scratch and leaves the root untouched.
+    """
+    return bool(deps.copy_in_place and any(
+        _is_image_entry(entry) and entry.get("root_file") == fname
+        and entry.get("origin") != "downloaded"
+        for entry in state.values()))
 
 
 def _reconcile_set(deps, state, ids, stage_dir):
@@ -1317,7 +1669,7 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # operator-staged ISO. Only a copy this agent proved it downloaded is
         # still fair game; an in-progress/failed placement was never proven
         # to be anyone's root copy at all and is cleaned up as always.
-        protected = _protect_adopted_root(deps, entry, fname)
+        protected = _protect_adopted_root(deps, state, fname)
         if protected:
             deps.emit("ROOTCOPY-KEPT",
                       "left in place: operator-adopted %s" % fname)
@@ -1403,8 +1755,13 @@ def _staged_image_ids(state, ids):
     """The images of the set this device has fully staged: content verified
     (`done`) AND placed at the target-FS root (`copied`) — the same pair the
     steady-state short-circuit trusts."""
-    return [i for i in ids
-            if (state.get(i) or {}).get("done") and (state.get(i) or {}).get("copied")]
+    staged = []
+    for image_id in ids:
+        entry = state.get(image_id)
+        if (isinstance(entry, dict) and entry.get("done")
+                and entry.get("copied")):
+            staged.append(image_id)
+    return staged
 
 
 # Aggregate stage_state for a set of more than one image, most actionable
@@ -1416,7 +1773,8 @@ _SET_STAGE_STATES = ("flash_full_seeding_only", "flash_full", "error",
                      "copy_failed")
 
 
-def _send_set_heartbeat(deps, sid, state, ids, ticks):
+def _send_set_heartbeat(deps, sid, state, ids, ticks,
+                        instruction_attestation=None):
     """POST the tick's single heartbeat for the whole set; return the response.
 
     A one-image set POSTs its recorded payload verbatim — same keys, same
@@ -1428,7 +1786,8 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
         # Defensive: a future path may return without a heartbeat payload.
         return None
     if len(ids) == 1:
-        return _send_heartbeat(deps, sid, live[0].build())
+        return _send_heartbeat(deps, sid, live[0].build(),
+                               instruction_attestation)
     staged = _staged_image_ids(state, ids)
     # Which assigned images THIS TICK's own per-image status calls a
     # terminal failure -- the same _SET_STAGE_STATES vocabulary `failed`
@@ -1456,11 +1815,12 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
                                  "staging")
     hb["stage_error"] = next((t.stage_error for t in live if t.stage_error),
                              None)
-    return _send_heartbeat(deps, sid, hb)
+    return _send_heartbeat(deps, sid, hb, instruction_attestation)
 
 
 def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
-                 legacy_pointer=False, plan_row=None):
+                 legacy_pointer=False, plan_row=None,
+                 instruction_attestation=None, assigned_ids=()):
     """Stage ONE image of the assigned set and return its status string.
 
     This is the whole of the pre-multi-image run_once() from the catalog
@@ -1633,7 +1993,11 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     done_st = state.get(img_id, {})
     if done_st.get("done") and done_st.get("copied"):
         content_ok = done_st.get("sha", image["sha256"]) == image["sha256"]
-        staged_ok = deps.file_size(stage) is not None
+        # The exact staged size is kept, not just its presence: the re-seed
+        # arm below needs "this is the WHOLE image", which presence alone does
+        # not say. One stat, read twice.
+        steady_size = deps.file_size(stage)
+        staged_ok = steady_size is not None
         root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
                                     size)
         if content_ok and staged_ok and root_ok and not migrate_transport:
@@ -1707,11 +2071,76 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         stage_error="image SHA-256 verification failed; retrying download",
                         observation=_not_active_observation(tele_on, time.time()))
                     return "bad-sha"
+            # RE-SEED AN IMAGE ARIA2 HAS FORGOTTEN (board #248). A recreated
+            # container (XR appmgr re-onboard/restart, IOx CAF restart) brings
+            # up a brand-new aria2c whose session knows nothing, while the
+            # mount keeps the finished image and this state file keeps
+            # done/copied. Board #70's re-add cannot help: it lives on the
+            # download path far below, which THIS short-circuit returns before
+            # ever reaching, and a FINISHED download has no `.aria2` control
+            # file (aria2 removes it at completion), so the one arm down there
+            # that could re-add it treats a control-file-less file as an
+            # untrusted partial and discards it. The device therefore kept
+            # heartbeating 'ready' while announcing to no tracker at all: the
+            # swarm silently lost a seed (100.90.170.81/.82 stopped announcing
+            # at their container recreation, both images whole on disk).
+            #
+            # Re-adding with no control file is safe HERE, and only here,
+            # because IRIS's own evidence stands in for the bitfield aria2 no
+            # longer has. aria2 will NOT hash the file (no control file +
+            # --bt-seed-unverified means markAllPiecesDone(); see the discard
+            # arm below), so this arm demands the two facts the completion
+            # path itself required before it called the image staged: the file
+            # is EXACTLY the catalog size, and THIS agent hashed those bytes
+            # and recorded content_sha256_state='verified'. Either one missing
+            # -> no re-add, and today's behaviour stands.
+            #
+            # Deliberately NOT done: download_started is left alone, so the
+            # copy-success site's origin rule keeps calling an operator's
+            # in-place file 'adopted'; no peer-transfer snapshot is discarded,
+            # because no new transfer starts; done/copied/sha/origin are
+            # untouched. This tells aria2 again about bytes IRIS already
+            # accepted — it does not re-acquire them.
+            try:
+                if (steady_size == size
+                        and (done_st.get("tele") or {}).get(
+                            "content_sha256_state") == "verified"
+                        and deps.aria_stats(stage) is None):
+                    # An image adopted in place (XR: the file was already on
+                    # harddisk:) never fetched its torrent -- the download
+                    # path that does so is exactly what adoption skipped --
+                    # so the metainfo aria2 needs may be absent or stale
+                    # (a same-id republish). Fetch it the way the download
+                    # path does before handing the file to aria2; a fetch
+                    # failure lands in the deferred arm below and retries.
+                    if (deps.file_size(torrent) is None
+                            or done_st.get("torrent_id") != torrent_id):
+                        deps.catalog.download_torrent(img_id, torrent)
+                        done_st["torrent_id"] = torrent_id
+                        done_st["torrent_auth_format"] = torrent_transport
+                    deps.aria_remove(image["filename"])
+                    deps.aria_add(torrent, stage_dir)
+                    deps.emit("RESEED",
+                              "%s aria2 no longer holds this finished image "
+                              "(container/daemon restart); re-added to seed"
+                              % image["filename"])
+            except Exception as e:
+                # Best effort. The device HAS the image, and the heartbeat
+                # below is still an honest 'ready' — a torrent file that went
+                # missing, a daemon not serving yet, or an RPC secret aria2c
+                # has not adopted must not turn a fully staged image into an
+                # error; the next tick retries. RPC diagnostics can carry
+                # credentials, so only the exception type is logged.
+                deps.emit("RESEED-DEFERRED",
+                          "%s could not be re-added to aria2 for seeding "
+                          "(%s); will retry" % (image["filename"],
+                                                type(e).__name__))
             # The observation phase stays 'steady' whatever the report does:
             # aria2 is seeding here, not downloading, and _build_observation
             # takes an aria snapshot only for 'downloading'/'seeding-only'.
-            obs, _ = _build_observation(cfg, deps, state, img_id, stage,
-                                        "steady", time.time())
+            obs, _ = _build_observation(
+                cfg, deps, state, img_id, stage, "steady", time.time(),
+                tick_seconds=tick.tick_seconds)
             hb = tick.heartbeat(image, deps, "ready",
                                 target_fs=state.get("stage_fs"),
                                 tele_on=tele_on,
@@ -1850,6 +2279,28 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
+        # A legacy queue may name an image assigned again since it was
+        # queued, including a sibling staged later in this tick. Keep both
+        # its current catalog filename and its last placed root filename.
+        # An unavailable sibling cannot authorize deletion of an unknown
+        # destination; retry the cleanup once the whole set is resolvable.
+        assigned_files = {image["filename"].casefold()}
+        assigned_known = True
+        for assigned_id in assigned_ids:
+            try:
+                assigned = (image if assigned_id == img_id else
+                            deps.catalog.get_image(assigned_id))
+                filename = assigned["filename"]
+                if not isinstance(filename, str) or not _FILENAME_RE.fullmatch(filename):
+                    raise ValueError("invalid assigned filename")
+                assigned_files.add(filename.casefold())
+                entry = state.get(assigned_id)
+                root = entry.get("root_file") if isinstance(entry, dict) else None
+                if isinstance(root, str) and _FILENAME_RE.fullmatch(root):
+                    assigned_files.add(root.casefold())
+            except Exception:
+                assigned_known = False
+                break
         doomed = [n for n in pending
                   if n != image["filename"] and _FILENAME_RE.match(n)]
         deletable = [n for n in doomed
@@ -1860,16 +2311,25 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             if protected not in deletable:
                 deps.emit("ROOTCOPY-KEPT",
                           "left in place: operator-adopted %s" % protected)
-        # The BOOT target is never on the delete list either: a replaced root
-        # copy the operator has since pointed BOOT at is the file the device
-        # boots next. Resolved out of the queue like an adopted file (a retry
-        # could never change what BOOT says); an unreadable BOOT variable
-        # keeps the whole queue for the next tick and deletes nothing now.
+        # Neither the running image nor the next BOOT target may be deleted.
+        # An operator can point BOOT elsewhere while still running an older
+        # IRIS-placed image, so these are independent facts. Protected names
+        # are resolved like adopted files; an unreadable fact keeps the queue
+        # for the next tick and authorizes no destructive work.
         boot = _boot_target(deps)
-        if boot is None:
+        running = None
+        if boot is not None:
+            try:
+                running = _ios_basename(deps.running_image())
+            except Exception:
+                pass
+        if boot is None or not running or not assigned_known:
+            unavailable = ("BOOT variable unreadable" if boot is None else
+                           "running image unreadable" if not running else
+                           "assigned image unavailable")
             deps.emit("CLEANUP-PENDING",
-                      "replaced-image cleanup deferred: BOOT variable "
-                      "unreadable; will retry")
+                      "replaced-image cleanup deferred: %s; "
+                      "will retry" % unavailable)
             deletable = []
             still = list(doomed)
         else:
@@ -1877,6 +2337,16 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             for kept in [n for n in deletable if _is_boot_target(boot, n)]:
                 deps.emit("ROOTCOPY-KEPT",
                           "left in place: %s is the BOOT target" % kept)
+                deletable.remove(kept)
+            for kept in [n for n in deletable
+                         if running.casefold() == n.casefold()]:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: %s is the running image" % kept)
+                deletable.remove(kept)
+            for kept in [n for n in deletable
+                         if n.casefold() in assigned_files]:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: %s is an assigned image" % kept)
                 deletable.remove(kept)
         if deletable:
             deps.reclaim_bundle(fs, deletable)
@@ -2083,7 +2553,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                                      copy_bytes + flashcheck.HEADROOM, mode))
                         obs, peers = _build_observation(
                             cfg, deps, state, img_id, stage, "seeding-only",
-                            time.time())
+                            time.time(), tick_seconds=tick.tick_seconds)
                         hb = tick.heartbeat(image, deps,
                                             "flash_full_seeding_only",
                                             target_fs=state.get("stage_fs"),
@@ -2121,7 +2591,8 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         deps, sid, _heartbeat(image, deps, "transferring_to_ios",
                                               target_fs=target_prefix,
                                               tele_on=tele_on,
-                                              stream_on=stream_on))
+                                              stream_on=stream_on),
+                        instruction_attestation)
                 if not st.get("copied") and not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
                     result = deps.copy_to_root(image["filename"], target_prefix, size)
@@ -2211,8 +2682,9 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # "ready" only when the flash-root copy is actually placed; a failed
             # copy_to_root (signature fail / never appeared) keeps "staging" so
             # the heartbeat never claims a verified root copy that isn't there.
-            obs, _ = _build_observation(cfg, deps, state, img_id, stage,
-                                        "seeding-only", time.time())
+            obs, _ = _build_observation(
+                cfg, deps, state, img_id, stage, "seeding-only", time.time(),
+                tick_seconds=tick.tick_seconds)
             hb = tick.heartbeat(image, deps,
                                 "ready" if st.get("copied") else
                                 ("copy_failed" if st.get("copy_terminal")
@@ -2268,11 +2740,34 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     target_prefix, free = deps.target_fs()
     state["stage_fs"] = target_prefix
     stage_bytes = size * (2 if deps.io_transfer else 1)
+    keep_native_root = False
+    if (not flashcheck.has_room(free, stage_bytes)
+            and cfg.get("device_platform") == "iox" and deps.io_transfer
+            and _iox_root_ios_path(target_prefix, image["filename"]) is not None):
+        # A pre-existing destination must reach the post-download adoption
+        # check intact (#254). Native reclaim can remove it before that check,
+        # even though its bytes are already excluded from `free`. Existence
+        # alone forbids reclaim; it does NOT establish identity or readiness.
+        try:
+            observed = deps.root_file_size(image["filename"], target_prefix)
+        except Exception:
+            raise RuntimeError(
+                "existing IOS root file could not be inspected safely before download"
+            ) from None
+        if observed is not None:
+            if type(observed) is not int or observed < 0:
+                raise ValueError("invalid IOS root file size before download")
+            keep_native_root = True
+            # Keep one image's conservative allowance for the CAF seeding
+            # download: its storage may share the native backing filesystem.
+            # Later placement must freshly adopt or refuse the existing root,
+            # including with a configured share; no replacement is budgeted.
+            stage_bytes = size
     if not flashcheck.has_room(free, stage_bytes):
         st = state.setdefault(img_id, {})
         # Burn the once-guard only when reclaim actually ran (a no-op on a
         # transient mode=None must not permanently disable reclaim).
-        if not st.get("reclaim_tried"):
+        if not keep_native_root and not st.get("reclaim_tried"):
             if _reclaim_for_mode(deps, mode, target_prefix, image, state):
                 st["reclaim_tried"] = True
                 target_prefix, free = deps.target_fs()
@@ -2493,8 +2988,9 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # old 10s IRIS-MONITOR raced and spammed). Computed from the on-disk size.
         deps.emit("PROGRESS", "%s %d%% (%dMB/%dMB)"
                   % (image["filename"], have * 100 // size, have >> 20, size >> 20))
-    obs, peers = _build_observation(cfg, deps, state, img_id, stage,
-                                    "downloading", time.time())
+    obs, peers = _build_observation(
+        cfg, deps, state, img_id, stage, "downloading", time.time(),
+        tick_seconds=tick.tick_seconds)
     hb = tick.heartbeat(image, deps,
                         target_fs=state.get("stage_fs"),
                         tele_on=tele_on,
@@ -2517,7 +3013,586 @@ def _torrent_identity(image):
     return "sha:" + str(image.get("sha256") or "")
 
 
-def run_once(cfg, deps, state):
+class InstructionApplyError(ValueError):
+    """A bounded instruction could not be applied to the local aria2."""
+
+
+def _decimal_i63(value):
+    if isinstance(value, bool):
+        raise InstructionApplyError("invalid option")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        number = int(value)
+    else:
+        raise InstructionApplyError("invalid option")
+    if number < 0 or number > _MAX_I63:
+        raise InstructionApplyError("invalid option")
+    return number
+
+
+def _owned_aria_options(value, names):
+    if not isinstance(value, dict):
+        raise InstructionApplyError("invalid option result")
+    try:
+        return {name: _decimal_i63(value[name]) for name in names}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise InstructionApplyError("invalid option result") from None
+
+
+def _instruction_rpc(rpc, method, params):
+    try:
+        return rpc(method, params)
+    except InstructionApplyError:
+        raise
+    except Exception:
+        raise InstructionApplyError("RPC unavailable") from None
+
+
+def _instruction_values(result):
+    qos = dict(_FIXED_QOS)
+    control = dict(_FIXED_CONTROL)
+    instruction = result.get("instruction") if isinstance(result, dict) else None
+    if not isinstance(instruction, dict):
+        return qos, control
+    role = instruction.get("role")
+    device = instruction.get("device")
+    if not isinstance(role, dict) or not isinstance(device, dict):
+        return qos, control
+    role_qos = role.get("qos")
+    role_control = role.get("control")
+    device_qos = device.get("qos_override")
+    device_control = device.get("control_override")
+    if isinstance(role_qos, dict):
+        qos.update({name: role_qos[name] for name in _FIXED_QOS
+                    if name in role_qos})
+    if isinstance(device_qos, dict):
+        qos.update({name: device_qos[name] for name in _FIXED_QOS
+                    if name in device_qos})
+    if isinstance(role_control, dict):
+        control.update({name: role_control[name] for name in _FIXED_CONTROL
+                        if name in role_control})
+    if isinstance(device_control, dict):
+        control.update({name: device_control[name] for name in _FIXED_CONTROL
+                        if name in device_control})
+    return qos, control
+
+
+def _canonical_ipv4(value):
+    if not isinstance(value, str):
+        raise InstructionApplyError("invalid peer rule")
+    try:
+        parsed = (ipaddress.IPv4Network(value, strict=True)
+                  if "/" in value else ipaddress.IPv4Address(value))
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError,
+            ValueError):
+        raise InstructionApplyError("invalid peer rule") from None
+    if str(parsed) != value:
+        raise InstructionApplyError("invalid peer rule")
+    return parsed
+
+
+def _allow_complement(allowed):
+    canonical = sorted(str(_canonical_ipv4(value)) for value in allowed)
+    digest = hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    if (_ALLOW_COMPLEMENT_CACHE["digest"] == digest
+            and isinstance(_ALLOW_COMPLEMENT_CACHE["rules"], list)):
+        return list(_ALLOW_COMPLEMENT_CACHE["rules"])
+    intervals = []
+    for text in canonical:
+        item = _canonical_ipv4(text)
+        if isinstance(item, ipaddress.IPv4Address):
+            start = end = int(item)
+        else:
+            start, end = int(item.network_address), int(item.broadcast_address)
+        intervals.append((start, end))
+    intervals.sort(key=lambda interval: interval[0])
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    intervals = merged
+    rules = []
+    cursor = 0
+    maximum = (1 << 32) - 1
+    for start, end in intervals:
+        if cursor < start:
+            rules.extend(str(network) for network in
+                         ipaddress.summarize_address_range(
+                             ipaddress.IPv4Address(cursor),
+                             ipaddress.IPv4Address(start - 1)))
+        cursor = max(cursor, end + 1)
+    if cursor <= maximum:
+        rules.extend(str(network) for network in
+                     ipaddress.summarize_address_range(
+                         ipaddress.IPv4Address(cursor),
+                         ipaddress.IPv4Address(maximum)))
+    rules.append("::/0")
+    _ALLOW_COMPLEMENT_CACHE.update(digest=digest, rules=list(rules))
+    return list(rules)
+
+
+def _peer_blocklist(result, cfg):
+    peers = result.get("effective_peers") if isinstance(result, dict) else None
+    if not isinstance(peers, dict):
+        return [], False
+    mode = peers.get("mode")
+    if mode == "tracker-only":
+        return [], False
+    if mode == "deny":
+        if set(peers) != {"mode", "rules", "include_origin",
+                          "allowed_expires_at"}:
+            raise InstructionApplyError("invalid peer posture")
+        if (not isinstance(peers["rules"], list)
+                or not isinstance(peers["include_origin"], bool)):
+            raise InstructionApplyError("invalid peer posture")
+        _public_i63(peers["allowed_expires_at"])
+        rules = list(peers["rules"]) + ["::/0"]
+    elif mode == "allow":
+        if set(peers) != {"mode", "allowed", "include_origin",
+                          "allowed_expires_at"}:
+            raise InstructionApplyError("invalid peer posture")
+        if (not isinstance(peers["allowed"], list)
+                or not isinstance(peers["include_origin"], bool)):
+            raise InstructionApplyError("invalid peer posture")
+        _public_i63(peers["allowed_expires_at"])
+        allowed = list(peers["allowed"])
+        if peers["include_origin"]:
+            try:
+                hostname = urllib.parse.urlsplit(cfg.get("catalog_url", "")).hostname
+                address = ipaddress.IPv4Address(hostname)
+                if str(address) != hostname:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError,
+                    ipaddress.AddressValueError):
+                return [], True
+            allowed.append(str(address))
+        rules = _allow_complement(allowed)
+    else:
+        raise InstructionApplyError("invalid peer posture")
+    for rule in rules:
+        try:
+            if ":" in rule:
+                parsed = ipaddress.IPv6Network(rule, strict=True)
+                canonical = str(parsed)
+            else:
+                canonical = str(_canonical_ipv4(rule))
+        except (ValueError, TypeError):
+            raise InstructionApplyError("invalid peer rule") from None
+        if canonical != rule:
+            raise InstructionApplyError("invalid peer rule")
+    return rules, False
+
+
+def _valid_apply_baseline(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"session_id", "rules_digest",
+                              "blocklist_revision", "blocklist_rules",
+                              "applied"}):
+        return None
+    session = value.get("session_id")
+    digest = value.get("rules_digest")
+    try:
+        applied = _public_integer_unit(value.get("applied"), _APPLIED_FIELDS)
+        revision = _public_i63(value.get("blocklist_revision"))
+        count = _public_i63(value.get("blocklist_rules"))
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(session, str) or not 1 <= len(session) <= 128
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        return None
+    return dict(value, applied=applied, blocklist_revision=revision,
+                blocklist_rules=count)
+
+
+def _apply_instruction(result, cfg, state, rpc, torrent_defaults):
+    """Read, reassert and attest the closed Task 16 aria2 transaction."""
+    if not callable(rpc) or not isinstance(torrent_defaults, dict):
+        raise InstructionApplyError("instruction application unavailable")
+    qos, _control = _instruction_values(result)
+    global_write = {
+        "bt-max-peers": str(qos["max_peers"]),
+        "max-upload-limit": str(qos["leech_up_bps"]),
+        "max-download-limit": str(qos["leech_down_bps"]),
+        "max-overall-upload-limit": str(qos["overall_up_bps"]),
+        "max-overall-download-limit": str(qos["overall_down_bps"]),
+        "bt-request-peer-speed-limit": str(
+            qos["request_peer_speed_limit_bps"]),
+        "max-concurrent-downloads": str(qos["max_concurrent"]),
+    }
+    applied = {public: _decimal_i63(global_write[option])
+               for option, public in _ARIA_GLOBAL_OPTIONS}
+    rules, peer_degraded = _peer_blocklist(result, cfg)
+    rules_digest = hashlib.sha256(
+        json.dumps(rules, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+    session_result = _instruction_rpc(rpc, "aria2.getSessionInfo", [])
+    if (not isinstance(session_result, dict)
+            or set(session_result) != {"sessionId"}
+            or not isinstance(session_result["sessionId"], str)
+            or not 1 <= len(session_result["sessionId"]) <= 128):
+        raise InstructionApplyError("invalid session")
+    session = session_result["sessionId"]
+    global_read = _owned_aria_options(
+        _instruction_rpc(rpc, "aria2.getGlobalOption", []),
+        tuple(option for option, _public in _ARIA_GLOBAL_OPTIONS))
+    active_raw = _instruction_rpc(
+        rpc, "aria2.tellActive", [["gid", "files", "seeder"]])
+    active = []
+    row = None
+    try:
+        if not isinstance(active_raw, list) or len(active_raw) > 10:
+            raise InstructionApplyError("invalid active downloads")
+        for row in active_raw:
+            if (not isinstance(row, dict)
+                    or set(row) != {"gid", "files", "seeder"}
+                    or not isinstance(row["gid"], str)
+                    or _ARIA_GID_RE.fullmatch(row["gid"]) is None
+                    or not isinstance(row["files"], list)
+                    or row["seeder"] not in ("true", "false")):
+                raise InstructionApplyError("invalid active download")
+            active.append((row["gid"], row["seeder"] == "true"))
+    finally:
+        row = None
+        active_raw = None
+    live_reads = []
+    live_names = tuple(option for option, _public in _ARIA_LIVE_OPTIONS)
+    for gid, seeder in active:
+        current = _owned_aria_options(
+            _instruction_rpc(rpc, "aria2.getOption", [gid]), live_names)
+        live_reads.append((gid, seeder, current))
+
+    if _instruction_rpc(
+            rpc, "aria2.changeGlobalOption", [dict(global_write)]) != "OK":
+        raise InstructionApplyError("global write failed")
+    for gid, seeder, _current in live_reads:
+        live_write = {
+            "bt-max-peers": str(qos["max_peers"]),
+            "max-upload-limit": str(
+                qos["seed_up_bps"] if seeder else qos["leech_up_bps"]),
+            "max-download-limit": str(
+                qos["seed_down_bps"] if seeder else qos["leech_down_bps"]),
+            "bt-request-peer-speed-limit": str(
+                qos["request_peer_speed_limit_bps"]),
+        }
+        if _instruction_rpc(
+                rpc, "aria2.changeOption", [gid, live_write]) != "OK":
+            raise InstructionApplyError("download write failed")
+    block = _instruction_rpc(
+        rpc, "aria2.setBtPeerBlocklist", [list(rules)])
+    block = _public_integer_unit(
+        block, ("ruleCount", "revision", "disconnectedPeers",
+                "removedPeers"))
+
+    bag = state.get("instructions")
+    if not isinstance(bag, dict):
+        bag = {}
+        state["instructions"] = bag
+    previous = _valid_apply_baseline(bag.get("aria_apply"))
+    same_session = previous is not None and previous["session_id"] == session
+    drift_rows = []
+    if same_session:
+        for option, public in _ARIA_GLOBAL_OPTIONS:
+            observed = global_read[option]
+            expected = applied[public]
+            if observed != expected:
+                drift_rows.append({"option": public, "expected": expected,
+                                   "observed": observed})
+        for _gid, seeder, current in sorted(live_reads, key=lambda row: row[0]):
+            expected_live = {
+                "bt_max_peers": qos["max_peers"],
+                "max_upload_limit": (qos["seed_up_bps"] if seeder
+                                     else qos["leech_up_bps"]),
+                "max_download_limit": (qos["seed_down_bps"] if seeder
+                                       else qos["leech_down_bps"]),
+                "request_peer_speed_limit":
+                    qos["request_peer_speed_limit_bps"],
+            }
+            for option, public in _ARIA_LIVE_OPTIONS:
+                if current[option] != expected_live[public]:
+                    drift_rows.append({
+                        "option": public, "expected": expected_live[public],
+                        "observed": current[option]})
+    fact = _heartbeat_with_instruction(
+        {}, result.get("attestation") if isinstance(result, dict) else None)
+    source_state = fact.get("instr_state")
+    if peer_degraded:
+        fact["instr_state"] = "tracker-only"
+        fact.pop("instr_reason", None)
+    elif (previous is not None
+          and source_state in ("none", "applied", "lkg")):
+        fact["instr_state"] = "reasserted"
+    fact.update(applied=applied, blocklist_rules=block["ruleCount"],
+                blocklist_revision=block["revision"])
+    drift = {"options": drift_rows}
+    if same_session and previous["rules_digest"] == rules_digest:
+        if previous["blocklist_revision"] != block["revision"]:
+            drift["blocklist_revision"] = {
+                "expected": previous["blocklist_revision"],
+                "observed": block["revision"]}
+        if previous["blocklist_rules"] != block["ruleCount"]:
+            drift["blocklist_rules"] = {
+                "expected": previous["blocklist_rules"],
+                "observed": block["ruleCount"]}
+    if drift_rows or len(drift) > 1:
+        fact["qos_drift"] = drift
+    bag["aria_apply"] = {
+        "session_id": session, "rules_digest": rules_digest,
+        "blocklist_revision": block["revision"],
+        "blocklist_rules": block["ruleCount"], "applied": dict(applied),
+    }
+    future = {option: global_write[option]
+              for option, _public in _ARIA_LIVE_OPTIONS}
+    torrent_defaults.clear()
+    torrent_defaults.update(future)
+    return fact
+
+
+def _task16_runtime(deps):
+    return (callable(getattr(deps, "instruction_step", None))
+            and callable(getattr(deps, "aria_rpc", None))
+            and isinstance(getattr(deps, "torrent_defaults", None), dict))
+
+
+def _policy_assignment_ids(policy):
+    if not isinstance(policy, dict):
+        raise ValueError("invalid policy")
+    single = policy.get("approved_image_id")
+    if ("approved_image_id" in policy and single is not None
+            and (not isinstance(single, str)
+                 or not 1 <= len(single) <= 128)):
+        raise ValueError("invalid policy")
+    if "approved_image_ids" in policy:
+        values = policy["approved_image_ids"]
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("invalid policy")
+        ids = list(values)
+        if not ids and single is not None:
+            ids = [single]
+    else:
+        ids = [] if single is None else [single]
+    if (len(ids) > 10
+            or any(not isinstance(value, str) or not 1 <= len(value) <= 128
+                   for value in ids)):
+        raise ValueError("invalid policy")
+    return list(dict.fromkeys(ids))
+
+
+def _bounded_finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and 0 <= value <= _MAX_I63
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _valid_poll_marker(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"boot_id", "monotonic", "assignment_ids"}):
+        return None
+    boot = value.get("boot_id")
+    stamp = value.get("monotonic")
+    ids = value.get("assignment_ids")
+    if (not isinstance(boot, str) or not 1 <= len(boot) <= 128
+            or not _bounded_finite_number(stamp)
+            or not isinstance(ids, list) or len(ids) > 10
+            or any(not isinstance(item, str) or not 1 <= len(item) <= 128
+                   for item in ids)):
+        return None
+    return {"boot_id": boot, "monotonic": stamp,
+            "assignment_ids": list(ids)}
+
+
+def _valid_heartbeat_hint(value):
+    if not isinstance(value, dict) or not set(value).issubset({
+            "instr_rev", "keylist_seq"}):
+        return None
+    clean = {}
+    revision = value.get("instr_rev")
+    if revision is not None:
+        if (not isinstance(revision, dict)
+                or set(revision) != {"epoch", "instr_serial"}
+                or any(isinstance(revision.get(name), bool)
+                       or not isinstance(revision.get(name), int)
+                       or not 0 <= revision[name] <= _MAX_I63
+                       for name in ("epoch", "instr_serial"))):
+            return None
+        clean["instr_rev"] = dict(revision)
+    if "keylist_seq" in value:
+        sequence = value["keylist_seq"]
+        if (isinstance(sequence, bool) or not isinstance(sequence, int)
+                or not 1 <= sequence <= _MAX_I63):
+            return None
+        clean["keylist_seq"] = sequence
+    return clean or None
+
+
+def _record_heartbeat_hint(state, response, authenticated_date):
+    if not _bounded_finite_number(authenticated_date):
+        return
+    bag = state.get("instructions")
+    if not isinstance(bag, dict):
+        bag = {}
+        state["instructions"] = bag
+    candidate = {}
+    if isinstance(response, dict):
+        for name in ("instr_rev", "keylist_seq"):
+            if name in response:
+                candidate[name] = response[name]
+    clean = _valid_heartbeat_hint(candidate)
+    if clean is None:
+        bag.pop("heartbeat_hint", None)
+    else:
+        bag["heartbeat_hint"] = clean
+
+
+def _cadence_due(state, interval, boot, monotonic_now):
+    if interval == 60:
+        return True
+    bag = state.get("instructions")
+    if not isinstance(bag, dict):
+        return True
+    marker = _valid_poll_marker(bag.get("poll"))
+    if marker is None or marker["boot_id"] != boot:
+        return True
+    if monotonic_now < marker["monotonic"]:
+        return True
+    if monotonic_now - marker["monotonic"] >= interval:
+        return True
+    hint = _valid_heartbeat_hint(bag.get("heartbeat_hint"))
+    if hint is not None:
+        revision = hint.get("instr_rev")
+        if revision is not None:
+            local = (bag.get("accepted_epoch"), bag.get("accepted_serial"))
+            if local != (revision["epoch"], revision["instr_serial"]):
+                return True
+        if ("keylist_seq" in hint
+                and bag.get("keylist_seq") != hint["keylist_seq"]):
+            return True
+    return False
+
+
+def _cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
+                       attestation):
+    now = time.time()
+    if not ids:
+        payload = _heartbeat(
+            None, deps, "unassigned", target_fs=cfg.get("target_fs"),
+            tele_on=tele_on, stream_on=stream_on,
+            observation=_not_active_observation(tele_on, now))
+    else:
+        first = ids[0]
+        staged = _staged_image_ids(state, ids)
+        ready = len(staged) == len(ids)
+        payload = _heartbeat(
+            {"id": first}, deps, "ready" if ready else "staging",
+            target_fs=cfg.get("target_fs"), tele_on=tele_on,
+            stream_on=stream_on,
+            observation=_not_active_observation(tele_on, now),
+            staged_image_ids=staged if len(ids) > 1 else None)
+    response = _send_heartbeat(
+        deps, cfg["device_id"], payload, attestation)
+    # A cadence-only tick deliberately takes no sample, but its heartbeat is
+    # still authoritative for renewing or clearing stream directives.
+    telemetry_report.store_directives(state, response, now)
+    response_date = getattr(deps.catalog, "response_authenticated_date", None)
+    _record_heartbeat_hint(state, response, response_date)
+    return response
+
+
+def _contained_cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
+                                 attestation):
+    try:
+        return _cadence_heartbeat(
+            cfg, deps, state, ids, tele_on, stream_on, attestation)
+    except Exception as exc:
+        try:
+            deps.emit("HEARTBEAT-FAIL",
+                      "%s heartbeat construction failed (ignored): %s"
+                      % (cfg["device_id"], type(exc).__name__))
+        except Exception:
+            pass
+        return None
+
+
+# Longest stage_error a contained staging failure reports (#235). Well
+# inside the server's 1024-byte heartbeat cap (catalog.py _HEARTBEAT_STR_CAPS)
+# and short enough for the Console's device row.
+_STAGE_ERROR_MAX = 240
+_STAGE_ERROR_URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+# Credential-looking keys: the agent's own config names (catalog_token,
+# announce_token, device_ssh_pass, announce_key), HTTP auth words, and any
+# *key / *pass* spelling. Only a key=value / key:value pair is redacted, so an
+# exception TYPE such as KeyError (added after redaction anyway) is untouched.
+_STAGE_ERROR_SECRET_RE = re.compile(
+    r"(\w*token|\w*secret|\w*pass(?:w(?:or)?d)?|bearer|authorization|\w*key)"
+    r"\s*[=:]\s*\S+", re.IGNORECASE)
+
+
+def _public_stage_error(exc, limit=_STAGE_ERROR_MAX):
+    """The exception text a contained staging failure may put on the wire.
+
+    Exception messages are not written with the heartbeat in mind: a catalog
+    or tracker error can quote an authenticated URL, an aria2 RPC fault can
+    echo the `token:<secret>` parameter it rejected. Any URL and any
+    key=value/key:value pair whose key names a credential is redacted before
+    the text leaves the device, whitespace is collapsed, and the result is
+    bounded to `limit` characters. The exception type always leads so an
+    empty message (KeyError()) still says something."""
+    text = " ".join(str(exc).split())
+    text = _STAGE_ERROR_URL_RE.sub("<url>", text)
+    text = _STAGE_ERROR_SECRET_RE.sub(r"\1=<redacted>", text)
+    name = type(exc).__name__
+    text = "%s: %s" % (name, text) if text else name
+    if len(text) > limit:
+        text = text[:max(limit - 3, 0)] + "..."
+    return text
+
+
+def _contained_stage_failure(cfg, deps, state, img_id, tick, tele_on,
+                             stream_on, exc):
+    """Record ONE image's uncontained staging exception as that image's
+    verdict instead of letting it escape run_once (#235).
+
+    Before this, any exception inside _stage_image -- deps.target_fs()
+    refusing to name a writable IOS filesystem ("no proved writable IOS
+    staging filesystem"), an SSH transport error, a state-shape surprise --
+    unwound past the set heartbeat POST below, so the server never heard
+    from the device at all: last_seen stayed "never" and the only trace was a
+    syslog line on the device. A device that cannot stage must still
+    register, exactly like the unassigned path does; the failure rides the
+    heartbeat as stage_state "error" with the bounded, redacted exception
+    text as stage_error, and the tick returns "stage-error" for it. Nothing
+    is written to state: the next tick re-runs the image and re-reports or
+    clears the error on its own, and a bare stage_error entry would read as
+    an image record to the park pass.
+
+    The tick's earlier records are replaced: whatever heartbeat or telemetry
+    the image staged before raising described a tick that did not finish."""
+    text = _public_stage_error(exc)
+    try:
+        deps.emit("STAGE-FAIL", "%s staging failed: %s" % (img_id, text))
+    except Exception:
+        pass
+    tick.tele = None
+    tick.heartbeat({"id": img_id}, deps, "error",
+                   target_fs=state.get("stage_fs") or cfg.get("target_fs"),
+                   tele_on=tele_on, stream_on=stream_on,
+                   stage_error=text,
+                   observation=_not_active_observation(
+                       tele_on, time.time()))
+    return "stage-error"
+
+
+def run_once(cfg, deps, state, tick_seconds=60):
+    tick_seconds = _normalize_tick_seconds(tick_seconds)
     # Self-refresh the catalog token BEFORE any catalog work, once it's past
     # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
     # POST + client rebind + atomic conf rewrite and returns the updated cfg,
@@ -2526,14 +3601,37 @@ def run_once(cfg, deps, state):
     # so a few failed ticks never strand the device; the live client's bearer
     # is _refresh_impl's concern, see its docstring for the failure split).
     _container_platform = cfg.get("device_platform") in agent_config.DEVICE_PLATFORMS
-    if ((_container_platform and not cfg.get("announce_token"))
-            or needs_refresh(time.time(),
-                             int(float(cfg.get("token_expires_at", 0) or 0)),
-                             _TOKEN_TTL, _TOKEN_REFRESH_AT)):
+    expires_at = int(float(cfg.get("token_expires_at", 0) or 0))
+    catalog_now = None
+    instruction_runtime = None
+    monotonic_now = None
+    current_boot_id = None
+    # main() validates these fields before run_once. A few old unit fixtures
+    # deliberately call this function with only device_id/stage_dir; preserve
+    # that non-runtime seam without consulting the untrusted device wall clock.
+    # Every production config has catalog_url and therefore refreshes
+    # conservatively until an authenticated catalog Date anchors this boot.
+    if cfg.get("catalog_url") or isinstance(state.get("instructions"), dict):
+        import instr
+        instruction_runtime = instr
+        monotonic_now = time.monotonic()
+        current_boot_id = instr.boot_id()
+        catalog_now = instr.project_clock(
+            state, "catalog", monotonic_now, current_boot_id)
+    refresh_due = catalog_now is None
+    if catalog_now is not None:
+        refresh_due = needs_refresh(catalog_now, expires_at,
+                                    _TOKEN_TTL, _TOKEN_REFRESH_AT)
+    if ((_container_platform and not cfg.get("announce_token")) or refresh_due):
         new_cfg = deps.refresh()
         if new_cfg is None:
-            deps.emit("TOKEN-REFRESH-FAIL",
-                      "catalog token refresh failed; proceeding on current token")
+            # main() never reaches this point without catalog_url. Preserve
+            # the old direct-unit-call seam's quiet behavior while still
+            # exercising its conservative refresh callback.
+            if cfg.get("catalog_url") or expires_at == 0:
+                deps.emit(
+                    "TOKEN-REFRESH-FAIL",
+                    "catalog token refresh failed; proceeding on current token")
         else:
             cfg = new_cfg
     sid = cfg["device_id"]
@@ -2556,19 +3654,209 @@ def run_once(cfg, deps, state):
         if cleared:
             deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
 
-    policy = deps.catalog.get_policy(sid)
-    # The server assigns an ORDERED SET of images (at most 10). Older servers,
-    # and policy rows they wrote, carry only the singular approved_image_id —
-    # fall back to it and stage a set of one, which is byte-for-byte the old
-    # single-image behaviour.
-    ids = policy.get("approved_image_ids")
-    if not isinstance(ids, (list, tuple)) or not ids:
-        single = policy.get("approved_image_id")
-        ids = [single] if single else []
-    # De-duplicate, keeping assignment order. The server rejects duplicates, so
-    # this only guards a hand-edited policy: staging the same id twice in one
-    # tick would double every emit and list it twice in staged_image_ids.
-    ids = list(dict.fromkeys(i for i in ids if i))
+    if "max_peers" in cfg:
+        instruction_bag = state.get("instructions")
+        if not isinstance(instruction_bag, dict):
+            instruction_bag = {}
+            state["instructions"] = instruction_bag
+        if instruction_bag.get("max_peers_ignored") is not True:
+            # Mark before the best-effort notice so a failed syslog write does
+            # not repeat forever or suppress the tick's heartbeat/staging work.
+            instruction_bag["max_peers_ignored"] = True
+            try:
+                deps.emit(
+                    "MAX-PEERS-IGNORED",
+                    "legacy max_peers configuration is ignored; signed "
+                    "instructions control peer limits")
+            except Exception:
+                pass
+
+    task16 = _task16_runtime(deps)
+    instruction_attestation = None
+    if task16:
+        # Refresh is deliberately complete before this fresh launcher-local
+        # verifier budget and cache-only LKG preview are created.
+        monotonic_now = time.monotonic()
+        if instruction_runtime is None:
+            import instr
+            instruction_runtime = instr
+        current_boot_id = instruction_runtime.boot_id()
+        verification_attempts = {}
+        try:
+            preview = deps.instruction_step(
+                cfg=cfg, state=state, hints={}, catalog_date=None,
+                cache_only=True,
+                verification_attempts=verification_attempts)
+            if not isinstance(preview, dict):
+                raise ValueError("invalid preview")
+        except Exception as e:
+            deps.emit("INSTRUCTION-FAIL",
+                      "instruction preview failed (ignored): %s"
+                      % type(e).__name__)
+            preview = {
+                "instruction": None, "effective": None,
+                "effective_peers": {"mode": "tracker-only",
+                                    "include_origin": False},
+                "attestation": _instruction_unavailable_fact(state),
+            }
+        _qos, preview_control = _instruction_values(preview)
+        interval = preview_control.get("catalog_tick_s", 60)
+        if (isinstance(interval, bool) or not isinstance(interval, int)
+                or not 60 <= interval <= 900 or interval % 60):
+            interval = 60
+        due = _cadence_due(
+            state, interval, current_boot_id, monotonic_now)
+        marker = _valid_poll_marker(
+            state.get("instructions", {}).get("poll")
+            if isinstance(state.get("instructions"), dict) else None)
+        if not due:
+            ids = marker["assignment_ids"]
+            try:
+                instruction_attestation = _apply_instruction(
+                    preview, cfg, state, deps.aria_rpc,
+                    deps.torrent_defaults)
+            except Exception as e:
+                deps.emit("INSTRUCTION-APPLY-FAIL",
+                          "instruction apply failed: %s"
+                          % type(e).__name__)
+                instruction_attestation = _instruction_unavailable_fact(state)
+                _contained_cadence_heartbeat(
+                    cfg, deps, state, ids, tele_on, stream_on,
+                    instruction_attestation)
+                return "instruction-apply-unavailable"
+            _contained_cadence_heartbeat(
+                cfg, deps, state, ids, tele_on, stream_on,
+                instruction_attestation)
+            return "catalog-not-due"
+
+        try:
+            policy = deps.catalog.get_policy(sid)
+            # Bind all hint/clock decisions to this response's own Date before
+            # any heartbeat or other request can replace the client property.
+            authenticated_date = getattr(
+                deps.catalog, "response_authenticated_date", None)
+            policy_received_monotonic = time.monotonic()
+            ids = _policy_assignment_ids(policy)
+        except Exception as e:
+            try:
+                instruction_runtime.note_hint(
+                    state, None, authenticated=False)
+            except Exception:
+                pass
+            deps.emit("CATALOG-UNAVAILABLE",
+                      "catalog policy unavailable: %s" % type(e).__name__)
+            ids = [] if marker is None else marker["assignment_ids"]
+            try:
+                instruction_attestation = _apply_instruction(
+                    preview, cfg, state, deps.aria_rpc,
+                    deps.torrent_defaults)
+            except Exception as apply_error:
+                deps.emit("INSTRUCTION-APPLY-FAIL",
+                          "instruction apply failed: %s"
+                          % type(apply_error).__name__)
+                instruction_attestation = _instruction_unavailable_fact(state)
+                _contained_cadence_heartbeat(
+                    cfg, deps, state, ids, tele_on, stream_on,
+                    instruction_attestation)
+                return "instruction-apply-unavailable"
+            _contained_cadence_heartbeat(
+                cfg, deps, state, ids, tele_on, stream_on,
+                instruction_attestation)
+            return "catalog-unavailable"
+
+        if authenticated_date is not None:
+            try:
+                instruction_runtime.observe_clock(
+                    state, "catalog", authenticated_date,
+                    policy_received_monotonic, current_boot_id)
+            except instruction_runtime.InstructionError:
+                pass
+        try:
+            instruction_result = deps.instruction_step(
+                cfg=cfg, state=state, hints=policy,
+                catalog_date=authenticated_date, cache_only=False,
+                verification_attempts=verification_attempts)
+            if not isinstance(instruction_result, dict):
+                raise ValueError("invalid instruction result")
+        except Exception as e:
+            deps.emit("INSTRUCTION-FAIL",
+                      "instruction step failed (ignored): %s"
+                      % type(e).__name__)
+            instruction_result = {
+                "instruction": None, "effective": None,
+                "effective_peers": {"mode": "tracker-only",
+                                    "include_origin": False},
+                "attestation": _instruction_unavailable_fact(state),
+            }
+        bag = state.get("instructions")
+        if not isinstance(bag, dict):
+            bag = {}
+            state["instructions"] = bag
+        bag["poll"] = {
+            "boot_id": current_boot_id,
+            "monotonic": policy_received_monotonic,
+            "assignment_ids": list(ids),
+        }
+        try:
+            instruction_attestation = _apply_instruction(
+                instruction_result, cfg, state, deps.aria_rpc,
+                deps.torrent_defaults)
+        except Exception as e:
+            deps.emit("INSTRUCTION-APPLY-FAIL",
+                      "instruction apply failed: %s" % type(e).__name__)
+            instruction_attestation = _instruction_unavailable_fact(state)
+            _contained_cadence_heartbeat(
+                cfg, deps, state, ids, tele_on, stream_on,
+                instruction_attestation)
+            return "instruction-apply-unavailable"
+    else:
+        # Task 15 compatibility path for downstream callers that have not
+        # supplied Task 16's RPC/default metadata.
+        policy = deps.catalog.get_policy(sid)
+        cumulative_catalog_date = getattr(
+            deps.catalog, "last_authenticated_date", None)
+        _missing_response_date = object()
+        authenticated_date = getattr(
+            deps.catalog, "response_authenticated_date", _missing_response_date)
+        if authenticated_date is _missing_response_date:
+            authenticated_date = cumulative_catalog_date
+        catalog_clock_date = (cumulative_catalog_date
+                              if cumulative_catalog_date is not None
+                              else authenticated_date)
+        if catalog_clock_date is not None:
+            monotonic_now = time.monotonic()
+            if instruction_runtime is None:
+                import instr
+                instruction_runtime = instr
+                current_boot_id = instr.boot_id()
+            try:
+                instruction_runtime.observe_clock(
+                    state, "catalog", catalog_clock_date,
+                    monotonic_now, current_boot_id)
+            except instruction_runtime.InstructionError:
+                pass
+        if callable(deps.instruction_step):
+            try:
+                instruction_result = deps.instruction_step(
+                    cfg=cfg, state=state, hints=policy,
+                    catalog_date=authenticated_date)
+                if isinstance(instruction_result, dict):
+                    instruction_attestation = instruction_result.get(
+                        "attestation")
+            except Exception as e:
+                deps.emit("INSTRUCTION-FAIL",
+                          "instruction step failed (ignored): %s"
+                          % type(e).__name__)
+                instruction_attestation = _instruction_unavailable_fact(state)
+    if not task16:
+        # Older servers and policy rows carry only the singular assignment.
+        # Keep this permissive parsing only on the compatibility path; Task 16
+        # already validated its bounded ordered set above.
+        ids = policy.get("approved_image_ids")
+        if not isinstance(ids, (list, tuple)) or not ids:
+            single = policy.get("approved_image_id")
+            ids = [single] if single else []
+        ids = list(dict.fromkeys(i for i in ids if i))
     # The server's per-image transfer identities, to be adopted per image by
     # _stage_image. Only the SHAPE is settled here: a `plans` value that is not
     # a map at all (older server, legacy-bootstrap policy row, captive-portal
@@ -2594,30 +3882,53 @@ def run_once(cfg, deps, state):
         # Still heartbeat: an unassigned device must register (devices.json,
         # swarm map, telemetry posture) or console onboarding can never see
         # it come up — assignment only gates staging, not presence.
-        _send_heartbeat(deps, sid,
-                        _heartbeat(None, deps, "unassigned",
-                                   target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on,
-                                   observation=_not_active_observation(
-                                       tele_on, time.time())))
+        hb_resp = _send_heartbeat(
+            deps, sid,
+            _heartbeat(None, deps, "unassigned",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       observation=_not_active_observation(
+                           tele_on, time.time())),
+            instruction_attestation)
+        if task16:
+            heartbeat_date = getattr(
+                deps.catalog, "response_authenticated_date", None)
+            _record_heartbeat_hint(state, hb_resp, heartbeat_date)
         return "no-assignment"
 
     ticks = []
     statuses = []
     for idx, img_id in enumerate(ids):
-        tick = _ImageTick()
+        tick = _ImageTick(tick_seconds)
         ticks.append(tick)
         # The FIRST image of the set carries the legacy top-level "image_id"
         # pointer; _stage_image writes it where the single-image agent did,
         # after that image's own catalog and filename checks pass.
-        statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
-                                     stream_on, tick,
-                                     legacy_pointer=(idx == 0),
-                                     plan_row=plan_rows.get(img_id)))
+        #
+        # One image's failure is that image's verdict, never the tick's: the
+        # set heartbeat below must still go out so the device registers and
+        # the Console shows the error (#235, _contained_stage_failure).
+        try:
+            status = _stage_image(cfg, deps, state, img_id, tele_on,
+                                  stream_on, tick,
+                                  legacy_pointer=(idx == 0),
+                                  plan_row=plan_rows.get(img_id),
+                                  instruction_attestation=
+                                  instruction_attestation,
+                                  assigned_ids=ids)
+        except Exception as exc:
+            status = _contained_stage_failure(
+                cfg, deps, state, img_id, tick, tele_on, stream_on, exc)
+        statuses.append(status)
 
     # ONE heartbeat for the whole set (the device is one row on the server),
     # then each image's telemetry replayed against the answer it carried.
-    hb_resp = _send_set_heartbeat(deps, sid, state, ids, ticks)
+    hb_resp = _send_set_heartbeat(
+        deps, sid, state, ids, ticks, instruction_attestation)
+    if task16:
+        heartbeat_date = getattr(
+            deps.catalog, "response_authenticated_date", None)
+        _record_heartbeat_hint(state, hb_resp, heartbeat_date)
     for tick in ticks:
         tick.replay(hb_resp)
 
@@ -2704,9 +4015,22 @@ def _tracker_headers(cfg, conf_path=None):
 
 def _aria_torrent_options(cfg, dest_dir, conf_path=None,
                           require_tracker_bearer=False):
-    """Build addTorrent options, preserving legacy Guest Shell behavior."""
-    options = {"dir": dest_dir, "bt-seed-unverified": "true",
-               "bt-max-peers": cfg.get("max_peers", "10")}
+    """Build addTorrent options from the current verified private context."""
+    import instr
+    defaults = getattr(instr.torrent_option_context(), "defaults", None)
+    names = tuple(option for option, _public in _ARIA_LIVE_OPTIONS)
+    if (not isinstance(defaults, dict) or set(defaults) != set(names)
+            or any(not isinstance(defaults.get(name), str)
+                   for name in names)):
+        defaults = {
+            "bt-max-peers": str(_FIXED_QOS["max_peers"]),
+            "max-upload-limit": str(_FIXED_QOS["leech_up_bps"]),
+            "max-download-limit": str(_FIXED_QOS["leech_down_bps"]),
+            "bt-request-peer-speed-limit": str(
+                _FIXED_QOS["request_peer_speed_limit_bps"]),
+        }
+    options = {"dir": dest_dir, "bt-seed-unverified": "true"}
+    options.update({name: defaults[name] for name in names})
     if require_tracker_bearer:
         options["header"] = _tracker_headers(cfg, conf_path)
     return options
@@ -2799,6 +4123,10 @@ def _refresh_impl(cfg, conf_path, catalog, emit_fn):
     if bag.get("rpc_secret") is not None:
         new_cfg["rpc_secret"] = bag["rpc_secret"]
     try:
+        # Instruction-key validation is an independent subtransaction. The
+        # config helper returns a fresh mapping, retains the complete old pair
+        # on malformed input, and deliberately never consumes a server lkg_key.
+        new_cfg = agent_config.merge_instruction_key_refresh(new_cfg, bag)
         agent_config.write_conf(conf_path, new_cfg)
     except Exception as e:
         emit_fn("TOKEN-REFRESH-FAIL", "%s conf rewrite failed: %s" % (sid, e))
@@ -3084,7 +4412,7 @@ def _dir_size_of(dir_out, fname):
 
 def _ios_root_file_size(fname, prefix, cli_execute_fn):
     """Strict native size: only explicit IOS ENOENT proves absence."""
-    if (prefix not in ("flash:", "bootflash:")
+    if (prefix not in _IOS_ROOT_PREFIXES
             or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
         raise ValueError("invalid IOS root path")
     path = prefix + fname
@@ -3112,6 +4440,30 @@ def _parse_ios_sha512(output, root_path):
             or "%Error" in output or "% Invalid" in output):
         raise ValueError("IOS SHA-512 response is missing or ambiguous")
     return hashes[0].lower()
+
+
+def _verify_iox_root(fname, prefix, digest, cli_execute_fn):
+    """Read-only native IOS SHA-512 of `<prefix><fname>`, run DIRECTLY on the
+    IOx agent's SSH-to-self vty.
+
+    The Guest Shell needs the asynchronous IRIS-ROOT-HASH EEM policy
+    (_verify_guestshell_root) only because its synchronous `cli` module hangs
+    on long-running commands. The IOx transport is a real vty session with a
+    900 s execution budget (cli_ssh.SSHCli), which runs `verify /sha512` to
+    completion like any other command — measured at 26 s for a 459 MB image
+    on an IE-3400-8T2S. `verify` reads the file and prints one digest line;
+    no image is copied, deleted or modified. Returns True only when the ONE
+    digest IOS bound to exactly this path equals the catalog's; raises on
+    any other response (_parse_ios_sha512), which the adoption caller turns
+    into a "blocked" verdict rather than a guess."""
+    root_path = _iox_root_ios_path(prefix, fname)
+    if root_path is None or not isinstance(digest, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{128}", digest):
+        raise ValueError("invalid native root hash request")
+    output = cli_execute_fn("verify /sha512 %s" % root_path)
+    if not isinstance(output, str):
+        raise ValueError("IOS SHA-512 response unavailable")
+    return _parse_ios_sha512(output, root_path) == digest.lower()
 
 
 def _verify_guestshell_root(fname, prefix, digest, stage_dir,
@@ -3594,6 +4946,19 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
                               expected_size=expected_size)
 
 
+def _ios_rename_refusal(rename_out):
+    """The `%Error renaming ...` line IOS printed for a `rename` it refused, or
+    None. Only an explicit refusal in the command's own output counts — an
+    empty output is the ordinary silent success, and a raise (None here) is
+    ambiguous and stays with the dir-based verdict."""
+    if not isinstance(rename_out, str):
+        return None
+    for line in rename_out.splitlines():
+        if line.lstrip().startswith("%Error renaming"):
+            return line.strip()
+    return None
+
+
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
                               reverify_fn=_agent_reverify_root, copy_source=None,
                               delete_source_on_success=False,
@@ -3709,16 +5074,37 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     # docstring above for why this is the smallest window this driver can
     # make the replacement's exposure.
     try:
-        cli_execute_fn("rename %s %s" % (tmp_dst, dst))
+        rename_out = cli_execute_fn("rename %s %s" % (tmp_dst, dst))
     except Exception as e:
         # Unlike the copy above, a raise here is NOT treated as "nothing
         # happened": Phase 1 already proved good bytes exist at the temp
         # name, so the only open question is whether the rename itself
         # landed. rename_reverify_fn below is the actual verdict either way.
+        rename_out = None
         emit_fn("ROOTCOPY-FAIL",
                 "%s rename into place raised; the verified bytes at %s are "
                 "unharmed either way, and the dir check below is the real "
                 "verdict on whether the rename landed: %s" % (fname, tmp, e))
+    refused = _ios_rename_refusal(rename_out)
+    if refused:
+        # IOS answered the rename with an explicit refusal, so nothing moved:
+        # `<fname>` still holds whatever it held, and the proven bytes are
+        # still at the temp name. Observed verbatim on an IE-3400-8T2S
+        # (IOS-XE 17.15.4, `file prompt quiet`) when the real name already
+        # existed at the sdflash: root — this release's `rename` does not
+        # overwrite an existing destination, quiet prompts or not:
+        #   %Error renaming sdflash:<f>.iris-tmp to sdflash:<f> (File exists)
+        # Polling the pair for 60 s would only re-derive the same verdict,
+        # and its generic "cannot be confirmed" wording would send an operator
+        # looking for a lost rename rather than at the file in the way. The
+        # pre-copy adoption probe (_try_adopt_guestshell_root) is what keeps
+        # a byte-identical existing file from reaching this point at all.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s rename into place refused by IOS, so %s was left exactly "
+                "as it was and the verified bytes remain at %s (this IOS "
+                "release does not rename over an existing file): %s"
+                % (fname, dst, tmp_dst, refused))
+        return False
     ok = rename_reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
                             expected_size=expected_size)
     # In container mode the scp-pushed guest-share scratch is a transfer
@@ -3764,9 +5150,11 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
 
 
 def _share_settings(cfg):
-    """(share_dir, share_ios_path) for the C9k SSD share mount. The app-hosting
-    run-opts set the environment (the normal path); conf keys are the fallback
-    so a hand-dropped config can steer it too. Empty strings = no share."""
+    """(share_dir, share_ios_path) for the bind-mounted app-hosting share
+    (C9300: the SSD share; Catalyst 8000: bootflash). The app-hosting run-opts
+    set the environment (the normal path); conf keys are the fallback so a
+    hand-dropped config can steer it too. Empty strings = no share, which is
+    what selects the IE-3x00 scp hand-off."""
     return (os.environ.get("IRIS_SHARE_DIR") or cfg.get("share_dir") or "",
             os.environ.get("IRIS_SHARE_IOS_PATH")
             or cfg.get("share_ios_path") or "")
@@ -3790,6 +5178,29 @@ _SHARE_PROBE_BODY = "iris"      # the probe's exact bytes; `dir` must report len
 _SHARE_STAGE = "iris-staged.bin"
 
 
+class _ShareUnavailable(object):
+    """Why the bind-mounted share could not carry this placement.
+
+    _stage_via_share_impl returns one of these INSTEAD of a placement
+    verdict, carrying the precise reason (share not mounted in the app, IOS
+    cannot read the share, the local copy into it failed, ...). It is never a
+    verdict: callers test for it by type, never for truthiness.
+
+    It exists because the reason has to reach the operator. On a platform
+    whose app block configures a share (Catalyst 9300, Catalyst 8000) there
+    is NO scp fallback — the device's SCP server is not even enabled there
+    (issue #228) — so _iox_place_impl turns this into a terminal
+    ROOTCOPY-FAIL that names what the probe found."""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason):
+        self.reason = reason
+
+    def __str__(self):
+        return self.reason
+
+
 def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                           copy_direct_fn, emit_fn, cli_execute_fn):
     """Land the downloaded scratch in the bind-mounted app-hosting share
@@ -3808,18 +5219,23 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     `dir`-checked THROUGH IOS: the bind mount proves only the container side,
     not that share_ios_path names this box's view of the same directory (a
     stacked C9300 can enumerate the SSD differently; an operator override can
-    be wrong). An IOS-unreadable share must fall back to scp — without the
-    probe it burned a full SSD write plus a ~15-minute reverify timeout per
-    tick, wedging the device while the working fallback sat suppressed.
+    be wrong). Without the probe an IOS-unreadable share burned a full SSD
+    write plus a ~15-minute reverify timeout per tick.
 
-    Returns None when the share cannot be used (unconfigured, not mounted,
-    probe failed, or the local copy failed) so the caller falls back to the
-    scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
-    placement failure AFTER a good probe is FINAL — scp would push the
-    same bytes. The transient share copy is always removed (the swarm seeds
-    from the scratch under stage_dir, not from the share)."""
-    if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
-        return None
+    Returns a _ShareUnavailable carrying the reason when the share cannot be
+    used (unconfigured, not mounted, probe failed, or the local copy failed);
+    what the caller does with that is platform policy (_iox_place_impl).
+    Otherwise returns copy_direct_fn's verdict: an IOS-side placement failure
+    AFTER a good probe is FINAL — scp would push the same bytes. The
+    transient share copy is always removed (the swarm seeds from the scratch
+    under stage_dir, not from the share)."""
+    if not share_dir:
+        return _ShareUnavailable("no container share directory is configured")
+    if not share_ios_path:
+        return _ShareUnavailable("no IOS share path is configured")
+    if not os.path.isdir(share_dir):
+        return _ShareUnavailable(
+            "share %s is not mounted in the app" % share_dir)
 
     def _sweep():
         # ONLY files carrying OUR prefix, at the share root — operator and
@@ -3850,10 +5266,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                 or _dir_size_of(listing, _SHARE_PROBE) != len(_SHARE_PROBE_BODY)):
             raise OSError("IOS cannot read %s" % share_ios_path)
     except Exception as e:
-        emit_fn("SHARE-FALLBACK",
-                "%s share probe failed (%s); falling back to scp" % (fname, e))
+        emit_fn("SHARE-UNUSABLE",
+                "%s share probe failed (%s)" % (fname, e))
         _sweep()
-        return None
+        return _ShareUnavailable("share probe failed (%s)" % e)
     local = os.path.join(stage_dir, fname)
     staged = os.path.join(share_dir, _SHARE_STAGE)
     part = os.path.join(share_dir, _SHARE_STAGE + ".part")
@@ -3864,10 +5280,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
             shutil.copyfileobj(src, dst, length=1 << 20)
         os.replace(part, staged)
     except OSError as e:
-        emit_fn("SHARE-FALLBACK",
-                "%s share copy failed (%s); falling back to scp" % (fname, e))
+        emit_fn("SHARE-UNUSABLE",
+                "%s local copy into the share failed (%s)" % (fname, e))
         _sweep()
-        return None
+        return _ShareUnavailable("local copy into the share failed (%s)" % e)
     try:
         # The final copy reads the fixed staged name and writes the REAL
         # image name to the target FS (the caller's dst) — the source name
@@ -3879,7 +5295,162 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
 
 
+def _iox_place_impl(fname, target_prefix, share_dir, share_ios_path,
+                    stage_via_share_fn, push_scratch_fn, direct_copy_fn,
+                    emit_fn):
+    """Hand the verified scratch to IOS from inside the IOx container, by the
+    ONE route this target's app block configured. Issue #228.
+
+    A target whose app block carries a share (both run-opts set: Catalyst
+    9300 via the SSD share, Catalyst 8000 via bootflash:) hands the image
+    over through that bind mount plus an IOS-internal plain `copy`. There is
+    NO scp fallback for it: IRIS does not enable the device's SCP server on a
+    share-configured target at all (server/iox_verification.py,
+    prepare_iox_scp), so a push would only fail late, after a full-size
+    transfer, with a less useful error than the share probe already produced.
+    An unusable share therefore FAILS the placement, naming what the probe
+    found.
+
+    That failure returns ROOT_COPY_NOT_ATTEMPTED, not plain False: only the
+    read-only `dir` probe ran, so the delete-first never cleared the target
+    name and nothing may authorise the terminal reclaim. It still counts as
+    an attempt, so the operator still reaches the terminal state.
+
+    A target with no share (IE-3x00: IOx cannot bind-mount sdflash: into the
+    app) keeps the scp push to guest-share exactly as before."""
+    if share_dir and share_ios_path:
+        shared = stage_via_share_fn()
+        if not isinstance(shared, _ShareUnavailable):
+            return shared
+        # ASCII only: _emit_impl encodes the syslog line with errors=replace.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s share hand-off to %s unusable: %s; this platform stages "
+                "only through the share (no scp fallback). Nothing was "
+                "deleted, no IOS placement command ran."
+                % (fname, share_ios_path, shared.reason))
+        return ROOT_COPY_NOT_ATTEMPTED
+    try:
+        push_scratch_fn(fname, target_prefix)
+    except Exception as e:
+        # Pure container-side transfer failure: no IOS command ran, so no
+        # delete-first cleared the target name.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s scp push to %s failed before any IOS work: %s"
+                % (fname, target_prefix, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    # NOTE: like the Guest Shell path, placement transiently needs ~2x the
+    # image on the target FS (scratch + root copy); the verified-delete in
+    # the direct copy reclaims the scratch afterwards.
+    return direct_copy_fn()
+
+
 # ---- on-box wiring (not exercised by unit tests) ----
+
+def _instruction_platform(platform, cfg):
+    """Map the established launcher/storage profiles to the signed platform."""
+    if platform == "iox":
+        return "iox"
+    if platform == "xr-appmgr" \
+            or (not platform and (cfg.get("mode") or "").strip() == "xr"):
+        return "xr-appmgr"
+    if (not platform
+            and cfg.get("stage_dir") == "/bootflash/guest-share/iris"
+            and cfg.get("target_fs") == "bootflash:"):
+        return "router"
+    return "guestshell"
+
+
+def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
+    """Attach the contained instruction and loopback aria2 runtime."""
+    # Preserve the established platform-dispatch seam: tests and downstream
+    # wrappers may return an opaque sentinel from a substituted builder.  Only
+    # the real dependency contract can safely receive runtime wiring.
+    if (getattr(deps, "_fields", None) != Deps._fields
+            or not callable(getattr(deps, "_replace", None))):
+        return deps
+    import instr
+
+    runtime_platform = _instruction_platform(platform, cfg)
+    paths = instr.paths_for(runtime_platform, cfg)
+    verifier = instr.SSHVerifier(
+        shutil.which("ssh-keygen") or "/usr/bin/ssh-keygen",
+        paths["signers"], paths["root_signers"], paths["work_dir"])
+    current_boot_id = instr.boot_id()
+
+    def instruction_step(cfg, state, hints, catalog_date, cache_only=False,
+                         verification_attempts=None):
+        return instr.run_instruction_step(
+            cfg, state, deps.catalog, hints, catalog_date,
+            runtime_platform, paths["work_dir"], current_boot_id,
+            time.monotonic(), verifier,
+            lambda updated: agent_config.write_conf(conf_path, updated),
+            deps.emit, checkpoint=deps.checkpoint, cache_only=cache_only,
+            verification_attempts=verification_attempts)
+
+    endpoint = None
+    secret = None
+    try:
+        port_text = str(cfg["rpc_port"])
+        if not port_text.isdigit():
+            raise ValueError
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            raise ValueError
+        configured_secret = cfg.get("rpc_secret", "")
+        if (not isinstance(configured_secret, str)
+                or len(configured_secret) > 128):
+            raise ValueError
+        secret = agent_config.validate_single_line(
+            "rpc_secret", configured_secret)
+        if not secret:
+            secret = "iris"
+        endpoint = "http://127.0.0.1:%d/jsonrpc" % port
+    except (KeyError, TypeError, ValueError):
+        pass
+
+    if endpoint is None:
+        def aria_rpc(_method, _params):
+            raise InstructionApplyError("RPC unavailable")
+    else:
+        def aria_rpc(method, params):
+            if not isinstance(method, str) or not isinstance(params, list):
+                raise InstructionApplyError("invalid RPC request")
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": "p", "method": method,
+                "params": ["token:" + secret] + params,
+            }, separators=(",", ":")).encode("ascii")
+            request = urllib.request.Request(
+                endpoint, data=payload,
+                headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    raw = response.read(64 * 1024 + 1)
+                if len(raw) > 64 * 1024:
+                    raise InstructionApplyError("RPC response too large")
+                decoded = json.loads(raw.decode("utf-8"))
+                if (not isinstance(decoded, dict)
+                        or set(decoded) != {"jsonrpc", "id", "result"}
+                        or decoded.get("jsonrpc") != "2.0"
+                        or decoded.get("id") != "p"):
+                    raise InstructionApplyError("invalid RPC response")
+                return decoded["result"]
+            except InstructionApplyError:
+                raise
+            except Exception:
+                # Never expose a JSON-RPC error body, credential-bearing URL or
+                # transport exception text to callers, emits or heartbeats.
+                raise InstructionApplyError("RPC unavailable") from None
+
+    defaults = {}
+    aria_add = deps.aria_add
+    wrapper = _instruction_aria_add_protocol(aria_add)
+    if wrapper is not None:
+        aria_add = wrapper[1]()
+    return deps._replace(
+        instruction_step=instruction_step, aria_rpc=aria_rpc,
+        torrent_defaults=defaults,
+        aria_add=_InstructionAriaAdd(aria_add, defaults))
+
 
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # One container selector owns both the backend and storage profile. An
@@ -3891,7 +5462,9 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     legacy_xr = (not platform and (cfg.get("mode") or "").strip() == "xr")
     if platform == "xr-appmgr" or legacy_xr:
         import xr_deps
-        return xr_deps.build_deps(cfg, conf_path, state_path)
+        return _with_instruction_step(
+            xr_deps.build_deps(cfg, conf_path, state_path),
+            cfg, conf_path, platform)
     import base64
     import urllib.request
     import catalog_client
@@ -3933,7 +5506,9 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # same as the SSH-to-self CLI), then the SSH vty runs a plain
     # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
-    # scratch via the in-VM mount, so it pushes nothing here.
+    # scratch via the in-VM mount, so it pushes nothing here, and a
+    # share-configured IOx target (C9300, Catalyst 8000) never reaches this
+    # push at all: its SCP server is not even enabled (issue #228).
     _legacy_runtime = (os.environ.get("IRIS_RUNTIME_MODE")
                        or cfg.get("runtime_mode") or "guestshell")
     _container_iox = (platform == "iox"
@@ -3986,47 +5561,36 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # basename safety decision made before any destructive command.
         confirmed_running = lambda: running
         if _container_iox and _transport is not None:
-            # C9k container: the SSD share (usbflash1:iox_host_data_share) is
-            # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
-            # disk speed and IOS places it with an internal disk-to-disk plain
-            # `copy` — no scp, no CoPP-policed punt traffic. None =
-            # share unusable -> fall through to the scp push below.
+            # Share-configured container (C9300 SSD share, Catalyst 8000
+            # bootflash share): the share is bind-mounted at IRIS_SHARE_DIR,
+            # so the scratch lands there at disk speed and IOS places it with
+            # an internal disk-to-disk plain `copy` — no scp, no CoPP-policed
+            # punt traffic, and no fallback if the share is unusable. Only a
+            # share-LESS container (IE-3x00) scp-pushes the scratch onto the
+            # IOS-visible SD and then runs a plain `copy` DIRECTLY over the
+            # SSH-to-self vty. (The EEM applet offload is only needed for the
+            # C9300 Guest Shell cli module, which can't drive an interactive
+            # copy; a real vty runs copy fine and EEM's `cli command "copy"`
+            # is a no-op here — so the direct path is both correct and
+            # necessary.) _iox_place_impl owns that decision.
             share_dir, share_ios_path = _share_settings(cfg)
-            if share_dir:
-                shared = _stage_via_share_impl(
+            return _iox_place_impl(
+                fname, target_prefix, share_dir, share_ios_path,
+                lambda: _stage_via_share_impl(
                     fname, cfg["stage_dir"], share_dir, share_ios_path,
                     lambda copy_source: _copy_to_root_direct_impl(
                         fname, target_prefix, cli_execute, emit,
                         copy_source=copy_source,
                         running_image_fn=confirmed_running,
                         expected_size=expected_size),
-                    emit, cli_execute)
-                if shared is not None:
-                    return shared
-            # IE-3x00 / container fallback: push the scratch onto the
-            # IOS-visible SD, then run a plain `copy` DIRECTLY over the
-            # SSH-to-self vty. The EEM applet offload is only needed for the
-            # C9300 Guest Shell cli module (can't drive interactive copy); a
-            # real vty runs copy fine, and the EEM `cli command "copy"` action
-            # is a no-op on this platform — so the direct path is both correct
-            # and necessary.
-            try:
-                _push_scratch(fname, target_prefix)
-            except Exception as e:
-                # Pure container-side transfer failure: no IOS command ran, so
-                # no delete-first cleared the target name.
-                emit("ROOTCOPY-FAIL",
-                     "%s scp push to %s failed before any IOS work: %s"
-                     % (fname, target_prefix, e))
-                return ROOT_COPY_NOT_ATTEMPTED
-            # NOTE: like the Guest Shell path, placement transiently needs
-            # ~2x the image on the target FS (scratch + root copy); the
-            # verified-delete below reclaims the scratch afterwards.
-            return _copy_to_root_direct_impl(fname, target_prefix,
-                                             cli_execute, emit,
-                                             delete_source_on_success=True,
-                                             running_image_fn=confirmed_running,
-                                             expected_size=expected_size)
+                    emit, cli_execute),
+                _push_scratch,
+                lambda: _copy_to_root_direct_impl(
+                    fname, target_prefix, cli_execute, emit,
+                    delete_source_on_success=True,
+                    running_image_fn=confirmed_running,
+                    expected_size=expected_size),
+                emit)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit,
                                   running_image_fn=confirmed_running,
@@ -4207,12 +5771,17 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             return _gsf_cache[0]
         found = None
         for f in fss:
-            if f["type"] == "disk" and "rw" in f["flags"] \
-                    and "crashinfo:" not in f["prefixes"]:
-                prefix = f["prefixes"][0]
+            if f["type"] != "disk" or "rw" not in f["flags"]:
+                continue
+            # Probe every prefix IRIS may actually name, not just the first:
+            # crashinfo: is never selectable, and a disk that exposes it
+            # alongside real prefixes (Catalyst 8000V) is still a candidate.
+            for prefix in flash_target.selectable_prefixes(f):
                 if "Directory of" in _show("dir %sguest-share" % prefix):
                     found = prefix
                     break
+            if found:
+                break
         _gsf_cache.append(found)
         return found
 
@@ -4299,25 +5868,52 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # after a checkpointed POST restarts with the frozen id/sequence.
         _atomic_write_state(state_path, state)
 
-    return Deps(catalog=catalog, emit=emit, boot_image=boot_image,
-                aria_add=aria_add,
-                file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
-                verify=lambda p, sha: verify_image.sha256_matches(p, sha),
-                free_bytes=free_bytes, version=version, copy_to_root=copy_to_root,
-                purge_others=purge_others, reclaim=reclaim,
-                root_present=root_present, remove_stage=remove_stage,
-                aria_remove=aria_remove,
-                detect_mode=detect_mode, target_fs=target_fs,
-                running_image=running_image, reclaimable=reclaimable,
-                reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
-                aria_stats=aria_stats, aria_peers=aria_peers,
-                io_transfer=_container_iox,
-                checkpoint=checkpoint, aria_session=aria_session,
-                copy_in_place=False,
-                root_file_size=lambda name, prefix: _ios_root_file_size(
-                    name, prefix, cli_execute),
-                verify_root=lambda name, prefix, digest: _verify_guestshell_root(
-                    name, prefix, digest, cfg["stage_dir"], cli_configure))
+    deps = Deps(
+        catalog=catalog, emit=emit, boot_image=boot_image,
+        aria_add=aria_add,
+        file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
+        verify=lambda p, sha: verify_image.sha256_matches(p, sha),
+        free_bytes=free_bytes, version=version, copy_to_root=copy_to_root,
+        purge_others=purge_others, reclaim=reclaim,
+        root_present=root_present, remove_stage=remove_stage,
+        aria_remove=aria_remove,
+        detect_mode=detect_mode, target_fs=target_fs,
+        running_image=running_image, reclaimable=reclaimable,
+        reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
+        aria_stats=aria_stats, aria_peers=aria_peers,
+        io_transfer=_container_iox,
+        checkpoint=checkpoint, aria_session=aria_session,
+        copy_in_place=False,
+        root_file_size=lambda name, prefix: _ios_root_file_size(
+            name, prefix, cli_execute),
+        # IOx has a real vty: hash synchronously. The Guest Shell's
+        # `cli` module cannot sit through a long command, hence its
+        # asynchronous EEM policy and attestation files instead.
+        verify_root=(
+            (lambda name, prefix, digest: _verify_iox_root(
+                name, prefix, digest, cli_execute))
+            if _container_iox else
+            (lambda name, prefix, digest: _verify_guestshell_root(
+                name, prefix, digest, cfg["stage_dir"], cli_configure))))
+    return _with_instruction_step(deps, cfg, conf_path, platform)
+
+
+# Tick results for which main() exits NON-ZERO (#232). Both launchers key
+# their failure backoff on the agent's exit status (entrypoint.sh
+# next_tick_sleep, bootstrap.sh BACKOFF_FILE -- issue #59), and both document
+# that backoff as covering "catalog unreachable, timed out, or answering a
+# non-2xx status". run_once contains exactly that case into the string
+# "catalog-unavailable" and returned it with exit 0, so the backoff only ever
+# engaged for an uncontained crash and a catalog outage kept every device
+# re-polling on the ordinary cadence. The state file is still written and the
+# result still printed before the exit code is raised; the other contained
+# results (no assignment, a local instruction apply failure, a per-image
+# staging error) are not catalog-plane failures and keep exit 0.
+_BACKOFF_RESULTS = frozenset(("catalog-unavailable",))
+
+
+def _tick_exit_code(result):
+    return 1 if result in _BACKOFF_RESULTS else 0
 
 
 def main():  # pragma: no cover
@@ -4338,6 +5934,11 @@ def main():  # pragma: no cover
         return
 
     cfg = agent_config.load(conf_path)
+    if cfg.get("device_platform") in ("iox", "xr-appmgr"):
+        tick_seconds = _normalize_tick_seconds(
+            os.environ.get("IRIS_TICK_SECONDS"))
+    else:
+        tick_seconds = 60
     load_error = None
     try:
         with open(state_path) as f:
@@ -4352,7 +5953,7 @@ def main():  # pragma: no cover
         deps.emit("STATE-LOAD-FAIL",
                   "%s unreadable; starting with empty state: %s"
                   % (state_path, load_error))
-    result = run_once(cfg, deps, state)
+    result = run_once(cfg, deps, state, tick_seconds)
     try:
         # Ordinary final state save: durable, best-effort. A crash-critical
         # identity/sequence fact was already checkpointed BEFORE its POST, so
@@ -4362,8 +5963,10 @@ def main():  # pragma: no cover
         deps.emit("STATE-WRITE-FAIL", "%s persistence failed: %s"
                   % (state_path, e))
     print(result)
+    return _tick_exit_code(result)
 
 
 if __name__ == "__main__":
     if "--once" in sys.argv or len(sys.argv) == 1:
-        main()
+        # None (the "busy" early return) exits 0 like the ordinary tick.
+        sys.exit(main())

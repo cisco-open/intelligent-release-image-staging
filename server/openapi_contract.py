@@ -15,11 +15,1127 @@ import re
 
 import api_problem
 import api_routes
+import instructions
+import peer_policy
+import schedules
 
 
 ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
-                  416, 422, 429, 500, 502, 503)
+                  416, 422, 428, 429, 500, 502, 503)
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
+POLICY_MUTATIONS = {
+    ("PUT", "/peer-policy/roles/{name}"),
+    ("POST", "/peer-policy/roles/import-csv"),
+    ("DELETE", "/peer-policy/roles/{name}"),
+    ("PUT", "/peer-policy/qos"),
+    ("POST", "/devices/{device_id}/role"),
+    ("POST", "/devices/bulk-role"),
+}
+
+INSTRUCTION_RESOURCES = (
+    "/v1/devices/{device_id}/instructions",
+    "/v1/devices/{device_id}/instruction-keylist",
+)
+
+
+def _instruction_resource(route):
+    return (route.service == "catalog" and route.method == "GET"
+            and route.path in INSTRUCTION_RESOURCES)
+
+
+def _instruction_headers(success=True):
+    headers = {
+        "Cache-Control": {"schema": {"type": "string", "const":
+            "private, no-store" if success else "no-store"}},
+        "Vary": {"schema": {"type": "string", "const": "Authorization"}},
+        "Date": {"schema": {"type": "string"},
+                 "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                 "example": "Mon, 07 Sep 2026 12:00:00 GMT"},
+        "X-Content-Type-Options": {
+            "schema": {"type": "string", "const": "nosniff"}},
+    }
+    if success:
+        headers["ETag"] = {
+            "schema": {"type": "string", "pattern": '^"sha256-[0-9a-f]{64}"$'},
+            "description": "Strong SHA-256 digest of the exact selected response bytes",
+            "example": '"sha256-' + "0" * 64 + '"',
+        }
+    return headers
+
+
+def _instruction_problem_variants(route, status):
+    keylist = route.path == INSTRUCTION_RESOURCES[1]
+    return {
+        401: (("catalog-authentication-required", "Catalog authentication required"),),
+        403: (("instruction-device-forbidden", "Instruction access forbidden"),),
+        404: (("instruction-keylist-missing", "Instruction keylist missing"),)
+             if keylist else (("instruction-stamp-missing", "Instruction stamp missing"),),
+        409: (("stale_pointer", "Stale instruction pointer"),),
+        429: (("instruction-rate-limit-exceeded", "Instruction request rate limit exceeded"),),
+        503: (("credential-store-unavailable", "Credential store unavailable"),
+              ("instruction-keylist-unavailable", "Instruction keylist unavailable")
+              if keylist else ("instruction-state-unavailable", "Instruction state unavailable")),
+    }[status]
+
+
+def _instruction_integer(minimum=0):
+    return {"type": "integer", "minimum": minimum, "maximum": instructions.MAX_I63}
+
+
+def _nullable_instruction_integer(minimum=0, maximum=None):
+    return {"type": ["integer", "null"], "minimum": minimum,
+            "maximum": instructions.MAX_I63 if maximum is None else maximum}
+
+
+_INSTRUCTION_DISPLAY_STATES = (
+    "applied", "lkg", "stale", "rejected", "tracker-only",
+    "pre-instructions", "unknown", "unavailable", "pending", "forbidden",
+    "floor_reset", "none", "revoked",
+)
+
+# Canonical nonnegative signed-63-bit decimal spelling. JSON object keys are
+# strings, so a digit-count-only pattern would admit values above MAX_I63.
+_DECIMAL_I63_PATTERN = (
+    r"^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|"
+    r"92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|"
+    r"92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|"
+    r"92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|"
+    r"9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|"
+    r"922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|"
+    r"92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|"
+    r"9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])(?![\s\S])"
+)
+
+
+def _instruction_identity_schema():
+    names = ("epoch", "instr_serial", "policy_revision")
+    return {
+        "oneOf": [{
+            "type": "object", "required": list(names),
+            "additionalProperties": False,
+            "properties": {name: _instruction_integer() for name in names},
+        }, {"type": "null"}],
+        "description": (
+            "Complete accepted-envelope identity asserted by the agent. Null "
+            "means no complete accepted identity was reported."),
+    }
+
+
+def _instruction_evidence_schema():
+    return {"type": "string",
+            "enum": ["agent-asserted", "server-observed"]}
+
+
+def _instruction_device_schema():
+    fields = {
+        "display_state": {"type": "string",
+                          "enum": list(_INSTRUCTION_DISPLAY_STATES)},
+        "label": {"type": "string", "minLength": 1, "maxLength": 96},
+        "evidence": _instruction_evidence_schema(),
+        "underlying_state": {"type": ["string", "null"],
+                             "enum": sorted(instructions.INSTR_STATES) + [None]},
+        "underlying_label": {
+            "type": "string", "minLength": 1, "maxLength": 96},
+        "underlying_evidence": {
+            "type": "string", "const": "agent-asserted"},
+        "reason": {"type": ["string", "null"],
+                   "enum": sorted(instructions.INSTR_REASONS) + [None]},
+        "reported_instr_serial": _nullable_instruction_integer(),
+        "accepted_identity": _instruction_identity_schema(),
+        "verify_level": {"type": ["string", "null"],
+                         "enum": ["sig", "none", None]},
+        "pointer_skew": {"type": ["boolean", "null"]},
+        "qos_drift_count": _nullable_instruction_integer(maximum=(
+            instructions.QOS_DRIFT_MAX_ROWS + 2)),
+        "report_age_seconds": _nullable_instruction_integer(),
+        "report_stale": {"type": ["boolean", "null"]},
+        "revoked": {"type": ["boolean", "null"]},
+        "revocation_evidence": {
+            "type": "string", "const": "server-observed"},
+    }
+    return {
+        "type": "object", "properties": fields,
+        "required": list(fields), "additionalProperties": False,
+        "description": (
+            "Canonical bounded instruction display projection. Device facts "
+            "remain assertions; server-observed revocation and report age may "
+            "take display precedence while retaining the underlying report."),
+    }
+
+
+def _instruction_device_example():
+    maximum = instructions.MAX_I63
+    return {
+        "display_state": "applied",
+        "label": "applied r%d" % maximum,
+        "evidence": "agent-asserted",
+        "underlying_state": "applied",
+        "underlying_label": "applied r%d" % maximum,
+        "underlying_evidence": "agent-asserted",
+        "reason": None,
+        "reported_instr_serial": maximum,
+        "accepted_identity": {
+            "epoch": 11, "instr_serial": maximum, "policy_revision": 7},
+        "verify_level": "sig",
+        "pointer_skew": False,
+        "qos_drift_count": 0,
+        "report_age_seconds": 3,
+        "report_stale": False,
+        "revoked": False,
+        "revocation_evidence": "server-observed",
+    }
+
+
+def _instruction_fleet_rollup_schema():
+    states = {
+        name: _instruction_integer() for name in _INSTRUCTION_DISPLAY_STATES}
+    return {
+        "type": "object",
+        "properties": {
+            "issued_revision": _nullable_instruction_integer(),
+            "applied": {
+                "type": "object",
+                "propertyNames": {
+                    "type": "string", "pattern": _DECIMAL_I63_PATTERN},
+                "additionalProperties": _instruction_integer(),
+                "description": (
+                    "Agent-asserted accepted policy revisions as exact decimal "
+                    "string keys, mapped to inventory-device counts."),
+            },
+            "states": {
+                "type": "object", "properties": states,
+                "additionalProperties": False,
+            },
+        },
+        "required": ["issued_revision", "applied", "states"],
+        "additionalProperties": False,
+    }
+
+
+def _instruction_status_schema():
+    fields = {
+        "observed_at": {"type": "number", "minimum": 0,
+                        "maximum": instructions.MAX_I63},
+        "instr_stamp_missing": _nullable_instruction_integer(),
+        "pointer_skew": _nullable_instruction_integer(),
+        "issued_revision_label": {
+            "type": ["string", "null"], "maxLength": 20,
+            "pattern": "^r" + _DECIMAL_I63_PATTERN[1:]},
+    }
+    return {"type": "object", "properties": fields,
+            "required": list(fields), "additionalProperties": False}
+
+
+def _instruction_custody_schema():
+    nullable_signed = {
+        "type": ["integer", "null"],
+        "minimum": -instructions.MAX_I63, "maximum": instructions.MAX_I63}
+    fields = {
+        "schema": {"type": "string",
+                   "const": "iris-instruction-key-status/v1"},
+        "enabled": {"type": "boolean"},
+        "state": {"type": "string", "enum": [
+            "phase0", "ready", "renewal_due", "signing_refused",
+            "keylist_missing", "invalid", "error"]},
+        "certificate_days_to_expiry": nullable_signed,
+        "certificate_renewal_due": {"type": "boolean"},
+        "signing_refused": {"type": "boolean"},
+        "keylist_seq": _nullable_instruction_integer(minimum=1),
+        "keylist_age_days": _nullable_instruction_integer(),
+        "keylist_resign_due": {"type": "boolean"},
+        "roots_configured": {"type": "integer", "minimum": 0, "maximum": 2},
+        "roots_attested_180d": {
+            "type": "integer", "minimum": 0, "maximum": 2},
+        "root_ceremony_overdue": {"type": "string", "enum": [
+            "unknown", "ok", "warn", "critical"]},
+        "root_quorum_degraded": {"type": "boolean"},
+        "updated_at": _instruction_integer(),
+    }
+    available = {"type": "object", "properties": fields,
+                 "required": list(fields), "additionalProperties": False}
+    return {"oneOf": [available, {"type": "null"}],
+            "description": (
+                "Validated durable signing-custody status, or null when the "
+                "status snapshot is absent, invalid, stale or unavailable.")}
+
+
+def _instruction_custody_example():
+    return {
+        "schema": "iris-instruction-key-status/v1",
+        "enabled": True, "state": "ready",
+        "certificate_days_to_expiry": 14,
+        "certificate_renewal_due": False, "signing_refused": False,
+        "keylist_seq": 8, "keylist_age_days": 30,
+        "keylist_resign_due": False, "roots_configured": 2,
+        "roots_attested_180d": 2, "root_ceremony_overdue": "ok",
+        "root_quorum_degraded": False, "updated_at": 1788470400,
+    }
+
+
+def _instruction_pair_schema():
+    return {
+        "type": "object", "required": ["expected", "observed"],
+        "additionalProperties": False,
+        "properties": {name: _instruction_integer() for name in ("expected", "observed")},
+        "description": "Non-Boolean integers; expected and observed must differ. Equality is rejected by the runtime sanitizer.",
+    }
+
+
+def _instruction_attestation_request(schema, legacy):
+    """Document the authoritative vocabulary and complete omission units."""
+    applied_names = list(instructions.APPLIED_FIELDS)
+    pair = _instruction_pair_schema()
+    option = _instruction_pair_schema()
+    option["required"] = ["option", "expected", "observed"]
+    option["properties"]["option"] = {"type": "string", "enum": applied_names}
+    properties = schema["properties"]
+    properties.update({
+        "instr_protocol": {
+            "type": ["integer", "null"], "enum": [1, None],
+            "description": (
+                "Protocol 1 identifies the current instruction projection; "
+                "null records a present but unsupported or malformed marker. "
+                "Absence identifies a pre-instructions agent."),
+        },
+        "applied": {
+            "type": "object", "required": applied_names,
+            "additionalProperties": False,
+            "properties": {name: _instruction_integer() for name in applied_names},
+            "description": "Seven complete global/default aria2 observations, not per-GID claims. Omitted until successful assertion; retained for known LKG/fallback settings. Invalid objects are omitted as a whole.",
+        },
+        "instr_state": {"type": "string", "enum": sorted(instructions.INSTR_STATES)},
+        "instr_reason": {"type": "string", "enum": sorted(instructions.INSTR_REASONS)},
+        "instr_epoch": _instruction_integer(),
+        "instr_serial": _instruction_integer(),
+        "instr_policy_revision": _instruction_integer(),
+        "pointer_skew": {"type": ["boolean", "null"]},
+        "verify_level": {"type": "string", "enum": ["sig", "none"]},
+        "blocklist_rules": _instruction_integer(),
+        "blocklist_revision": _instruction_integer(),
+        "qos_drift": {
+            "type": "object", "required": ["options"], "additionalProperties": False,
+            "properties": {
+                "options": {"type": "array", "maxItems": instructions.QOS_DRIFT_MAX_ROWS,
+                            "items": option},
+                "blocklist_revision": pair, "blocklist_rules": pair,
+            },
+            "anyOf": [
+                {"properties": {"options": {"minItems": 1}}},
+                {"required": ["blocklist_revision"]},
+                {"required": ["blocklist_rules"]},
+            ],
+            "description": "One bounded fact; preserves option order and duplicate observations. At most seven global/default plus four options for each of ten active GIDs. GIDs, scopes, indexes, addresses and arbitrary option names are never transmitted. Active GIDs contribute only bt_max_peers, max_upload_limit, max_download_limit or request_peer_speed_limit. Any invalid row or pair omits the whole fact.",
+        },
+    })
+    schema["dependentRequired"] = {
+        "blocklist_rules": ["blocklist_revision"],
+        "blocklist_revision": ["blocklist_rules"],
+        "instr_epoch": ["instr_serial", "instr_policy_revision"],
+        "instr_policy_revision": ["instr_epoch", "instr_serial"],
+    }
+    schema["allOf"] = [{
+        "if": {"required": ["instr_state"],
+               "properties": {"instr_state": {"const": "key_rejected"}}},
+        "then": {"required": ["instr_reason"]},
+        "else": {"not": {"required": ["instr_reason"]}},
+    }]
+    schema["description"] = (
+        "Instruction fields are optional device assertions, not verified compliance. "
+        "The server omits invalid state/reason and blocklist pairs as units; legacy "
+        "agents omit all instruction fields. Integers exclude Boolean values and "
+        "fractional or floating-point input. The accepted identity is either the "
+        "complete epoch/serial/policy-revision triple or the legacy serial alone. "
+        "Device role/platform, keys, signatures, peer lists and opaque aria2 "
+        "option dictionaries are never accepted as attestation.")
+    applied = dict(legacy, instr_protocol=1, instr_state="applied",
+                   instr_epoch=11, instr_serial=7, instr_policy_revision=3,
+                   pointer_skew=False, verify_level="sig",
+                   applied={name: index for index, name in enumerate(applied_names)},
+                   blocklist_rules=12, blocklist_revision=3,
+                   qos_drift={"options": [{"option": "max_upload_limit",
+                                          "expected": 8192, "observed": 16384}]})
+    return {"schema": schema, "examples": {
+        "applied": {"value": applied},
+        "keyRejected": {"value": dict(
+            legacy, instr_protocol=1, instr_state="key_rejected",
+            instr_reason="unknown_key", pointer_skew=False)},
+        "unknownCapability": {"value": dict(legacy, instr_protocol=None)},
+        "legacy": {"value": legacy},
+    }}
+
+
+def _schedule_resource(route):
+    return (route.service in ("console", "management") and
+            _resource_suffix(route) in (
+                "/schedules", "/schedules/{id}",
+                "/schedules/{id}/occurrences",
+                "/schedules/{id}/receipts", "/schedules/{id}/reaffirm"))
+
+
+def _schedule_conditional(route):
+    return _schedule_resource(route) and (
+        route.method in ("PUT", "PATCH", "DELETE") or
+        _resource_suffix(route).endswith("/reaffirm"))
+
+
+def _schedule_object(properties, required=None):
+    return {"type": "object", "properties": properties,
+            "required": list(properties) if required is None else list(required),
+            "additionalProperties": False}
+
+
+def _schedule_integer(minimum=0, maximum=schedules.MAX_INTEGER):
+    return {"type": "integer", "minimum": minimum, "maximum": maximum}
+
+
+def _schedule_id_schema(device=False):
+    schema = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\s\S])"}
+    if device:
+        schema["not"] = {"const": "seeder"}
+    return schema
+
+
+def _schedule_ids_schema(images=False, minimum=0):
+    return {"type": "array", "uniqueItems": True, "minItems": minimum,
+            "maxItems": 10 if images else schedules.MAX_TARGETS,
+            "items": {"type": "string", "pattern": r"^[A-Za-z0-9._-]{1,128}(?![\s\S])"}
+            if images else _schedule_id_schema(device=True)}
+
+
+def _schedule_text_schema(limit=256, empty=False):
+    # JSON Schema counts characters; the byte bound remains an explicit wire
+    # constraint and is enforced by the schedule store's UTF-8 validation.
+    atom = r"[^\s\x00-\x1f\x7f-\x9f](?:[^\x00-\x1f\x7f-\x9f]*[^\s\x00-\x1f\x7f-\x9f])?"
+    return {"type": "string", "maxLength": limit, "minLength": 0 if empty else 1,
+            "pattern": "^(?:" + atom + ")" + ("?" if empty else "") + r"(?![\s\S])",
+            "x-iris-maxUtf8Bytes": limit,
+            "description": "Valid UTF-8, at most %d bytes; no leading/trailing whitespace or C0/C1 controls." % limit}
+
+
+def _schedule_target_schema(normalized=False):
+    filters = {key: _schedule_text_schema(empty=True) for key in sorted(schedules.FILTER_KEYS)}
+    filters["role"] = {"type": "string", "pattern": r"^(?:|__none|[a-z0-9][a-z0-9._-]{0,31})(?![\s\S])"}
+    return _schedule_object({
+        "filters": _schedule_object(filters, ()),
+        "device_ids": _schedule_ids_schema(),
+        "bind": {"type": "string", "enum": ["late", "early"], "default": "late"},
+    }, None if normalized else ())
+
+
+def _schedule_payload_schema(kind, normalized=False):
+    if kind == "assign":
+        return _schedule_object({
+            "image_ids": _schedule_ids_schema(images=True, minimum=1),
+            "mode": {"type": "string", "enum": ["merge", "replace"], "default": "merge"},
+        }, None if normalized else ("image_ids",))
+    return _schedule_object({
+        "telemetry": {"type": "boolean", "default": True},
+        "telemetry_stream": {"type": "boolean", "default": False},
+        "mode": {"type": "string", "const": "new-only", "default": "new-only"},
+        "max_devices": _schedule_integer(1, schedules.MAX_TARGETS),
+    }, None if normalized else ("max_devices",))
+
+
+def _schedule_when_schema(normalized=False):
+    common = {"tz": dict(_schedule_text_schema(128), default="UTC",
+                          description="IANA timezone available in server tzdata; defaults to UTC. Unknown names return invalid_schedule."),
+              "window_seconds": _schedule_integer(1, schedules.MAX_WINDOW_SECONDS)}
+    return {"oneOf": [
+        _schedule_object({"kind": {"const": "once"},
+                          "at": _schedule_integer(0, schedules.MAX_EPOCH - schedules.MAX_WINDOW_SECONDS),
+                          **common}, ("kind", "at", "window_seconds") + (("tz",) if normalized else ())),
+        _schedule_object({"kind": {"const": "recurring"},
+                          "weekday": dict(_schedule_integer(0, 6), description="Monday=0 through Sunday=6"),
+                          "hour": _schedule_integer(0, 23), "minute": _schedule_integer(0, 59),
+                          **common}, ("kind", "weekday", "hour", "minute", "window_seconds") + (("tz",) if normalized else ())),
+    ], "description": "Server-side half-open window. A nonexistent local time resolves to the first valid instant after it; an ambiguous local time fires once at its first occurrence. Epoch fields remain integer seconds."}
+
+
+def _schedule_after_schema():
+    return _schedule_object({
+        "schedule_id": _schedule_id_schema(),
+        "condition": {"type": "string", "const": "min_staged_ratio"},
+        **{field: {"type": "number", "minimum": 0, "maximum": 1} for field in (
+            "min_staged_ratio", "max_errored_ratio", "max_missing_ratio")},
+        "deadline_seconds": _schedule_integer(1, schedules.MAX_WINDOW_SECONDS),
+    })
+
+
+def _schedule_definition_schema(*, create=False, patch=False, normalized=False):
+    properties = {
+        "kind": {"type": "string", "enum": ["assign", "onboard"]},
+        "target": _schedule_target_schema(normalized),
+        "payload": {"oneOf": [_schedule_payload_schema(kind, normalized) for kind in ("assign", "onboard")]},
+        "when": _schedule_when_schema(normalized),
+        "after": {"oneOf": [_schedule_after_schema(), {"type": "null"}]} if patch else _schedule_after_schema(),
+        "state": {"type": "string", "enum": ["pending", "paused", "completed"], "default": "pending"},
+    }
+    required = [] if patch else ["kind", "target", "payload", "when"]
+    if normalized:
+        required.append("state")
+    if create:
+        properties = {"id": _schedule_id_schema(), **properties}
+        required.insert(0, "id")
+    schema = _schedule_object(properties, required)
+    schema["allOf"] = [{
+        "if": {"required": ["kind"], "properties": {"kind": {"const": kind}}},
+        "then": {"properties": {"payload": _schedule_payload_schema(kind, normalized)}},
+    } for kind in ("assign", "onboard")]
+    schema["description"] = (
+        "Closed stage-only definition: assign images or onboard the staging agent. "
+        "Unknown fields at every level are rejected. No install, activation, boot-variable or reload operation exists. "
+        "Empty target filters and IDs select the whole fleet; explicit IDs intersect filters. "
+        "Late binding resolves at fire time; early binding retains preview device IDs. "
+        "A referenced target role must exist. An after gate cannot reference this schedule itself.")
+    if patch:
+        schema["description"] += (
+            " PATCH replaces supplied top-level subobjects in full, without recursive merge; "
+            "after:null removes the gate. The resulting complete definition is validated, "
+            "including compatibility between an omitted existing kind and a supplied payload.")
+    return schema
+
+
+def _schedule_etag_header(description="Strong ETag of the returned schedule revision"):
+    revision = _DECIMAL_I63_PATTERN.removeprefix("^").removesuffix(r"(?![\s\S])")
+    pattern = (r'^"iris-schedule-[A-Za-z0-9][A-Za-z0-9._-]{0,63}-(?!0)' +
+               revision + r'"(?![\s\S])')
+    return {"description": description,
+            "schema": {"type": "string", "pattern": pattern},
+            "example": '"iris-schedule-s-boat-1"'}
+
+
+def _stored_schedule_schema():
+    schema = _schedule_definition_schema(normalized=True)
+    fields = {
+        "id": _schedule_id_schema(),
+        "generation": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "rev": _schedule_integer(1),
+        "created_by": dict(_schedule_text_schema(), allOf=[{
+            "pattern": r"^[a-z][a-z0-9_-]{0,31}:.+"}],
+            description="Server-supplied creator identity; ordinary edits preserve it. Reaffirm derives the current actor server-side."),
+        "created_at": _schedule_integer(0, schedules.MAX_EPOCH),
+        "preview": _schedule_object({
+            "revision": _schedule_integer(), "now": _schedule_integer(0, schedules.MAX_EPOCH),
+            "device_ids": _schedule_ids_schema()}),
+    }
+    schema["properties"].update(fields)
+    schema["required"].extend(fields)
+    return schema
+
+
+def _schedule_view_schema():
+    schema = _stored_schedule_schema()
+    fields = {
+        "etag": dict(_schedule_etag_header()["schema"], readOnly=True),
+        "creator_exists": {"type": "boolean", "readOnly": True, "description": "Response-only marker from the authoritative administrator record; an absent creator does not prevent firing."},
+        "next_fire": {"oneOf": [_schedule_slot_schema(), {"type": "null"}],
+                      "readOnly": True,
+                      "description": "Response-only current or next slot, computed by the same authority the runner fires from, so a client never recomputes local weekly time itself. Null when the schedule is paused or completed, or when a one-time schedule has no further slot."},
+    }
+    schema["properties"].update(fields)
+    schema["required"].extend(fields)
+    return schema
+
+
+def _schedule_target_facts_schema():
+    return _schedule_object({"missing_os_family": _schedule_integer(),
+                             "role_drift": _schedule_integer(),
+                             "quarantined_ids": _schedule_ids_schema()})
+
+
+def _schedule_wave_schema():
+    """The wave gate's own view of a PRECEDING occurrence."""
+    count = _schedule_integer(0, schedules.MAX_TARGETS)
+    properties = {
+        "schedule_id": _schedule_id_schema(),
+        "occurrence_id": {"oneOf": [
+            {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+            {"type": "null"}]},
+        "total": count,
+    }
+    properties.update({field: count for field in schedules.WAVE_COUNTS})
+    properties["gate"] = {"type": "string",
+                          "enum": sorted(schedules.WAVE_GATES)}
+    properties["observed_at"] = _schedule_integer(0, schedules.MAX_EPOCH)
+    schema = _schedule_object(properties)
+    schema["description"] = (
+        "Wave-gate evaluation of the preceding schedule's own occurrence: an "
+        "operational signal about when work is admitted, never an authority "
+        "over what it may do. staged, errored and missing each count part of "
+        "that occurrence's bound target and never exceed its total; the "
+        "remainder is still in flight. Missing counts a device that produced "
+        "no evidence at all, which is deliberately not the same as errored. "
+        "A gate with no preceding occurrence yet reports a null occurrence id "
+        "and zero counts, which is a hold rather than an all-clear.")
+    return schema
+
+
+def _schedule_receipt_schema(*, predecessor=False):
+    epoch = _schedule_integer(0, schedules.MAX_EPOCH)
+    reason_pattern = r"^[a-z][a-z0-9_]{0,63}(?![\s\S])"
+    reason = {
+        "type": "string", "pattern": reason_pattern,
+        "description": (
+            "Machine-readable per-device outcome. `conflict` includes a current registration "
+            "that differs from the occurrence binding; `identity_unavailable` means fresh work "
+            "could not prove a durable target identity. See Operations scheduled outcomes."),
+    }
+    properties = {
+        "occurrence_id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "device_id": _schedule_id_schema(device=True), "rev": _schedule_integer(1),
+        "attempt": _schedule_integer(1, schedules.MAX_RECEIPT_ATTEMPTS),
+        "attempt_started_at": epoch,
+        "status": {"type": "string", "enum": sorted(schedules.RECEIPT_STATES)},
+        "reason": reason, "created_at": epoch, "updated_at": epoch,
+        "completed_at": {"oneOf": [epoch, {"type": "null"}]},
+        "notes": {"type": "array", "items": {"type": "string", "pattern": reason_pattern},
+                  "maxItems": 16},
+    }
+    if not predecessor:
+        properties["predecessors"] = {"type": "array", "maxItems": schedules.MAX_RECEIPT_ATTEMPTS - 1,
+                                      "items": _schedule_receipt_schema(predecessor=True)}
+        properties.update({
+            "schedule_id": _schedule_id_schema(), "scheduled_at": epoch, "window_end": epoch,
+            "occurrence_state": {"type": "string", "enum": sorted(schedules.OCCURRENCE_TRANSITIONS)},
+            "schedule_rev": _schedule_integer(1),
+        })
+    required = list(properties)
+    properties["wave"] = _schedule_wave_schema()
+    properties.update({field: _schedule_id_schema() for field in (
+        "job_id", "record_id", "predecessor_record_id")})
+    properties["manual_generation"] = _schedule_integer()
+    properties["fleet_registered_at"] = {
+        "oneOf": [epoch, {"type": "null"}]}
+    properties["fleet_registration_id"] = {
+        "type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"}
+    properties.update({field: _schedule_ids_schema(images=True) for field in (
+        "before_image_ids", "after_image_ids", "removed_image_ids")})
+    schema = _schedule_object(properties, required)
+    terminal = {"enum": sorted(schedules.TERMINAL_RECEIPT_STATES)}
+    schema["allOf"] = [{
+        "if": {"properties": {"status": terminal}},
+        "then": {"properties": {"completed_at": epoch}},
+        "else": {"properties": {"completed_at": {"type": "null"}},
+                 "not": {"anyOf": [{"required": ["after_image_ids"]}, {"required": ["removed_image_ids"]}]}},
+    }]
+    if predecessor:
+        schema["properties"]["status"] = {"type": "string", "enum": ["intent", "submitted", "running"]}
+    schema["description"] = (
+        "Durable attempt evidence. Timestamps are ordered created_at <= attempt_started_at <= updated_at; "
+        "terminal completed_at lies within the attempt. Predecessors retain prior nonterminal attempts "
+        "without nested history, with increasing revisions and shared device/occurrence identity. "
+        "The attempt number equals one plus predecessor count. Removed images equal before minus after when all three sets are present.")
+    return schema
+
+
+def _schedule_slot_schema():
+    epoch = _schedule_integer(0, schedules.MAX_EPOCH)
+    return _schedule_object({
+        "scheduled_at": epoch, "window_end": epoch,
+        "status": {"type": "string", "enum": ["future", "due", "missed"]},
+        "resolution": {"type": "string", "enum": ["normal", "gap", "fold"]},
+        "tz": _schedule_text_schema(128),
+        "local_time": _schedule_text_schema(64),
+        "next_at": {"oneOf": [epoch, {"type": "null"}]},
+    })
+
+
+def _schedule_occurrence_schema():
+    epoch = _schedule_integer(0, schedules.MAX_EPOCH)
+    snapshot = _schedule_object({
+        "revision": _schedule_integer(), "now": epoch,
+        "device_ids": _schedule_ids_schema()})
+    snapshot["properties"]["registration_ids"] = {
+        "type": "object", "maxProperties": schedules.MAX_TARGETS,
+        "propertyNames": _schedule_ids_schema()["items"],
+        "additionalProperties": {"oneOf": [
+            {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+            {"type": "null"}]},
+        "description": (
+            "Registration identity for each fired target, frozen when the "
+            "occurrence is claimed. Legacy snapshots may omit these bindings; "
+            "new execution requires a durable registration identity."),
+    }
+    slot = _schedule_slot_schema()
+    properties = {
+        "id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "schedule_id": _schedule_id_schema(),
+        "schedule_generation": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "schedule_rev": _schedule_integer(1),
+        "schedule": _ref("StoredSchedule"),
+        "actor": dict(_schedule_text_schema(), allOf=[{
+            "pattern": r"^schedule:[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\s\S])"}]),
+        "slot": slot, "scheduled_at": epoch, "window_end": epoch,
+        "state": {"type": "string", "enum": sorted(schedules.OCCURRENCE_TRANSITIONS)},
+        "preview": snapshot, "created_at": epoch, "updated_at": epoch,
+        "target_snapshot": snapshot,
+        "delta": _schedule_object({"added": _schedule_integer(0, schedules.MAX_TARGETS),
+                                    "removed": _schedule_integer(0, schedules.MAX_TARGETS)}),
+        "annotations": _schedule_object({
+            "all_targets_quarantined": _schedule_integer(
+                1, schedules.MAX_TARGETS),
+            "wave": _schedule_wave_schema()}, ()),
+    }
+    required = tuple(key for key in properties
+                     if key not in ("target_snapshot", "delta", "annotations"))
+    schema = _schedule_object(properties, required)
+    schema["allOf"] = [{
+        "if": {"required": ["state"],
+               "properties": {"state": {"const": "missed"}}},
+        "then": {"not": {"anyOf": [
+            {"required": ["target_snapshot"]}, {"required": ["delta"]}]}},
+        "else": {"required": ["target_snapshot", "delta"]},
+    }]
+    schema["description"] = (
+        "Durable frozen occurrence authority and outcome. Missed occurrences "
+        "have no target snapshot or delta; every other state retains both, "
+        "including an empty target set. Slot resolution records normal, DST-gap "
+        "or first-fold scheduling.")
+    return schema
+
+
+def _schedule_definition_example(kind="assign"):
+    return {"kind": kind, "target": {"filters": {"role": "boat"}, "device_ids": ["edge-01"], "bind": "late"},
+            "payload": {"image_ids": ["image-a"], "mode": "merge"} if kind == "assign" else
+                {"telemetry": True, "telemetry_stream": False, "mode": "new-only", "max_devices": 20},
+            "when": {"kind": "once", "at": 1788883260, "tz": "UTC", "window_seconds": 3600} if kind == "assign" else
+                {"kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+                 "tz": "Europe/Stockholm", "window_seconds": 3600},
+            "state": "pending"}
+
+
+def _schedule_view_example():
+    row = dict(_schedule_definition_example(), id="s-boat", generation="0" * 32, rev=1,
+               created_by="console:alice", created_at=1788883200,
+               preview={"revision": 2, "now": 1788883200, "device_ids": ["edge-01"]},
+               etag='"iris-schedule-s-boat-1"', creator_exists=True)
+    return dict(row, next_fire=schedules.occurrence_slot(
+        row, row["when"]["at"] - 60))
+
+
+def _schedule_occurrence_example():
+    schedule = _schedule_view_example()
+    schedule.pop("etag")
+    schedule.pop("creator_exists")
+    schedule.pop("next_fire")
+    scheduled_at = schedule["when"]["at"]
+    slot = schedules.occurrence_slot(schedule, scheduled_at)
+    return {
+        "id": schedules.occurrence_id(schedule, scheduled_at),
+        "schedule_id": "s-boat",
+        "schedule_generation": "0" * 32, "schedule_rev": 1,
+        "schedule": schedule, "actor": "schedule:s-boat",
+        "slot": slot, "scheduled_at": scheduled_at,
+        "window_end": slot["window_end"],
+        "state": "completed", "preview": schedule["preview"],
+        "target_snapshot": {"revision": 3, "now": scheduled_at,
+                            "device_ids": ["edge-01"]},
+        "delta": {"added": 0, "removed": 0},
+        "created_at": scheduled_at, "updated_at": scheduled_at + 40,
+    }
+
+
+def _schedule_request_body(route):
+    suffix = _resource_suffix(route)
+    if route.method in ("GET", "DELETE"):
+        return None
+    if suffix.endswith("/reaffirm"):
+        return {"required": True, "content": {"application/json": _media(_schedule_object({}), {})}}
+    patch = route.method == "PATCH"
+    create = suffix == "/schedules"
+    schema = _schedule_definition_schema(create=create, patch=patch)
+    examples = {"pause": {"value": {"state": "paused"}},
+                "removeGate": {"value": {"after": None}},
+                "retarget": {"value": {"target": {"filters": {"role": "boat"}, "bind": "late"}}}} if patch else {
+        kind: {"value": dict(_schedule_definition_example(kind), **({"id": "s-boat"} if create else {}))}
+        for kind in ("assign", "onboard")}
+    return {"required": True, "content": {"application/json": {"schema": schema, "examples": examples}}}
+
+
+def _schedule_success(route):
+    suffix = _resource_suffix(route)
+    if route.method == "DELETE":
+        return "204", {"description": "Schedule deleted; empty body",
+                       "headers": {"ETag": _schedule_etag_header("Successfully matched predecessor ETag, including wildcard deletion")}}
+    row = _schedule_view_example()
+    if suffix.endswith("/receipts"):
+        schema = _schedule_object({
+            "schedule_id": _schedule_id_schema(),
+            "receipts": {"type": "array", "maxItems": schedules.MAX_RECEIPT_PAGE, "items": _ref("ScheduleReceipt")},
+            "total": _schedule_integer(), "offset": _schedule_integer(), "truncated": {"type": "boolean"},
+        })
+        receipt = {"occurrence_id": "1" * 32, "device_id": "edge-01", "rev": 1, "attempt": 1,
+                   "attempt_started_at": 1788883260, "predecessors": [], "status": "ok", "reason": "assigned",
+                   "created_at": 1788883260, "updated_at": 1788883260, "completed_at": 1788883260, "notes": [],
+                   "schedule_id": "s-boat", "scheduled_at": 1788883260, "window_end": 1788886860,
+                   "occurrence_state": "completed", "schedule_rev": 1,
+                   "before_image_ids": [], "after_image_ids": ["image-a"], "removed_image_ids": []}
+        return "200", {"description": "Schedule-wide receipt page, ordered by scheduled_at, occurrence_id, device_id. total counts all receipts; truncated is true when offset is nonzero or more rows remain. The response cap never prunes durable evidence.",
+                       "content": {"application/json": _media(schema, {
+                           "schedule_id": "s-boat", "receipts": [receipt], "total": 1, "offset": 0, "truncated": False})}}
+    if suffix.endswith("/occurrences"):
+        schema = _schedule_object({
+            "schedule_id": _schedule_id_schema(),
+            "occurrences": {"type": "array",
+                            "maxItems": schedules.MAX_OCCURRENCE_PAGE,
+                            "items": _ref("ScheduleOccurrence")},
+            "total": _schedule_integer(), "offset": _schedule_integer(),
+            "truncated": {"type": "boolean"},
+        })
+        return "200", {
+            "description": "Schedule-wide occurrence page, ordered by scheduled_at and occurrence id. It retains missed and empty-target outcomes even when they have no per-device receipts or the definition was deleted.",
+            "content": {"application/json": _media(schema, {
+                "schedule_id": "s-boat",
+                "occurrences": [_schedule_occurrence_example()],
+                "total": 1, "offset": 0, "truncated": False})}}
+    if suffix == "/schedules" and route.method == "GET":
+        return "200", {"description": "All schedules; each row includes its own ETag, with no collection ETag",
+                       "content": {"application/json": _media(_schedule_object({
+                           "schedules": {"type": "array", "items": _ref("ScheduleView")}, "total": _schedule_integer()}),
+                           {"schedules": [row], "total": 1})}}
+    properties = {"schedule": _ref("ScheduleView")}
+    example = {"schedule": row}
+    if not suffix.endswith("/reaffirm") and route.method in ("POST", "PUT", "PATCH"):
+        facts = _schedule_target_facts_schema()
+        properties["target_facts"] = {"oneOf": [facts, {"type": "null"}]} if route.method == "PATCH" else facts
+        example["target_facts"] = {"missing_os_family": 0, "role_drift": 0, "quarantined_ids": []}
+    response = {"description": "Current schedule view" if route.method == "GET" else "Saved schedule view with server-owned identity and preview",
+                "headers": {"ETag": _schedule_etag_header()},
+                "content": {"application/json": _media(_schedule_object(properties), example)}}
+    if route.method == "PATCH":
+        response["description"] += "; target_facts is null when the patch does not retarget"
+        media = response["content"]["application/json"]
+        media.pop("example")
+        media["examples"] = {
+            "retarget": {"value": example},
+            "definitionOnly": {"value": {"schedule": row, "target_facts": None}},
+        }
+    if suffix == "/schedules":
+        response["headers"]["Location"] = {
+            "description": "Versioned resource path of the created schedule",
+            "schema": {"type": "string", "format": "uri-reference"}, "example": route.path + "/s-boat"}
+        return "201", response
+    return "200", response
+
+
+def _schedule_errors(route):
+    if not _schedule_resource(route):
+        return None
+    suffix = _resource_suffix(route)
+    errors = {401: {"console-session-required", "management-authentication-required"},
+              404: {"route-not-found"},
+              422: {"invalid_schedule"},
+              503: {"service-unavailable", "credential-store-unavailable",
+                    "schedule_state_unavailable"}}
+    if suffix != "/schedules":
+        errors[404].add("schedule_not_found")
+    if route.method in MUTATIONS:
+        errors[400] = {"invalid-request"}
+        errors[403] = {"csrf-validation-failed"}
+        errors[413] = {"payload-too-large"}
+    if route.method in ("PUT", "PATCH") or (route.method == "POST" and suffix == "/schedules"):
+        errors[422].add("role_not_found")
+        errors[503].update({"policy_fail_closed", "policy_error",
+                            "schedule_target_unavailable", "schedule_target_status_unavailable",
+                            "schedule_target_heartbeat_unavailable", "schedule_target_policy_unavailable"})
+    if route.method == "POST" and suffix == "/schedules":
+        errors[409] = {"schedule_conflict"}
+    if _schedule_conditional(route):
+        errors[412] = {"precondition_failed"}
+        errors[428] = {"precondition_required"}
+    if route.service == "console":
+        errors.setdefault(400, set()).add("invalid-content-length")
+        if route.method == "GET":
+            errors[400].add("request-body-not-supported")
+        errors[411] = {"content-length-required"}
+        errors[413] = {"payload-too-large"}
+        errors[503].add("management-api-unavailable")
+    return {status: tuple(sorted(codes)) for status, codes in errors.items()}
+
+
+def _policy_mutation(route):
+    return (route.method, _resource_suffix(route)) in POLICY_MUTATIONS
+
+
+def _policy_business_errors(route):
+    """Business refusals by the exact handler branch, excluding tier guards."""
+    key = (route.method, _resource_suffix(route))
+    specific = {
+        ("GET", "/peer-policy"): {},
+        ("GET", "/peer-policy/roles"): {503: ("policy_unavailable",)},
+        ("GET", "/peer-policy/roles/export-csv"): {503: ("policy_unavailable",)},
+        ("POST", "/peer-policy/roles/import-csv"): {
+            409: ("role_reserved_name", "role_isolated", "role_in_use"),
+            413: ("payload-too-large",),
+            422: ("invalid_policy", "invalid_roles_csv")},
+        ("GET", "/peer-policy/explain"): {
+            422: ("principal_unresolvable",), 503: ("policy_unavailable",)},
+        ("GET", "/devices/{device_id}/effective-qos"): {
+            404: ("device_not_found",), 422: ("invalid_policy_request",),
+            503: ("policy_unavailable",)},
+        ("PUT", "/peer-policy/roles/{name}"): {
+            409: ("role_reserved_name", "role_isolated"),
+            413: ("payload-too-large",),
+            422: ("invalid_policy",)},
+        ("DELETE", "/peer-policy/roles/{name}"): {
+            404: ("role_not_found",), 409: ("role_reserved_name", "role_in_use"),
+            413: ("payload-too-large",), 422: ("invalid_policy",)},
+        ("PUT", "/peer-policy/qos"): {
+            404: ("role_not_found",), 409: ("role_reserved_name",),
+            413: ("payload-too-large",), 422: ("invalid_policy",)},
+        ("POST", "/devices/{device_id}/role"): {
+            404: ("device_not_found", "role_not_found"),
+            409: ("role_reserved_name", "role_shadowed_by_assignment"),
+            422: ("bad_role", "invalid_policy", "incomparable_role_change"),
+            503: ("fleet_write_failed",)},
+        ("POST", "/devices/bulk-role"): {
+            404: ("role_not_found",),
+            409: ("role_reserved_name", "role_shadowed_by_assignment"),
+            422: ("bad_role", "invalid_policy", "incomparable_role_change", "mixed_role_direction"),
+            503: ("fleet_write_failed",)},
+    }.get(key)
+    if specific is None or route.service not in ("console", "management"):
+        return None
+    result = dict(specific)
+    if _policy_mutation(route):
+        for status, codes in {
+                409: ("revision_conflict", "operation_backlog_full"),
+                412: ("precondition_failed",), 422: ("invalid_policy_request",),
+                428: ("precondition_required", "confirmation_required"),
+                503: ("policy_unavailable",)}.items():
+            result[status] = result.get(status, ()) + codes
+    return result
+
+
+def _policy_errors(route):
+    business = _policy_business_errors(route)
+    if business is None:
+        return None
+    errors = {status: set(codes) for status, codes in business.items()}
+    common = {401: {"console-session-required"},
+              404: {"route-not-found"}, 503: {"service-unavailable"}}
+    # The proxy can forward a rejected mounted tier credential as well.
+    common[401].add("management-authentication-required")
+    if route.method in MUTATIONS:
+        common[403] = {"csrf-validation-failed"}
+    if route.method == "POST":
+        common[400] = {"invalid-request"}  # body length / unsupported idempotency
+        common[413] = {"payload-too-large"}
+    if route.service == "console":
+        common.setdefault(400, set()).add("invalid-content-length")
+        if route.method == "GET":
+            common[400].add("request-body-not-supported")
+        common[411] = {"content-length-required"}
+        common[413] = {"payload-too-large"}
+        common[503].add("management-api-unavailable")
+    for status, codes in common.items():
+        errors.setdefault(status, set()).update(codes)
+    return {status: tuple(sorted(codes)) for status, codes in errors.items()}
+
+
+def _qos_schema(scope):
+    """Use the policy validator's closed grammar; every layer key is optional."""
+    properties = {}
+    for key, scopes in peer_policy._QOS_SCOPES.items():
+        if scope not in scopes:
+            continue
+        if key == "telemetry_pause":
+            value = {"type": "boolean"}
+        elif key == "on_stale":
+            value = {"type": "string", "enum": ["keep", "defaults"]}
+        else:
+            minimum, maximum = peer_policy._QOS_RANGES[key]
+            value = {"type": "integer", "minimum": minimum, "maximum": maximum}
+            if key in peer_policy._RATE_KEYS:
+                value["anyOf"] = [{"const": 0}, {"minimum": peer_policy._MIN_RATE_BPS}]
+            if key == "catalog_tick_s":
+                value["multipleOf"] = 60
+        properties[key] = value
+    return {"type": "object", "properties": properties,
+            "additionalProperties": False,
+            "description": "Replace this layer with any supported subset; an empty object clears it. Cross-field and restricted-role semantics are validated by the policy transaction."}
+
+
+def _tracker_qos_state_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                "announce_min_interval_s": {
+                    "type": "integer", "minimum": 10, "maximum": 300},
+                "numwant": {
+                    "type": "integer", "minimum": 4, "maximum": 200}}}
+
+
+def _tracker_qos_state_map_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                state: _ref("TrackerQosState")
+                for state in ("seeder", "leecher")},
+            "description": (
+                "Closed seeder and leecher tracker-cadence overrides.")}
+
+
+def _role_name_schema():
+    return {"type": "string", "pattern": peer_policy._ROLE_NAME_RE.pattern,
+            "not": {"enum": sorted(peer_policy.RESERVED_ROLE_NAMES)}}
+
+
+def _role_definition_schema():
+    return {"type": "object", "additionalProperties": False, "properties": {
+        "restricted": {"type": "boolean"}, "origin": {"type": "boolean"},
+        "peers": {"type": "array", "items": _role_name_schema(),
+                  "minItems": 1, "maxItems": peer_policy.MAX_ROLE_PEERS,
+                  "uniqueItems": True, "x-iris-selfPeerRequired": True,
+                  "description": "Must contain the role's {name} path value; missing self returns 409 role_isolated."},
+        "nets": {"type": "array", "items": {"type": "string",
+            "pattern": peer_policy.ROLE_NET_PATTERN,
+            "description": "IPv4 address, CIDR or dotted netmask/hostmask. A decimal prefix allows at most %d digits, including leading zeroes; valid spelling is preserved." % peer_policy.ROLE_NET_MAX_PREFIX_DIGITS}},
+        "on_stale": {"type": "string", "enum": ["keep", "defaults"]},
+        "qos": _qos_schema("role"),
+        "qos_state": _ref("TrackerQosStateMap")}}
+
+
+def _swarm_peer_schema():
+    """Explicit source-grouped tracker identity variants from telemetry._peer_row."""
+    variants = []
+    for kind in ("device", "service", "legacy"):
+        tracker = {"type": "object", "additionalProperties": False,
+            "required": ["principal_type", "role", "left", "last_seen", "progress"],
+            "properties": {
+                "principal_type": {"const": kind},
+                "role": {"enum": ["seeder", "leecher"]},
+                "left": {"type": ["integer", "null"]},
+                "last_seen": {"type": ["number", "null"]},
+                "progress": {"type": ["number", "null"], "minimum": 0, "maximum": 1}}}
+        properties = {"ip": {"type": "string"}, "port": {"type": "integer"},
+                      "tracker": tracker}
+        required = ["ip", "port", "tracker"]
+        if kind == "legacy":
+            tracker["properties"]["participant_class"] = {"type": "string"}
+            properties.update(device_id={"type": "null"},
+                warning={"const": "legacy_unattributed"}, quarantine_available={"const": False})
+        else:
+            tracker["properties"]["principal_id"] = {"type": "string"}
+            tracker["required"].append("principal_id")
+            for name in ("device_observation", "server_observation", "latest_report",
+                         "peer_policy", "peer_enforcement"):
+                properties[name] = {"type": "object"}
+            if kind == "device":
+                required.append("device_id")
+                properties["device_id"] = {"type": "string"}
+                for name in ("model", "current_image_id", "stage_state"):
+                    properties[name] = {"type": "string"}
+                for name in ("staged_image_ids", "errored_image_ids"):
+                    properties[name] = {"type": "array", "items": {"type": "string"}}
+        variants.append({"type": "object", "additionalProperties": False,
+                         "required": required, "properties": properties})
+    return {"oneOf": variants}
+
+
+def _blast_example():
+    return {"member_delta": 1, "origin_access_lost": 0,
+            "empty_permitted_sets": 0, "role_pairs_stopped": 0,
+            "qos_changed": False, "requires_confirmation": True,
+            "confirm_token": "candidate-bound-sha256"}
+
+
+def _policy_write_example():
+    return {"ok": True, "revision": 5, "candidate_revision": 5,
+            "dry_run": True, **_blast_example()}
+
+
+def _qos_example():
+    # Representative final/derived values include each key in the shared grammar.
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {"qos_default": {"per_peer_bps": 20000}}
+    qos = peer_policy.explain_qos(doc, "edge-01")
+    qos["numwant"].update(effective_ceiling=50, runtime_request_zero="disabled",
+                         constraint_source="pinned-aria2-client")
+    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
+                                         constraint_source="pinned-aria2-client")
+    qos["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
+    return qos
+
+
+def _tracker_qos_source_schema():
+    return {"type": "string", "pattern": (
+        r"^(?:builtin|global|global-state:(?:seeder|leecher)|"
+        r"role:[a-z0-9][a-z0-9._-]{0,31}|"
+        r"role-state:[a-z0-9][a-z0-9._-]{0,31}:"
+        r"(?:seeder|leecher))$")}
+
+
+def _tracker_interval_explanation_schema(leecher):
+    properties = {
+        "value": {"type": "integer", "minimum": 10, "maximum": 300},
+        "source": _tracker_qos_source_schema(),
+    }
+    required = ["value", "source"]
+    if leecher:
+        properties.update({
+            "peerless_leecher_floor_s": {
+                "type": "integer", "const": 120},
+            "constraint_source": {
+                "type": "string", "const": "pinned-aria2-client"},
+        })
+        required.extend(["peerless_leecher_floor_s", "constraint_source"])
+    return {"type": "object", "additionalProperties": False,
+            "properties": properties, "required": required}
+
+
+def _tracker_numwant_explanation_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                "value": {"type": "integer", "minimum": 4,
+                          "maximum": 200},
+                "source": _tracker_qos_source_schema(),
+                "effective_ceiling": {"type": "integer", "minimum": 4,
+                                      "maximum": 50},
+                "runtime_request_zero": {
+                    "type": "string", "const": "disabled"},
+                "constraint_source": {
+                    "type": "string", "const": "pinned-aria2-client"},
+            },
+            "required": ["value", "source", "effective_ceiling",
+                         "runtime_request_zero", "constraint_source"]}
+
+
+def _tracker_qos_explanation_schema(leecher=None):
+    interval = (
+        {"oneOf": [_tracker_interval_explanation_schema(False),
+                   _tracker_interval_explanation_schema(True)]}
+        if leecher is None else
+        _tracker_interval_explanation_schema(leecher))
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                "announce_min_interval_s": interval,
+                "numwant": _tracker_numwant_explanation_schema(),
+            },
+            "required": ["announce_min_interval_s", "numwant"]}
+
+
+def _tracker_qos_example(state):
+    interval = {
+        "value": 120, "source": "role-state:boat:" + state}
+    if state == "leecher":
+        interval.update(peerless_leecher_floor_s=120,
+                        constraint_source="pinned-aria2-client")
+    return {
+        "announce_min_interval_s": interval,
+        "numwant": {
+            "value": 4, "source": "global-state:" + state,
+            "effective_ceiling": 4,
+            "runtime_request_zero": "disabled",
+            "constraint_source": "pinned-aria2-client",
+        },
+    }
+
+
+def _explain_side(device_id):
+    return {"principal": {"type": "device", "id": device_id}, "role": "boat",
+            "acl_source": "role:boat", "acl_name": "role:boat",
+            "decision": "permit", "matched_seq": 10,
+            "role_unknown": False, "role_shadowed_by": None}
 
 
 def _ref(name):
@@ -55,8 +1171,11 @@ def _schema_for_example(example, title, required=None, field="",
             return {"type": ["boolean", "null"]}
         if field in ("record",):
             return {"type": ["object", "null"]}
+        if field == "last_reconciled_at":
+            return {"type": ["number", "null"]}
         if field in ("limit", "certs", "at", "matched", "mismatched",
-                     "not_in_feed", "finished_at", "rc"):
+                     "not_in_feed", "finished_at", "rc", "issued_revision",
+                     "matched_seq", "applied_revision"):
             return {"type": ["integer", "null"]}
         return {"type": ["string", "null"]}
     if isinstance(example, str):
@@ -103,6 +1222,8 @@ def _problem_variants(route, status):
     a missing browser session from an unavailable tier/device credential. The
     mature handler still supplies the status-level code for business errors.
     """
+    if _instruction_resource(route):
+        return _instruction_problem_variants(route, status)
     suffix = _resource_suffix(route)
     if route.service == "artifact":
         if status == 403 and route.security == "legacyGuestShell":
@@ -150,6 +1271,14 @@ def _problem_variants(route, status):
         if status == 503 and suffix == "/status":
             return (("telemetry-status-unavailable",
                      "Telemetry status unavailable"),)
+    schedule_errors = _schedule_errors(route)
+    if schedule_errors is not None:
+        return tuple((code, code.replace("_", " ").replace("-", " ").capitalize())
+                     for code in schedule_errors[status])
+    policy_errors = _policy_errors(route)
+    if policy_errors is not None:
+        return tuple((code, code.replace("_", " ").replace("-", " ").capitalize())
+                     for code in policy_errors[status])
     if route.service in ("console", "management"):
         if status == 503 and route.path == \
                 "/internal/v1/console-certificate":
@@ -198,6 +1327,22 @@ def _problem_response(route, status):
         for code, title in variants
     ]
     media = {"schema": _ref("Problem")}
+    if _schedule_resource(route):
+        schemas = []
+        for doc in documents:
+            properties = {name: {"const": value} for name, value in doc.items()}
+            properties["title"] = {"type": "string"}
+            required = list(properties)
+            # Shared legacy framing/error adapters can retain their error
+            # member; schedule business failures use the closed stable code.
+            if doc["code"] in ("invalid-request", "service-unavailable"):
+                properties["error"] = {"type": "string", "deprecated": True}
+            if doc["code"] == "role_not_found":
+                properties["role"] = _role_name_schema()
+                required.append("role")
+                doc["role"] = "boat"
+            schemas.append(_schedule_object(properties, required))
+        media["schema"] = schemas[0] if len(schemas) == 1 else {"oneOf": schemas}
     if len(documents) == 1:
         media["example"] = documents[0]
     else:
@@ -208,6 +1353,27 @@ def _problem_response(route, status):
         "x-iris-problem-codes": [code for code, _title in variants],
         "content": {"application/problem+json": media},
     }
+    if _instruction_resource(route):
+        schemas = [{
+            "type": "object", "required": ["type", "title", "status", "code"],
+            "additionalProperties": False,
+            "properties": {name: {"const": value} for name, value in doc.items()},
+        } for doc in documents]
+        media["schema"] = schemas[0] if len(schemas) == 1 else {"oneOf": schemas}
+        response["headers"] = _instruction_headers(success=False)
+        if status == 401:
+            response["headers"]["WWW-Authenticate"] = {
+                "schema": {"type": "string", "const": "Bearer"}, "example": "Bearer"}
+        if status in (409, 429, 503):
+            response["headers"]["Retry-After"] = {
+                "schema": {"type": "integer", "minimum": 1},
+                "example": 1 if status == 429 else 10,
+                "description": "Computed seconds until one limiter token is available"
+                               if status == 429 else "Retry after ten seconds",
+            }
+            if status != 429:
+                response["headers"]["Retry-After"]["schema"]["const"] = 10
+        return response
     if status in (429, 503):
         response["headers"] = {
             "Retry-After": {"description": "Seconds before a retry when known",
@@ -221,6 +1387,13 @@ def _problem_response(route, status):
             "schema": {"type": "string"},
             "example": challenge,
         }
+    if _schedule_conditional(route) and status in (412, 428):
+        response.setdefault("headers", {})["ETag"] = _schedule_etag_header(
+            "Current ETag. Present for missing/stale/malformed conditions and revision races; "
+            "absent on 412 if the row disappeared between the preliminary read and locked mutation.")
+    business_errors = _policy_business_errors(route)
+    if business_errors is not None and status in business_errors:
+        response.setdefault("headers", {})["ETag"] = {"schema": {"type": "string"}}
     return response
 
 
@@ -239,6 +1412,8 @@ def _path_parameters(path):
                 "oneOf": [
                     {"pattern": r"^iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf$"},
                     {"pattern": r"^rpc-secret-[0-9A-Fa-f]{32}$"},
+                    {"pattern": r"^iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope$"},
+                    {"pattern": r"^bundle-sha256-[0-9a-f]{32}$"},
                 ],
             } if name == "legacy_artifact" else
                 {"type": "string", "minLength": 1}),
@@ -254,6 +1429,41 @@ def _query_parameters(route):
     path = route.path
     suffix = _resource_suffix(route)
     params = []
+    if _schedule_resource(route) and suffix.endswith(("/occurrences",
+                                                      "/receipts")):
+        occurrence_page = suffix.endswith("/occurrences")
+        maximum = (schedules.MAX_OCCURRENCE_PAGE if occurrence_page else
+                   schedules.MAX_RECEIPT_PAGE)
+        params.extend([
+            {"name": "limit", "in": "query", "required": False,
+             "description": "Maximum %s across this schedule" %
+                            ("occurrences" if occurrence_page else "receipts"),
+             "schema": dict(_schedule_integer(1, maximum), default=maximum),
+             "example": 100},
+            {"name": "offset", "in": "query", "required": False,
+             "description": ("Zero-based offset in scheduled_at and occurrence-id order"
+                             if occurrence_page else
+                             "Zero-based offset in scheduled_at, occurrence_id, device_id order"),
+             "schema": dict(_schedule_integer(), default=0), "example": 0},
+        ])
+    if _policy_mutation(route):
+        params.append({"name": "dry_run", "in": "query", "required": False,
+            "description": "1 previews the locked candidate without persistence; 0 commits after required confirmation.",
+            "schema": {"type": "integer", "enum": [0, 1]}, "example": 1})
+    if suffix == "/peer-policy/explain":
+        params.extend({"name": key, "in": "query", "required": True,
+            "description": "Bare device ID, device:<id>, or service:seeder. Requires one fresh, unambiguous durable IPv4 attribution; no inventory-IP fallback.",
+            "schema": {"type": "string"}, "example": value}
+            for key, value in (("a", "edge-01"), ("b", "service:seeder")))
+    if suffix == "/devices/{device_id}/effective-qos":
+        params.append({
+            "name": "tracker_state", "in": "query", "required": False,
+            "description": (
+                "Selects the seeder or leecher tracker cadence explanation. "
+                "Omission preserves the v1 scalar-only response bytes."),
+            "schema": {"type": "string", "enum": ["seeder", "leecher"]},
+            "example": "seeder"})
+
     if route.service in ("console", "management") and suffix == "/devices":
         params.extend([
             {"name": "limit", "in": "query", "required": False,
@@ -279,6 +1489,12 @@ def _query_parameters(route):
                 "on", "off", "unknown"]}, "on"),
             "peer": ({"type": "string", "enum": [
                 "quarantined", "not-quarantined"]}, "not-quarantined"),
+            "role": ({"type": "string"}, "boat"),
+            "model_family": ({"type": "string", "enum": [
+                "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
+                "XR8000", "unknown"]}, "C9xxx"),
+            "os_family": ({"type": "string", "enum": ["xe", "xr"]},
+                          "xe"),
             "status": ({"type": "string", "enum": [
                 "onboarding", "undeploying", "waiting-heartbeat", "waiting-staging",
                 "onboard-failed", "undeploy-failed", "deployed",
@@ -414,6 +1630,13 @@ def _query_parameters(route):
             "schema": {"type": "string", "const": "bearer"},
             "example": "bearer",
         })
+    if _instruction_resource(route):
+        params.append({
+            "name": "If-None-Match", "in": "header", "required": False,
+            "schema": {"type": "string"},
+            "description": "RFC 9110 weak comparison for GET: accepts a weak or strong tag, a comma-separated list, or wildcard *. Multiple field lines form one list. Invalid syntax and nonmatches return the ordinary response. Authentication, limiter admission and current state/key validation precede matching.",
+            "example": 'W/"sha256-' + "0" * 64 + '"',
+        })
     return params
 
 
@@ -463,6 +1686,20 @@ def _resource_suffix(route):
 # handler actually requires.  ``required_body`` is false only for operations
 # whose established v1 wire form permits an empty body.
 _JSON_REQUESTS = {
+    "/peer-policy/roles/import-csv": ({
+        "csv": "role,restricted,peers,seed_up_bps\nboat,true,boat;fiber,12500000\nfiber,true,fiber;boat,\n",
+        "confirm_token": "candidate-bound-sha256"}, ("csv",), True),
+    "/peer-policy/roles/{name}": ({"restricted": True, "peers": ["boat"],
+        "origin": True, "nets": [], "on_stale": "keep", "qos": {},
+        "confirm_token": "candidate-bound-sha256"}, (), True),
+    "/peer-policy/qos": ({"qos": {"numwant": 25},
+        "qos_state": {"seeder": {"announce_min_interval_s": 120,
+                                    "numwant": 4}},
+        "role": "boat", "confirm_token": "candidate-bound-sha256"}, (), True),
+    "/devices/{device_id}/role": ({"role": "boat",
+        "confirm_token": "candidate-bound-sha256"}, ("role",), True),
+    "/devices/bulk-role": ({"device_ids": ["edge-01", "edge-02"], "role": "boat",
+        "confirm_token": "candidate-bound-sha256"}, ("device_ids", "role"), True),
     "/peer-policy/quarantine/{device_id}": (
         {"quarantined": True, "if_revision": 4},
         ("quarantined", "if_revision"), True),
@@ -497,8 +1734,8 @@ _JSON_REQUESTS = {
     "/devices/{device_id}/adopt": ({"acknowledge_adopt": True},
                                    ("acknowledge_adopt",), True),
     "/devices/{device_id}/onboard": (
-        {"telemetry": True, "telemetry_stream": False}, (), False),
-    "/devices/{device_id}/undeploy": ({"force": False}, (), False),
+        {"telemetry": True, "telemetry_stream": False, "log": False}, (), False),
+    "/devices/{device_id}/undeploy": ({"force": False, "log": False}, (), False),
     "/credentials": (
         {"id": "default", "name": "Default devices",
          "device_user": "operator", "device_pass": "device-password",
@@ -544,6 +1781,12 @@ _JSON_REQUESTS = {
 
 
 def _request_body(route):
+    if _schedule_resource(route):
+        return _schedule_request_body(route)
+    if route.method == "DELETE" and _policy_mutation(route):
+        return {"required": False, "content": {"application/json": _media(
+            {"type": "object", "properties": {"confirm_token": {"type": ["string", "null"]}},
+             "additionalProperties": False}, {"confirm_token": "candidate-bound-sha256"})}}
     if route.method not in ("POST", "PUT", "PATCH"):
         return None
     path = route.path
@@ -567,6 +1810,43 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix in ("/devices/{device_id}/onboard", "/devices/{device_id}/undeploy"):
+        schema["properties"]["log"].update({
+            "default": False,
+            "description": (
+                "Enable detailed IOx command output in the job log. "
+                "Onboarding also enables download logs on IOx and IOS-XR. "
+                "Guest Shell logging is configured separately."),
+        })
+    if suffix == "/devices":
+        # Fleet JSON input is a closed operator-owned schema. Historical
+        # vlan/guest_ip aliases remain CSV compatibility fields only, while
+        # schema_version, registered_at, registration_id and os_family are
+        # server-owned.
+        writable = (
+            "device_id", "device_ip", "management_type", "iris_vlan",
+            "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
+            "inband_vlan", "ios_ssh_host", "model", "vpg_number",
+            "nat_interface", "svi_igp", "role", "platform",
+            "credential_profile_id",
+        )
+        for field in writable:
+            schema["properties"].setdefault(
+                field, {"type": ["string", "integer"]})
+        schema["properties"]["role"] = {"type": ["string", "null"]}
+        schema["properties"]["management_type"].update({"enum": [
+            "routed", "inband", "router-routed", "router-nat", "xr-host"]})
+        schema["properties"]["platform"].update({"enum": [
+            "", "guestshell", "iox", "router", "xr-appmgr"]})
+        schema["additionalProperties"] = False
+        schema["description"] = (
+            "Closed operator-owned fleet record. Unknown fields and the "
+            "server-owned schema_version, registered_at, registration_id and "
+            "os_family fields "
+            "are rejected with 422.")
+    if route.service == "catalog" and path.endswith("/heartbeat"):
+        return {"required": required_body, "content": {
+            "application/json": _instruction_attestation_request(schema, example)}}
     if suffix == "/settings/image-verification":
         schema["properties"]["mode"].update(
             {"enum": ["off", "daily", "weekly"]})
@@ -596,6 +1876,27 @@ def _request_body(route):
     # silently accepted as alternate credentials.
     if suffix in ("/login", "/setup") or path.endswith("/authorizations"):
         schema["additionalProperties"] = False
+    if _policy_mutation(route):
+        schema["additionalProperties"] = False
+        schema["properties"]["confirm_token"]["type"] = ["string", "null"]
+        if suffix == "/peer-policy/roles/{name}":
+            schema["properties"].update(_role_definition_schema()["properties"])
+        if suffix == "/peer-policy/qos":
+            schema["properties"]["qos"] = _qos_schema("global")
+            schema["properties"]["qos_state"] = _ref("TrackerQosStateMap")
+            schema["anyOf"] = [
+                {"required": ["qos"]}, {"required": ["qos_state"]}]
+            schema["description"] = (
+                "Global qos_state is stored at roles.qos_state_default. "
+                "Role qos_state is stored at roles.defs.<role>.qos_state. "
+                "Omission preserves either stored layer; an explicit empty "
+                "object clears the supplied layer.")
+            schema["allOf"] = [{"if": {"required": ["role"], "properties": {
+                "role": {"type": "string"}}}, "then": {"properties": {"qos": _qos_schema("role")}}}]
+        if "role" in schema["properties"]:
+            schema["properties"]["role"]["type"] = ["string", "null"]
+        if "device_ids" in schema["properties"]:
+            schema["properties"]["device_ids"].update(minItems=1, maxItems=10000)
     return {"required": required_body,
             "content": {"application/json": _media(schema, example)}}
 
@@ -605,14 +1906,47 @@ def _json_success_example(route):
     suffix = _resource_suffix(route)
 
     exact = {
+        "/peer-policy/roles": {"revision": 4, "degraded": False, "fail_closed": False,
+            "roles": {"boat": {"restricted": True, "peers": ["boat"], "origin": True}}},
+        "/peer-policy/roles/{name}": _policy_write_example(),
+        "/peer-policy/roles/import-csv": {**_policy_write_example(), "roles": 2},
+        "/peer-policy/qos": _policy_write_example(),
+        "/devices/{device_id}/role": {**_policy_write_example(), "partial": False,
+            "applied": 1, "failed": {}, "direction": "tighten",
+            "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
+        "/devices/bulk-role": {**_policy_write_example(), "partial": False,
+            "applied": 2, "failed": {}, "direction": "tighten",
+            "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
+        "/devices/{device_id}/effective-qos": {"revision": 4, "degraded": False,
+            "fail_closed": False, "device_id": "edge-01",
+            "delivery_state": "pre-instructions", "qos": _qos_example(),
+            "instruction": _instruction_device_example()},
+        "/peer-policy/explain": {"revision": 4, "degraded": False,
+            "fail_closed": False, "a": _explain_side("edge-01"),
+            "b": _explain_side("edge-02"), "mutual": True},
         "/peer-policy": {
             "schema": 1, "revision": 4, "degraded": False,
             "fail_closed": False,
             "quarantine": {"reserved": True,
                            "description": "reserved policy value"},
             "quarantine_assignments": ["edge-02"],
+            "roles_supported": True, "roles_present": True,
+            "roles": {"defined": 1, "restricted": 1, "members": {"boat": 2}},
+            "role_drift": {"count": 0, "device_ids": [], "truncated": False},
+            "outbox": {"unacknowledged": 1, "capacity": 256},
+            "origin_qos": {"state": None, "global_option_count": 0,
+                "target_download_count": 0, "applied_download_count": 0,
+                "last_reconciled_at": None, "last_error": None},
+            "fleet_rollup": {"issued_revision": 12, "applied": {"7": 1},
+                "states": {"applied": 1}},
+            "instruction_status": {
+                "observed_at": 1788470400, "instr_stamp_missing": 0,
+                "pointer_skew": 0, "issued_revision_label": "r12"},
+            "instruction_keys": _instruction_custody_example(),
             "enforcement": {"state": None, "stale": False,
-                            "desired_ip_count": 1, "conflict_count": 0}},
+                            "desired_ip_count": 1, "conflict_count": 0,
+                            "mutual_origin": {"mode": "preflight",
+                                "newly_denied_device_count": None}}},
         "/peer-policy/quarantine/{device_id}": {
             "ok": True, "revision": 5, "quarantined": True},
         "/audit": {"events": [{"ts": 1788470400, "event": "login",
@@ -680,7 +2014,9 @@ def _json_success_example(route):
                 "_event_id": "0123456789abcdef0123456789abcdef"}]},
         "/devices/{device_id}/deployment": {
             "record": None, "total": 0},
-        "/devices/{device_id}/assign": {"ok": True},
+        "/devices/{device_id}/assign": {
+            "ok": True, "assigned_image_ids": ["image-01"],
+            "removed_image_ids": []},
         "/devices/{device_id}/credential": {"ok": True},
         "/devices/{device_id}/platform": {"ok": True},
         "/devices/{device_id}/forget-host-key": {
@@ -725,9 +2061,10 @@ def _json_success_example(route):
             "images": [{
                 "image": "image.bin", "info_hash": "00" * 20,
                 "total_bytes": 1048576, "seeders": 1, "leechers": 0,
-                "peers": [{"principal_type": "device",
-                            "principal_id": "edge-01",
-                            "ip": "192.0.2.10", "port": 6881}]}]},
+                "peers": [{"device_id": "edge-01", "ip": "192.0.2.10", "port": 6881,
+                           "tracker": {"principal_type": "device", "principal_id": "edge-01",
+                                       "role": "seeder", "left": 0, "last_seen": 1788470400.0,
+                                       "progress": 1.0}}]}]},
         "/telemetry/health": {
             "ok": True,
             "otlp_export": {"state": "healthy", "signals": {}}},
@@ -829,9 +2166,16 @@ def _json_success_example(route):
         return None
     if suffix == "/devices" and route.method == "GET":
         return {"devices": [{"device_id": "edge-01",
-                              "device_ip": "192.0.2.10"}],
+                              "device_ip": "192.0.2.10",
+                              "model_family": "C9xxx",
+                              "os_family": "xe",
+                              "platform_resolved": "guestshell",
+                              "instruction": _instruction_device_example()}],
                 "total": 1, "offset": 0, "limit": None,
-                "revision": 7, "now": 1788470400}
+                "revision": 7, "now": 1788470400,
+                "target_facts": {"missing_os_family": 0,
+                                 "role_drift": 0},
+                "target_warnings": []}
     if suffix == "/devices" and route.method == "POST":
         return {"device": {"device_id": "edge-01",
                             "device_ip": "192.0.2.10",
@@ -861,8 +2205,17 @@ def _json_success_example(route):
 
 
 def _success(route):
+    if _schedule_resource(route):
+        return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if _instruction_resource(route):
+        artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/1"
+        return "200", {
+            "description": "Exact " + artifact + " framed bytes",
+            "headers": _instruction_headers(),
+            "content": {"application/octet-stream": _media({}, "<" + artifact + " bytes>")},
+        }
     if path.endswith("/authorizations"):
         return "204", {"description": "Headers authorized; no response body"}
     if path.endswith("/console-certificate"):
@@ -947,9 +2300,12 @@ def _success(route):
                        "content": {"text/plain": _media(
                            {"type": "string"}, "onboard started\n")}}
     if path.endswith("export-csv") or path.endswith("example-csv"):
+        sample = ("role,restricted,peers,origin,nets,on_stale\nboat,true,boat;fiber,true,,keep\n"
+                  if suffix == "/peer-policy/roles/export-csv"
+                  else "device_id,device_ip\n")
         return "200", {"description": "CSV document",
                        "content": {"text/csv": _media(
-                           {"type": "string"}, "device_id,device_ip\n")}}
+                           {"type": "string"}, sample)}}
     if path.endswith("/healthz") or path.endswith("/readyz"):
         return "200", {"description": "Non-disclosing probe result",
                        "content": {"application/json": _media(
@@ -1114,6 +2470,7 @@ def _success(route):
                 "type": ["string", "null"]}
         normal_schema["properties"]["images"]["items"]["properties"][
             "total_bytes"] = {"type": ["integer", "null"]}
+        normal_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
         empty_schema = {"type": "object", "maxProperties": 0}
         if route.service == "telemetry":
             variants = [normal_schema, empty_schema]
@@ -1134,6 +2491,7 @@ def _success(route):
                     "type": ["string", "null"]}
             paged_schema["properties"]["images"]["items"]["properties"][
                 "total_bytes"] = {"type": ["integer", "null"]}
+            paged_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
             paged_schema["properties"]["peers_limit"] = {
                 "type": ["integer", "null"]}
             unavailable_schema = _schema_for_example(
@@ -1253,13 +2611,119 @@ def _success(route):
         event = schema["properties"]["events"]["items"]
         event["required"] = [name for name in event["required"]
                              if name != "category"]
+    if suffix == "/peer-policy/explain":
+        for side in ("a", "b"):
+            properties = schema["properties"][side]["properties"]
+            for key in ("role", "acl_name", "role_shadowed_by"):
+                properties[key]["type"] = ["string", "null"]
+            properties["matched_seq"]["type"] = ["integer", "null"]
+            properties["principal"]["properties"]["type"]["enum"] = ["device", "service"]
+    if suffix == "/peer-policy/roles":
+        schema["properties"]["roles"] = {"type": "object",
+            "propertyNames": _role_name_schema(), "additionalProperties": _role_definition_schema()}
+        schema["properties"]["qos_state_default"] = \
+            _ref("TrackerQosStateMap")
+    if suffix == "/peer-policy":
+        schema["properties"]["roles_supported"]["const"] = True
+        mutual = schema["properties"]["enforcement"]["properties"]["mutual_origin"]
+        mutual["additionalProperties"] = False
+        mutual["properties"]["mode"]["const"] = "preflight"
+        mutual["properties"]["newly_denied_device_count"] = {
+            "type": ["integer", "null"], "minimum": 0,
+            "description": (
+                "Prospective count only; additional mutual-origin enforcement "
+                "is inactive. Null means unavailable, including when the "
+                "protected seeder IPv4 address is unknown. Zero is a completed "
+                "preflight with no newly denied devices."),
+        }
+        schema["properties"]["roles"]["properties"]["members"] = {
+            "type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+        schema["properties"]["fleet_rollup"] = \
+            _instruction_fleet_rollup_schema()
+        schema["properties"]["instruction_status"] = \
+            _instruction_status_schema()
+        schema["properties"]["instruction_keys"] = \
+            _instruction_custody_schema()
+    if suffix == "/devices" and route.method == "GET":
+        row = schema["properties"]["devices"]["items"]
+        row["properties"]["instruction"] = _instruction_device_schema()
+        if "instruction" not in row["required"]:
+            row["required"].append("instruction")
+    if suffix == "/devices/{device_id}/effective-qos":
+        for row in schema["properties"]["qos"]["properties"].values():
+            row["required"] = [key for key in row["required"] if key != "derived_from"]
+        schema["properties"].update({
+            "delivery_state": {
+                "type": "string", "const": "pre-instructions",
+                "deprecated": True,
+                "description": (
+                    "Legacy Phase 0 compatibility sentinel. Always "
+                    "pre-instructions; use instruction for current delivery "
+                    "and application status."),
+            },
+            "instruction": _instruction_device_schema(),
+            "tracker_state": {
+                "type": "string", "enum": ["seeder", "leecher"]},
+            "tracker_qos": _tracker_qos_explanation_schema(),
+        })
+        if "instruction" not in schema["required"]:
+            schema["required"].append("instruction")
+        schema["dependentRequired"] = {
+            "tracker_state": ["tracker_qos"],
+            "tracker_qos": ["tracker_state"],
+        }
+        schema.setdefault("allOf", []).extend([
+            {
+                "if": {"required": ["tracker_state"], "properties": {
+                    "tracker_state": {"const": "seeder"}}},
+                "then": {"properties": {
+                    "tracker_qos": _tracker_qos_explanation_schema(False)}},
+            },
+            {
+                "if": {"required": ["tracker_state"], "properties": {
+                    "tracker_state": {"const": "leecher"}}},
+                "then": {"properties": {
+                    "tracker_qos": _tracker_qos_explanation_schema(True)}},
+            },
+        ])
+    if suffix in ("/devices/{device_id}/role", "/devices/bulk-role"):
+        optional = {"candidate_revision", *_blast_example()}
+        schema["required"] = [key for key in schema["required"] if key not in optional]
+    if _policy_mutation(route) and route.method != "POST":
+        example["member_delta"] = 0
+        if suffix == "/peer-policy/qos":
+            example["qos_changed"] = True
+        else:
+            example["role_pairs_stopped"] = 1
+    if _policy_mutation(route):
+        schema["properties"]["confirm_token"]["type"] = ["string", "null"]
     response = {"description": route.summary + " response",
                 "content": {"application/json": _media(
                     schema, example)}}
+    if suffix == "/devices/{device_id}/effective-qos":
+        state_example = dict(
+            example, tracker_state="seeder",
+            tracker_qos=_tracker_qos_example("seeder"))
+        response["content"]["application/json"]["example"] = state_example
+    if _policy_mutation(route):
+        no_confirmation = dict(example, confirm_token=None, requires_confirmation=False,
+            member_delta=0, origin_access_lost=0, empty_permitted_sets=0,
+            role_pairs_stopped=0, qos_changed=False)
+        media = response["content"]["application/json"]
+        media.pop("example")
+        media["examples"] = {
+            "confirmationRequired": {"value": example},
+            "noConfirmation": {"value": no_confirmation}}
+        if suffix in ("/devices/{device_id}/role", "/devices/bulk-role"):
+            noop = {key: value for key, value in no_confirmation.items()
+                    if key not in {"candidate_revision", *_blast_example()}}
+            noop.update(dry_run=False, direction="neutral")
+            media["examples"]["unchangedMembership"] = {"value": noop}
     if suffix == "/devices" and route.method == "GET":
         response["headers"] = {"ETag": {
             "schema": {"type": "string"}, "example": '"iris-fleet-7"'}}
-    if suffix == "/peer-policy":
+    if suffix in ("/peer-policy", "/peer-policy/roles", "/peer-policy/explain",
+                  "/devices/{device_id}/effective-qos") or _policy_mutation(route):
         response["headers"] = {"ETag": {
             "schema": {"type": "string"},
             "example": '"iris-peer-policy-4"'}}
@@ -1267,6 +2731,31 @@ def _success(route):
         response["headers"] = {"ETag": {
             "schema": {"type": "string"},
             "example": '"iris-peer-policy-5"'}}
+    if route.service == "catalog" and suffix in (
+            "/v1/devices/{device_id}/policy", "/v1/devices/{device_id}/heartbeat"):
+        media = response["content"]["application/json"]
+        properties = media["schema"]["properties"]
+        properties["instr_rev"] = {
+            "type": "object", "required": ["epoch", "instr_serial"],
+            "additionalProperties": False,
+            "properties": {name: _instruction_integer() for name in ("epoch", "instr_serial")},
+            "description": "Pointer from the complete stored stamp only; absent before stamping. Role/cadence failure does not remove a valid pointer.",
+        }
+        properties["keylist_seq"] = dict(_instruction_integer(1), description=(
+            "Monotonic sequence parsed from the installed signed artifact; omitted "
+            "when uninitialized or unavailable without failing policy/heartbeat."))
+        legacy = media.pop("example")
+        current = dict(legacy, instr_rev={"epoch": 1788782400, "instr_serial": 7},
+                       keylist_seq=8)
+        media["examples"] = {"instructionsAvailable": {"value": current},
+                             "legacyOrUnavailable": {"value": legacy}}
+        if suffix.endswith("/heartbeat"):
+            properties["stream_every"] = {
+                "type": "integer", "minimum": 1, "maximum": 60,
+                "description": "The one server-resolved telemetry cadence reused for observation validation, retention and response; global settings supply the fallback."}
+            properties["stream_pause"] = {"type": "boolean"}
+            media["examples"]["fallbackCadence"] = {
+                "value": {"ok": True, "stream_every": 4, "stream_pause": False}}
     return "200", response
 
 
@@ -1307,6 +2796,29 @@ def _operation(route):
     path_exception = _resource_path_exception(route)
     if path_exception is not None:
         op["x-iris-v1-resource-path-exception"] = path_exception
+    if _policy_mutation(route):
+        op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
+            "description": "One exact strong policy ETag. Missing: 428; stale: 412; race under the policy lock: 409. Confirmation is candidate-bound at threshold zero, including every changed QoS document.",
+            "schema": {"type": "string"}, "example": '\"iris-peer-policy-4\"'})
+    if _schedule_resource(route):
+        for parameter in op["parameters"]:
+            if parameter["in"] == "path" and parameter["name"] == "id":
+                parameter["schema"] = _schedule_id_schema()
+                parameter["example"] = "s-boat"
+        if _schedule_conditional(route):
+            tag = _schedule_etag_header()
+            op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
+                "description": (
+                    "Exactly one singleton field containing the current strong schedule ETag or *. "
+                    "Missing: 428 precondition_required. Weak tags, comma lists, duplicate fields, "
+                    "malformed tags, mixed wildcard/tag values and stale tags: 412 precondition_failed. "
+                    "An item unknown before condition evaluation returns 404. Compare and mutation "
+                    "occur under the schedule shard lock; a revision race returns 412 with the newest "
+                    "current ETag, and a disappearance race returns 412 without an ETag. "
+                    "Other 412 and 428 responses include the current ETag. * matches any existing "
+                    "version and never creates a missing row."),
+                "schema": {"oneOf": [tag["schema"], {"type": "string", "const": "*"}]},
+                "example": tag["example"]})
     if route.path.endswith("/peer-policy/quarantine/{device_id}"):
         op["parameters"].append({
             "name": "If-Match", "in": "header", "required": False,
@@ -1318,6 +2830,15 @@ def _operation(route):
         op["requestBody"] = body
     success_status, success = _success(route)
     op["responses"][success_status] = success
+    if _instruction_resource(route):
+        op["responses"]["304"] = {
+            "description": "Selected representation matches If-None-Match after current authorization, limiter and state checks; no body, Content-Type or Content-Length",
+            "headers": _instruction_headers(),
+        }
+    if route.method == "DELETE" and _policy_mutation(route):
+        op["responses"]["200"]["description"] = "Dry-run candidate and confirmation preview"
+        op["responses"]["204"] = {"description": "Role deleted; no body",
+            "headers": {"ETag": {"schema": {"type": "string"}}}}
     if route.service == "artifact":
         op["responses"]["304"] = {
             "description": "Artifact has not changed since If-Modified-Since"}
@@ -1361,7 +2882,16 @@ def _error_statuses(route):
     subset of its family's declared codes. This remains explicit rather than
     an unbounded OpenAPI ``default`` response.
     """
+    if _instruction_resource(route):
+        return ((401, 403, 404, 429, 503) if route.path == INSTRUCTION_RESOURCES[1]
+                else (401, 403, 404, 409, 429, 503))
     suffix = _resource_suffix(route)
+    schedule_errors = _schedule_errors(route)
+    if schedule_errors is not None:
+        return tuple(sorted(schedule_errors))
+    policy_errors = _policy_errors(route)
+    if policy_errors is not None:
+        return tuple(sorted(policy_errors))
     if suffix == "/healthz":
         return ()
     if suffix == "/readyz":
@@ -1429,6 +2959,12 @@ def _error_statuses(route):
         statuses.update((408, 409, 502))
     if suffix in ("/image-verification/refresh",):
         statuses.update((409, 502))
+    if _policy_mutation(route):
+        statuses.update((409, 412, 422, 428))
+    if suffix in ("/peer-policy/explain", "/devices/{device_id}/effective-qos"):
+        statuses.add(422)
+    if suffix in ("/devices", "/devices/{device_id}/assign"):
+        statuses.add(422)
     if suffix in ("/peer-policy/quarantine/{device_id}",):
         statuses.update((409, 412, 422))
     if suffix in ("/images/import", "/images/{image_id}",
@@ -1517,9 +3053,11 @@ def _resource_path_exception(route):
          "image lifecycle action"),
         (r"^/image-verification/(?:offline|refresh)$",
          "verification job action"),
-        (r"^/devices/(?:import-csv|bulk-credential)$",
+        (r"^/devices/(?:import-csv|bulk-credential|bulk-role)$",
          "fleet batch action"),
-        (r"^/devices/\{device_id\}/(?:assign|credential|platform|forget-host-key|request-report|adopt|onboard|undeploy)$",
+        (r"^/peer-policy/roles/(?:import-csv|export-csv)$",
+         "role definition batch action"),
+        (r"^/devices/\{device_id\}/(?:role|effective-qos|assign|credential|platform|forget-host-key|request-report|adopt|onboard|undeploy)$",
          "device workflow action"),
         (r"^/onboard/(?:jobs/\{job_id\}/abort|cancel-queued)$",
          "onboarding job control"),
@@ -1537,6 +3075,17 @@ def _resource_path_exception(route):
 
 def _description(route):
     notes = [route.summary + "."]
+    if _instruction_resource(route):
+        notes.extend([
+            "Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence.",
+            "Both instruction routes share one process-local per-device token bucket: burst 2, refill one token per 10 seconds, 20,000 device bound, and 20-second idle pruning. Body, 304 and later resource-error requests all consume a token; authentication/authorization failures do not. Retry-After on 429 is max(1, ceil((1 - tokens) * 10)). Restart resets the limiter; multiple processes or replicas multiply the allowance. The supported deployment uses one catalog process/replica.",
+            "No instruction keys, role artifacts or signatures have separate delivery aliases. Device verifier roots use only the exact artifact and bundle trust files; IRIS stages images only.",
+        ])
+        if route.path == INSTRUCTION_RESOURCES[0]:
+            notes.append("Reconstructs at most 256 KiB from one stored stamp and its validated immutable role artifact. The exact stamped non-revoked current key remains eligible regardless of rotation-trigger expiry; a non-revoked previous key is eligible only before its overlap deadline. Every response, including cache hits and 304, rechecks complete state and key eligibility. Missing stamp/named file returns counted 404; an unavailable stamped key returns stale_pointer 409. server_time equals stored issued_at; current HTTP Date does not change envelope bytes. The process-memory ciphertext cache is bounded at 256 entries and 16 MiB; per-device ciphertext is never persisted.")
+        else:
+            notes.append("Serves at most 128 KiB of the exact installed root-signed keylist, including a KRL of at most 80 KiB. Both artifact and metadata absent means uninitialized 404; established artifact loss or contradictory/corrupt state means 503. An artifact ahead of its metadata remains authoritative and serveable. No signature verification, root discovery or repair occurs on GET.")
+        return " ".join(notes)
     if route.service == "console":
         notes.append("Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.")
     elif route.service == "management":
@@ -1555,6 +3104,25 @@ def _description(route):
         if route.path == "/scrape":
             notes.append("A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. The seeder service and authenticated unattributed principals can scrape all torrents.")
     suffix = _resource_suffix(route)
+    if _schedule_resource(route):
+        notes.append("Schedules only assign images or onboard staging agents; devices never evaluate schedule time. "
+                     "Each definition has its own revision, generation and strong ETag; occurrence progress does not change it. "
+                     "Creator existence comes from the current authoritative administrator record, not session expiry. "
+                     "An absent creator is marked but the schedule keeps firing as schedule:<id>.")
+        if suffix == "/schedules" and route.method == "POST":
+            notes.append("Create-if-absent: the caller selects id; a duplicate returns 409 schedule_conflict. "
+                         "The server supplies generation, revision, creator, creation time and target preview. "
+                         "No If-Match or process-local Idempotency-Key replay is required; inspect the selected id after an uncertain retry.")
+        elif route.method == "PUT":
+            notes.append("Replaces the complete mutable definition, preserving id, generation, created_by and created_at.")
+        elif route.method == "PATCH":
+            notes.append("Replaces supplied top-level subobjects in full; after:null removes the gate. "
+                         "target_facts is null unless the target is replaced.")
+        elif route.method == "DELETE":
+            notes.append("Deletion remains allowed when a referenced role or creator is gone.")
+        elif suffix.endswith("/reaffirm"):
+            notes.append("Accepts an empty object only. Replaces created_by with console:<current-session-username> "
+                         "derived server-side; identity fields cannot be supplied by the caller.")
     if suffix == "/install-options":
         notes.append("The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.")
     elif suffix == "/devices" and route.method == "GET":
@@ -1577,7 +3145,15 @@ def _description(route):
 
 def build_document():
     paths = {}
-    for route in api_routes.ROUTES:
+    # Keep newly introduced schedule resources together at the end of the
+    # generated path map. OpenAPI path order has no wire meaning, and this
+    # stable grouping avoids rewriting every established operation whenever
+    # the schedule family grows.
+    routes = tuple(route for route in api_routes.ROUTES
+                   if not _schedule_resource(route)) + tuple(
+                       route for route in api_routes.ROUTES
+                       if _schedule_resource(route))
+    for route in routes:
         item = paths.setdefault(route.path, {})
         method = route.method.lower()
         if method in item:
@@ -1614,10 +3190,10 @@ def build_document():
             "trackerErrors": "BEP clients require bencoded failures, so tracker errors are not RFC 9457.",
             "probeErrors": "readyz 503 remains a deliberately non-disclosing {ok:false} health document.",
             "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
-            "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses four static files and two high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
+            "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses five static files and four high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
             "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
-            "pagination": "Devices and audit expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
-            "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
+            "pagination": "Devices, audit, schedule occurrences and schedule receipts expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
+            "compareAndSet": "Schedules require a singleton strong If-Match or * on existing-row mutations (428 missing, 412 stale or raced). Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
             "statusCodes": "Upsert and job operations return 200 with the documented response body. Operations declare a bounded set of error responses; conditional branches may use a subset.",
             "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Restart clears that replay ledger and in-memory jobs; inspect catalog state, deployment records, and persisted deployment logs before retrying.",
         },
@@ -1666,6 +3242,12 @@ def build_document():
                                "ok": {"type": "boolean"},
                            },
                            "additionalProperties": False},
+                "ScheduleView": _schedule_view_schema(),
+                "StoredSchedule": _stored_schedule_schema(),
+                "ScheduleOccurrence": _schedule_occurrence_schema(),
+                "ScheduleReceipt": _schedule_receipt_schema(),
+                "TrackerQosState": _tracker_qos_state_schema(),
+                "TrackerQosStateMap": _tracker_qos_state_map_schema(),
             },
         },
     }

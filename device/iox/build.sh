@@ -6,12 +6,13 @@
 
 # Wrap the canonical IRIS device image as a classic IOx package.
 #
-#   device/iox/build.sh [--image-only] [--amd64|--arm64] [OUTPUT_DIR]
+#   device/iox/build.sh [--image-only] [--amd64|--arm64]
+#       [--instruction-roots-dir DIR] [OUTPUT_DIR]
 #
-# Image inputs (ARIA2C_BIN_AMD64 and ARIA2C_BIN_ARM64) are validated by the
-# shared builder. Deployment trust material is supplied at install/runtime;
-# this wrapper owns only the IOx descriptor/classic-archive envelope. IOS-XR
-# packages the same deployment-neutral amd64 manifest.
+# Image inputs (ARIA2C_BIN_AMD64 and ARIA2C_BIN_ARM64) and the two instruction
+# roots are validated by the shared builder. Catalog TLS trust is supplied at
+# install/runtime; this wrapper owns only the IOx descriptor/classic-archive
+# envelope. IOS-XR packages the same root-bound amd64 manifest.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,18 +20,24 @@ REPO="$(cd "$HERE/../.." && pwd)"
 PACKAGE=1
 OUT="$HERE/out"
 ARCH_FLAG=""
-for arg in "$@"; do
-  case "$arg" in
+ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --image-only) PACKAGE=0 ;;
     --amd64) ARCH_FLAG=amd64 ;;
     --arm64) ARCH_FLAG=arm64 ;;
+    --instruction-roots-dir)
+      [ "$#" -ge 2 ] && [ -n "$2" ] \
+        || { echo "--instruction-roots-dir needs a value" >&2; exit 2; }
+      ROOTS="$2"; shift ;;
     -h|--help)
-      echo "usage: $0 [--image-only] [--amd64|--arm64] [OUTPUT_DIR]"
+      echo "usage: $0 [--image-only] [--amd64|--arm64] [--instruction-roots-dir DIR] [OUTPUT_DIR]"
       exit 0
       ;;
-    -*) echo "unknown option: $arg" >&2; exit 2 ;;
-    *) OUT="$arg" ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) OUT="$1" ;;
   esac
+  shift
 done
 
 IOX_ARCH="${ARCH_FLAG:-${IOX_ARCH:-arm64}}"
@@ -68,7 +75,7 @@ CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$OUT"
 
-"$REPO/tools/build-device-image.sh" --context "$CTX"
+"$REPO/tools/build-device-image.sh" --context "$CTX" --instruction-roots-dir "$ROOTS"
 OCI_ARCHIVE="$(cat "$CTX/iris-device-oci-path")"
 OCI_INDEX="$(sed -n 's/^index_digest=//p' "$CTX/iris-device-oci.manifest")"
 OCI_ARCHIVE_SHA="$(sed -n 's/^archive_sha256=//p' "$CTX/iris-device-oci.manifest")"

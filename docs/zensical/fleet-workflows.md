@@ -26,7 +26,7 @@ VPG subnet behind NAT), or `xr-host` (an IOS-XR appmgr container sharing the
 router's own network stack):
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,role,platform
 ```
 
 - **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
@@ -68,6 +68,21 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 See [Management Type and VLAN Ownership](management-type.md) for the full
 ownership rules.
 
+Console/API inventory writes accept only the named operator fields in this
+schema (plus `credential_profile_id`). Unknown names are rejected instead of
+being stored for a future component to interpret. `schema_version`,
+`registered_at`, the unique `registration_id`, and the observed `os_family` are
+maintained by the server and cannot be supplied in a JSON request. The
+registration ID distinguishes devices deleted and re-added within the same
+second. Older `vlan`/`guest_ip` headers remain a CSV import compatibility path;
+they are not public JSON aliases.
+
+An old CSV row can remain in inventory before its management type is
+classified. IRIS onboards it only when the complete historical routed tuple is
+valid (`device_id`, `device_ip`, VLAN, SVI address/mask, and app address).
+Incomplete rows fail before a job, enrollment credential, or device connection
+is created; edit them into one of the current management types first.
+
 ### Credentials are not in the CSV
 
 The inventory carries network information only. There is no
@@ -88,10 +103,62 @@ Keep operator passwords out of `fleet/devices.csv` even as a convenience — the
 credential profile lives in the server's secret store, and the CSV is a
 reviewable, Git-friendly file.
 
+### Role definitions and membership
+
+The optional `role` inventory column declares one lowercase role per device.
+Copying or re-importing an older pre-role CSV does not clear membership, and a
+blank `role` cell preserves the stored value. Clear it explicitly through the
+role API, the Console's **Set role** action, or:
+
+```bash
+iris-role set DEVICE_ID - --dry-run
+iris-role set DEVICE_ID - --confirm '<preview token>'
+```
+
+Role definitions have their own round-trippable file. Lists in `peers` and
+`nets` are semicolon-separated; rates are integer bytes per second and `*_s`
+values are integer seconds.
+
+`fleet/roles.csv.example` is the tracked template. The real
+`fleet/roles.csv` is operator-owned and ignored by Git; keep its review and
+backup controls with the rest of your site inventory.
+
+```bash
+cp fleet/roles.csv.example fleet/roles.csv
+iris-role import fleet/roles.csv --dry-run
+iris-role import fleet/roles.csv --confirm '<preview token>'
+iris-role export > fleet/roles.exported.csv
+```
+
+The Console offers the same file round trip: **Peer policy → Role
+definitions → Import CSV… / Export CSV** on the Devices page use one shared
+parser and writer with `iris-role`, so either surface's export imports in the
+other. The Console also edits single definitions in place; see
+[Console](console.md#role-definitions).
+
+Import validates the whole role graph before writing, including references,
+symmetric restricted-role links, duplicate/canonical-equivalent networks, QoS
+ranges, and reserved names. Duplicate CSV headers and rows with extra cells
+are rejected before any policy write. One bulk membership or CSV action creates one
+policy revision and one tracker-outbox event. A partial two-store write reports
+the exact failed rows and `role_drift`; correct the storage problem and reapply
+the same intent. Role definitions control tracker peering and the QoS/control
+values delivered to instruction-capable agents through verified instructions.
+Tracker-specific `tracker_qos` remains server-side. Role changes add no device
+VLAN, IOS ACL, environment variable, or package setting.
+
+Tracker policy changes stop new introductions; device application is a separate
+observation in the Console's instruction status. Unassigning every image asks
+the current agent to remove its torrents after its next successful due policy
+poll and successful aria2 application; cadence and RPC failures can delay that
+removal. Device controls remain cooperative in the presence of a privileged
+device administrator;
+configured intent alone does not prove that a device applied it.
+
 ### Batch operations in the Console
 
 The Devices toolbar finishes a CSV import in bulk: onboard, undeploy, adopt,
-delete, credential assignment, and image assignment all act on the checked
+delete, credential assignment, role membership, and image assignment all act on the checked
 rows and report per-device refusals instead of failing the whole batch. Image
 assignment applies a *set* — up to ten images — to the whole selection in one
 pick, not one image per device: the toolbar opens the same checkbox picker as
@@ -134,9 +201,9 @@ Start from the template:
 cp fleet/assignments.csv.example fleet/assignments.csv
 ```
 
-Assignments are release intent, one image per device per row — this CSV path
-does not carry the console's multi-image set; assign more than one image to a
-device from the console instead (see [Bulk device actions](console.md#bulk-device-actions)):
+Assignments are release intent, one image per device per row. The CSV requires
+each device id once; applying that row adds its image without discarding images
+already assigned to the device:
 
 ```text
 device_id,image_id
@@ -149,9 +216,115 @@ tools/apply-assignments.sh fleet/assignments.csv
 ```
 
 The script validates all rows first, then applies assignments. That avoids partially applying a malformed file.
+Each target must already exist in fleet inventory. The command-line
+To add several images in one operation, use
+`iris-assign DEVICE IMAGE [IMAGE ...]`, which also merges by default. Use
+`iris-assign --replace DEVICE IMAGE [IMAGE ...]` only when the reviewed intent
+is to replace the set and remove images that are no longer listed. The Console
+and assignment API keep replacement semantics.
 The agent picks up assignments on its next policy poll. Approval alone is not
 staging activity: the Console shows **Waiting for staging** until the device
 reports work, then uses that device's progress and errors.
+
+## Scheduling
+
+A schedule runs one action inside one maintenance window, and it has exactly
+two verbs: **assign**, which approves images for staging, and **onboard**,
+which deploys the IRIS agent to devices that do not have it. There is no third
+verb, and neither of these two installs, activates, changes a boot variable, or
+reloads anything. A scheduled window stages images and nothing else — the same
+hard limit that applies to every other path into IRIS.
+
+Create one from the Console (**Devices → Schedule…**, or the **Schedules**
+panel) or from the CLI, which reads and writes the same durable store:
+
+```bash
+iris-schedule list
+iris-schedule create core-wave --file core-wave.json
+iris-schedule get core-wave
+iris-schedule patch core-wave --file pause.json --if-match '"iris-schedule-core-wave-3"'
+iris-schedule export > fleet/schedules.exported.csv
+iris-schedule import fleet/schedules.csv
+```
+
+### What a schedule targets
+
+A target is a **filter** plus an optional list of named `device_ids`, and the
+two are combined with **and**: named ids narrow the filter, they never widen
+it. Empty filters and an empty id list explicitly select the whole fleet. The
+filter keys are the Devices table's own — `q`, `management_type`, `platform`,
+`cred`, `telemetry`, `peer`, `role`, `model_family`, `os_family`, `status` — so
+what the table shows is what the window will act on.
+
+`bind` decides when that set is fixed:
+
+| `bind` | Meaning |
+| --- | --- |
+| `late` (default) | The target is **resolved at fire** time, against the fleet as it then is. A device that has since been added, retired or re-roled is included or dropped accordingly. |
+| `early` | The set frozen in the **preview** at creation time is the set that runs. Devices matching later are not added. |
+
+Either way the occurrence records the `+N / −M` delta between the preview and
+what actually fired, so a target that moved is visible rather than silent.
+
+At claim time, each fired target is also bound to its unique registration
+identity. Deleting and re-adding the same device name after the claim cannot
+redirect that occurrence to the replacement device. An older occurrence with
+no durable registration identity refuses fresh execution as
+`identity_unavailable`; already prepared work retains its recorded identity
+for recovery. Inspect the occurrence and receipts before scheduling a new run.
+
+A `role` filter selects on the **declared** role — the value in the inventory
+`role` column, which an operator sets — not on the **compiled** peer-policy
+index the tracker enforces with. The two are normally the same; when they are
+not, the difference is reported as `role_drift`, and the schedule still targets
+what was declared. Fix the drift before relying on a role-targeted window.
+
+### When it runs, and what daylight saving does to that
+
+`once` names an **absolute instant** (`at`, an epoch). It is immune to daylight
+saving by construction: an absolute instant does not move when a civil clock
+does.
+
+`recurring` names a local weekday and time in an IANA zone, so twice a year
+that local time is ambiguous or absent. Each occurrence records which case it
+was, as `normal`, `gap` or `fold`:
+
+| Case | What happens |
+| --- | --- |
+| `normal` | The local time exists exactly once. It fires there. |
+| `gap` | Spring forward: the local time does not exist at all. It fires at the **first valid** instant after the gap — never skipped, never doubled. |
+| `fold` | Fall back: the local time happens **twice**. It fires at the **first** of the two, and the second is not a second run. |
+
+The window is `window_seconds` long and half-open: work is admitted from the
+scheduled instant up to, but not including, the end. A window that closes with
+devices still unreached closes them out honestly rather than running late — see
+[Scheduled outcomes](operations.md#scheduled-outcomes).
+
+### Waves
+
+A schedule may declare an `after` gate naming a preceding schedule and the
+ratios it must reach — `min_staged_ratio`, `max_errored_ratio`,
+`max_missing_ratio` — before this one admits any work, plus a
+`deadline_seconds` after which it stops waiting. That is how core → distribution
+→ access ordering is expressed. The gate reads the preceding occurrence's own
+result and counts **missing** apart from **errored**, so one powered-off device
+is not reported as a failure and cannot hold the chain open forever. See
+[Deployment waves](operations.md#deployment-waves).
+
+### Scheduled and manual work on the same device
+
+A scheduled `assign` writes the same approved set a manual one does, so the two
+paths can collide. The Console shows a **Scheduled** marker on the row of any
+device a pending schedule's approved preview names, so a manual assignment is
+not made in ignorance of one.
+
+The collision that actually loses work is narrowing:
+`iris-assign --replace DEVICE IMAGE` replaces the whole approved set with the
+single image named, including images a schedule put there — and a scheduled
+assignment with `"mode":"replace"` does the same to a manual one. Merge mode
+(the default on both paths) adds without removing. Every scheduled outcome
+records `before_image_ids`, `after_image_ids` and `removed_image_ids`, so a
+narrowing is visible after the fact even when nobody expected it.
 
 ## Workflow map
 

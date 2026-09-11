@@ -215,3 +215,45 @@ def test_two_aria_clients_on_one_device_do_not_duplicate_address_rate():
     hub._peer_up = {"abc": {("192.0.2.1", 50000): 123}}
     assert all("server_observation" not in p
                for p in hub.swarm_snapshot(now=100)["images"][0]["peers"])
+
+
+def test_node_caption_carries_the_reported_model_and_never_repeats_an_ip_identity():
+    """An IOS-XR router is onboarded by IP, announces from that same IP (the
+    appmgr container uses host networking) and, like every platform, reports
+    a model but no hostname in its heartbeat. The node caption is therefore
+    the device id plus the reported model; the table row repeats the announce
+    IP only when it differs from the id; a legacy peer gets neither."""
+    run_map("""
+      const xr=peer('100.90.170.81','ready'); xr.model='8000';
+      const c8k=peer('Iris-c8kv-104','ready'); c8k.ip='100.90.171.14'; c8k.model='C8000V';
+      const legacy={ip:'198.51.100.7',port:6881,_hash:'hash-os',_img:'os.iso',_image_id:'os',device_id:null,
+        model:'leaked',tracker:{principal_type:'legacy',participant_class:'legacy_unattributed',role:'leecher'}};
+      DATA=snapshot([xr,c8k,legacy]); render();
+      const scene=nodes.svg.children.find(c=>c.attrs.id==='scene');
+      const captions=Object.fromEntries(scene.children.filter(c=>c.attrs.class==='node')
+        .map(g=>[g.attrs['aria-label'],g.children.filter(t=>t.attrs.class==='small').map(t=>t.textContent)]));
+      assert.deepEqual(captions['Open 100.90.170.81 (8000) details'],['100.90.170.81','8000']);
+      assert.deepEqual(captions['Open Iris-c8kv-104 (C8000V) details'],['Iris-c8kv-104','C8000V']);
+      assert.deepEqual(captions['Open Legacy unattributed peer details'],['Legacy unattributed peer']);
+      const rows=nodes.tbody.children.map(tr=>tr.children[0].children[0].textContent).sort();
+      assert.deepEqual(rows,['100.90.170.81','Iris-c8kv-104 — 100.90.171.14','Legacy unattributed peer — 198.51.100.7']);
+      assert.match(peerDetails(xr),/<h2>100\\.90\\.170\\.81<\\/h2><p class="sub">Model: 8000<\\/p><p class="sub">Announce IP: 100\\.90\\.170\\.81<\\/p>/);
+      assert.doesNotMatch(peerDetails(legacy),/Model:/);
+    """)
+
+
+def test_image_labels_are_the_catalog_filename_once_for_every_platform():
+    """An IOS-XR image id is its whole filename (publish.derive_id strips only
+    .SPA.bin/.bin), an XE id is the stem: the selector and the table show the
+    catalog filename once either way -- never an info hash, never an empty
+    label, never the id repeated behind the name."""
+    run_map("""
+      DATA={now:100,images:[
+        {image:'8000-x64-26.2.1.iso',image_id:'8000-x64-26.2.1.iso',info_hash:'253b',peers:[peer('100.90.170.81','ready')]},
+        {image:'cat9k_iosxe.26.01.01.SPA.bin',image_id:'cat9k_iosxe.26.01.01',info_hash:'c9fd',peers:[peer('100.92.9.129','ready')]}]};
+      render();
+      assert.deepEqual(nodes.imgsel.children.map(o=>o.label),['All images','8000-x64-26.2.1.iso','cat9k_iosxe.26.01.01.SPA.bin']);
+      const byName=Object.fromEntries(nodes.tbody.children.map(tr=>[tr.children[0].children[0].textContent,tr.children[1].textContent]));
+      assert.deepEqual(byName,{'100.90.170.81':'8000-x64-26.2.1.iso','100.92.9.129':'cat9k_iosxe.26.01.01.SPA.bin'});
+      for(const p of allPeers()) assert.match(peerDetails(p),new RegExp('<dt>Image</dt><dd>'+p._img+'</dd>'));
+    """)

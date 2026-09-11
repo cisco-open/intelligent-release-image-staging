@@ -91,6 +91,67 @@ The server and Console divide the work as follows:
 | Telemetry service | Reads device reports stored by the catalog and combines them with tracker and seeder data for swarm views, metrics, and exports. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
+## Roles, encrypted instructions and traffic controls
+
+The tracker applies role ACLs, announce cadence and candidate ceilings before
+introducing mutually permitted peers. DHT, peer exchange and local discovery
+remain disabled. The origin reconciler applies global and per-image upload
+limits and its peer cap. These server controls remain authoritative; per-role
+origin shaping is not expressible in one shared torrent.
+
+Tracker and origin enforcement remains authoritative for those server
+controls. Device accepted identity, LKG and QoS evidence is separate
+agent-reported state.
+
+Phase 1 adds a server stamper and device verifier to this path. The stamper
+signs immutable role intent and records per-device serials and policy revision.
+The catalog seals a per-device envelope and serves it, plus the root-signed
+keylist, through the existing authenticated HTTPS transport on TCP 8443.
+The agent verifies signature, MAC-before-decrypt, audience, expiry and the
+monotonic `(epoch, instr_serial)` floor before applying QoS/peer instructions;
+responses are capped at 256 KiB. It reasserts verified/default options on every
+mechanical tick and saves a device-key-encrypted LKG for catalog outages.
+
+```mermaid
+flowchart LR
+    Fleet["Fleet role declaration"] --> Policy["Revisioned role/QoS policy"]
+    Policy --> Tracker["Tracker :6969<br/>ACL, cadence, candidates"]
+    Policy --> Origin["Origin reconciler<br/>global/per-image rates"]
+    Policy --> Stamp["Management process<br/>stamper daemon thread"]
+    Roots["Two offline roots<br/>public trust only on server/device"] --> Stamp
+    Stamp --> Catalog["Catalog :8443<br/>per-device sealed envelope + keylist"]
+    Catalog --> Verify["Agent verification<br/>signature, MAC, audience, replay floor"]
+    Verify --> Local["Verified QoS/peers + local LKG"]
+    Tracker --> Aria["Device aria2c"]
+    Origin --> Aria
+    Local --> Aria
+    Recovery["Exempt agent artifacts<br/>enrollment + refresh"] --> Verify
+```
+
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` are new authenticated
+application requests, with no new listener, port, network path or firewall
+flow. TCP 9443 remains Console-to-server management-only. The management
+process adds custody and stamper daemon threads; the entrypoint still
+supervises five processes, not another service/container.
+
+Role ACLs are compiled in memory and consume none of the 64 stored-ACL slots.
+Fleet declaration and compiled membership remain separate durable values;
+partial writes can produce `role_drift`. Agent distribution, enrollment and
+refresh remain exempt from role/QoS restrictions. Device admins can bypass a
+cooperative agent; see the [honest guarantee](security.md#device-administrator-trust-boundary)
+for signed IOx/XR images versus Guest Shell's replaceable trust files.
+
+Tracker/quarantine discovery alone does not terminate an established
+device-to-device connection or erase retained peers. Applied verified device
+deny lists may cooperatively disconnect matching peers.
+[Image unassignment](operations.md#role-policy-operations-and-rollback) requests
+containment, but removal requires the next successful due policy poll and
+successful aria2 policy apply, subject to signed logical cadence and failures.
+Issue #153 mutual-origin union remains
+preflight-only, pending one full tagged-release dwell and a separately
+authorized activation release with lab/live validation.
+
 IOx and IOS-XR appmgr use the same multi-architecture device image and the
 same entrypoint. `IRIS_DEVICE_PLATFORM=iox` or `xr-appmgr` selects the storage
 and device-integration profile; a missing or unknown value fails before any

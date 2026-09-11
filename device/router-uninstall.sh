@@ -137,12 +137,20 @@ EOF
 # it is present (see the collisions list in gui_onboard.py). Leaving it behind
 # left the device exactly as stranded as before the teardown ran, which is the
 # one thing force mode exists to prevent.
-# The description router-install.sh writes into every VirtualPortGroup IRIS
-# creates (see device/router-install.sh, "interface VirtualPortGroup" block).
-# It is on-device proof of ownership that survives the loss of a record --
-# which is what makes the force path able to reclaim its own network config
-# without ever guessing about an operator's.
-IRIS_VPG_DESCRIPTION="description IRIS Guest Shell VPG"
+# The description each recipe writes into the VirtualPortGroup it creates is
+# on-device proof of ownership that survives the loss of a record -- which is
+# what makes the force path able to reclaim its own network config without
+# ever guessing about an operator's. The Guest Shell router recipe writes
+# "description IRIS Guest Shell VPG" (device/router-install.sh, "interface
+# VirtualPortGroup" block); the IOx-on-router recipe writes "description IRIS
+# IOx VPG" (server/iox_verification.py / device/iox/install.sh).
+# The record-less reclaim must recognise EITHER, or an IOx app on a router
+# that lost its record leaves a VPG this force path cannot take back and
+# every re-onboard is refused for a collision (issues #209, #212).
+# Ownership requires the whole description line. A note that merely mentions
+# an old IRIS description does not authorize deleting an operator's interface
+# or any NAT mappings within its subnet.
+IRIS_VPG_DESCRIPTION_RE="(?m)^[ \t]*description IRIS (?:Guest Shell|IOx) VPG[ \t]*\r?$"
 
 # Echo the VPG numbers whose interface block carries IRIS's description, and
 # the IRIS-named NAT objects present, from ONE running-config read. Anything
@@ -156,7 +164,7 @@ marker = sys.argv[1]
 text = sys.stdin.read()
 # An IOS interface block runs to the next line that starts in column 0.
 for m in re.finditer(r"(?ms)^interface VirtualPortGroup(\d+)\s*$\n(.*?)(?=^\S|\Z)", text):
-    if marker in m.group(2):
+    if re.search(marker, m.group(2)):
         print("vpg %s" % m.group(1))
 for acl in sorted(set(re.findall(r"(?m)^ip access-list standard (IRIS-NAT-\d+)\s*$", text))):
     print("acl %s" % acl)
@@ -169,7 +177,7 @@ for acl, iface in re.findall(
 import ipaddress
 nets = []
 for m in re.finditer(r"(?ms)^interface VirtualPortGroup(\d+)\s*$\n(.*?)(?=^\S|\Z)", text):
-    if marker not in m.group(2):
+    if not re.search(marker, m.group(2)):
         continue
     a = re.search(r"(?m)^\s*ip address\s+(\S+)\s+(\S+)\s*$", m.group(2))
     if a:
@@ -189,7 +197,7 @@ for line in re.findall(r"(?m)^ip nat inside source static tcp .*$", text):
         print("static %s" % line)
 for n in nets:
     print("net %s" % n.with_prefixlen)
-' "$IRIS_VPG_DESCRIPTION"
+' "$IRIS_VPG_DESCRIPTION_RE"
 }
 
 # Translations whose inside-local address sits in an IRIS VPG subnet, as
@@ -290,7 +298,9 @@ if [ "$DRY" -eq 1 ]; then
   fi
   echo "===== [5/5] Remove IRIS files under $IOS_ROOT ====="
   echo "delete /force /recursive $IRIS_DIR"
-  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
+  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
+              bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
+              iris-instructions.bootstrap; do
     echo "delete /force $IOS_ROOT/$name"
   done
   echo "===== Save startup-config ====="
@@ -506,7 +516,9 @@ fi
 echo "[5/5] remove IRIS files"
 {
   printf 'delete /force /recursive %s\n' "$IRIS_DIR"
-  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
+  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
+              bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
+              iris-instructions.bootstrap; do
     printf 'delete /force %s/%s\n' "$IOS_ROOT" "$name"
   done
 } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
@@ -594,7 +606,9 @@ case "$FILES" in
   *"Directory of bootflash:/guest-share/iris"*)
     forbidden="${forbidden}${forbidden:+, }bootflash:guest-share/iris" ;;
 esac
-for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
+for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
+            bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
+            iris-instructions.bootstrap; do
   case "$FILES" in *"$name"*) forbidden="${forbidden}${forbidden:+, }$IOS_ROOT/$name" ;; esac
 done
 

@@ -77,6 +77,48 @@ PY
   }
 done
 
+# The online instruction signer is optional during Phase 0 and deliberately
+# separate from the three required bootstrap secrets above. If ciphertext is
+# present, however, corruption or a wrong identity is fatal: silently starting
+# without a configured signer would make the server claim a weaker custody
+# state than the operator provisioned. Sweep any stale runtime copy first.
+instruction_key_enc="$IRIS_CONFIG/instr/signing-key.age"
+instruction_key_out="$IRIS_RUN/instr/signing-key"
+instruction_cert="$IRIS_CONFIG/instr/signing-key-cert.pub"
+instruction_runtime_cert="$IRIS_RUN/instr/signing-key-cert.pub"
+if [ ! -e "$instruction_key_enc" ] && [ ! -L "$instruction_key_enc" ]; then
+  rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+    "$instruction_runtime_cert"
+elif [ -L "$instruction_key_enc" ] || [ ! -f "$instruction_key_enc" ]; then
+  rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+    "$instruction_runtime_cert"
+  echo "FATAL: instruction signing key ciphertext must be a regular non-symlink file (fail closed)" >&2
+  exit 1
+else
+  mkdir -p "$IRIS_RUN/instr"
+  rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+    "$instruction_runtime_cert"
+  IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$script_dir" python3 - \
+      "$instruction_key_enc" "$instruction_key_out" \
+      "$IRIS_AGE_KEY_FILE" <<'PY' || {
+import os, sys
+import secretfs
+secretfs.decrypt_to(sys.argv[1], sys.argv[2], sys.argv[3],
+                    age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+    rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+      "$instruction_runtime_cert"
+    echo "FATAL: could not decrypt instruction signing key (fail closed)" >&2
+    exit 1
+  }
+  chmod 600 "$instruction_key_out"
+  if [ -s "$instruction_cert" ]; then
+    cp "$instruction_cert" "$instruction_runtime_cert.tmp"
+    chmod 644 "$instruction_runtime_cert.tmp"
+    mv -f "$instruction_runtime_cert.tmp" "$instruction_runtime_cert"
+  fi
+fi
+
 # Build the plaintext combined cert (cert+key) in tmpfs for ssl.load_cert_chain.
 cat "$IRIS_CONFIG/tls/crt.pem" "$IRIS_RUN/tls/key.pem" > "$IRIS_RUN/tls/cert.pem"
 chmod 600 "$IRIS_RUN/tls/cert.pem"
@@ -272,7 +314,14 @@ mkdir -p "$IRIS_ARTIFACTS_DIR/staging" 2>/dev/null || true
 # bootstrap.sh, iris-catalog.pem) into the artifacts dir so a fresh deploy
 # doesn't fail onboarding on missing files. Best-effort (never blocks startup).
 # Both IOx tars and iris-xr.rpm still have to be built out of band.
-bash /opt/iris/server/provision-served.sh "$IRIS_ARTIFACTS_DIR" || true
+# This state belongs to this supervisor invocation, not an artifact record.
+# A failed attempt to write a new record must override an older success.
+export _IRIS_SERVED_BUNDLE_STARTUP=pending
+if bash /opt/iris/server/provision-served.sh "$IRIS_ARTIFACTS_DIR"; then
+  export _IRIS_SERVED_BUNDLE_STARTUP=ok
+else
+  export _IRIS_SERVED_BUNDLE_STARTUP=failed
+fi
 
 if [ "${SKIP_SUPERVISE:-0}" = "1" ]; then
   echo "iris entrypoint: secrets decrypted to $IRIS_RUN (SKIP_SUPERVISE=1, not launching services)"
@@ -310,11 +359,14 @@ trap on_shutdown TERM INT
 
 python3 tracker.py & T=$!
 python3 catalog.py & C=$!
+# The seeder's first announces must wait for the tracker to bind. The gate
+# replaces itself with the recipe, preserving S for shutdown and supervision.
 RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
   IMAGES_DIR="${IMAGES_DIR:-/opt/images/iosxe/c9300}" \
   IRIS_IMAGES_DIR="$IRIS_IMAGES_DIR" \
   SEEDER_LOG=- \
-  ARIA2=/opt/iris/bin/aria2c bash seed-launch.sh & S=$!
+  ARIA2=/opt/iris/bin/aria2c \
+  python3 wait_for_tracker.py bash seed-launch.sh & S=$!
 # Artifact server (HTTPS): explicit API consumers authenticate with resource-
 # bound device Basic credentials before path translation/existence. Unchanged
 # Guest Shell onboarding still pulls the explicit static files and time-bounded

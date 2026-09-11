@@ -103,6 +103,7 @@
           <button class="linkish" type="button" id="help-copy-id">copy</button>
         </div>
         <a class="menu-item menu-close" id="help-docs-link" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
+        <a class="menu-item menu-close" id="help-api-reference" href="/swagger/" target="_blank" rel="noopener">Local API reference (Swagger) ↗</a>
         <a class="menu-item menu-close" id="help-device-guide" href="/help-device.html" target="_blank" rel="noopener">Device-side troubleshooting ↗</a>
         <a class="menu-item menu-close" id="help-server-guide" href="/help-server.html" target="_blank" rel="noopener">Server-side setup &amp; troubleshooting ↗</a>
       </div>
@@ -263,6 +264,64 @@
         <div class="page-header">
           <h2 class="page-title">Devices</h2>
         </div>
+        <p class="policy-warning" id="role-capability-banner" role="status" aria-live="polite" hidden></p>
+        <details class="policy-panel" id="peer-policy-panel">
+          <summary>Peer policy <span class="muted" id="peer-policy-summary">Loading policy counts…</span></summary>
+          <div class="policy-panel-body">
+            <dl class="policy-counts">
+              <div><dt>Roles defined</dt><dd id="policy-roles-defined">—</dd></div>
+              <div><dt>Restricted roles</dt><dd id="policy-roles-restricted">—</dd></div>
+              <div><dt>Role drift</dt><dd id="policy-role-drift">—</dd></div>
+              <div><dt>Unacknowledged operations</dt><dd id="policy-outbox">—/256</dd></div>
+            </dl>
+            <p class="muted">Role members in peer policy</p>
+            <ul class="policy-members" id="policy-role-members"></ul>
+            <p id="policy-origin-qos"></p>
+            <p id="policy-mutual-origin"></p>
+            <h3>Role definitions</h3>
+            <p class="muted">Roles a device can be set to, with their peer access and speed limits. Rates are bytes per second (0 = unlimited); a blank field inherits the global default. Import replaces every definition with the file, in the same CSV grammar as <code>iris-role</code>.</p>
+            <div class="role-def-actions">
+              <button class="btn" type="button" id="role-def-new">New role…</button>
+              <button class="btn ghost" type="button" id="role-def-import">Import CSV…</button>
+              <button class="btn ghost" type="button" id="role-def-export">Export CSV</button>
+              <input type="file" id="role-def-file" accept=".csv,text/csv" hidden>
+            </div>
+            <div class="table-scroll">
+              <table class="tbl dense role-def-table" aria-label="Role definitions">
+                <thead><tr><th>Role</th><th>Restricted</th><th>Peer roles</th><th>Origin</th><th>Networks</th><th>QoS overrides</th><th>Actions</th></tr></thead>
+                <tbody id="role-def-rows"><tr><td colspan="7" class="muted">Expand this panel to load role definitions.</td></tr></tbody>
+              </table>
+            </div>
+            <p class="role-message" id="role-def-status" role="status" aria-live="polite"></p>
+            <h3>Instruction delivery</h3>
+            <dl class="policy-counts">
+              <div><dt>Highest issued revision</dt><dd id="policy-issued-revision">—</dd></div>
+              <div><dt>Devices missing an instruction stamp</dt><dd id="policy-instr-stamp-missing">—</dd></div>
+              <div><dt>Devices reporting pointer skew</dt><dd id="policy-pointer-skew">—</dd></div>
+              <div><dt>Server observation time</dt><dd id="policy-instruction-observed">—</dd></div>
+            </dl>
+            <p class="muted">Reported applied policy revisions — agent-asserted</p>
+            <ul class="policy-members" id="policy-applied-revisions"></ul>
+            <p class="muted">Primary instruction states — mixed evidence; old reports remain in the fleet denominator</p>
+            <ul class="policy-members" id="policy-instruction-states"></ul>
+            <h3>Instruction key custody</h3>
+            <dl class="policy-counts">
+              <div><dt>Custody state</dt><dd id="instruction-key-state">—</dd></div>
+              <div><dt>Signing certificate remaining</dt><dd id="instruction-cert-days">—</dd></div>
+              <div><dt>Key list age</dt><dd id="instruction-keylist-age">—</dd></div>
+              <div><dt>Root ceremony</dt><dd id="instruction-root-ceremony">—</dd></div>
+              <div><dt>Root quorum</dt><dd id="instruction-root-quorum">—</dd></div>
+              <div><dt>Required action</dt><dd id="instruction-key-actions">—</dd></div>
+            </dl>
+            <ul class="policy-members" aria-label="Evidence sources">
+              <li><strong>Server-observed:</strong> report age, origin and tracker observations, durable revocation and key custody, and missing instruction stamps.</li>
+              <li><strong>Device-authored:</strong> announce upload and download counters reported by the transfer client.</li>
+              <li><strong>Agent-asserted:</strong> instruction identity and state, applied options, QoS drift, and pointer skew.</li>
+            </ul>
+            <p class="muted"><code>violation = 0 does not mean compliant</code>. Application is the latest report, not verified compliance or proof of current device state.</p>
+            <p class="muted">Declared roles appear in the table. Drift counts differences from peer policy. An explicit ACL assignment shadows a role. Role definitions are edited above; global QoS defaults and tracker <code>qos_state</code> remain API/CLI.</p>
+          </div>
+        </details>
         <!-- One control row for the whole table. Magnetic Table > Placement >
              Table-level actions: "When a table includes a filter bar, place
              table-level actions on the right side of the filter bar to keep
@@ -328,6 +387,25 @@
                   <option value="quarantined">quarantined</option>
                   <option value="not-quarantined">not quarantined</option>
                 </select>
+                <select id="dev-filter-role" aria-label="Filter by declared role">
+                  <option value="">Role: any</option>
+                  <option value="__none">— no role —</option>
+                </select>
+                <select id="dev-filter-model-family" aria-label="Filter by model family">
+                  <option value="">Model family: any</option>
+                  <option value="IE3x00">IE3x00</option>
+                  <option value="IR1x00">IR1x00</option>
+                  <option value="C9xxx">C9xxx</option>
+                  <option value="C8xxx">C8xxx</option>
+                  <option value="ISR/ASR/CSR">ISR/ASR/CSR</option>
+                  <option value="XR8000">XR8000</option>
+                  <option value="unknown">unknown</option>
+                </select>
+                <select id="dev-filter-os-family" aria-label="Filter by OS family">
+                  <option value="">OS family: any</option>
+                  <option value="xe">IOS XE / IOS</option>
+                  <option value="xr">IOS XR</option>
+                </select>
               </div>
             </details>
             <!-- Reset (Magnetic Filter bar > Anatomy: "Displayed when at least
@@ -344,6 +422,7 @@
                  down in the filter row, which disagreed on wording and made
                  the reader check both. -->
             <span class="filter-total" id="dev-count"></span>
+            <span class="muted" id="dev-target-warning" role="status"></span>
             <!-- Prev/Next paging over the CURRENT filter's match set (issue
                  #112 step 3: the table only pages once server-side filter
                  parity and id-keyed selection, both above, hold). Hidden
@@ -379,6 +458,7 @@
             </div>
             <input type="file" id="csv-file" accept=".csv" hidden>
             <button class="btn ghost" id="manage-creds">Manage credentials</button>
+            <button class="btn ghost" id="manage-schedules">Schedules</button>
             <button class="btn" id="add-dev">Add device</button>
           </div>
         </div>
@@ -426,6 +506,8 @@
                 <button class="menu-item menu-close" type="button" id="quarantine-selected">Quarantine</button>
                 <button class="menu-item menu-close" type="button" id="release-selected">Release</button>
                 <button class="menu-item menu-close" type="button" id="set-cred-selected">Set credential…</button>
+                <button class="menu-item menu-close" type="button" id="set-role-selected">Set role…</button>
+                <button class="menu-item menu-close" type="button" id="schedule-selected">Schedule…</button>
                 <hr class="menu-divider">
                 <!-- Magnetic Dropdown > Types: "A dropdown menu can contain
                      regular, disabled, and destructive menu item types." Delete
@@ -480,6 +562,25 @@
             <span class="err" id="cf-err" role="alert"></span>
           </form>
         </div>
+        <!-- Schedules (Phase 2, Task 25): a list and one action, deliberately
+             no deeper. Editing a window, its gate or its payload stays with
+             the API and iris-schedule; what an operator needs on this screen
+             is what is going to run, against what, when, and how the last run
+             went. It lives beside the device table because the target of a
+             schedule IS this table's filter. -->
+        <div class="inline-form" id="sched-panel" hidden>
+          <div class="table-scroll">
+          <table class="tbl">
+            <thead><tr><th>Schedule</th><th>Action</th><th>Target</th><th>Next run</th><th>State</th><th>Latest run</th><th>Created by</th><th></th></tr></thead>
+            <tbody id="sched-rows"></tbody>
+          </table>
+          </div>
+          <div class="form-actions">
+            <button class="btn ghost" type="button" id="sched-refresh">Refresh</button>
+            <button class="btn ghost" type="button" id="sched-close">Close</button>
+          </div>
+          <p class="muted" id="sched-status" role="status" aria-live="polite"></p>
+        </div>
         <!-- devices-table-wrap (fix wave 1): the Status legend popover
              (#status-legend-pop below) must NOT be a descendant of
              .table-scroll -- that container's overflow-x:auto forces its
@@ -494,7 +595,7 @@
         <div class="devices-table-wrap">
         <div class="table-scroll">
         <table class="tbl dense" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all" aria-label="Select all devices on this page"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all" aria-label="Select all devices on this page"></th><th>Device</th><th>Role</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Instructions</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         </div>
@@ -585,6 +686,8 @@
               <p class="muted">Installs the IRIS agent on each selected device and starts staging its assigned images.</p>
               <label class="check-row"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
               <label class="check-row"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
+              <label class="check-row"><input type="checkbox" id="onboard-log" aria-describedby="onboard-log-help"> Detailed logs</label>
+              <p class="muted" id="onboard-log-help">Extra command output for IOx jobs. Also enables download logs on IOx and IOS-XR.</p>
             </div>
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="onboard-cancel">Cancel</button>
@@ -618,6 +721,8 @@
                 otherwise. Any record for the device is abandoned once the
                 teardown succeeds, so it can be onboarded again.
               </div>
+              <label class="check-row"><input type="checkbox" id="undeploy-log" aria-describedby="undeploy-log-help"> Detailed logs</label>
+              <p class="muted" id="undeploy-log-help">Extra command output for IOx jobs.</p>
             </div>
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="undeploy-cancel">Cancel</button>
@@ -640,6 +745,119 @@
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="cred-modal-cancel">Cancel</button>
               <button class="btn" type="button" id="apply-cred-selected">Apply</button>
+            </div>
+          </div>
+        </div>
+        <div id="role-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="role-modal-title" aria-describedby="role-modal-help">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="role-modal-title">Set role <span id="role-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="role-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p id="role-modal-help">Set one declared role for the selected devices, including selections on other pages. Preview the effect before saving; this changes peer policy only.</p>
+              <label class="field" for="role-selected"><span class="field-label">Role</span>
+                <select id="role-selected"><option value="" disabled selected>— choose a role —</option></select>
+              </label>
+              <p class="role-preview" id="role-preview" aria-live="polite" hidden></p>
+              <p class="role-message" id="role-modal-msg" role="status" aria-live="polite"></p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="role-modal-cancel">Cancel</button>
+              <button class="btn" type="button" id="apply-role-selected">Preview change</button>
+            </div>
+          </div>
+        </div>
+        <div id="role-def-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="role-def-modal-title" aria-describedby="role-def-modal-help">
+          <div class="modal modal-wide role-def-modal">
+            <div class="modal-head">
+              <span id="role-def-modal-title">New role</span>
+              <button class="btn ghost icon-only" type="button" id="role-def-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p id="role-def-modal-help">Preview the effect before saving; this changes peer policy only. Blank QoS fields inherit the global default.</p>
+              <div class="role-def-grid">
+                <label class="field" for="rd-name"><span class="field-label">Role name <span class="muted">a–z, 0–9, . _ - (max 32)</span></span><input id="rd-name" maxlength="32" placeholder="e.g. boat" autocomplete="off" spellcheck="false"></label>
+                <label class="field" for="rd-peers"><span class="field-label">Peer roles <span class="muted">comma separated; itself is implied</span></span><input id="rd-peers" placeholder="e.g. fiber" autocomplete="off" spellcheck="false"></label>
+                <label class="field" for="rd-nets"><span class="field-label">Networks <span class="muted">IPv4 prefixes, comma separated</span></span><input id="rd-nets" placeholder="e.g. 10.20.0.0/16" autocomplete="off" spellcheck="false"></label>
+                <label class="field" for="rd-on-stale"><span class="field-label">When instructions expire</span>
+                  <select id="rd-on-stale">
+                    <option value="">Inherit (keep for restricted, defaults otherwise)</option>
+                    <option value="keep">Keep the last verified QoS</option>
+                    <option value="defaults">Fall back to defaults</option>
+                  </select>
+                </label>
+                <label class="check-row"><input type="checkbox" id="rd-restricted"> Restricted — members may only pair with the peer roles listed</label>
+                <label class="check-row"><input type="checkbox" id="rd-origin" checked> Origin — the tracker may introduce the origin seeder to members</label>
+              </div>
+              <h4>Speed limits <span class="muted">bytes per second · 0 = unlimited · otherwise at least 8192 · blank = inherit</span></h4>
+              <div class="role-def-grid" id="rd-rates"></div>
+              <h4>Swarm and agent cadence <span class="muted">blank = inherit</span></h4>
+              <div class="role-def-grid" id="rd-swarm"></div>
+              <p class="role-preview" id="role-def-preview" aria-live="polite" hidden></p>
+              <p class="role-message" id="role-def-msg" role="status" aria-live="polite"></p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="role-def-cancel">Cancel</button>
+              <button class="btn" type="button" id="role-def-save">Preview change</button>
+            </div>
+          </div>
+        </div>
+        <div id="sched-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="sched-modal-title" aria-describedby="sched-modal-help">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="sched-modal-title">Schedule <span id="sched-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="sched-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p id="sched-modal-help">Run one action inside a maintenance window: assign images to stage, or onboard new devices.</p>
+              <label class="field" for="sched-modal-id"><span class="field-label">Schedule id</span><input id="sched-modal-id" placeholder="e.g. core-wave"></label>
+              <label class="field" for="sched-modal-scope"><span class="field-label">Target</span>
+                <select id="sched-modal-scope">
+                  <option value="filter" selected>The current Devices filter — re-resolved at each run</option>
+                  <option value="selection">Only the devices selected now</option>
+                </select>
+              </label>
+              <p class="muted" id="sched-modal-preview" aria-live="polite"></p>
+              <label class="field" for="sched-modal-kind"><span class="field-label">Action</span>
+                <select id="sched-modal-kind">
+                  <option value="assign" selected>Assign images (stage only)</option>
+                  <option value="onboard">Onboard new devices</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-images"><span class="field-label">Images to assign</span>
+                <select id="sched-modal-images" multiple size="4"></select>
+              </label>
+              <label class="field" for="sched-modal-mode"><span class="field-label">Assignment mode</span>
+                <select id="sched-modal-mode">
+                  <option value="merge" selected>Merge with the existing approved set</option>
+                  <option value="replace">Replace the approved set</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-max" hidden><span class="field-label">Maximum devices per run</span><input id="sched-modal-max" type="number" min="1" value="20"></label>
+              <label class="field" for="sched-modal-when"><span class="field-label">When</span>
+                <select id="sched-modal-when">
+                  <option value="once" selected>Once, at a time you pick</option>
+                  <option value="recurring">Every week</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-at"><span class="field-label">Start (your browser's local time)</span><input id="sched-modal-at" type="datetime-local"></label>
+              <label class="field" for="sched-modal-weekday" hidden><span class="field-label">Weekday</span>
+                <select id="sched-modal-weekday">
+                  <option value="0">Monday</option><option value="1">Tuesday</option>
+                  <option value="2">Wednesday</option><option value="3">Thursday</option>
+                  <option value="4">Friday</option><option value="5">Saturday</option>
+                  <option value="6" selected>Sunday</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-time" hidden><span class="field-label">Local time of day</span><input id="sched-modal-time" type="time" value="02:30"></label>
+              <label class="field" for="sched-modal-tz"><span class="field-label">Time zone (IANA)</span><input id="sched-modal-tz" placeholder="e.g. Europe/Stockholm"></label>
+              <label class="field" for="sched-modal-window"><span class="field-label">Window length (minutes)</span><input id="sched-modal-window" type="number" min="1" value="60"></label>
+              <p class="role-message" id="sched-modal-msg" role="status" aria-live="polite"></p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="sched-modal-cancel">Cancel</button>
+              <button class="btn" type="button" id="create-schedule">Create schedule</button>
             </div>
           </div>
         </div>

@@ -13,6 +13,40 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVICE="$REPO_ROOT/device"
 ARIA2="$REPO_ROOT/bin/aria2c"
 EXPECTED_ARIA2_ARCH="x86-64"
+MANIFEST_ARCH="x86_64"
+ARCH="amd64"
+ARIA2_EXPLICIT=0
+OUT=""
+ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
+usage() {
+  echo "usage: $0 [--arch amd64|arm64] [--aria2 /path/to/aria2c] [--out output.tgz] [--instruction-roots-dir DIR]"
+}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --arch|--aria2|--out|--instruction-roots-dir)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { usage >&2; exit 2; }
+      case "$1" in
+        --arch) ARCH="$2" ;;
+        --aria2) ARIA2="$2"; ARIA2_EXPLICIT=1 ;;
+        --out) OUT="$2" ;;
+        --instruction-roots-dir) ROOTS="$2" ;;
+      esac
+      shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+case "$ARCH" in
+  amd64|x86_64) BUNDLE_NAME="iris-agent.tgz" ;;
+  arm64|aarch64)
+    EXPECTED_ARIA2_ARCH="aarch64"
+    MANIFEST_ARCH="aarch64"
+    BUNDLE_NAME="iris-agent-arm.tgz"
+    [ "$ARIA2_EXPLICIT" -eq 1 ] || {
+      echo "arm64 requires --aria2 /path/to/the/pinned/aarch64/aria2c" >&2; exit 2;
+    } ;;
+  *) usage >&2; exit 2 ;;
+esac
 
 say() { printf '%s\n' "$*"; }
 ask() {                      # ask "Question" "default"  ->  prints the answer
@@ -31,15 +65,15 @@ verify_aria2() {
     || { say "  $description is not an $EXPECTED_ARIA2_ARCH ELF binary: $file_out"; return 1; }
   # The manifest is the pin, not the architecture: a stale or substituted
   # x86-64 static binary passes the `file` check, so compare against the
-  # x86_64 entry in tools/aria2c.sha256 and fail closed on a mismatch —
+  # selected architecture entry in tools/aria2c.sha256 and fail closed on a mismatch —
   # the same guarantee get-aria2c.sh and the IOx build path enforce.
   sums="$REPO_ROOT/tools/aria2c.sha256"
-  expected="$(awk '$2 == "x86_64" {print $1}' "$sums" 2>/dev/null || true)"
+  expected="$(awk -v arch="$MANIFEST_ARCH" '$2 == arch {print $1}' "$sums" 2>/dev/null || true)"
   [ -n "$expected" ] \
-    || { say "  cannot verify $description: no x86_64 entry in $sums"; return 1; }
+    || { say "  cannot verify $description: no $MANIFEST_ARCH entry in $sums"; return 1; }
   actual="$( (shasum -a 256 "$ARIA2" 2>/dev/null || sha256sum "$ARIA2") | awk '{print $1}')"
   [ "$actual" = "$expected" ] \
-    || { say "  $description sha256 $actual does not match the x86_64 entry in tools/aria2c.sha256 ($expected)"
+    || { say "  $description sha256 $actual does not match the $MANIFEST_ARCH entry in tools/aria2c.sha256 ($expected)"
          say "  run  tools/get-aria2c.sh  to install the pinned handed-in binary"; return 1; }
 }
 
@@ -86,7 +120,7 @@ if [ ! -f "$ARIA2" ]; then
   # Require an immutable image reference rather than silently using a stale
   # local tag. The extracted binary is verified below before it is bundled.
   IRIS_IMAGE="${IRIS_IMAGE:-}"
-  if command -v docker >/dev/null 2>&1 && [[ "$IRIS_IMAGE" == *@sha256:* ]] \
+  if [ "$ARIA2_EXPLICIT" -eq 0 ] && command -v docker >/dev/null 2>&1 && [[ "$IRIS_IMAGE" == *@sha256:* ]] \
       && docker image inspect "$IRIS_IMAGE" >/dev/null 2>&1; then
     say "  bin/aria2c missing — extracting it from $IRIS_IMAGE..."
     mkdir -p "$(dirname "$ARIA2")"
@@ -96,7 +130,7 @@ if [ ! -f "$ARIA2" ]; then
     chmod +x "$ARIA2"
     say "  got it."
   else
-    say "  The aria2c program is not here yet (bin/aria2c), and no immutable IRIS_IMAGE"
+    say "  The aria2c program is not here yet ($ARIA2), and no immutable IRIS_IMAGE"
     say "  image reference is available. Set IRIS_IMAGE=name@sha256:<digest>, or"
     say "  run  tools/get-aria2c.sh  — then start me again."
     missing=1
@@ -111,8 +145,8 @@ fi
 
 # ---- 2. where to save it ---------------------------------------------------
 # default: the artifacts/ dir — the server container serves it on :8000 automatically
-DEFAULT_OUT="$REPO_ROOT/artifacts/iris-agent.tgz"
-OUT="$(ask "Where should I save the finished bundle?" "$DEFAULT_OUT")"
+DEFAULT_OUT="$REPO_ROOT/artifacts/$BUNDLE_NAME"
+[ -n "$OUT" ] || OUT="$(ask "Where should I save the finished bundle?" "$DEFAULT_OUT")"
 mkdir -p "$(dirname "$OUT")"
 
 # ---- 3. pack it (in the exact layout the device expects) -------------------
@@ -120,7 +154,19 @@ mkdir -p "$(dirname "$OUT")"
 # container's startup self-provisioning, so the served bundle never drifts.
 say ""
 say "Packing the bundle..."
-"$REPO_ROOT/server/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$OUT"
+"$REPO_ROOT/server/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$OUT" \
+  --instruction-roots-dir "$ROOTS"
+
+# The one packer owns this adjacent evidence. Refuse to report success if a
+# substituted wrapper failed to produce the exact raw digest contract.
+EXPECTED="$( (shasum -a 256 "$OUT" 2>/dev/null || sha256sum "$OUT") \
+  | awk '{print $1}')"
+[ -f "$OUT.sha256" ] \
+  && [ "$(wc -c < "$OUT.sha256" | tr -d ' ')" -eq 65 ] \
+  && [ "$(cat "$OUT.sha256")" = "$EXPECTED" ] || {
+    echo "bundle digest sidecar is missing or invalid: $OUT.sha256" >&2
+    exit 1
+  }
 
 # also place the bootstrap next to it — the installer fetches both from :8000
 cp "$DEVICE/bootstrap.sh" "$(dirname "$OUT")/bootstrap.sh"

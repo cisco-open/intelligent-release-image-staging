@@ -29,13 +29,19 @@ def _load_cli():
 # ---------------------------------------------------------------------------
 
 def _make_store(tmp_path, device_id="dev-1"):
-    """Create a secrets store with all three secret types minted."""
+    """Create a secrets store with all current and overlap records."""
     sp = str(tmp_path / "secrets.json")
     now = time.time()
     store = secrets_store.load(sp)
     secrets_store.mint(store, device_id, "catalog_token", now)
     secrets_store.mint(store, device_id, "announce_token", now)
     secrets_store.mint(store, device_id, "rpc_secret", now)
+    secrets_store.mint(store, device_id, "instr_key", now)
+    previous = dict(store["devices"][device_id]["instr_key"])
+    previous["expires_at"] = int(now) + 604800
+    store["devices"][device_id]["instr_key_prev"] = previous
+    store["devices"][device_id]["catalog_token_prev"] = dict(
+        store["devices"][device_id]["catalog_token"])
     secrets_store.save(store, sp)
     return sp
 

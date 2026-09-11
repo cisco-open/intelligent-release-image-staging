@@ -55,13 +55,33 @@ def test_parse_announce_handles_binary_info_hash():
     assert a["event"] == "started"
 
 
+def test_parse_announce_reads_nonnegative_transfer_counters():
+    parsed = tracker.parse_announce(
+        "info_hash=x&peer_id=p&port=6881&uploaded=123&downloaded=456")
+    assert parsed["uploaded"] == 123
+    assert parsed["downloaded"] == 456
+
+    malformed = tracker.parse_announce(
+        "info_hash=x&peer_id=p&port=6881&uploaded=-1&downloaded=bad")
+    assert malformed["uploaded"] is None
+    assert malformed["downloaded"] is None
+
+
 def test_build_announce_response_is_decodable():
     body = tracker.build_announce_response(
         [{"ip": "10.0.0.2", "port": 6882}], compact=False)
     decoded = bencode.decode(body)
     assert decoded[b"interval"] == tracker.INTERVAL
+    assert decoded[b"min interval"] == tracker.INTERVAL
     assert decoded[b"peers"][0][b"ip"] == b"10.0.0.2"
     assert decoded[b"peers"][0][b"port"] == 6882
+
+
+def test_build_announce_response_uses_one_authoritative_cadence():
+    decoded = bencode.decode(tracker.build_announce_response(
+        [], interval=120, min_interval=120))
+    assert decoded[b"interval"] == 120
+    assert decoded[b"min interval"] == 120
 
 
 def test_compact_peers_is_six_bytes_each():

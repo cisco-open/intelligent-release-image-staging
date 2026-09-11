@@ -34,12 +34,15 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 # favour of 3.5.8-r0 and was bumped here on 2026-09-03; a binary rebuilt on the
 # newer OpenSSL will not match tools/aria2c.sha256, which pins the artifact
 # IRIS ships rather than the recipe (see README.md in this directory).
+# GCC -flto=auto needs GNU make for parallel LTRANS, even with Ninja.
+# Without it GCC silently runs the link-time optimization jobs serially.
 RUN apk add --no-cache \
       gcc=15.2.0-r5 \
       g++=15.2.0-r5 \
       musl-dev=1.2.6-r2 \
       cmake=4.2.3-r0 \
       samurai=1.2-r8 \
+      make=4.4.1-r4 \
       pkgconf=2.5.1-r0 \
       linux-headers=7.0.0-r1 \
       zlib-dev=1.3.2-r0 \

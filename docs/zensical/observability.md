@@ -54,6 +54,122 @@ reads the IRIS target as down. Enable `IRIS_OBSERVABILITY=1` and restart the
 server to serve those metrics, or remove the scrape job. The Console's Swarm
 tab remains available for network state.
 
+## Role-policy status and privacy
+
+`GET /api/v1/peer-policy` is the operator status boundary. It is deliberately
+**count-only** for network enforcement: role definition/restriction/member
+counts, outbox occupancy, applied revision, desired denied-address count,
+conflict count/types, aggregate disconnect/removal effects, and origin-QoS
+target/applied counts. It never returns the raw blocklist, peer addresses,
+aria2 option dictionaries, session IDs, desired-state hashes, or the device IDs
+behind the mutual-origin preflight. Role drift is the narrow exception for
+repair: at most ten inventory device IDs are returned with `truncated`.
+
+Logging and export code must not serialize an aria2 option dictionary: tracker
+Authorization data can be present among those options. Closed state/error codes
+and aggregate counts are the supported observability vocabulary.
+
+Read these fields literally:
+
+| Field | Meaning |
+| --- | --- |
+| `roles_supported` / `roles_present` | This management binary understands roles / role state has existed in this policy. Presence is not an enforcement-success claim. |
+| `enforcement.state`, `applied_revision`, `stale` | Tracker blocklist reconciliation result and freshness. An old `enforced` value becomes stale after five minutes. |
+| `enforcement.mutual_origin.mode = preflight` | Issue #153 is observation only. `newly_denied_device_count` predicts a future mutual-origin block. It is `null` when unavailable, including an unknown protected seeder IPv4 address; `0` means a completed preflight found no newly denied devices. This phase does not add those devices to the applied origin blocklist. |
+| `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the global/per-torrent origin options reached every active origin GID. These are counts, not per-role throughput. |
+| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | Nullable current issued policy revision; accepted identity counts grouped by decimal policy revision, never instruction serial. Unavailable heartbeat evidence must not be inferred as zero application. |
+| `fleet_rollup.states.pre-instructions` | Inventory devices whose heartbeat lacks the instruction protocol capability marker; IOS software version alone is not capability evidence. |
+| `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | Deprecated legacy Phase 0 sentinel. The required canonical `instruction` object reports current evidence; `qos` values/sources explain compilation. |
+
+Legacy scalar `qos` remains instruction intent. Its deprecated compatibility
+sentinel `delivery_state: pre-instructions` is not a current delivery
+observation. Use the response's canonical `instruction` object, the matching
+Devices projection and fleet rollups for reported instruction-application evidence. An explicit
+`tracker_qos` explains the selected tracker state and its sources. `tracker_qos` is tracker-only: tracker
+state never enters instruction QoS/control, telemetry, semantic hashes, role artifacts,
+stamps, serials, envelopes, heartbeat, or device configuration.
+
+Swarm participant `peer_policy` facts retain the raw explicit `assignment` and
+separately expose the compiled `effective_acl`, `acl_source`, compiled policy membership
+as `role`, `role_unknown`, and `role_shadowed_by`. That role can differ from the
+Fleet-declared role shown in Devices while `role_drift` exists. A typed device
+may also carry the boolean `mutual_origin_preflight`; this is joined by
+authenticated device ID,
+never inferred from an address. The field is omitted when preflight is
+unavailable; a completed zero-count result reports `false`. Shared NAT conflicts report the reason and
+`global_block_applied: false` without turning an aggregate count into a claim
+that a particular device was blocked.
+
+The preflight fact does not prove activation or compliance. Issue #153 remains
+open through one full release of preflight observation; only a later reviewed
+change may apply the union across current self-evaluation and mutual-origin
+evaluation for every ACL.
+
+## Instruction evidence and custody
+
+**violation = 0 does not mean compliant**. Distinguish server-observed facts
+(durable revocation, report age and server custody/stamp status), device-authored
+reports (claims created on the device), and agent-asserted instruction facts
+(raw state, accepted identity, verification level and QoS drift). A privileged
+administrator can bypass the agent; absence of a reported violation proves
+only that the available evidence contains no violation.
+
+Tracker announce `uploaded` and `downloaded` counters are device-authored;
+they are not independent server measurements.
+
+Heartbeat `instr_protocol: 1` is the capability marker; `version` remains IOS
+software. An absent protocol marker displays `pre-instructions`; a present
+invalid or future marker displays `unknown`. Accepted identity is the complete
+`instr_epoch`, `instr_serial`,
+`instr_policy_revision` triple. `policy_revision` names server-issued intent;
+`instr_serial` plus `instr_epoch` names sealed per-device freshness.
+`enforcement.applied_revision` and `iris_peer_enforcement_applied_revision`
+are aria2 blocklist change counters unrelated to either. Never compare them as
+if they were one sequence.
+
+Raw states are `none`, `applied`, `lkg`, `stale_expired`, `allowlist_expired`,
+`rollback_rejected`, `floor_reset`, `audience_mismatch`, `key_rejected`,
+`tamper_rejected`, `verifier_missing`, `lkg_rejected`, `lkg_unreadable`,
+`oversize`, `reasserted`, `instr_unavailable`, `instr_pending`,
+`instr_forbidden`, `tracker-only`. The server separately displays `applied`,
+`lkg`, `stale`, `rejected`, `tracker-only`, `pre-instructions`, `unknown`,
+`unavailable`, `pending`, `forbidden`, `floor_reset`, `none`, `revoked`.
+See [failure actions](device-agents.md#instruction-failures-and-recovery).
+
+Durable `revoked` overrides an agent's LKG claim while retaining the underlying
+state and evidence. Within a supported instruction report, raw `stale_expired`
+or `allowlist_expired` remains stale by agent assertion before report-age
+classification, even when age is unknown. Other supported reports with
+missing/invalid/future report arrival time display unknown; an old valid report arrival time
+displays stale with the last reported state. `pointer_skew` reports
+the existing three-observation latch, and `qos_drift_count` is a bounded count
+of agent-reported corrections. `instr_stamp_missing` is a current
+inventory-device count, not a lifetime error total. Applied rollups use accepted
+policy revision, include retained complete identities and exclude orphan
+heartbeats. Missing/corrupt heartbeat, policy, custody or revocation evidence
+stays null/unknown; it must never become healthy zero. Server-generated string
+labels preserve exact i63 identities in the browser.
+
+Custody is `instruction_keys` on `/api/v1/peer-policy`. The Console shows
+`enabled`, `state`, certificate days to expiry, `certificate_renewal_due`,
+`signing_refused`, keylist sequence/age, `keylist_resign_due`,
+`roots_configured`, `roots_attested_180d`, `root_ceremony_overdue` and
+`root_quorum_degraded`. A 30-day online certificate is due for renewal at
+half-life; signing refuses in its last seven days. Keylists are due for
+re-signing at 90 days; ceremony warning/critical thresholds are 100/135 days.
+Fewer than two roots attested in 180 days is degraded quorum. Disabled
+custody reads not enabled; absent/invalid status is unavailable. Zero or negative
+certificate days is meaningful evidence, not a missing field.
+
+With metrics enabled, custody exposes
+`iris_instruction_certificate_days_to_expiry`,
+`iris_instruction_keylist_age_days`, `iris_instruction_roots_attested_180d`,
+`iris_instruction_root_ceremony_overdue` (0 ok, 1 warn, 2 critical), and
+`iris_instruction_root_quorum_degraded`. Unavailable fields are omitted rather
+than fabricated as zeros. These alarms measure custody evidence; they cannot
+detect the physical loss of an offline private key immediately. Use the
+[quarterly ceremony](operations.md#instruction-root-ceremony-and-recovery).
+
 ## Device reports
 
 Device reports are useful for both current status and post-incident review. Typical data includes:
@@ -483,7 +599,7 @@ Condition 3 is latched separately as `iris.transfer.tracker_seeder_at`.
 
 Neither fact is sufficient alone, which is why both are exported. aria2 begins
 announcing `left = 0` the instant the last piece lands, while the agent's
-sha256 of a ~1.2 GB image does not start until its next tick and then runs for
+sha256 of a ~1.2 GB image does not start until its next due staging tick and then runs for
 minutes: publishing on the tracker fact alone would announce "seeding" for
 content nobody has verified. Conversely the device can neither see nor attest
 the tracker fact — it never talks to the tracker; only its aria2 announces. The
@@ -655,20 +771,24 @@ from different observation points; do not sum the two record families.
 device transfer. An `--on-bt-download-complete` hook on the device reads the
 counters at the instant the last piece lands, before aria2 flips the download to
 seed-only and the connections drain. Attributes: `device.id` (the *receiving*
-device), `iris.image.id`, `iris.transfer.id`, `network.peer.address`,
-`network.peer.port`, `iris.transfer.session_bytes_from_peer` /
+device), `iris.image.id`, `iris.image.name` (the catalog filename),
+`iris.transfer.id`, `network.peer.address`, `network.peer.port`,
+`iris.transfer.session_bytes_from_peer` /
 `iris.transfer.session_bytes_to_peer`, `iris.peer.attribution`,
-`iris.peer.device.id`, `iris.peer.has_complete_file` and
-`iris.transfer_record.capture_complete`.
+`iris.peer.device.id`, `iris.peer.device_id` (the sender in one column: the
+device's id, `origin`, or absent for an unknown), `iris.peer.has_complete_file`
+and `iris.transfer_record.capture_complete`.
 
 `iris.peer.attribution` is the attribute that makes the number mean anything.
 The origin seeder is an ordinary BitTorrent peer of every device, so it appears
 in the device's own peer list like any other sender; the device cannot tell it
-apart and does not try. The server classifies each row at ingest against the
-tracker's `service:seeder` principal and its own device-address map, into
-`origin`, `device`, or `unknown` — an address that resolves to neither is
-reported as unknown, never folded into the device figure. The per-transfer
-rollups on `iris.device.transfer.report` follow the same split:
+apart and does not try. The server classifies each row when the report is
+first exported, against the tracker's `service:seeder` principal and its own
+device-address map, into `origin`, `device`, or `unknown` — an address that
+resolves to neither is reported as unknown, never folded into the device
+figure — and pins that answer (`report-attribution.json`), so the copy
+re-exported under the same `event.id` after a restart is identical. The
+per-transfer rollups on `iris.device.transfer.report` follow the same split:
 `iris.transfer.bytes_from_all_senders_total` is the device's own honest total
 **including the origin**, and `iris.transfer.bytes_from_origin_total`,
 `iris.transfer.bytes_from_devices_total` and

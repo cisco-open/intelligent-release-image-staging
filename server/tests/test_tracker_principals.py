@@ -13,6 +13,7 @@ failure posture (200 + filter + pending enqueue), and the exact override nets.
 """
 import hashlib
 import http.client
+import json
 import threading
 import time
 from urllib.parse import quote_from_bytes
@@ -232,6 +233,16 @@ def _quarantine_device(auth_path, lkg_path, device_id, now):
                                 "test", now, mutate)
 
 
+def _canonical_quarantine(auth_path, lkg_path, device_id):
+    peer_policy.initialize(auth_path, lkg_path)
+    for path in (auth_path, lkg_path):
+        with open(path) as stream:
+            document = json.load(stream)
+        document["quarantined_devices"] = {device_id: True}
+        with open(path, "w") as stream:
+            json.dump(document, stream, sort_keys=True)
+
+
 def test_quarantined_device_is_visible_but_filtered_both_directions(tmp_path):
     from peer_registry import PeerRegistry
     sp = _secrets_path(tmp_path)
@@ -254,6 +265,29 @@ def test_quarantined_device_is_visible_but_filtered_both_directions(tmp_path):
         peers = bencode.decode(body)[b"peers"]
         # only the quarantined peer exists besides self -> it is filtered out
         assert peers == []
+    finally:
+        srv.shutdown()
+
+
+def test_canonical_quarantine_is_visible_but_filtered_both_directions(tmp_path):
+    from peer_registry import PeerRegistry
+    sp = _secrets_path(tmp_path)
+    good_tok = _mint_device(sp, "good")
+    bad_tok = _mint_device(sp, "bad")
+    ap, lp = _policy_paths(tmp_path)
+    _canonical_quarantine(ap, lp, "bad")
+    reg = PeerRegistry()
+    srv, port = _serve(tmp_path, secrets_path=sp, registry=reg,
+                       policy_paths=(ap, lp))
+    try:
+        assert _announce(port, "pbad", bad_tok)[0] == 200
+        assert reg.snapshot()[INFO_HASH_HEX]
+        status, body = _announce(port, "pgood", good_tok)
+        assert status == 200
+        assert bencode.decode(body)[b"peers"] == []
+        status, body = _announce(port, "pbad-again", bad_tok)
+        assert status == 200
+        assert bencode.decode(body)[b"peers"] == []
     finally:
         srv.shutdown()
 

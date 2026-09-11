@@ -11,6 +11,371 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.11]
+
+### Added
+- Browsable, self-hosted Swagger API reference for all registered operations,
+  with exact canonical schemas and streaming examples, pinned upstream assets,
+  and a reproducible update helper included in release archives.
+- The Console serves that API reference locally at `/swagger/`, with its
+  canonical `/openapi.yaml`, offline assets bundled in the Console image, a
+  Help-menu link, and matching documentation and troubleshooting instructions.
+- Central troubleshooting guide, linked from the README, public website,
+  documentation index, and navigation, covering schedule identity conflicts,
+  staged-file ownership, Splunk accounting, and API diagnostics.
+
+### Fixed
+- A configured instruction root public key spelled with surplus base64 padding
+  resolves to the same root identity on every Python 3.12 patch release. Newer
+  interpreters tightened their strict base64 decoder, which turned such a file
+  into `configured root public key is invalid` on one host and a recognised
+  root on another.
+- The Console streams static files and the bundled API reference in fixed-size
+  chunks, so a stalled client holds one chunk per connection rather than a
+  whole file.
+- A device that policy places in no role is classified as tightening when it
+  enters a restricted role and as relaxing when it is cleared back, so Console
+  **Set role**, `iris-role set`, `iris-role bulk`, and a devices CSV import
+  that gives new devices a restricted role now succeed instead of refusing
+  with `incomparable_role_change`; such a first assignment still cannot share
+  one bulk or import with a relaxation.
+- XR parking preserves a shared root file when any historical image record
+  marks it adopted or leaves its ownership unknown, including parked records.
+- Scheduled occurrences bind device registration identities at claim time, so
+  deleting and re-adding a device cannot redirect already claimed work. Missing
+  targets refuse individually; prepared work retains its recovery identity.
+- Splunk Simple XML queries avoid a duplicated `search` command that silently
+  hid matching events in the browser. The portable `iris_rollout` source keeps
+  the rollout panels and device/time filters, adds measured peer captures with
+  exact bytes, and includes bytes omitted by capture row caps in received totals.
+- Splunk descriptions distinguish direct device captures from derived peer
+  estimates, selected metric samples from window deltas, and missing captures
+  from measured zero traffic (#287–#289).
+
+## [2026.09.10.1]
+
+### Added
+- Console and API onboard/undeploy jobs offer a **Detailed logs** option
+  (`log: true`, default off) for IOx command output. Onboarding also enables
+  download logs on IOx and IOS-XR; credential redaction remains active.
+- Splunk view: a *Peer-to-peer evidence* row shows bytes received stacked by
+  source (origin, peer device, unknown), the share of bytes served by peer
+  devices, and the individual device-to-device transfers, read from the
+  device-measured `iris.device.peer_transfer_record` rather than derived
+  from origin-side totals.
+- The catalog logs one bounded, token-free line for every refused device
+  bearer on any route (method, route template, device id, source IP, reason
+  such as `unknown_token`, `expired`, `revoked`, `wrong_principal`),
+  de-duplicated per minute and capped, so a device arriving with a stale
+  token is no longer indistinguishable from one that never called home (#233).
+- Telemetry: `iris.device.peer_transfer_record` rows carry `iris.image.name`
+  (catalog filename) and `iris.peer.device_id` (the sender: a device id,
+  `origin`, or absent when unknown). The Splunk "Bytes received from each
+  peer" search groups by sender and image name.
+- IOx: a job refused because the device's verification journal is
+  `indeterminate` names the record id, transaction id and revision that
+  `reconcile-enabled` needs, plus the device-side step and the runbook
+  (Operations → Recovering an IOx attempt cut off mid-run); a
+  `reconciliation_required` problem entry and the IOx control CLI reference
+  are new (#231).
+- Tests pin the IOS-XE dialects fixed on 2026-09-10 with verbatim IE-3400
+  17.15.4 and Catalyst 8000V 17.15.5 fixtures replayed through the IOx
+  transport and controller classifiers (#226).
+
+### Changed
+- Updated IOx upgrade, staging and logging guidance to match controller jobs
+  and verified platform behavior; documented Kubernetes bundle trust inputs.
+- Removed the unused IOx SCP upload transport. Current onboarding continues
+  to fetch over HTTPS; older SCP transcripts remain readable (#247).
+- IOx onboarding no longer pushes the package over SCP. The device fetches
+  its package, catalog certificate and instruction envelope from the artifact
+  server with `copy https:` over the catalog trustpoint, authenticating with
+  its own enrollment credential (`ip http client username`/`password`, set
+  for each copy and removed after it). Preflight refuses a device that
+  already carries operator HTTP client credentials. `ip scp server enable`
+  remains only for the agent's runtime image hand-off into IOS flash (#229).
+- aria2c rebuilt with patch 0007 (seeder good-bye grace): a seeder-to-seeder
+  connection survives 5 s past completion on both ends, so the device
+  completion hook can read per-peer transfer bytes over RPC and Catalyst
+  8000V downloads no longer report zero attributed bytes; `tools/aria2c.sha256`
+  pins the new x86_64 and aarch64 binaries (#68).
+
+### Fixed
+- Release archives include the documented role and schedule CSV templates
+  and verify their exact contents in the archive regression (#286).
+- QoS documentation matches the available write APIs and minimum nonzero
+  rate; IOx share-failure guidance distinguishes preserved IOS images from
+  reserved temporary-file cleanup (#283, #284, #285).
+- Documentation explains uncertain schedule writes, the limits of encrypted
+  instructions when an offline copy contains device keys, and the replay
+  attribution consequences of losing derived pins (#280, #281, #282).
+- Device deletion finishes record retirement and job cancellation before a
+  replacement can register under the same name, preserving its new deployment
+  and job (#279).
+- Role editing discards previews after form changes and retains the revision
+  originally opened, preventing stale forms from overwriting newer policy
+  (#268, #269).
+- Schedule history distinguishes unavailable evidence from zero runs, and
+  a lost creation response no longer claims the schedule was not created
+  (#273, #276).
+- Management startup admits no scheduled work after a latched termination
+  request and cleans up partially started background work (#277).
+- Maintenance-window guidance uses the scheduled worker limit and distinguishes
+  closing admission from draining running jobs; the IOx README directs operators
+  through the controller workflow (#274, #278).
+- XR command batches wait for each router prompt, preventing queued log
+  reads or logout from being lost after a `run` command (#253).
+- Schedule quarantine diagnostics retain a wave gate that already opened,
+  including recovery before the first execution receipt (#266).
+- Deployment-record reads preserve their strict refusal and read-only
+  fallback contracts after a concurrent replacement or read failure (#267).
+- Role CSV import rejects duplicate headers and extra cells before changing
+  policy (#270).
+- Changing inventory management type clears the prior routed-only SVI IGP
+  setting while preserving the device registration (#271).
+- IOx admission rejects dot path segments in native shared-storage paths
+  before contacting a device, including recorded and forced teardown (#272).
+- Router force cleanup requires an exact IRIS ownership description,
+  preserving operator interfaces and NAT entries that merely mention it (#265).
+- Malformed telemetry report rings preserve delivered-event IDs and pinned
+  attribution until a complete valid snapshot is available (#245).
+- Splunk peer-evidence queries count each cumulative transfer/peer capture
+  once across fresh report pulls and keep distinct unknown peer addresses;
+  chart labels describe capture totals rather than hourly traffic rate (#264).
+- Legacy root cleanup protects the running image and every assigned image,
+  defers when those identities are unavailable, and preserves a file if any
+  matching record marks it as operator-adopted (#258).
+- Public catalog-certificate publication reports copy or rename failures
+  and preserves the previously served certificate (#263).
+- Malformed persisted peer-attribution entries can be repaired by later
+  reports while valid first classifications remain unchanged (#262).
+- Instruction and keylist catalog endpoints emit the same bounded, redacted
+  bearer-refusal diagnostics as other device routes (#233).
+- Release archives include the IOx client checksum manifest and abort before
+  publication if an allowlisted tracked input is missing (#260, #261).
+- VLAN cleanup accepts only the complete recorded absent-interface response;
+  an additional refusal or unexpected output now fails the step (#259).
+- IOx failure details quote the rejected command response instead of an
+  earlier accepted cleanup advisory; instruction payloads stay private (#252).
+- Kubernetes preserves private authority-file permissions on PVC remounts;
+  documented storage preparation prevents setgid inheritance into authority
+  directories and provides a targeted recovery procedure (#257).
+- Recorded IOx undeploy honors the current job's detailed-log option while
+  preserving record-owned device addresses and cleanup resources (#255).
+- IOx job logs name the package and certificate steps `fetch_wrapper` and
+  `fetch_certificate`, matching their HTTPS delivery path (#249).
+- IOx install preflight reads only named collision lines and HTTP credential
+  presence counts, keeping unrelated running configuration and stored
+  credential hashes out of new preflight transcripts (#243).
+- Mutual-origin preflight reports an unavailable count when the protected
+  seeder IPv4 address is unknown. Console, API and telemetry distinguish
+  unavailable evidence from a completed zero-count result (#240).
+- Telemetry preserves delivered report IDs and pinned peer attribution when
+  a report-ring snapshot cannot be fully read, avoiding replay after a
+  transient storage read failure (#245).
+- IOx download preflight preserves an existing IOS root image when space is
+  tight. It reserves one image for the download and still requires native
+  size and SHA-512 verification before adopting the destination (#254).
+- The origin seeder waits for the local tracker listener before starting,
+  avoiding failed first announces and the resulting gap in swarm membership
+  after a server restart (#244).
+- Bundle-mode reclaim preserves all `.pkg` and `.conf` files when `BOOT`
+  points to a provisioning file, protecting the packages needed for the
+  operator's next boot. A sweep with nothing safe to delete leaves its
+  reclaim attempt available for a later tick (#239).
+- IOx containers use SCP when onboarding configures no shared filesystem.
+  Earlier packages invented a C9300 share on C8000V and IE-3400 devices,
+  preventing placement despite a complete download. Redeployment clears
+  those stale defaults while preserving explicitly configured shares.
+- IOx onboarding retries the IE-3400's exact activation-busy refusal within
+  the existing activation deadline. Every retry is recorded and cancellable;
+  other responses remain failures instead of triggering another activation.
+- IOx undeploy retries accept IOS's exact already-absent VirtualPortGroup
+  response and the revocation reminder after removing an enrolled IRIS
+  trustpoint. Cleanup can finish after a partial teardown on Catalyst 8000V
+  and IE-3400; unrelated errors still stop the job.
+- Devices seed again after a container is recreated: when aria2 no longer
+  holds a staged image the agent already finished and verified, the agent
+  re-adds it (`RESEED`) instead of reporting the image ready while announcing
+  to no tracker (#248).
+- IOx onboarding enables the device's SCP server only on platforms that hand
+  the image to IOS over scp (IE-3x00 and Catalyst 8000, which cannot
+  bind-mount their staging filesystem into the app); a Catalyst 9300 with the
+  SSD share never enables it, and a share-configured device whose share is
+  unusable fails the placement with a `ROOTCOPY-FAIL` naming the reason
+  instead of falling back to scp (#228).
+- `tools/get-aria2c.sh` now also takes the handed-in binary from
+  `deliverables/aria2c-<cpu>`, the same place the device package builders
+  use, so the Kubernetes and Compose image builds pick up a new aria2c from
+  one drop; the Kubernetes guide documents the rebuild-and-recopy steps an
+  aria2c pin change requires.
+- Device agent: a per-image staging failure (for example no provable writable
+  IOS staging filesystem) no longer suppresses the heartbeat. The device
+  registers with stage_state `error` and the bounded, redacted exception text
+  as `stage_error` (#235). A tick whose catalog policy fetch fails outright
+  exits non-zero so the launchers' documented failure backoff engages for
+  catalog outages on IOx, XR and Guest Shell (#232).
+- An IOx device whose target filesystem root already holds the assigned image
+  (IE-3x00 on `sdflash:`) no longer fails placement on IOS's
+  `rename ... (File exists)` refusal: the agent attests the existing file
+  natively (size and SHA-512), adopts it, reclaims its pushed scratch, and
+  reports an explicit rename refusal when one does occur.
+- Guest Shell agent: an ssh-keygen without `-Y verify` (OpenSSH 7.4 on the
+  Catalyst 9300 Guest Shell) is reported as `verifier_missing` with
+  tracker-only peers instead of `tamper_rejected`, and the bootstrap
+  instruction is kept for retry rather than deleted.
+- IOx onboard and undeploy job logs are step-level again: the recipe's
+  headers, prerequisite notices and poll outcomes plus one timed line per
+  controller operation, streamed as each step completes. A failed step names
+  itself and quotes the device's `% ...` verdict. The raw IOS session is
+  echoed only with the job's `IRIS_LOG=on` opt-in and otherwise stays in the
+  persisted transcript.
+- Telemetry: a report replayed after a server restart carries the same
+  sender attribution as its first export instead of a second `unknown` row
+  under the same `event.id`; the per-report classification is pinned in
+  `<state>/report-attribution.json`.
+- Swarm map nodes show the heartbeat-reported model under the device id, no
+  longer repeat an IOS-XR router's announce IP behind its identical id, and
+  the Console's image labels show an IOS-XR image (whose id is its filename)
+  once instead of twice.
+- Bundle-mode low-space reclaim recognises Catalyst 8000V image artifacts
+  (`c8000v-*` .bin/.pkg and `packages.conf`), so a stale staged image or a
+  crashed root-copy leftover on a C8000V can be freed; install-mode devices
+  are unaffected (#237).
+- Leave a router enough flash to stage onto. When IOx runs on a router the
+  app's `persist-disk` is carved out of the same `bootflash:` the image is
+  staged to, and placement transiently needs the IOS-side scratch and the
+  root copy at once. Reserving 2 GiB left a ~1 GiB image nowhere to land on
+  a 4.8 GiB Catalyst 8000V, and the agent correctly but unhelpfully reported
+  `flash_full` on a device that looked far from full. Router deployments now
+  reserve 1024 MiB; switches keep 2048 MiB, where IOx storage is a separate
+  `sdflash:`/`flash:` and does not compete with staging (issue #238).
+- Stage images on a Catalyst 8000V. That platform publishes its only writable
+  disk under three names at once (`bootflash: flash: crashinfo:`), and the
+  agent's filesystem chooser discarded any disk whose alias list contained
+  `crashinfo:`. The router was left with no writable disk, so every agent tick
+  raised "no proved writable IOS staging filesystem" and died before its
+  heartbeat, which is a tick's last step: the device staged nothing and also
+  never reported, showing "awaiting heartbeat" forever. `crashinfo:` is now a
+  prefix that is never *selected*, rather than one that disqualifies the disk
+  offering it; a disk that offers nothing else is still refused (issue #236).
+- Re-onboard a Catalyst 8000V after an undeploy. IOS-XE 17.15.5 on the
+  C8000V keeps the app's resource-profile association after
+  `app-hosting uninstall`, and removing the `app-hosting appid iris` block
+  in that state poisoned the name: every later onboard failed at the app
+  block with "IOxMan: Resource Profile-names is not specified" until the
+  router was reloaded. Both teardown paths now take the block's profile,
+  docker options, gateway and vnic out explicitly before removing the
+  block, which the router accepts; the IE-3400 was never affected. The
+  router preflight also accepts IRIS's own marked VirtualPortGroup left by
+  a failed attempt, and a refused IOx step now quotes the device's own
+  verdict line in the job log instead of only "IOx command failed"
+  (issue #230).
+- Onboard several IOx devices at once. Every IOx attempt validates the whole
+  deployment record store, and the transcript loader demanded that the
+  state, IOx and transcript directories keep byte-identical metadata while
+  it read, so a sibling attempt creating its own transcript or session fence
+  in the same second was refused as "unsafe transcript directory metadata"
+  or "IOx journal creation failed". The loader now holds directories to
+  identity, owner and mode, and a transcript to its inode and the durable
+  prefix the journal references, so concurrent attempts and the owning
+  attempt's own appends are no longer mistaken for tampering. Two
+  attempts creating the transcript directory in the same instant no longer
+  fail on the second mkdir. Because a transcript append and a session fence
+  update are atomic renames, a sibling that opened the old inode a moment
+  earlier now re-reads a bounded number of times instead of failing the
+  store ("transcript metadata changed") or the admission ("session fence
+  admission failed"); type, owner and mode refusals are never retried.
+  A server restart in the middle of an IOx attempt no longer leaves that
+  device refusing every later attempt with "active same-boot IOx session
+  fence": the fence's boot identity now folds in the container's own start
+  (pid 1), so a restarted container sees that fence as another boot's and
+  the next attempt reaps it and recovers the board, while a supervisor that
+  crashes inside a running container still fails closed as designed.
+- Make IOx onboarding work against real IOS-XE. The IOx transport had been
+  written against an idealised IOS that answers config commands silently,
+  uses one spelling per error, and always asks for confirmation. An IE-3400
+  (17.15) does none of that, and every install and teardown failed at the
+  first mismatch. The controller now forces the legacy SCP protocol (`-O`;
+  OpenSSH 9 defaults to SFTP, which IOS does not implement), reads the
+  app-hosting verification state through a filtered `dir`, accepts IOS's
+  advisory banners, save-progress line, optional `[yes/no]` confirmation, and
+  both spellings of an already-absent app, and treats already-absent config,
+  files and directories as success during teardown -- each narrowly, so a
+  genuine error still fails. Alongside: the recipe's `python3` was not on
+  the controller's PATH in the slimmed image, the credential resolver handed
+  the controller a `created_at` it refuses and a blank enable secret it read
+  as invalid, and the install request never carried its ownership claim or
+  `guest_ip`. IOx onboarding could not have worked through the Console
+  before this.
+- Make IOx on Catalyst 8000 actually reach the device. The recipe understood
+  the router management types, but the two components a live onboard runs
+  through did not: the Console's plan gate refused platform `iox` on a router
+  row, and the IOx controller rejected the router management types and
+  rendered no VirtualPortGroup or NAT commands. The controller now validates
+  and renders the router target (VPG vnic, `bootflash:` defaults, NAT ACL,
+  overload and swarm-port translation), the plan gate accepts `router` or
+  `iox` on those rows, and the deployment record claims the VPG/NAT footprint
+  it can actually take back.
+- Remove the router NAT footprint in the order IOS accepts. The IOx teardown
+  deleted the NAT ACL while the overload rule and swarm-port translation still
+  referenced it, and refused nothing when `VPG_NUMBER` was unset. Teardown now
+  removes the static translation and overload rule before the ACL, un-marks a
+  NAT outside interface only when the record says IRIS marked it, and
+  validates its inputs.
+- Say why a preflight could not run. A device that was unreachable, rejected
+  the login, or presented an untrusted host key all produced the same bare
+  "preflight could not run", and a refused IOx request said only that the
+  controller rejected it. Both now carry the reason — the runner's own
+  diagnostic, or the field the controller refused.
+- Offer only the agent installs a device row can take. Picking IOx for a
+  Catalyst 8000V on a router management type was refused by the fleet store
+  and the dropdown snapped back on the next refresh, with the reason parked in
+  the status line. Each row now carries the server's own answer
+  (`install_options`) and a refused choice is unselectable with the reason on
+  it; the stored value stays visible and the server-side rule is unchanged.
+- Grant the runtime uid the `artifacts/` directory during the Compose bring-up,
+  or refuse with the exact `chown`. An artifacts directory the server cannot
+  write let it start, report healthy, and then silently never stage
+  `iris-catalog.pem` or provision the Guest Shell bundle — leaving the Console
+  reporting every device package absent and unable to fix any of it
+  (issue #204).
+- Refuse the Compose bring-up with a named remedy when the handed-in `aria2c`
+  is missing, instead of letting the image build fail with a BuildKit cache-key
+  error. `tools/get-aria2c.sh` now also tells a wrong-architecture deliverable
+  apart from a stale one; its fail-closed checksum behaviour is unchanged
+  (issue #203).
+
+## [2026.09.10]
+
+### Fixed
+- Keep concurrent scheduled assignment receipts bound to their prepared policy
+  baseline, preserve that baseline as the replacement conflict check when an
+  overlapping merge changes policy, and distinguish device registrations
+  created within the same second before applying staged-image assignments.
+- Reject unknown, nested, and server-owned fleet fields before any inventory or
+  role-policy write; trusted model and OS observations use a bounded internal
+  update path, while historical CSV imports remain compatible (issue #171).
+- Make Console and CLI image assignment share one fleet-aware transaction and
+  audit outcome. The CLI now merges ordered image sets by default, explicit
+  `--replace` reports removals, and device retirement cannot race an assignment
+  into orphaned catalog state (issues #163 and #172).
+- Refuse incomplete legacy inventory before onboarding creates a job, mints a
+  credential, or contacts a device; complete historical rows remain usable
+  (issue #173).
+- Keep each ordinary ACL assignment preserved through peer quarantine and
+  release. Legacy rows whose ACL was already overwritten have unrecoverable
+  assignment history, and older servers ignore independent quarantine during a
+  downgrade.
+- Verify the server’s Guest Shell aria2c checksum and architecture before
+  publishing its bundle; failed provisioning remains visible in Device packages
+  readiness even when an older bundle is retained (issue #178).
+- Produce the ARM Guest Shell bundle with `tools/make-agent-bundle.sh --arch arm64 --aria2 PATH`, verifying the architecture and pinned checksum before packing (issue #179).
+- Accept incoming peers whose BitTorrent handshake arrives together with
+  protocol messages, preserving the buffered messages (issue #174).
+- Enforce the per-torrent peer admission cap for stalled downloads and
+  pending outbound connections in aria2c (issue #168).
+
 ### Security
 - Validate seeder credentials before writing aria2 configuration or sending
   tracker headers. Reject malformed credentials without exposing their values.
@@ -36,6 +401,91 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   changes report whether the Console loaded them successfully.
 - Use configured server paths when onboarding devices, and keep server log
   settings out of device installer options.
+
+### Added
+- Schedule stage-only maintenance windows. A schedule runs one of two verbs —
+  `assign` or `onboard` — against a device **target**: the Devices filter,
+  optionally narrowed by named devices, resolved at fire time or frozen at
+  creation. One-time windows name an absolute instant; weekly windows resolve
+  local time in an IANA zone and record whether the slot was `normal`, a
+  daylight-saving `gap`, or a `fold`. Neither verb installs, activates,
+  changes a boot variable, or reloads a device.
+- Record durable per-device evidence for every scheduled window: an occurrence
+  with the target it actually resolved, its `+N / -M` delta against the
+  approved preview, and one outcome per device carrying a stable reason.
+  Scheduled work is idempotent per occurrence and device, a restart resumes
+  only its own records, and manual work wins a conflict rather than being
+  overwritten.
+- Gate deployment waves on the preceding window's corroborated staging counts,
+  ordering core before distribution before access. The gate counts **missing**
+  apart from **errored**, so one powered-off device is not reported as a
+  failure and cannot hold a chain open forever; an unmet gate ends its
+  occurrence `stalled` at its deadline carrying those counts. It is an
+  operational signal about when work is admitted, not a security boundary.
+- List schedules in the Console and create one from the Devices filter with
+  **Schedule…**, at list-plus-action depth. Rows show the target, the
+  server-computed next run, the latest run's delta and wave counts, and an
+  orphaned creator with a re-affirm that rewrites `created_by` and bumps
+  `rev`. A device row marks a pending schedule aimed at it, so a manual
+  assignment is not made in ignorance of one.
+- Add Phase 0 server-side peer roles with one declared role per device,
+  in-memory virtual ACLs, explicit-ACL shadowing, lifecycle/migration tooling,
+  fleet/CSV membership, strong-CAS API mutations, dry-run impact counts,
+  candidate-bound confirmation, pair explanations, and effective-QoS
+  provenance. The Console adds a declared-role column/filter, aggregate
+  selection action, and a count-only policy disclosure.
+- Apply role-aware tracker discovery, bounded candidate selection, per-record
+  expiry, and configurable 10–300 second announce cadence plus `numwant`
+  ceilings. Policy changes stop new peer introductions; they do not sever
+  existing aria2 connections or erase retained peer addresses.
+- Expose state-aware tracker QoS through the management API with scalar
+  compatibility, explicit seeder/leecher cadence layers, and API-only
+  `qos_state` configuration; tracker state remains outside device delivery.
+- Apply origin-wide and per-torrent upload limits plus an origin peer cap, with
+  count-only reconciliation status. Per-role origin
+  shaping remains unavailable. Phase 1 adds verified device QoS below; the
+  effective-QoS route retains its deprecated `pre-instructions` compatibility
+  sentinel and adds the canonical `instruction` object used by Devices, with
+  fleet rollups on the policy view. Device-side limits remain cooperative under a privileged administrator.
+- Measure issue #153's prospective mutual-origin deny as a preflight count while
+  retaining the existing applied origin blocklist. Shared NAT permit/deny
+  conflicts stay unblocked and are reported by reason/count. The issue remains
+  open through one full release of preflight observation; any later activation
+  must separately review the union for all ACLs, including hand-written ACLs.
+- Keep agent artifacts, enrollment, and token refresh structurally exempt from
+  roles, QoS, cadence, and peer-selection budgets. The six-patch amd64/arm64
+  aria2 binaries are now the pinned source inputs for future refreshed Guest
+  Shell bundles and signed device packages; this does not cut a release, sign a
+  package, or update a deployed device.
+
+### Phase 1 instructions
+
+- Deliver bounded per-device encrypted instruction envelopes and root-signed
+  keylists over existing authenticated catalog HTTPS 8443. Verify signatures,
+  MACs, audience, expiry and monotonic freshness before applying device QoS and
+  peer controls; keep locally encrypted LKG through instruction-key rotations.
+- Reassert verified/default QoS every mechanical tick and before new torrents;
+  demote plaintext peer/concurrency launch values to upgrade compatibility.
+  Signed logical catalog cadence remains separate from heartbeat/reassertion.
+- Add server-only encrypted online signing custody, two distinct offline public
+  roots, certificate/keylist windows and recovery runbooks. IOx/XR image trust
+  depends on enforced native package signatures; Guest Shell remains
+  tamper-evident, with runtime verifier probing and tracker-only fallback.
+- Preserve owned IOx device-global verification state through unsigned package
+  onboarding, interruption and uninstall; prefer signed wrappers without state
+  mutation. Verify Guest Shell bundle SHA-256 sidecars and both public-root
+  files, retaining the prior runnable bundle on refusal.
+- Show server-observed and agent-asserted instruction evidence, exact accepted
+  identity, policy-revision rollups, evidence age, drift, pointer skew, missing
+  stamps and custody alarms in the Console/API. Unavailable evidence remains
+  null/unknown; violation = 0 does not mean compliant.
+- Document Compose, split-host and single-replica Kubernetes custody/network
+  checks. Five supervised processes and existing ports remain; multi-replica
+  server operation is unsupported. The next package build must propagate the
+  final shared agent and current pinned aria2c binaries to every device format.
+  This Unreleased work is not a signed release or live-device validation.
+  Issue #153 stays preflight-only through a full tagged-release dwell and a
+  separately authorized activation release with lab/live evidence.
 
 ## [2026.09.05]
 

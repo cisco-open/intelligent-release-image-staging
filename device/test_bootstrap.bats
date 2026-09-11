@@ -32,6 +32,68 @@ setup() {
 
 teardown() { rm -rf "$TMP"; }
 
+bundle_file_list() {
+  cat <<'EOF'
+agent/agent_config.py
+agent/catalog_client.py
+agent/cli_ssh.py
+agent/flash_target.py
+agent/flashcheck.py
+agent/instr.py
+agent/iris_agent.py
+agent/peer-transfer-hook.sh
+agent/telemetry_report.py
+agent/verify_image.py
+agent/xr_deps.py
+aria2c
+bootstrap.sh
+guestshell-start.sh
+iris-root.allowed_signers
+iris-signers.allowed_signers
+rotate-logs.sh
+EOF
+}
+
+make_valid_bundle_tree() {
+  BUNDLE_TREE="$TMP/bundle-src"
+  rm -rf "$BUNDLE_TREE"
+  mkdir -p "$BUNDLE_TREE/agent"
+  while IFS= read -r name; do
+    mkdir -p "$(dirname "$BUNDLE_TREE/$name")"
+    printf 'fixture:%s\n' "$name" > "$BUNDLE_TREE/$name"
+  done < <(bundle_file_list)
+  printf 'open(r"%s/new-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$BUNDLE_TREE/agent/iris_agent.py"
+  printf '#!/usr/bin/env bash\necho new-started >> "%s/new-gss.log"\n' "$TMP" \
+    > "$BUNDLE_TREE/guestshell-start.sh"
+  { printf '#!/usr/bin/env bash\n'
+    for _ in $(seq 1 400); do printf 'exit 99 # upgraded-bootstrap padding line\n'; done
+  } > "$BUNDLE_TREE/bootstrap.sh"
+}
+
+pack_valid_bundle() {
+  local out="$1"
+  make_valid_bundle_tree
+  # Match the production packer's explicit top-level list: no leading ./ entry.
+  tar czf "$out" -C "$BUNDLE_TREE" agent bootstrap.sh guestshell-start.sh \
+    rotate-logs.sh aria2c iris-signers.allowed_signers iris-root.allowed_signers
+  cp "$BUNDLE_TREE/iris-signers.allowed_signers" \
+    "$(dirname "$out")/iris-signers.allowed_signers"
+}
+
+write_bundle_digest() {
+  local bundle="$1" digest="$2"
+  sha256sum "$bundle" | awk '{print $1}' > "$digest"
+}
+
+install_prior_agent() {
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/prior-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  printf 'prior instruction signer trust\n' > "$STAGE/iris-signers.allowed_signers"
+  printf 'prior root signer trust\n' > "$STAGE/iris-root.allowed_signers"
+}
+
 @test "bootstrap syncs rpc-secret from conf and bounces aria2c when it changed" {
   printf 'rpc_secret = REALSECRET123\nrpc_port = 6800\n' > "$STAGE/iris-agent.conf"
   printf '\n' > "$STAGE/rpc-secret"   # baked empty
@@ -53,11 +115,101 @@ teardown() { rm -rf "$TMP"; }
   [ ! -f "$TMP/pkill.log" ]
 }
 
+@test "config-only re-onboarding retains the device-local LKG key when incoming config omits it" {
+  key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'device_id = retained\nlkg_key = %s\n' "$key" \
+    > "$STAGE/iris-agent.conf"
+  printf 'opaque encrypted fallback\n' > "$STAGE/iris-instructions.lkg"
+  printf 'device_id = replacement\ncatalog_token = fresh\n' \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -eq 0 ]
+  grep -qx "lkg_key = $key" "$STAGE/iris-agent.conf"
+  [ "$(cat "$STAGE/iris-instructions.lkg")" = "opaque encrypted fallback" ]
+  [ ! -e "$SRC/iris-agent.conf" ]
+}
+
+@test "incoming config cannot rotate an established device-local LKG key" {
+  old=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  incoming=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  printf 'device_id = retained\nlkg_key = %s\n' "$old" \
+    > "$STAGE/iris-agent.conf"
+  printf 'device_id = replacement\nlkg_key = %s\n' "$incoming" \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^lkg_key[[:space:]]*=' "$STAGE/iris-agent.conf")" -eq 1 ]
+  grep -qx "lkg_key = $old" "$STAGE/iris-agent.conf"
+}
+
+@test "unsafe or malformed established LKG config blocks replacement" {
+  printf 'device_id = old\nlkg_key = NOT-A-LOCAL-KEY\n' \
+    > "$STAGE/iris-agent.conf"
+  cp "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  printf 'device_id = replacement\ncatalog_token = fresh\n' \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -ne 0 ]
+  cmp -s "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  [ -f "$SRC/iris-agent.conf" ]
+  [[ "$output" == *"existing iris-agent.conf is unsafe or has an invalid lkg_key"* ]]
+}
+
+@test "malformed incoming LKG key cannot replace an established configuration" {
+  key=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  printf 'device_id = old\nlkg_key = %s\n' "$key" \
+    > "$STAGE/iris-agent.conf"
+  cp "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  printf 'device_id = replacement\nlkg_key = UPPERCASE-OR-BROKEN\n' \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -ne 0 ]
+  cmp -s "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  [ -f "$SRC/iris-agent.conf" ]
+  [[ "$output" == *"incoming iris-agent.conf is unsafe or invalid"* ]]
+}
+
+@test "unsafe incoming config types fail promptly without replacing local config" {
+  key=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  printf 'device_id = old\nlkg_key = %s\n' "$key" \
+    > "$STAGE/iris-agent.conf"
+  cp "$STAGE/iris-agent.conf" "$TMP/original-conf"
+
+  for shape in symlink fifo oversize; do
+    rm -f "$SRC/iris-agent.conf"
+    case "$shape" in
+      symlink) ln -s /etc/passwd "$SRC/iris-agent.conf" ;;
+      fifo) mkfifo "$SRC/iris-agent.conf" ;;
+      oversize) head -c 65537 /dev/zero > "$SRC/iris-agent.conf" ;;
+    esac
+
+    run timeout 3 env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+        bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    cmp -s "$STAGE/iris-agent.conf" "$TMP/original-conf"
+    [ -e "$SRC/iris-agent.conf" ] || [ -L "$SRC/iris-agent.conf" ]
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Persisted aria2c launch overrides from iris-agent.conf (issue #122):
 # guestshell-start.sh only reads its own live process environment, refreshed
-# on each 60s EEM tick, so an operator has no way to make IRIS_LOG (or
-# RPC_PORT/MAX_PEERS, which had the identical gap) stick without this. These
+# on each 60s EEM tick, so an operator has no way to make IRIS_LOG (or RPC_PORT)
+# stick without this. Legacy max_peers remains parseable but inert. These
 # tests run the REAL guestshell-start.sh (not a stub) against a stub aria2c
 # so the launch line it actually builds can be inspected end to end.
 # ---------------------------------------------------------------------------
@@ -115,8 +267,8 @@ teardown() { rm -rf "$TMP"; }
   [[ "$(cat "$TMP/launched.txt")" != *"--log="* ]]
 }
 
-@test "bootstrap propagates rpc_port and max_peers from iris-agent.conf to aria2c's real launch line" {
-  printf 'rpc_secret = SAME\nrpc_port = 6900\nmax_peers = 25\n' > "$STAGE/iris-agent.conf"
+@test "bootstrap propagates rpc_port while ignoring legacy max_peers" {
+  printf 'rpc_secret = SAME\nrpc_port = 6900\nmax_peers = 65535\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
   cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
   chmod +x "$STAGE/guestshell-start.sh"
@@ -129,11 +281,13 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   out="$(cat "$TMP/launched.txt")"
   [[ "$out" == *"--rpc-listen-port=6900"* ]]
-  [[ "$out" == *"--bt-max-peers=25"* ]]
+  [[ "$out" == *"--bt-max-peers=10"* ]]
+  [[ "$out" != *"--bt-max-peers=65535"* ]]
+  [[ "$output" != *"max_peers"* ]]
 }
 
-@test "bootstrap ignores an invalid rpc_port/max_peers in iris-agent.conf and keeps the builtin defaults" {
-  printf 'rpc_secret = SAME\nrpc_port = not-a-port\nmax_peers = 999999\n' \
+@test "bootstrap ignores invalid rpc_port but accepts inert max_peers in iris-agent.conf" {
+  printf 'rpc_secret = SAME\nrpc_port = not-a-port\nmax_peers = 65535\n' \
     > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
   cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
@@ -146,7 +300,7 @@ teardown() { rm -rf "$TMP"; }
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"ignoring invalid rpc_port"* ]]
-  [[ "$output" == *"ignoring out-of-range max_peers"* ]]
+  [[ "$output" != *"max_peers"* ]]
   out="$(cat "$TMP/launched.txt")"
   [[ "$out" == *"--rpc-listen-port=6800"* ]]   # builtin default, unchanged
   [[ "$out" == *"--bt-max-peers=10"* ]]        # builtin default, unchanged
@@ -227,7 +381,104 @@ teardown() { rm -rf "$TMP"; }
   [ -f "$TMP/gss.log" ]
 }
 
-@test "a bundle upgrade replaces bootstrap.sh by rename so the running tick still reaches the agent" {
+@test "simultaneous ticks cannot enter through an unpublished lock owner" {
+  mkdir -p "$STAGE/agent"
+  cat > "$STAGE/agent/iris_agent.py" <<'PYTHON'
+import os
+import time
+
+running = os.environ["IRIS_AGENT_RUNNING"]
+try:
+    os.mkdir(running)
+except OSError:
+    with open(os.environ["IRIS_AGENT_OVERLAP"], "w") as stream:
+        stream.write("overlap\n")
+with open(os.environ["IRIS_AGENT_ENTRIES"], "a") as stream:
+    stream.write("entered\n")
+time.sleep(2)
+try:
+    os.rmdir(running)
+except OSError:
+    pass
+PYTHON
+
+  real_mkdir="$(command -v mkdir)"
+  cat > "$BIN/mkdir" <<'SHELL'
+#!/usr/bin/env bash
+last=""
+for argument in "$@"; do last="$argument"; done
+"$IRIS_REAL_MKDIR" "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$last" = "$IRIS_LOCK_PATH" ] \
+    && [ ! -e "$IRIS_LOCK_READY" ]; then
+  : > "$IRIS_LOCK_READY"
+  sleep 1
+fi
+exit "$status"
+SHELL
+  chmod +x "$BIN/mkdir"
+
+  hook="$TMP/flock-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import fcntl
+import os
+import time
+
+_real_flock = fcntl.flock
+
+
+def _hold_first_acquisition(descriptor, operation):
+    result = _real_flock(descriptor, operation)
+    if operation & fcntl.LOCK_EX and operation & fcntl.LOCK_NB:
+        try:
+            marker = os.open(os.environ["IRIS_LOCK_READY"],
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError:
+            pass
+        else:
+            os.close(marker)
+            time.sleep(1)
+    return result
+
+
+fcntl.flock = _hold_first_acquisition
+PYTHON
+
+  env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      IRIS_REAL_MKDIR="$real_mkdir" IRIS_LOCK_PATH="$STAGE/.bundle-lock" \
+      IRIS_LOCK_READY="$TMP/lock-ready" \
+      IRIS_AGENT_RUNNING="$TMP/agent-running" \
+      IRIS_AGENT_OVERLAP="$TMP/agent-overlap" \
+      IRIS_AGENT_ENTRIES="$TMP/agent-entries" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh" > "$TMP/first.out" 2>&1 &
+  first_pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$TMP/lock-ready" ] || break
+    sleep 0.02
+  done
+  [ -e "$TMP/lock-ready" ]
+
+  second_status=0
+  env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      IRIS_REAL_MKDIR="$real_mkdir" IRIS_LOCK_PATH="$STAGE/.bundle-lock" \
+      IRIS_LOCK_READY="$TMP/lock-ready" \
+      IRIS_AGENT_RUNNING="$TMP/agent-running" \
+      IRIS_AGENT_OVERLAP="$TMP/agent-overlap" \
+      IRIS_AGENT_ENTRIES="$TMP/agent-entries" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh" > "$TMP/second.out" 2>&1 &
+  second_pid=$!
+  wait "$second_pid" || second_status=$?
+  first_status=0
+  wait "$first_pid" || first_status=$?
+
+  [ "$first_status" -eq 0 ]
+  [ "$second_status" -eq 0 ]
+  [ ! -e "$TMP/agent-overlap" ]
+  [ "$(wc -l < "$TMP/agent-entries" | tr -d ' ')" -eq 1 ]
+}
+
+@test "a verified bundle commits atomically, retains one prior footprint, and updates bootstrap by rename" {
   # bootstrap.sh runs FROM $SRC/bootstrap.sh (the EEM applet's path) and, on
   # a bundle drop, replaces that very file. `cp -f` rewrote the same inode,
   # so the bash still executing it resumed at its old byte offset inside the
@@ -238,21 +489,442 @@ teardown() { rm -rf "$TMP"; }
   cp "$BATS_TEST_DIRNAME/bootstrap.sh" "$SRC/bootstrap.sh"
   printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
-  BUNDLE="$TMP/bundle-src"; mkdir -p "$BUNDLE/agent"
-  { printf '#!/usr/bin/env bash\n'
-    for _ in $(seq 1 400); do printf 'exit 99 # upgraded-bootstrap padding line\n'; done
-  } > "$BUNDLE/bootstrap.sh"
-  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
-    > "$BUNDLE/agent/iris_agent.py"
-  tar czf "$SRC/bundle.tgz" -C "$BUNDLE" bootstrap.sh agent
+  install_prior_agent
+  printf 'persistent\n' > "$STAGE/iris-instructions.lkg"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
   run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
       bash "$SRC/bootstrap.sh"
   [ "$status" -eq 0 ]
   # the tick that performed the upgrade still ran the agent...
-  [ -f "$TMP/agent-invoked" ]
+  [ -f "$TMP/new-agent-invoked" ]
   # ...and the next tick will read the bundled bootstrap
-  cmp -s "$SRC/bootstrap.sh" "$BUNDLE/bootstrap.sh"
+  cmp -s "$SRC/bootstrap.sh" "$BUNDLE_TREE/bootstrap.sh"
   [ ! -e "$SRC/bootstrap.sh.new" ]
+  [ ! -e "$STAGE/bundle.tgz" ]
+  [ ! -e "$STAGE/bundle.tgz.sha256" ]
+  [ "$(cat "$STAGE/iris-instructions.lkg")" = persistent ]
+  grep -q 'prior-agent-invoked' "$STAGE/.bundle-previous/files/agent/iris_agent.py"
+  [ -x "$STAGE/aria2c" ]
+  [ -x "$STAGE/agent/peer-transfer-hook.sh" ]
+  [ -x "$STAGE/guestshell-start.sh" ]
+}
+
+@test "a digest without a bundle waits without discarding the evidence" {
+  install_prior_agent
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$STAGE/bundle.tgz.sha256" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" != *"bundle rejected"* ]]
+}
+
+@test "a bundle without a digest is rejected while the prior agent continues" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [ ! -e "$SRC/bundle.tgz" ]
+  [ ! -e "$STAGE/bundle.tgz" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (missing-digest)"* ]]
+}
+
+@test "malformed and mismatched digests are bounded and never replace the prior runtime" {
+  install_prior_agent
+  cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  cp "$STAGE/iris-signers.allowed_signers" "$TMP/prior-signers"
+  cp "$STAGE/iris-root.allowed_signers" "$TMP/prior-root-signers"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  printf 'NOT-A-DIGEST secret-material-that-must-not-be-logged\n' \
+    > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  cmp -s "$STAGE/iris-signers.allowed_signers" "$TMP/prior-signers"
+  cmp -s "$STAGE/iris-root.allowed_signers" "$TMP/prior-root-signers"
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-digest)"* ]]
+  [[ "$output" != *"secret-material"* ]]
+  [ "${#output}" -lt 512 ]
+
+  rm -f "$TMP/prior-agent-invoked"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  cmp -s "$STAGE/iris-signers.allowed_signers" "$TMP/prior-signers"
+  cmp -s "$STAGE/iris-root.allowed_signers" "$TMP/prior-root-signers"
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (digest-mismatch)"* ]]
+}
+
+@test "a 64-hex digest without its one required newline is malformed" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  sha256sum "$SRC/bundle.tgz" | awk '{printf "%s", $1}' \
+    > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-digest)"* ]]
+}
+
+@test "a FIFO bundle is rejected promptly instead of blocking the EEM tick" {
+  install_prior_agent
+  mkfifo "$SRC/bundle.tgz"
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+
+  run timeout 3 env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
+@test "a hash-matching archive with a symlink is rejected before extraction" {
+  install_prior_agent
+  cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  make_valid_bundle_tree
+  cp "$BUNDLE_TREE/iris-signers.allowed_signers" \
+    "$SRC/iris-signers.allowed_signers"
+  rm -f "$BUNDLE_TREE/aria2c"
+  ln -s /etc/passwd "$BUNDLE_TREE/aria2c"
+  tar czf "$SRC/bundle.tgz" -C "$BUNDLE_TREE" agent bootstrap.sh \
+    guestshell-start.sh rotate-logs.sh aria2c iris-signers.allowed_signers \
+    iris-root.allowed_signers
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  [ "$(cat "$STAGE/iris-signers.allowed_signers")" = \
+    "prior instruction signer trust" ]
+  [ "$(cat "$STAGE/iris-root.allowed_signers")" = \
+    "prior root signer trust" ]
+  [ ! -L "$STAGE/aria2c" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
+@test "tar extension metadata is rejected before the archive parser runs" {
+  install_prior_agent
+  python3 - "$SRC/bundle.tgz" <<'PYTHON'
+import io
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "w:gz", format=tarfile.PAX_FORMAT) as archive:
+    info = tarfile.TarInfo("unexpected")
+    info.pax_headers = {"comment": "x" * 4096}
+    info.size = 1
+    archive.addfile(info, io.BytesIO(b"x"))
+PYTHON
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  hook="$TMP/tar-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+import tarfile
+
+_real_open = tarfile.open
+
+
+def _record_open(*args, **kwargs):
+    with open(os.environ["IRIS_TAR_OPEN_MARKER"], "a") as stream:
+        stream.write("opened\n")
+    return _real_open(*args, **kwargs)
+
+
+tarfile.open = _record_open
+PYTHON
+  run env PYTHONPATH="$hook" IRIS_TAR_OPEN_MARKER="$TMP/tar-opened" \
+      PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TMP/tar-opened" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
+@test "archive parsing uses only the immutable bytes that were hashed" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  hook="$TMP/grow-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import gzip
+import os
+
+_real_gzip_file = gzip.GzipFile
+_grown = False
+
+
+def _grow_after_hash(*args, **kwargs):
+    global _grown
+    if not _grown:
+        _grown = True
+        with open(os.environ["IRIS_GROW_BUNDLE"], "ab") as stream:
+            stream.write(b"not-an-authenticated-gzip-member")
+    return _real_gzip_file(*args, **kwargs)
+
+
+gzip.GzipFile = _grow_after_hash
+PYTHON
+  run env PYTHONPATH="$hook" IRIS_GROW_BUNDLE="$STAGE/bundle.tgz" \
+      PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/new-agent-invoked" ]
+  [[ "$output" != *"bundle rejected"* ]]
+}
+
+@test "a standalone signer that differs from the verified bundle cannot change live trust" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  printf 'different public signer bytes\n' > "$SRC/iris-signers.allowed_signers"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STAGE/iris-signers.allowed_signers")" = \
+    "prior instruction signer trust" ]
+  [ "$(cat "$STAGE/iris-root.allowed_signers")" = \
+    "prior root signer trust" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (signer-mismatch)"* ]]
+}
+
+@test "an incomplete promotion is rolled back before anything launches" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/absent"
+  printf 'open(r"%s/recovered-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$TX/prior/files/agent/iris_agent.py"
+  cp "$STAGE/guestshell-start.sh" "$TX/prior/files/guestshell-start.sh"
+  for name in aria2c bootstrap.sh rotate-logs.sh \
+      iris-signers.allowed_signers iris-root.allowed_signers; do
+    : > "$TX/prior/absent/$name"
+  done
+  printf 'promoting\n' > "$TX/phase"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/partial-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  printf 'partial\n' > "$STAGE/aria2c"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/recovered-agent-invoked" ]
+  [ ! -e "$TMP/partial-agent-invoked" ]
+  [ ! -e "$STAGE/aria2c" ]
+  [ ! -e "$TX" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: recovered interrupted bundle install"* ]]
+}
+
+@test "a rollback that cannot prove the prior footprint hard-stops before launch" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files" "$TX/prior/absent" "$STAGE/agent"
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/untrusted-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$TMP/untrusted-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle transaction recovery failed"* ]]
+}
+
+@test "a prior footprint with both saved bytes and an absence marker hard-stops" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files" "$TX/prior/absent" "$STAGE/agent"
+  for name in agent aria2c bootstrap.sh guestshell-start.sh rotate-logs.sh \
+      iris-signers.allowed_signers iris-root.allowed_signers; do
+    : > "$TX/prior/absent/$name"
+  done
+  printf 'saved but also marked absent\n' > "$TX/prior/files/aria2c"
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/ambiguous-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$TMP/ambiguous-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle transaction recovery failed"* ]]
+}
+
+@test "a commit failure cannot replace an EEM bootstrap that had no staged prior" {
+  install_prior_agent
+  rm -f "$STAGE/bootstrap.sh"
+  printf 'original EEM bootstrap\n' > "$SRC/bootstrap.sh"
+  cp "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  real_python="$(command -v python3)"
+  cat > "$BIN/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = commit ]; then
+  exit 1
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$BIN/python3"
+
+  run env PATH="$BIN:$PATH" REAL_PYTHON="$real_python" SRC="$SRC" \
+      STAGE="$STAGE" bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+}
+
+@test "a failed EEM sibling rename leaves committed runtime for recovery" {
+  install_prior_agent
+  printf 'original EEM bootstrap\n' > "$SRC/bootstrap.sh"
+  cp "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  real_cp="$(command -v cp)"
+  cat > "$BIN/cp" <<'COPY'
+#!/usr/bin/env bash
+case "${*: -1}" in
+  */bootstrap.sh.new) exit 1 ;;
+esac
+exec "$REAL_CP" "$@"
+COPY
+  chmod +x "$BIN/cp"
+
+  run env PATH="$BIN:$PATH" REAL_CP="$real_cp" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$STAGE/.bundle-transaction/phase")" = committed ]
+  cmp -s "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  [ ! -e "$TMP/new-agent-invoked" ]
+
+  rm -f "$BIN/cp"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  [ -f "$TMP/new-agent-invoked" ]
+  cmp -s "$SRC/bootstrap.sh" "$BUNDLE_TREE/bootstrap.sh"
+}
+
+@test "an interrupted rollback restarts from an immutable prior snapshot" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/absent" "$STAGE/agent"
+  printf 'open(r"%s/restartable-prior-agent", "w").write("ran")\n' "$TMP" \
+    > "$TX/prior/files/agent/iris_agent.py"
+  printf '#!/usr/bin/env bash\necho prior-started >> "%s/prior-started"\n' "$TMP" \
+    > "$TX/prior/files/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\n: prior-bootstrap\n' \
+    > "$TX/prior/files/bootstrap.sh"
+  printf '#!/usr/bin/env bash\n: prior-rotate\n' \
+    > "$TX/prior/files/rotate-logs.sh"
+  printf 'prior aria2c\n' > "$TX/prior/files/aria2c"
+  printf 'prior signer\n' > "$TX/prior/files/iris-signers.allowed_signers"
+  printf 'prior root signer\n' > "$TX/prior/files/iris-root.allowed_signers"
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/partial-agent", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  hook="$TMP/rollback-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_real_replace = os.replace
+_stopped = False
+
+
+def _stop_after_first_restore(source, destination):
+    global _stopped
+    _real_replace(source, destination)
+    source_text = os.fspath(source)
+    destination_text = os.fspath(destination)
+    if not _stopped and os.path.basename(destination_text) == "agent" \
+            and ("/prior/files/agent" in source_text
+                 or "/restore/agent" in source_text):
+        _stopped = True
+        with open(os.environ["IRIS_ROLLBACK_STOP_MARKER"], "w") as stream:
+            stream.write("stopped\n")
+        os._exit(86)
+
+
+os.replace = _stop_after_first_restore
+PYTHON
+  run env PYTHONPATH="$hook" \
+      IRIS_ROLLBACK_STOP_MARKER="$TMP/rollback-stopped" \
+      PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ -f "$TMP/rollback-stopped" ]
+
+  run env PYTHONPATH= PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/restartable-prior-agent" ]
+  [ -f "$TMP/prior-started" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  [ ! -e "$STAGE/.bundle-rollback-complete" ]
+  [ "$(cat "$STAGE/aria2c")" = "prior aria2c" ]
+}
+
+@test "rollback does not require denied guest-share chmod operations" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/absent" "$STAGE/agent"
+  printf 'open(r"%s/chmod-prior-agent", "w").write("ran")\n' "$TMP" \
+    > "$TX/prior/files/agent/iris_agent.py"
+  for name in aria2c bootstrap.sh guestshell-start.sh rotate-logs.sh \
+      iris-signers.allowed_signers iris-root.allowed_signers; do
+    : > "$TX/prior/absent/$name"
+  done
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/chmod-partial-agent", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  hook="$TMP/chmod-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+
+def _deny(*args, **kwargs):
+    raise PermissionError("guest-share metadata changes are denied")
+
+
+os.chmod = _deny
+os.fchmod = _deny
+PYTHON
+  run env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/chmod-prior-agent" ]
+  [ ! -e "$TMP/chmod-partial-agent" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+}
+
+@test "a bad initial bundle fails after one fixed diagnostic" {
+  rm -f "$STAGE/guestshell-start.sh"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (digest-mismatch)"* ]]
+  [ "$(printf '%s\n' "$output" | grep -c 'bundle rejected')" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -272,18 +944,31 @@ teardown() { rm -rf "$TMP"; }
   printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
   mkdir -p "$STAGE/agent"
-  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+  printf 'import sys\nopen(r"%s/events.log", "a").write("agent:" + " ".join(sys.argv[1:]) + "\\n")\n' "$TMP" \
     > "$STAGE/agent/iris_agent.py"
-  # record the jitter sleep's argument instead of actually waiting
-  printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleep.log"\n' "$TMP" > "$BIN/sleep"
-  chmod +x "$BIN/sleep"
-  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=8 \
+  # Record the jitter sleep's argument instead of actually waiting. Pin the
+  # random result to the upper in-range value: zero is also valid and
+  # intentionally skips sleep, so leaving this to entropy makes the assertion
+  # below fail one run in eight.
+  printf '#!/usr/bin/env bash\necho "sleep:$1" >> "%s/events.log"\n' "$TMP" > "$BIN/sleep"
+  real_python="$(command -v python3)"
+  cat > "$BIN/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "$1" = "-c" ] && [[ "$2" == *random.randrange* ]]; then
+  printf '%s\n' "$3" > "$IRIS_RNG_ARG_LOG"
+  printf '%s\n' "$IRIS_TEST_JITTER"
+  exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$BIN/sleep" "$BIN/python3"
+  run env PATH="$BIN:$PATH" REAL_PYTHON="$real_python" IRIS_TEST_JITTER=7 \
+      IRIS_RNG_ARG_LOG="$TMP/rng-arg.log" \
+      SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=8 \
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
-  [ -f "$TMP/agent-invoked" ]
-  [ -f "$TMP/sleep.log" ]
-  jitter="$(cat "$TMP/sleep.log")"
-  [ "$jitter" -ge 0 ] && [ "$jitter" -lt 8 ]
+  [ "$(cat "$TMP/rng-arg.log")" -eq 8 ]
+  [ "$(cat "$TMP/events.log")" = $'sleep:7\nagent:--once' ]
 }
 
 @test "IRIS_TICK_JITTER_MAX=0 skips the jitter sleep entirely" {

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validated operator inventory, separate from applied deployment records."""
 import csv
+import functools
 import io
 import ipaddress
 import json
@@ -10,10 +11,21 @@ import os
 import re
 import tempfile
 import time
+import uuid
 
 import gui_onboard
+import fleet_authority
 import keyed_state
 import secrets_store
+
+
+def _membership_mutation(method):
+    """Serialize every fleet mutation with scheduled membership authority."""
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with fleet_authority.membership_guard(self):
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class FleetStateError(RuntimeError):
@@ -29,6 +41,31 @@ class FleetStateError(RuntimeError):
     connection-level handler gives catalog.StateFileError -- mirrored here,
     on purpose, for the identical reason."""
 
+
+class FleetPartialWriteError(FleetStateError):
+    """A grouped write failed after zero or more shards reached durable state."""
+
+    def __init__(self, message, results, stats=None):
+        self.results = dict(results)
+        failed = {device_id: outcome.get("error", "fleet write failed")
+                  for device_id, outcome in self.results.items()
+                  if not outcome.get("ok")}
+        applied = sum(1 for outcome in self.results.values()
+                      if outcome.get("ok"))
+        self.result = {"applied": applied, "failed": failed}
+        if stats is not None:
+            self.result["stats"] = dict(stats)
+        super().__init__(message)
+
+
+class FleetFieldError(ValueError):
+    """An operator supplied a field name or JSON value the fleet schema rejects.
+
+    Management HTTP maps this narrow input-integrity class to 422. Existing
+    semantic validation errors remain ordinary :class:`ValueError` and retain
+    their established 400 response.
+    """
+
 _CSV_V2_OLD_COLS = ["device_id", "device_ip", "management_type", "iris_vlan",
                     "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
                     "inband_vlan", "ios_ssh_host", "model", "platform"]
@@ -37,12 +74,51 @@ _CSV_V2_OLD_COLS = ["device_id", "device_ip", "management_type", "iris_vlan",
 # _CSV_V2_OLD_COLS, so an export/CSV from before this field existed still
 # imports unchanged -- see import_csv's v2_headers.
 _CSV_V2_PRE_SVI_IGP_COLS = _CSV_V2_OLD_COLS[:-1] + ["vpg_number", "nat_interface", "platform"]
-CSV_V2_COLS = _CSV_V2_PRE_SVI_IGP_COLS[:-1] + ["svi_igp", "platform"]
+_CSV_V2_PRE_ROLE_COLS = _CSV_V2_PRE_SVI_IGP_COLS[:-1] + ["svi_igp", "platform"]
+CSV_V2_COLS = _CSV_V2_PRE_ROLE_COLS[:-1] + ["role", "platform"]
 _LEGACY_COLS = ["device_id", "device_ip", "vlan", "svi_ip", "svi_mask",
                 "guest_ip", "model", "platform"]
+OPERATOR_WRITABLE_FIELDS = frozenset((
+    "device_id", "device_ip", "management_type", "iris_vlan", "svi_ip",
+    "svi_mask", "app_ip", "app_mask", "app_gateway", "inband_vlan",
+    "ios_ssh_host", "model", "vpg_number", "nat_interface", "svi_igp",
+    "role", "platform", "credential_profile_id",
+))
+SERVER_OWNED_FIELDS = frozenset((
+    "schema_version", "registered_at", "registration_id", "os_family"))
+INTERNAL_OBSERVATION_FIELDS = frozenset(("model", "os_family"))
+_LEGACY_CSV_ALIASES = frozenset(("vlan", "guest_ip"))
+STORED_FIELDS = OPERATOR_WRITABLE_FIELDS | SERVER_OWNED_FIELDS | _LEGACY_CSV_ALIASES
+_FIELD_MAX_LENGTH = {
+    "device_id": 64,
+    "device_ip": 64,
+    "management_type": 32,
+    "iris_vlan": 16,
+    "svi_ip": 64,
+    "svi_mask": 64,
+    "app_ip": 64,
+    "app_mask": 64,
+    "app_gateway": 64,
+    "inband_vlan": 16,
+    "ios_ssh_host": 64,
+    "model": 64,
+    "vpg_number": 16,
+    "nat_interface": 64,
+    "svi_igp": 16,
+    "role": 32,
+    "platform": 32,
+    "credential_profile_id": 128,
+    "vlan": 16,
+    "guest_ip": 64,
+    "os_family": 16,
+    "registration_id": 32,
+}
+_MAX_STORED_ROW_BYTES = 4096
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$")
 _INTERFACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9./_-]{0,63}$")
+_ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+_REGISTRATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _C8K_RE = re.compile(r"^C8[0-9]{3}", re.IGNORECASE)
 _ROUTER_TYPES = frozenset(("router-routed", "router-nat"))
 
@@ -73,6 +149,71 @@ def _atomic_write_json(path, obj):
 
 def _text(value):
     return str(value or "").strip()
+
+
+def _validate_scalar_fields(record, fields, error=FleetFieldError):
+    """Reject JSON containers/bools and bound every textual fleet value."""
+    for field in fields:
+        if field not in record or record[field] is None:
+            continue
+        value = record[field]
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise error("%s must be a scalar string or integer" % field)
+        limit = _FIELD_MAX_LENGTH[field]
+        if len(str(value)) > limit:
+            raise error("%s must be at most %d characters" % (field, limit))
+
+
+def _validate_operator_fields(record):
+    if not isinstance(record, dict):
+        raise ValueError("device record must be an object")
+    server_fields = sorted(set(record) & SERVER_OWNED_FIELDS)
+    if server_fields:
+        raise FleetFieldError("server-owned fleet field is not writable: %s"
+                              % ", ".join(server_fields))
+    unknown = sorted(set(record) - OPERATOR_WRITABLE_FIELDS)
+    if unknown:
+        raise FleetFieldError("unknown fleet field: %s" % ", ".join(unknown))
+    _validate_scalar_fields(record, set(record) & OPERATOR_WRITABLE_FIELDS)
+
+
+def _validate_stored_fields(record):
+    if not isinstance(record, dict):
+        raise ValueError("device record must be an object")
+    unknown = sorted(set(record) - STORED_FIELDS)
+    if unknown:
+        raise ValueError("unknown stored fleet field: %s" % ", ".join(unknown))
+    aliases = sorted(set(record) & _LEGACY_CSV_ALIASES)
+    if aliases and record.get("management_type") not in (None, "", "legacy_routed"):
+        raise ValueError("legacy fleet field is invalid on a classified row: %s"
+                         % ", ".join(aliases))
+    _validate_scalar_fields(
+        record, set(record) & (STORED_FIELDS - {"schema_version", "registered_at"}),
+        error=ValueError)
+    if "schema_version" in record and record["schema_version"] != 2:
+        raise ValueError("schema_version must be 2")
+    if "schema_version" in record and type(record["schema_version"]) is not int:
+        raise ValueError("schema_version must be the integer 2")
+    registered = record.get("registered_at")
+    if registered is not None and type(registered) is not int:
+        raise ValueError("registered_at must be an integer or null")
+    registration_id = record.get("registration_id")
+    if (registration_id is not None
+            and (not isinstance(registration_id, str)
+                 or not _REGISTRATION_ID_RE.fullmatch(registration_id))):
+        raise ValueError("registration_id must be a 32-character lowercase hex id or null")
+    family = record.get("os_family")
+    if family not in (None, "", "xe", "xr"):
+        raise ValueError("os_family must be xe or xr")
+
+
+def _check_stored_row_size(record):
+    try:
+        encoded = json.dumps(record, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raise ValueError("fleet record must contain JSON scalar values")
+    if len(encoded.encode("utf-8")) > _MAX_STORED_ROW_BYTES:
+        raise ValueError("fleet record exceeds %d bytes" % _MAX_STORED_ROW_BYTES)
 
 
 def _ipv4(value, field):
@@ -130,6 +271,20 @@ def _svi_igp(value):
     return value
 
 
+def _role(value):
+    """Normalize the declared policy role; blank is canonical unassigned."""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("role must be a string or null")
+    if value != value.strip():
+        raise ValueError("role must not contain surrounding whitespace")
+    if value and not _ROLE_RE.fullmatch(value):
+        raise ValueError(
+            "role must be 1-32 lowercase letters, numbers, dot, underscore, or hyphen")
+    return value
+
+
 def _static_network(ip, mask, gateway, prefix):
     ip = _ipv4(ip, prefix + "_ip")
     mask = _mask(mask, prefix + "_mask")
@@ -142,19 +297,60 @@ def _static_network(ip, mask, gateway, prefix):
     return ip, mask, gateway
 
 
+_ALL_PLATFORMS = ("guestshell", "iox", "router", "xr-appmgr")
+
+
+def install_options_for_record(record):
+    """The platform values validate_record would ACCEPT for this stored row.
+
+    validate_record refuses; this answers the same rules the other way round,
+    so a Console can offer only what the row can take instead of letting the
+    operator pick a choice the server then refuses. It is deliberately a
+    projection of validate_record's rules, not a second policy: router
+    management types run the router recipe (Guest Shell) or the IOx app, xr-host runs the
+    appmgr container and nothing else, the two IOS-XE switch types run neither,
+    and within that the model table narrows further. An inventory-only row
+    (no management type yet) is narrowed by its model alone.
+    """
+    management_type = record.get("management_type") or ""
+    model = gui_onboard.normalize_model(record.get("model") or "")
+    # An inventory-only row (no management type chosen yet) is what
+    # validate_record's allow_legacy path accepts, and that path applies none
+    # of the model or type coupling: the row may carry any platform as intent
+    # until a management type is chosen and the full rules run. Offer it all.
+    if management_type in ("", "legacy_routed"):
+        return list(_ALL_PLATFORMS)
+    by_model = gui_onboard.install_options_for(model, record.get("os_family") or "")
+    options = list(_ALL_PLATFORMS) if by_model is None else list(by_model)
+    if management_type in _ROUTER_TYPES:
+        # Router recipe first: it is what a blank platform auto-resolves to.
+        options = [p for p in ("router", "iox") if p in options] or (
+            ["router", "iox"] if _C8K_RE.match(model or "") or not model else [])
+    elif management_type == "xr-host":
+        options = [p for p in options if p == "xr-appmgr"]
+    elif management_type in ("routed", "inband"):
+        options = [p for p in options if p not in ("router", "xr-appmgr")]
+    return options
+
+
 def validate_record(record, allow_legacy=False):
     """Normalize a safe v2 record. Legacy data is only accepted when explicit."""
-    if not isinstance(record, dict):
-        raise ValueError("device record must be an object")
+    _validate_stored_fields(record)
+    raw_role = record.get("role")
     result = {key: _text(value) for key, value in record.items() if value is not None}
     did = result.get("device_id", "")
     if not _ID_RE.fullmatch(did):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
     secrets_store.validate_device_id(did)
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
+    role = _role(raw_role)
+    if role:
+        result["role"] = role
+    else:
+        result.pop("role", None)
     management_type = result.get("management_type", "")
     if management_type == "legacy_routed" and allow_legacy:
-        return result
+        return _legacy_like(record)
     if management_type not in ("routed", "inband", "router-routed", "router-nat", "xr-host"):
         raise ValueError("management_type must be routed, inband, router-routed, "
                          "router-nat, or xr-host")
@@ -177,8 +373,11 @@ def validate_record(record, allow_legacy=False):
         if model and not model_is_c8k:
             raise ValueError("router modes support the Catalyst 8000 family only; "
                              "%s is not yet supported" % model)
-        if effective_platform != "router":
-            raise ValueError("router management types require platform router or a C8xxx model")
+        # Guest Shell (the router recipe) or an IOx app -- both attach to the
+        # IRIS-owned VirtualPortGroup; a blank platform on a C8xxx still
+        # auto-resolves to the router recipe.
+        if effective_platform not in ("router", "iox"):
+            raise ValueError("router management types require platform router or iox, or a C8xxx model")
     elif model_is_c8k:
         raise ValueError("Catalyst 8000 models require management_type router-routed or router-nat")
     elif effective_platform == "router":
@@ -272,34 +471,62 @@ def validate_record(record, allow_legacy=False):
                 raise ValueError("nat_interface must be a valid IOS interface name")
         elif nat_interface:
             raise ValueError("nat_interface is only valid for router-nat")
+    _check_stored_row_size(result)
     return result
 
 
 def _legacy_record(row):
     result = dict(zip(_LEGACY_COLS, row))
-    result = {key: _text(value) for key, value in result.items() if value is not None}
-    if not _ID_RE.fullmatch(result.get("device_id", "")):
-        raise ValueError("legacy row has invalid device_id")
-    secrets_store.validate_device_id(result["device_id"])
-    result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     result["management_type"] = "legacy_routed"
-    return result
+    return _legacy_like(result)
 
 
 def _legacy_like(record):
-    """Minimal normalization for an unclassified or legacy record. It enforces a
-    safe device_id and IPv4 device_ip, preserves the remaining fields as-is, and
-    marks the row ``legacy_routed`` so it cannot deploy until a management type
-    is chosen. This keeps bare device creation and partial edits (model, platform,
-    credential) working without demanding full routed/inband fields."""
-    result = {key: (_text(value) if isinstance(value, str) else value)
-              for key, value in record.items() if value is not None}
+    """Normalize a bounded unclassified or historical legacy record."""
+    _validate_stored_fields(record)
+    result = {key: _text(value) for key, value in record.items()
+              if value is not None}
     if not _ID_RE.fullmatch(result.get("device_id", "")):
         raise ValueError("device_id must contain only letters, numbers, dot, "
                          "underscore, or hyphen")
     secrets_store.validate_device_id(result["device_id"])
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
+    for field in ("svi_ip", "app_ip", "app_gateway", "ios_ssh_host", "guest_ip"):
+        if result.get(field):
+            result[field] = _ipv4(result[field], field)
+    for field in ("svi_mask", "app_mask"):
+        if result.get(field):
+            result[field] = _mask(result[field], field)
+    for field in ("iris_vlan", "inband_vlan", "vlan"):
+        if result.get(field):
+            result[field] = str(_vlan(result[field], field))
+    if result.get("vpg_number"):
+        result["vpg_number"] = str(_vpg(result["vpg_number"]))
+    if result.get("nat_interface") and not _INTERFACE_RE.fullmatch(
+            result["nat_interface"]):
+        raise ValueError("nat_interface must be a valid IOS interface name")
+    if result.get("svi_igp"):
+        result["svi_igp"] = _svi_igp(result["svi_igp"])
+    model = result.get("model", "")
+    if model:
+        model = gui_onboard.normalize_model(model)
+        if not _MODEL_RE.fullmatch(model):
+            raise ValueError("model contains unsupported characters")
+        result["model"] = model
+    platform = result.get("platform", "")
+    if platform not in ("", "guestshell", "iox", "router", "xr-appmgr"):
+        raise ValueError("platform must be guestshell, iox, router, or xr-appmgr")
+    role = _role(record.get("role"))
+    if role:
+        result["role"] = role
+    else:
+        result.pop("role", None)
     result["management_type"] = "legacy_routed"
+    if "schema_version" in record:
+        result["schema_version"] = 2
+    if "registered_at" in record:
+        result["registered_at"] = record["registered_at"]
+    _check_stored_row_size(result)
     return result
 
 
@@ -407,7 +634,7 @@ class FleetStore:
             current = self._read_revision()
             _atomic_write_json(self._revision_path, {"revision": current + 1})
 
-    def _merge_record(self, previous, record):
+    def _merge_record(self, previous, record, trusted_observation=False):
         """The full per-row merge/validate/stamp pipeline every write path
         (upsert, bulk_upsert, import_csv) shares — factored out so there is
         exactly ONE place this logic lives, whether one device is being
@@ -416,6 +643,20 @@ class FleetStore:
         device's CURRENT row (or None), read from within the same shard
         lock that will hold the write — never a separately-fetched, possibly
         stale copy."""
+        if trusted_observation:
+            allowed = INTERNAL_OBSERVATION_FIELDS | {"device_id"}
+            unknown = sorted(set(record) - allowed)
+            if unknown:
+                raise FleetFieldError("unknown internal observation field: %s"
+                                      % ", ".join(unknown))
+            _validate_scalar_fields(record, set(record) & allowed)
+            family = record.get("os_family")
+            if family is not None and family not in ("xe", "xr"):
+                raise ValueError("os_family must be xe or xr")
+        else:
+            _validate_operator_fields(record)
+        if previous is not None:
+            _validate_stored_fields(previous)
         previous_record = previous if isinstance(previous, dict) else {}
         merged = dict(previous_record)
         incoming_management_type = record.get("management_type")
@@ -427,6 +668,8 @@ class FleetStore:
             # partial upsert changing type must not retain stale values
             # from the old family and then fail validation (or, worse,
             # retarget a plan).
+            if incoming_management_type != "routed":
+                merged.pop("svi_igp", None)
             old_router = previous_record.get("management_type") in _ROUTER_TYPES
             new_router = incoming_management_type in _ROUTER_TYPES
             old_xr = previous_record.get("management_type") == "xr-host"
@@ -451,6 +694,20 @@ class FleetStore:
             if (old_router != new_router or old_xr != new_xr) and \
                     "platform" not in record:
                 merged.pop("platform", None)
+            if previous_record.get("management_type") in (None, "", "legacy_routed"):
+                # Historical CSV aliases are valid stored compatibility data,
+                # but a classified row must carry only the canonical names.
+                # A complete Console/API edit supplies the current fields;
+                # discard the retained aliases before full validation so an
+                # imported device can actually leave legacy_routed state.
+                for alias in _LEGACY_CSV_ALIASES:
+                    merged.pop(alias, None)
+        # ``None`` means "leave unchanged" for ordinary partial fields, but an
+        # explicitly present blank/null role is the role API's clear operation.
+        # Remove the prior key before the usual non-None overlay and let both
+        # validators retain their canonical blank-is-unassigned normalization.
+        if "role" in record and record.get("role") in (None, ""):
+            merged.pop("role", None)
         merged.update({key: value for key, value in record.items() if value is not None})
         # Full v2 validation applies only when the record actually carries a
         # classified management type (Console form, CSV v2, adoption). Bare
@@ -466,6 +723,8 @@ class FleetStore:
             raise ValueError("management_type must be routed, inband, router-routed, "
                              "router-nat, xr-host, or legacy_routed")
         normalized["registered_at"] = self._registration_stamp(previous)
+        normalized["registration_id"] = self._registration_id(previous)
+        _check_stored_row_size(normalized)
         return normalized
 
     def _registration_stamp(self, previous):
@@ -487,6 +746,44 @@ class FleetStore:
             return int(prior) if prior is not None else None
         except (TypeError, ValueError):
             raise ValueError("registered_at must be an integer or null")
+
+    @staticmethod
+    def _registration_id(previous):
+        """Return one durable identity for this registration incarnation."""
+        if previous is None or previous.get("registration_id") is None:
+            return uuid.uuid4().hex
+        value = previous["registration_id"]
+        if not isinstance(value, str) or not _REGISTRATION_ID_RE.fullmatch(value):
+            raise ValueError(
+                "registration_id must be a 32-character lowercase hex id or null")
+        return value
+
+    @_membership_mutation
+    def ensure_registration_id(self, device_id):
+        """Durably identify a legacy row before binding scheduled work."""
+        did = _text(device_id)
+        current = self.get_device(did)
+        if current is None:
+            raise ValueError("no such device")
+        _validate_stored_fields(current)
+        if current.get("registration_id") is not None:
+            return current
+        self._ensure_revision_readable()
+        registration_id = uuid.uuid4().hex
+
+        def merge(previous):
+            if previous is None:
+                raise ValueError("no such device")
+            _validate_stored_fields(previous)
+            if previous.get("registration_id") is not None:
+                return previous
+            row = dict(previous, registration_id=registration_id)
+            _check_stored_row_size(row)
+            return row
+
+        identified = self._devices.update(did, merge)
+        self._bump_revision()
+        return identified
 
     def list_devices(self):
         return list(self._devices.snapshot().values())
@@ -523,7 +820,9 @@ class FleetStore:
     def revision(self):
         return self._read_revision()
 
+    @_membership_mutation
     def upsert(self, record):
+        _validate_operator_fields(record)
         did = _text(record.get("device_id"))
         self._ensure_revision_readable()
         normalized = self._devices.update(
@@ -531,6 +830,48 @@ class FleetStore:
         self._bump_revision()
         return normalized
 
+    def validate_operator_upsert(self, record):
+        """Return the normalized upsert result without mutating fleet state.
+
+        Role coordination calls this before a policy-first relaxation. The
+        real upsert repeats the same checks under the device shard lock.
+        """
+        _validate_operator_fields(record)
+        did = _text(record.get("device_id"))
+        return self._merge_record(self.get_device(did), record)
+
+    @_membership_mutation
+    def update_observation(self, device_id, *, model=None, os_family=None):
+        """Persist model/OS values learned from a trusted device observation."""
+        record = {"device_id": device_id}
+        if model is not None:
+            record["model"] = model
+        if os_family is not None:
+            record["os_family"] = os_family
+        # A caller with no new evidence gets a read-only result and does not
+        # advance the fleet revision.
+        if len(record) == 1:
+            existing = self.get_device(_text(device_id))
+            if existing is None:
+                raise ValueError("no such device")
+            return existing
+        _validate_scalar_fields(record, set(record))
+        if record.get("os_family") not in (None, "xe", "xr"):
+            raise ValueError("os_family must be xe or xr")
+        did = _text(device_id)
+        self._ensure_revision_readable()
+
+        def merge(previous):
+            if previous is None:
+                raise ValueError("no such device")
+            return self._merge_record(
+                previous, record, trusted_observation=True)
+
+        normalized = self._devices.update(did, merge)
+        self._bump_revision()
+        return normalized
+
+    @_membership_mutation
     def bulk_upsert(self, device_ids, fields):
         """Apply the SAME partial-record patch *fields* (e.g. a credential or
         platform reassignment) to every id in *device_ids* — the fix for
@@ -562,9 +903,10 @@ class FleetStore:
         per id in *device_ids* (a repeated id is processed once per
         occurrence; only the last outcome for it survives in the result,
         the same as calling upsert() that many times in a row would leave)."""
-        self._ensure_revision_readable()
         fields = {key: value for key, value in dict(fields or {}).items()
                  if key != "device_id"}
+        _validate_operator_fields(dict(fields, device_id="bulk-validation"))
+        self._ensure_revision_readable()
         results = {}
 
         def merge(did, previous):
@@ -581,7 +923,14 @@ class FleetStore:
             return normalized
 
         ids = [_text(did) for did in device_ids]
-        self._devices.update_many(ids, merge)
+        try:
+            self._devices.update_many(ids, merge)
+        except Exception as exc:
+            self._complete_grouped_intentions(ids, results, merge)
+            live = self._live_grouped_results(ids, results)
+            if any(outcome["ok"] for outcome in live.values()):
+                self._bump_revision()
+            raise FleetPartialWriteError(str(exc), live) from exc
         # One bump per CALL, not per device: the counter is a "did the fleet
         # change" signal, not a per-row tally (import_csv has always bumped
         # once per call the same way), and bumping it once keeps this call's
@@ -593,6 +942,82 @@ class FleetStore:
             self._bump_revision()
         return results
 
+    @_membership_mutation
+    def bulk_set_roles(self, role_by_device):
+        """Apply per-device role declarations in one grouped fleet mutation.
+
+        Unlike :meth:`bulk_upsert`, each device can receive a different role;
+        this is the CSV/coordinator seam.  Missing devices are reported and
+        skipped, explicit blank/``None`` clears the declaration, and the fleet
+        revision advances once when at least one row changes successfully.
+        """
+        requested = dict(role_by_device or {})
+        for device_id, role in requested.items():
+            _validate_operator_fields({"device_id": device_id, "role": role})
+        self._ensure_revision_readable()
+        ids = [_text(device_id) for device_id in requested]
+        results = {}
+
+        def merge(device_id, previous):
+            if previous is None:
+                results[device_id] = {"ok": False, "error": "no such device"}
+                return None
+            try:
+                normalized = self._merge_record(
+                    previous, {"device_id": device_id,
+                               "role": requested[device_id]})
+            except ValueError as exc:
+                results[device_id] = {"ok": False, "error": str(exc)}
+                return None
+            results[device_id] = {"ok": True, "device": normalized}
+            return normalized
+
+        try:
+            self._devices.update_many(ids, merge)
+        except Exception as exc:
+            self._complete_grouped_intentions(ids, results, merge)
+            live = self._live_grouped_results(ids, results)
+            if any(outcome["ok"] for outcome in live.values()):
+                self._bump_revision()
+            raise FleetPartialWriteError(str(exc), live) from exc
+        if any(outcome["ok"] for outcome in results.values()):
+            self._bump_revision()
+        return results
+
+    def _complete_grouped_intentions(self, device_ids, intended, merge):
+        """Build expected records for shards update_many never visited."""
+        for device_id in dict.fromkeys(device_ids):
+            if device_id in intended:
+                continue
+            try:
+                merge(device_id, self.get_device(device_id))
+            except Exception:
+                intended[device_id] = {"ok": False,
+                                       "error": "fleet write failed"}
+
+    def _live_grouped_results(self, device_ids, intended):
+        """Re-read grouped-write outcomes so a late shard error is exact."""
+        live = {}
+        for device_id in dict.fromkeys(device_ids):
+            expected = intended.get(device_id, {}).get("device")
+            if expected is None:
+                live[device_id] = {
+                    "ok": False,
+                    "error": intended.get(device_id, {}).get(
+                        "error", "fleet write failed")}
+                continue
+            try:
+                actual = self.get_device(device_id)
+            except Exception:
+                actual = None
+            if actual == expected:
+                live[device_id] = {"ok": True, "device": actual}
+            else:
+                live[device_id] = {"ok": False,
+                                   "error": "fleet write failed"}
+        return live
+
+    @_membership_mutation
     def delete(self, device_id):
         self._ensure_revision_readable()
         existed = self._devices.delete(device_id)
@@ -600,11 +1025,12 @@ class FleetStore:
             self._bump_revision()
         return existed
 
-    def import_csv(self, text):
-        """Import v2 (named-header) or a legacy routed CSV. Legacy rows are
-        classified ``legacy_routed`` and never inferred as inband. Returns
-        {imported, new, updated, skipped} where skipped counts comment, blank,
-        and header lines. All-or-nothing: any bad row raises before writing."""
+    def parse_csv(self, text):
+        """Parse and validate an inventory CSV without reading or writing state.
+
+        The role coordinator uses this pure preview to validate every declared
+        role and select the safe fleet/policy write order before phase one.
+        """
         skipped = 0
         header = None
         data_rows = []
@@ -619,13 +1045,15 @@ class FleetStore:
                 continue
             data_rows.append(row)
         if header is None:
-            return {"imported": 0, "new": 0, "updated": 0, "skipped": skipped}
+            return {"records": [], "skipped": skipped, "header": None,
+                    "legacy": False}
         # The pre-router v2 header (_CSV_V2_OLD_COLS, no vpg_number/nat_interface
         # columns) and the pre-svi_igp v2 header (_CSV_V2_PRE_SVI_IGP_COLS, no
         # svi_igp column) both still import unchanged; the retired
         # network_attachment alias header is gone -- an old exported CSV
         # using it is rejected below like any other unknown header.
-        v2_headers = (CSV_V2_COLS, _CSV_V2_OLD_COLS, _CSV_V2_PRE_SVI_IGP_COLS)
+        v2_headers = (CSV_V2_COLS, _CSV_V2_PRE_ROLE_COLS,
+                      _CSV_V2_PRE_SVI_IGP_COLS, _CSV_V2_OLD_COLS)
         legacy = header in (_LEGACY_COLS, _LEGACY_COLS[:-1], _LEGACY_COLS[:-2])
         if header not in v2_headers and not legacy:
             raise ValueError("CSV must use the v2 named header: %s" % ",".join(CSV_V2_COLS))
@@ -653,6 +1081,112 @@ class FleetStore:
                                  "row %d" % (index, record["device_id"],
                                              seen_at))
             records.append(record)
+        return {"records": records, "skipped": skipped, "header": header,
+                "legacy": legacy}
+
+    @staticmethod
+    def _revalidate_parsed_csv(parsed):
+        """Validate a parse preview as untrusted input before grouped writes."""
+        if not isinstance(parsed, dict):
+            raise ValueError("parsed CSV must be an object")
+        raw_records = parsed.get("records", [])
+        if not isinstance(raw_records, list):
+            raise ValueError("parsed CSV records must be a list")
+        skipped = parsed.get("skipped", 0)
+        if type(skipped) is not int or skipped < 0:
+            raise ValueError("parsed CSV skipped count must be a non-negative integer")
+        header = parsed.get("header")
+        legacy = parsed.get("legacy", False)
+        if type(legacy) is not bool:
+            raise ValueError("parsed CSV legacy marker must be boolean")
+        v2_headers = (CSV_V2_COLS, _CSV_V2_PRE_ROLE_COLS,
+                      _CSV_V2_PRE_SVI_IGP_COLS, _CSV_V2_OLD_COLS)
+        legacy_headers = (_LEGACY_COLS, _LEGACY_COLS[:-1], _LEGACY_COLS[:-2])
+        if header is None:
+            if raw_records or legacy:
+                raise ValueError("parsed CSV without a header cannot contain records")
+            return [], skipped
+        if not isinstance(header, list):
+            raise ValueError("parsed CSV header must be a list")
+        if legacy != (header in legacy_headers):
+            raise ValueError("parsed CSV header and legacy marker disagree")
+        if header not in v2_headers and header not in legacy_headers:
+            raise ValueError("parsed CSV has an unsupported header")
+
+        records = []
+        seen = set()
+        for index, raw in enumerate(raw_records, 1):
+            if not isinstance(raw, dict):
+                raise ValueError("parsed CSV data row %d must be an object" % index)
+            record = dict(raw)
+            allowed = ((set(_LEGACY_COLS) | {"management_type"}) if legacy else
+                       (set(CSV_V2_COLS) | {"schema_version"}))
+            unknown = sorted(set(record) - allowed)
+            if unknown:
+                raise FleetFieldError(
+                    "parsed CSV data row %d has unknown fleet field: %s"
+                    % (index, ", ".join(unknown)))
+            try:
+                normalized = (_legacy_like(record) if legacy else
+                              validate_record(record, allow_legacy=True))
+            except ValueError as exc:
+                raise type(exc)("parsed CSV data row %d: %s" % (index, exc))
+            device_id = normalized["device_id"]
+            if device_id in seen:
+                raise ValueError("parsed CSV data row %d repeats device_id %s"
+                                 % (index, device_id))
+            seen.add(device_id)
+            records.append(normalized)
+        return records, skipped
+
+    def _merge_import_record(self, previous, source):
+        """Build one final CSV replacement row without writing it."""
+        if previous is not None:
+            # Refuse recoverable historical/future data rather than silently
+            # erasing it during a whole-row CSV replacement.
+            _validate_stored_fields(previous)
+        record = dict(source)
+        registered_at = self._registration_stamp(previous)
+        registration_id = self._registration_id(previous)
+        family = previous.get("os_family") if isinstance(previous, dict) else None
+        if family:
+            record["os_family"] = family
+        profile = (previous.get("credential_profile_id")
+                   if isinstance(previous, dict) else None)
+        if profile and not record.get("credential_profile_id"):
+            record["credential_profile_id"] = profile
+        prior_role = previous.get("role") if isinstance(previous, dict) else None
+        if prior_role and not record.get("role"):
+            record["role"] = prior_role
+        record = validate_record(record, allow_legacy=True)
+        record["registered_at"] = registered_at
+        record["registration_id"] = registration_id
+        _check_stored_row_size(record)
+        return record
+
+    def validate_parsed_csv(self, parsed):
+        """Purely validate CSV replacement rows against current stored state.
+
+        Role coordination calls this before any policy-first relaxation. The
+        persistence path repeats the same merge and validation under each
+        device shard lock.
+        """
+        records, skipped = self._revalidate_parsed_csv(parsed)
+        normalized = []
+        for record in records:
+            previous = self.get_device(record["device_id"])
+            normalized.append(self._merge_import_record(previous, record))
+        return {"records": normalized, "skipped": skipped}
+
+    @_membership_mutation
+    def import_parsed_csv(self, parsed):
+        """Apply a :meth:`parse_csv` result, preserving non-CSV state.
+
+        CSV is add/change-only for roles.  Both a pre-role header and a blank
+        role in the current header retain the existing declaration; explicit
+        role removal belongs to the role API/CLI.
+        """
+        records, skipped = self._revalidate_parsed_csv(parsed)
         # Every row above is fully parsed and validated (schema, IP/mask,
         # management-type field isolation, duplicate device_id) BEFORE any
         # storage is touched -- the "all-or-nothing" the docstring promises
@@ -667,46 +1201,77 @@ class FleetStore:
         # keyed_state already accepted (a corrupt shard used to mean a
         # corrupt WHOLE fleet.json blocking every device; now it means the
         # devices in that one shard).
-        new = updated = 0
+        new = updated = roles_cleared = 0
         by_id = {record["device_id"]: record for record in records}
+        intended = {}
+        existed = {}
+
+        # A historical row carrying an unknown field is recoverable state,
+        # not permission for CSV replacement to erase it. Refuse before the
+        # first grouped write so every original field remains available for
+        # an explicit repair or migration.
+        for did in by_id:
+            previous = self.get_device(did)
+            if previous is not None:
+                _validate_stored_fields(previous)
 
         def merge(did, previous):
-            nonlocal new, updated
-            record = dict(by_id[did])
+            nonlocal new, updated, roles_cleared
             if previous is not None:
                 updated += 1
             else:
                 new += 1
-            # A re-import REPLACES the row wholesale, so carry the
-            # registration stamp across explicitly or every CSV import
-            # would look like a fresh registration of the whole fleet.
-            record["registered_at"] = self._registration_stamp(previous)
-            # Same reason, different field: os_family is determined from
-            # the device's own 'show version' banner and is deliberately
-            # NOT a CSV column -- an operator typing it would be a new way
-            # to lie to the system. Dropping it on the documented
-            # export -> edit -> re-import round trip would silently reopen
-            # the IOS-XR misroute on the next onboard.
-            family = previous.get("os_family") if isinstance(previous, dict) else None
-            if family:
-                record["os_family"] = family
-            # And the credential profile: the CSV deliberately carries no
-            # credential column (fleet-workflows.md), so the assignment
-            # made in the Console after the first import must survive the
-            # export -> edit -> re-import cycle, or one bulk edit silently
-            # disarms every device's onboard/undeploy until re-assigned.
-            profile = (previous.get("credential_profile_id")
-                       if isinstance(previous, dict) else None)
-            if profile and not record.get("credential_profile_id"):
-                record["credential_profile_id"] = profile
+            prior_role = (previous.get("role")
+                          if isinstance(previous, dict) else None)
+            record = self._merge_import_record(previous, by_id[did])
+            # This remains zero under _merge_import_record's carry-forward.
+            # Count the actual result so a future change cannot weaken the
+            # guarantee while still reporting zero.
+            if prior_role and not record.get("role"):
+                roles_cleared += 1
+            intended[did] = {"ok": True, "device": record}
+            existed[did] = previous is not None
             return record
 
         if records:
             self._ensure_revision_readable()
-            self._devices.update_many(list(by_id), merge)
+            ids = list(by_id)
+            try:
+                self._devices.update_many(ids, merge)
+            except Exception as exc:
+                # update_many intentionally retains earlier shard commits.
+                # Reconstruct expectations for an unvisited shard from its
+                # still-live row, then compare every requested full record.
+                for did in ids:
+                    if did in intended:
+                        continue
+                    try:
+                        previous = self.get_device(did)
+                        intended[did] = {
+                            "ok": True, "device": merge(did, previous)}
+                    except Exception:
+                        intended[did] = {"ok": False,
+                                         "error": "fleet write failed"}
+                live = self._live_grouped_results(ids, intended)
+                applied = {did for did, outcome in live.items()
+                           if outcome["ok"]}
+                if applied:
+                    self._bump_revision()
+                partial_stats = {
+                    "imported": len(applied),
+                    "new": sum(1 for did in applied if not existed.get(did)),
+                    "updated": sum(1 for did in applied if existed.get(did)),
+                    "skipped": skipped,
+                    "roles_cleared": 0}
+                raise FleetPartialWriteError(
+                    str(exc), live, stats=partial_stats) from exc
             self._bump_revision()
         return {"imported": len(records), "new": new, "updated": updated,
-                "skipped": skipped}
+                "skipped": skipped, "roles_cleared": roles_cleared}
+
+    def import_csv(self, text):
+        """Parse then apply an inventory CSV; invalid input writes nothing."""
+        return self.import_parsed_csv(self.parse_csv(text))
 
     @staticmethod
     def _export_row(record):
@@ -746,9 +1311,10 @@ class FleetStore:
             "# default (none) for that device; every other management type must leave it blank.",
             "# Uncomment and edit the example rows below to import your devices.",
             ",".join(CSV_V2_COLS),
-            "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,,guestshell",
-            "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,guestshell",
-            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,iox",
-            "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,router",
-            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,xr-appmgr",
+            "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,,,guestshell",
+            "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,,guestshell",
+            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,,iox",
+            "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router",
+            "# edge-c8kv-iox,192.0.2.41,router-routed,,,,10.8.0.6,255.255.255.252,10.8.0.5,,,C8000V,11,,,,iox",
+            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,,xr-appmgr",
         ]) + "\n"

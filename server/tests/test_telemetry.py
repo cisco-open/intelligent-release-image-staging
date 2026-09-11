@@ -2,14 +2,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import http.client
+import io
 import json
 import os
 import socket
 import threading
+import time
 
 import pytest
 
+import keyed_state
 import metrics
 import otlp
 import telemetry
@@ -1214,11 +1218,11 @@ def test_read_reports_missing_file_returns_empty(tmp_path):
     assert telemetry._read_reports(str(tmp_path)) == {}
 
 
-def test_read_reports_garbage_returns_empty(tmp_path):
-    (tmp_path / "telemetry.json").write_text("{not json!!!")
-    assert telemetry._read_reports(str(tmp_path)) == {}
-    (tmp_path / "telemetry.json").write_text('["a list, not a dict"]')
-    assert telemetry._read_reports(str(tmp_path)) == {}
+@pytest.mark.parametrize("payload", ["{not json!!!", '["not an object"]'])
+def test_read_reports_garbage_is_unknown_not_empty(tmp_path, payload):
+    (tmp_path / "telemetry.json").write_text(payload)
+    with pytest.raises(keyed_state.KeyedStateError):
+        telemetry._read_reports(str(tmp_path))
 
 
 def test_read_reports_parses_valid_ring(tmp_path):
@@ -1442,6 +1446,71 @@ def test_metrics_text_reports_stored_zero_when_unwired():
     assert "iris_device_reports_stored 0" in hub.metrics_text()
 
 
+def test_metrics_text_reads_durable_instruction_status_provider():
+    calls = []
+
+    def status():
+        calls.append(True)
+        return {
+            "certificate_days_to_expiry": 6,
+            "keylist_age_days": 135,
+            "root_ceremony_overdue": "critical",
+            "roots_attested_180d": 1,
+            "root_quorum_degraded": True,
+        }
+
+    hub = telemetry.Telemetry(
+        PeerRegistry(), instruction_status_info=status)
+    text = hub.metrics_text()
+    assert calls == [True]
+    assert "iris_instruction_certificate_days_to_expiry 6" in text
+    assert "iris_instruction_keylist_age_days 135" in text
+    assert "iris_instruction_root_ceremony_overdue 2" in text
+    assert "iris_instruction_root_quorum_degraded 1" in text
+
+
+def test_instruction_status_provider_failure_omits_families():
+    def failed():
+        raise OSError("unreadable")
+
+    hub = telemetry.Telemetry(
+        PeerRegistry(), instruction_status_info=failed)
+    text = hub.metrics_text()
+    assert "iris_instruction_certificate_days_to_expiry" not in text
+    assert "iris_instruction_root_quorum_degraded" not in text
+
+
+def test_from_env_wires_instruction_status_from_state_file(tmp_path):
+    import instruction_keys
+
+    status = {
+        "schema": instruction_keys.STATUS_SCHEMA,
+        "enabled": True,
+        "state": "renewal_due",
+        "certificate_days_to_expiry": 14,
+        "certificate_renewal_due": True,
+        "signing_refused": False,
+        "keylist_seq": 2,
+        "keylist_age_days": 101,
+        "keylist_resign_due": True,
+        "roots_configured": 2,
+        "roots_attested_180d": 1,
+        "root_ceremony_overdue": "warn",
+        "root_quorum_degraded": True,
+        "updated_at": int(time.time()),
+    }
+    (tmp_path / "instruction-key-status.json").write_text(
+        json.dumps(status) + "\n", encoding="utf-8")
+    hub = telemetry.from_env({
+        "IRIS_STATE": str(tmp_path),
+        "IRIS_RPC_SECRET": "test",
+        "IRIS_OTLP_ENDPOINT": "",
+        "IRIS_OBSERVABILITY": "0",
+    })
+    assert hub._instruction_status_snapshot() == status
+    assert "iris_instruction_keylist_age_days 101" in hub.metrics_text()
+
+
 # ---- live transfer streaming: aggregation + /swarm enrichment (spec 7.2/7.4)
 
 IMAGES = {"img-1": {"id": "img-1", "filename": "cat9k.bin", "size": 1000,
@@ -1628,7 +1697,9 @@ class TestPeerPolicyEnforcementFacts:
         row = self._row(self._hub(policy=policy))
         assert row["peer_policy"] == {
             "decision": "permit", "matched_seq": None,
-            "assignment": None, "quarantined": False, "fail_closed": False}
+            "assignment": None, "quarantined": False, "fail_closed": False,
+            "effective_acl": None, "acl_source": "none", "role": None,
+            "role_unknown": False, "role_shadowed_by": None}
 
     def test_quarantine_assignment_surfaces_decision_and_status(self):
         import peer_policy
@@ -1639,7 +1710,7 @@ class TestPeerPolicyEnforcementFacts:
         row = self._row(self._hub(policy=policy))
         assert row["peer_policy"]["decision"] == "deny"
         assert row["peer_policy"]["matched_seq"] == 10
-        assert row["peer_policy"]["assignment"] == "quarantine"
+        assert row["peer_policy"]["assignment"] is None
         assert row["peer_policy"]["quarantined"] is True
 
     def test_fail_closed_is_explicit_deny(self):
@@ -1689,6 +1760,60 @@ class TestPeerPolicyEnforcementFacts:
         assert "blocked" not in row["peer_enforcement"]
         assert "conflict" not in row["peer_enforcement"]
 
+    @pytest.mark.parametrize("principal_id,expected", [
+        ("iris8kv-1", True),
+        ("iris8kv-2", False),
+    ])
+    def test_mutual_origin_preflight_is_typed_identity_fact(
+            self, principal_id, expected):
+        enforcement = {
+            "state": "enforced", "conflicts": [],
+            "mutual_origin": {
+                "mode": "preflight",
+                "newly_denied_device_count": 1,
+                "newly_denied_device_ids": ["iris8kv-1"],
+            },
+        }
+        row = self._row(self._hub(
+            enforcement=enforcement, principal_id=principal_id,
+            # Both rows deliberately share the same address: attribution must
+            # come from the authenticated principal id, never the IP.
+            ip="198.51.100.14"))
+        assert row["peer_enforcement"]["mutual_origin_preflight"] is expected
+        blob = json.dumps(row, sort_keys=True)
+        assert "newly_denied_device_ids" not in blob
+
+    @pytest.mark.parametrize("count,ids,expected", [
+        (None, None, None), (0, [], False),
+    ])
+    def test_unknown_preflight_omits_fact_but_known_zero_reports_false(
+            self, count, ids, expected):
+        enforcement = {
+            "state": "enforced", "conflicts": [],
+            "mutual_origin": {
+                "mode": "preflight", "newly_denied_device_count": count,
+                "newly_denied_device_ids": ids,
+            },
+        }
+        row = self._row(self._hub(enforcement=enforcement))
+        fact = row["peer_enforcement"]
+        if expected is None:
+            assert "mutual_origin_preflight" not in fact
+        else:
+            assert fact["mutual_origin_preflight"] is expected
+        assert "blocked" not in fact
+
+    def test_malformed_preflight_never_creates_typed_fact(self):
+        enforcement = {
+            "state": "enforced", "conflicts": [],
+            "mutual_origin": {
+                "mode": "preflight", "newly_denied_device_count": 2,
+                "newly_denied_device_ids": ["iris8kv-1", "iris8kv-1"],
+            },
+        }
+        row = self._row(self._hub(enforcement=enforcement))
+        assert "mutual_origin_preflight" not in row["peer_enforcement"]
+
     def test_fail_closed_enforcement_state_does_not_prove_peer_block(self):
         enforcement = {"state": "fail_closed", "conflicts": []}
         row = self._row(self._hub(enforcement=enforcement))
@@ -1702,7 +1827,13 @@ class TestPeerPolicyEnforcementFacts:
             peer_policy.base_document(), degraded=False, fail_closed=False)
         hub = telemetry.Telemetry(
             PeerRegistry(), policy_info=lambda: policy,
-            enforcement_info=lambda: {"state": "enforced", "conflicts": []})
+            enforcement_info=lambda: {
+                "state": "enforced", "conflicts": [],
+                "mutual_origin": {
+                    "mode": "preflight", "newly_denied_device_count": 1,
+                    "newly_denied_device_ids": ["iris8kv-1"],
+                },
+            })
         hub._registry.announce("abc", "p1", "198.51.100.31", 6881, left=5,
                                now=0, principal=auth.Principal("legacy", ""))
         row = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
@@ -2214,7 +2345,7 @@ class TestFromEnvDestination:
         assert hub._headers == {"Authorization": "Bearer x"}
 
 
-def _rate_hub(peer_rows):
+def _rate_hub(peer_rows, policy=None):
     """A hub whose seeder poll reports *peer_rows* from aria2.getPeers."""
     def rpc(method, params=None):
         if method == "aria2.getGlobalStat":
@@ -2231,7 +2362,37 @@ def _rate_hub(peer_rows):
         if method == "aria2.getPeers":
             return peer_rows
         raise AssertionError(method)
-    return telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
+    return telemetry.Telemetry(
+        PeerRegistry(), rpc=rpc, interval=10,
+        policy_info=(lambda: policy) if policy is not None else None)
+
+
+def _role_policy(device_id="d1", role="boat"):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {
+        "defs": {role: {"restricted": True, "peers": [role]}},
+        "role_of": {device_id: role}, "qos_default": {}, "qos_device": {}}
+    peer_policy.validate_document(doc)
+    return peer_policy.PolicyResult(
+        doc, degraded=False, fail_closed=False,
+        roles=peer_policy.compile_roles(doc))
+
+
+def test_tracker_event_uses_only_compiled_enforced_device_role():
+    """A tracker lifecycle event is attributed from PolicyResult.roles,
+    never from fleet declaration or a caller-provided event label."""
+    policy = _role_policy()
+    hub = telemetry.Telemetry(PeerRegistry(), policy_info=lambda: policy)
+    hub.on_swarm_event({
+        "event": "join", "principal_type": "device", "principal_id": "d1",
+        "device_role": "declared-but-not-enforced", "left": 1, "ts": 1})
+    raw = hub.log_queue.snapshot()[0]
+    assert raw["device_role"] == "boat"
+    hub.on_swarm_event({
+        "event": "join", "principal_type": "legacy", "principal_id": "",
+        "device_role": "boat", "left": 1, "ts": 1})
+    assert "device_role" not in hub.log_queue.snapshot()[1]
 
 
 def test_measured_rate_survives_an_ephemeral_source_port():
@@ -2320,6 +2481,24 @@ def test_sampler_emits_a_peer_rate_record_per_measured_edge():
     assert a["iris.peer.role"] == "leecher"
 
 
+def test_sampler_peer_rate_uses_enforced_role_and_keeps_peer_role_distinct():
+    import auth
+    emitted = []
+    hub = _rate_hub(
+        [{"ip": "10.0.0.5", "port": "51999", "uploadSpeed": "2048"}],
+        policy=_role_policy("dz", "boat"))
+    hub._registry.announce("abc", "lx", "10.0.0.5", 6881, left=900,
+                           principal=auth.Principal("device", "dz"))
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
+    hub.sample()
+    record = next(r for r in emitted
+                  if r.get("eventName") == "iris.swarm.peer_rate")
+    attrs = {x["key"]: list(x["value"].values())[0]
+             for x in record["attributes"]}
+    assert attrs["iris.device.role"] == "boat"
+    assert attrs["iris.peer.role"] == "leecher"
+
+
 def test_seeder_torrent_upload_rate_is_exported_and_measured():
     """The device-reported iris.transfer.throughput cannot see a transfer that
     finishes inside one 60s agent tick -- and at lab speed a 929 MB image lands
@@ -2348,7 +2527,8 @@ def test_seeder_torrent_upload_rate_is_exported_and_measured():
 
 # --- durable origin -> peer attribution (peer ledger wiring) ---
 
-def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None):
+def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None,
+               policy=None):
     """A hub with a durable peer ledger whose aria2 double reads the MUTABLE
     `peers` (the getPeers reply) and `torrent` ({"uploadLength": n}) so a test
     can move the swarm between samples the way a real transfer does."""
@@ -2374,7 +2554,8 @@ def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None):
     return telemetry.Telemetry(
         PeerRegistry(), rpc=rpc, interval=10,
         peer_ledger=peer_ledger.PeerLedger(str(tmp_path)),
-        device_info=(lambda: devices) if devices is not None else None)
+        device_info=(lambda: devices) if devices is not None else None,
+        policy_info=(lambda: policy) if policy is not None else None)
 
 
 def _peer(ip, port, uploaded, seeder="false"):
@@ -2461,6 +2642,27 @@ def test_peer_bytes_record_names_the_device_and_the_measured_role(tmp_path):
     assert a["iris.peer.role"] == "seeder"
     assert int(a["iris.transfer.peer_sent_bytes"]) == 700
     assert int(a["iris.transfer.peer_sent_delta_bytes"]) == 300
+
+
+def test_peer_bytes_uses_enforced_role_during_declared_policy_drift(tmp_path):
+    peers = [_peer("10.0.0.2", "51422", 400, seeder="true")]
+    torrent = {"uploadLength": 400}
+    hub = _swarm_hub(
+        tmp_path, peers, torrent,
+        devices={"rtr-04": {"swarm_ip": "10.0.0.2", "role": "declared"}},
+        policy=_role_policy("rtr-04", "enforced"))
+    hub.sample()
+    emitted = []
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
+    peers[0] = _peer("10.0.0.2", "51422", 700, seeder="true")
+    torrent["uploadLength"] = 700
+    hub.sample()
+    record = next(r for r in emitted
+                  if r.get("eventName") == "iris.swarm.peer_bytes")
+    attrs = {x["key"]: list(x["value"].values())[0]
+             for x in record["attributes"]}
+    assert attrs["iris.device.role"] == "enforced"
+    assert attrs["iris.peer.role"] == "seeder"
 
 
 def test_no_record_is_emitted_for_a_peer_that_gained_nothing(tmp_path):
@@ -2850,6 +3052,15 @@ def test_peer_transfer_records_reach_the_log_queue_not_just_the_catalog():
         ip = attrs["network.peer.address"]["stringValue"]
         classes[ip] = attrs["iris.peer.attribution"]["stringValue"]
     assert classes == {"10.9.9.9": "origin", "10.0.0.7": "device"}, classes
+    # and the sender column an operator groups by: origin / the device's id
+    sources = {}
+    for record in hub.log_queue.snapshot():
+        if log_name(record) != "iris.device.peer_transfer_record":
+            continue
+        attrs = {a["key"]: a["value"] for a in record["attributes"]}
+        sources[attrs["network.peer.address"]["stringValue"]] = \
+            attrs["iris.peer.device_id"]["stringValue"]
+    assert sources == {"10.9.9.9": "origin", "10.0.0.7": "d7"}, sources
 
 
 def test_image_size_family_reaches_the_metrics_endpoint(tmp_path):
@@ -2891,6 +3102,8 @@ def test_image_size_family_reaches_the_metrics_endpoint(tmp_path):
 # pure APPEND: nothing above it is touched, and in particular the existing
 # exact-shape assertions stay the regression guard they were written to be.
 import auth
+import peer_endpoints
+import report_attribution
 import transfer_lifecycle
 
 _LIFECYCLE_NAME = "iris.transfer.lifecycle"
@@ -3908,3 +4121,566 @@ def test_a_hub_with_no_lifecycle_store_omits_the_families_rather_than_zeroing(
     assert not [p for p in exports[-1]
                 if p["name"].startswith("iris.transfer.lifecycle.")]
     assert "iris_transfer_lifecycle_" not in hub.metrics_text()
+
+
+def test_role_policy_fact_uses_loaded_compiler_and_never_permits_error(monkeypatch):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {"defs": {"boat": {"restricted": True, "peers": ["boat"]}},
+                    "role_of": {"d1": "boat"}}
+    compiled = peer_policy.compile_roles(doc)
+    policy = peer_policy.PolicyResult(doc, False, False, compiled)
+    original = peer_policy.evaluate
+    def evaluate(*args, **kwargs):
+        assert kwargs["compiled"] is compiled
+        return original(*args, **kwargs)
+    monkeypatch.setattr(peer_policy, "evaluate", evaluate)
+    row = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
+    assert row["role"] == "boat"
+    assert row["assignment"] is None
+    assert row["effective_acl"] == row["acl_source"] == "role:boat"
+    def broken(*args, **kwargs):
+        raise RuntimeError("private path")
+    monkeypatch.setattr(peer_policy, "evaluate", broken)
+    row = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
+    assert row is None or row["decision"] != "permit"
+
+
+@pytest.mark.parametrize("assignment", ["quarantine", "manual"])
+def test_policy_contract_fail_closed_exception_preserves_assignment(monkeypatch, assignment):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {"defs": {"boat": {"restricted": True}}, "role_of": {"d1": "boat"}}
+    doc["assignments"]["d1"] = assignment
+    doc["acls"]["manual"] = {"rules": []}
+    compiled = peer_policy.compile_roles(doc)
+    policy = peer_policy.PolicyResult(doc, True, True, compiled)
+    def broken(*args, **kwargs):
+        raise RuntimeError("private")
+    monkeypatch.setattr(peer_policy, "evaluate", broken)
+    fact = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
+    assert fact["decision"] == "deny" and fact["matched_seq"] is None
+    assert fact["assignment"] == (None if assignment == "quarantine"
+                                   else assignment)
+    assert fact["quarantined"] == (assignment == "quarantine")
+    assert fact["role"] == "boat"
+    assert fact["role_shadowed_by"] == (None if assignment == "quarantine" else "boat")
+
+
+def test_canonical_and_legacy_quarantine_have_identical_observable_facts():
+    import peer_policy
+
+    def fact(document):
+        policy = peer_policy.PolicyResult(
+            document, False, False, peer_policy.compile_roles(document))
+        return telemetry._peer_policy_fact(
+            policy, "device", "d1", "192.0.2.1")
+
+    legacy = peer_policy.base_document()
+    legacy["assignments"]["d1"] = peer_policy.RESERVED_QUARANTINE
+    canonical = peer_policy.base_document()
+    canonical["quarantined_devices"] = {"d1": True}
+    expected = {
+        "decision": "deny", "matched_seq": 10, "assignment": None,
+        "quarantined": True, "fail_closed": False,
+        "effective_acl": "quarantine", "acl_source": "assignment:quarantine",
+        "role": None, "role_unknown": False, "role_shadowed_by": None,
+    }
+    assert fact(legacy) == expected
+    assert fact(canonical) == expected
+
+
+def test_quarantine_preserves_ordinary_assignment_but_shadows_its_policy():
+    import peer_policy
+
+    document = peer_policy.base_document()
+    document["acls"]["manual"] = {"rules": [
+        {"seq": 20, "action": "permit", "match": {"type": "any"}},
+    ]}
+    document["assignments"]["d1"] = "manual"
+    document["roles"] = {
+        "defs": {"boat": {"restricted": True}},
+        "role_of": {"d1": "boat"},
+        "qos_default": {}, "qos_device": {},
+    }
+    document["quarantined_devices"] = {"d1": True}
+    policy = peer_policy.PolicyResult(
+        document, False, False, peer_policy.compile_roles(document))
+    row = telemetry._peer_policy_fact(
+        policy, "device", "d1", "192.0.2.1")
+    assert row["assignment"] == "manual"
+    assert row["quarantined"] is True
+    assert row["decision"] == "deny"
+    assert row["effective_acl"] == "quarantine"
+    assert row["acl_source"] == "assignment:quarantine"
+    assert row["role"] == "boat"
+    assert row["role_shadowed_by"] == "boat"
+
+
+def test_fail_closed_canonical_quarantine_preserves_known_intent(monkeypatch):
+    import peer_policy
+
+    document = peer_policy.base_document()
+    document["acls"]["manual"] = {"rules": [
+        {"seq": 20, "action": "permit", "match": {"type": "any"}},
+    ]}
+    document["assignments"]["d1"] = "manual"
+    document["roles"] = {
+        "defs": {"boat": {"restricted": True}},
+        "role_of": {"d1": "boat"},
+        "qos_default": {}, "qos_device": {},
+    }
+    document["quarantined_devices"] = {"d1": True}
+    policy = peer_policy.PolicyResult(
+        document, True, True, peer_policy.compile_roles(document))
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("evaluator unavailable")
+
+    monkeypatch.setattr(peer_policy, "evaluate", broken)
+    fact = telemetry._peer_policy_fact(
+        policy, "device", "d1", "192.0.2.1")
+    assert fact["assignment"] == "manual"
+    assert fact["quarantined"] is True
+    assert fact["decision"] == "deny"
+    assert fact["matched_seq"] is None
+    assert fact["role"] == "boat"
+    assert fact["role_shadowed_by"] == "boat"
+
+
+# ---------------------------------------------------------------------------
+# Pinned sender classification (report_attribution)
+# ---------------------------------------------------------------------------
+#
+# Observed in Splunk on 2026-09-10: iris.device.peer_transfer_record with ONE
+# event.id (<report_id>:100.90.168.20) indexed once as attribution=origin,
+# then 42 more times as attribution=unknown, same 213309440 bytes. Every
+# extra copy was a ring replay by a freshly started process, run before the
+# seeder's first re-announce had reached the empty in-memory registry.
+
+
+def _seeded_registry():
+    reg = PeerRegistry()
+    reg.announce("abc", "seeder", _ORIGIN_IP, 6881, left=0,
+                 principal=auth.Principal("service", "seeder"))
+    return reg
+
+
+def _transfer_record_report(report_id="r1", received_at=1, rows=None):
+    if rows is None:
+        rows = [_transfer_record_row(_ORIGIN_IP, 700),
+                _transfer_record_row("10.0.0.7", 300)]
+    return {"schema": "v2", "report_id": report_id,
+            "received_at": received_at, "image_id": "img-1",
+            "transfer_id": "t1",
+            "peer_transfer_records": _transfer_record_block(rows)}
+
+
+def _flat(record):
+    return {a["key"]: list(a["value"].values())[0]
+            for a in record["attributes"]}
+
+
+def _peer_rows(hub):
+    """{peer address: flat attributes} of the queued per-peer records."""
+    out = {}
+    for record in hub.log_queue.snapshot():
+        attrs = _flat(record)
+        if attrs.get("otel.log.name") == "iris.device.peer_transfer_record":
+            out[attrs["network.peer.address"]] = attrs
+    return out
+
+
+def _report_rows(hub):
+    return [_flat(r) for r in hub.log_queue.snapshot()
+            if _flat(r).get("otel.log.name") == "iris.device.transfer.report"]
+
+
+def test_a_replay_after_a_restart_exports_the_attribution_it_first_exported(
+        tmp_path):
+    """One event.id, one content. The first export ran with the seeder in the
+    registry and a device map that named 10.0.0.7; the replay runs in a fresh
+    process with an EMPTY registry and an empty device map. Pinned, the replay
+    is byte-identical to the first export -- report record and per-peer rows
+    alike -- instead of a second row saying unknown."""
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    reports = {"rtr-04": [_transfer_record_report()]}
+    first = telemetry.Telemetry(
+        _seeded_registry(), reports_info=lambda: reports,
+        device_info=lambda: {"rtr-07": {"swarm_ip": "10.0.0.7"}},
+        report_attribution=store)
+    first._export_new_reports()
+    before = _peer_rows(first)
+    assert before[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
+    assert before[_ORIGIN_IP]["iris.peer.device_id"] == "origin"
+    assert before["10.0.0.7"]["iris.peer.attribution"] == "device"
+    assert before["10.0.0.7"]["iris.peer.device_id"] == "rtr-07"
+    assert _report_rows(first)[0]["iris.transfer.bytes_from_origin_total"] \
+        == "700"
+
+    replay = telemetry.Telemetry(
+        PeerRegistry(), reports_info=lambda: reports,
+        device_info=lambda: {}, report_attribution=store)
+    replay._export_new_reports()
+    assert _peer_rows(replay) == before
+    assert [r["attributes"] for r in replay.log_queue.snapshot()] == \
+        [r["attributes"] for r in first.log_queue.snapshot()]
+
+    # without the store this is exactly the Splunk symptom
+    bare = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports,
+                               device_info=lambda: {})
+    bare._export_new_reports()
+    assert _peer_rows(bare)[_ORIGIN_IP]["iris.peer.attribution"] == "unknown"
+    assert _peer_rows(bare)[_ORIGIN_IP]["event.id"] == \
+        before[_ORIGIN_IP]["event.id"]
+
+
+def test_a_classification_made_without_any_origin_identity_is_not_pinned(
+        tmp_path):
+    """The startup gap must not become permanent: a pass that knew no origin
+    address and left a row unknown exports what it has but pins nothing, so
+    the next export (with the seeder back) classifies live and pins THAT. A
+    device-only block classified in the same gap is exact and is pinned."""
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    reports = {"rtr-04": [
+        _transfer_record_report("r1", 1),
+        _transfer_record_report("r2", 2, rows=[
+            _transfer_record_row("10.0.0.7", 300)])]}
+    devices = lambda: {"rtr-07": {"swarm_ip": "10.0.0.7"}}
+    gap = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports,
+                              device_info=devices, report_attribution=store)
+    gap._export_new_reports()
+    assert _peer_rows(gap)[_ORIGIN_IP]["iris.peer.attribution"] == "unknown"
+    assert store.get("r1") is None
+    assert store.get("r2") == (set(), {"10.0.0.7": "rtr-07"})
+
+    later = telemetry.Telemetry(_seeded_registry(),
+                                reports_info=lambda: reports,
+                                device_info=devices, report_attribution=store)
+    later._export_new_reports()
+    assert _peer_rows(later)[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
+    assert store.get("r1") == ({_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+
+    # a genuine unknown classified while the origin WAS known is pinned as
+    # such: it is an answer, not a gap
+    reports["rtr-04"].append(_transfer_record_report("r3", 3, rows=[
+        _transfer_record_row("203.0.113.9", 5)]))
+    later._export_new_reports()
+    assert store.get("r3") == (set(), {})
+
+
+def test_pinned_attribution_is_bounded_to_the_report_ring(tmp_path):
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    reports = {"rtr-04": [_transfer_record_report("r1", 1),
+                          _transfer_record_report("r2", 2)]}
+    hub = telemetry.Telemetry(_seeded_registry(),
+                              reports_info=lambda: reports,
+                              report_attribution=store)
+    hub._export_new_reports()
+    assert store.get("r1") is not None and store.get("r2") is not None
+    reports["rtr-04"] = [_transfer_record_report("r2", 2)]
+    hub._export_new_reports()
+    assert store.get("r1") is None
+    assert store.get("r2") is not None
+    # a report without a transfer-record block has nothing to pin
+    reports["rtr-04"].append({"schema": "v2", "report_id": "r9",
+                              "received_at": 9})
+    hub._export_new_reports()
+    assert store.get("r9") is None
+
+
+@pytest.mark.parametrize("failure", [
+    "directory", "shard-permission", "corrupt-shard", "nonobject-shard",
+    "nonlist-ring", "nonobject-report"])
+def test_failed_report_snapshot_preserves_delivery_and_attribution_until_recovery(
+        tmp_path, monkeypatch, failure):
+    """An incomplete scan must not retire delivered IDs or their first
+    classification, even when another shard was read successfully."""
+    directory = tmp_path / "telemetry.d"
+    directory.mkdir()
+    first_shard = directory / "00.json"
+    failed_shard = directory / "01.json"
+    first_shard.write_text(json.dumps({"rtr-04": [_transfer_record_report()]}))
+    failed_shard.write_text(json.dumps({
+        "rtr-05": [_transfer_record_report("r2", 2)]}))
+    # A migrated store intentionally retains an invalid legacy rollback guard.
+    (tmp_path / "telemetry.json").write_text("migrated: rollback prohibited")
+    (tmp_path / "telemetry.json.migrated").write_text("{}")
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    sent = []
+    exporter = otlp.OTLPLogExporter(
+        "http://collector.invalid:4318", sender=lambda _url, body: sent.append(body))
+    devices = {"rtr-07": {"swarm_ip": "10.0.0.7"}}
+    hub = telemetry.Telemetry(
+        _seeded_registry(), exporter=exporter,
+        reports_info=lambda: telemetry._read_reports(str(tmp_path)),
+        device_info=lambda: devices, report_attribution=store)
+    hub._export_new_reports()
+    original_records = {telemetry._otlp_record_event_id(record): record["attributes"]
+                        for record in hub.log_queue.snapshot()}
+    assert hub.log_queue.flush(lambda _batch: None) == 6
+    hub._export_new_reports()
+    assert hub._seen_report_event_ids == {"r1", "r2"}
+    pins = store.snapshot()
+    pin_bytes = open(store.path, "rb").read()
+    pin_mtime = os.stat(store.path).st_mtime_ns
+    assert set(pins) == {"r1", "r2"}
+
+    original_open, original_scandir = builtins.open, os.scandir
+
+    def faulty_open(filename, *args, **kwargs):
+        if os.fspath(filename) == str(failed_shard):
+            if failure == "shard-permission":
+                raise PermissionError("unreadable report shard")
+            if failure == "corrupt-shard":
+                return io.StringIO("{invalid")
+            if failure == "nonobject-shard":
+                return io.StringIO("[]")
+            if failure == "nonlist-ring":
+                return io.StringIO(json.dumps({"rtr-05": "invalid ring"}))
+            if failure == "nonobject-report":
+                return io.StringIO(json.dumps({"rtr-05": [None]}))
+        return original_open(filename, *args, **kwargs)
+
+    def faulty_scandir(filename):
+        if os.fspath(filename) == str(directory) and failure == "directory":
+            raise PermissionError("unreadable report directory")
+        return original_scandir(filename)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", faulty_open)
+        patch.setattr(keyed_state.os, "scandir", faulty_scandir)
+        hub.sample()
+    assert hub._seen_report_event_ids == {"r1", "r2"}
+    assert hub.log_queue.queued == 0 and sent == []
+    assert store.snapshot() == pins
+    assert open(store.path, "rb").read() == pin_bytes
+    assert os.stat(store.path).st_mtime_ns == pin_mtime
+
+    # Recovery sees the same delivered ring with changed live identity; it
+    # neither replays the records nor drops the original attribution pins.
+    devices.clear()
+    hub._registry = PeerRegistry()
+    hub.sample()
+    assert hub._seen_report_event_ids == {"r1", "r2"}
+    assert hub.log_queue.queued == 0 and sent == []
+    assert store.snapshot() == pins
+    replay = telemetry.Telemetry(
+        PeerRegistry(), reports_info=lambda: telemetry._read_reports(str(tmp_path)),
+        device_info=lambda: {}, report_attribution=store)
+    replay._export_new_reports()
+    assert {telemetry._otlp_record_event_id(record): record["attributes"]
+            for record in replay.log_queue.snapshot()} == original_records
+
+    # A genuinely new report still enters the queue after recovery.
+    first_shard.write_text(json.dumps({"rtr-04": [
+        _transfer_record_report(),
+        {"schema": "v2", "report_id": "r3", "received_at": 3}]}))
+    hub._export_new_reports()
+    assert [telemetry._otlp_record_event_id(record)
+            for record in hub.log_queue.snapshot()] == ["r3"]
+
+
+@pytest.mark.parametrize("empty_store", [
+    "missing-fresh", "empty-directory", "empty-legacy", "empty-migrated"])
+def test_verified_empty_report_store_prunes_delivery_and_attribution(
+        tmp_path, empty_store):
+    path = tmp_path / "telemetry.json"
+    path.write_text(json.dumps({"rtr-04": [_transfer_record_report()]}))
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    hub = telemetry.Telemetry(
+        _seeded_registry(), reports_info=lambda: telemetry._read_reports(str(tmp_path)),
+        report_attribution=store)
+    hub._export_new_reports()
+    assert hub.log_queue.flush(lambda _batch: None) == 3
+    assert "r1" in hub._seen_report_event_ids
+    assert store.get("r1") is not None
+    path.unlink()
+    if empty_store in {"empty-directory", "empty-migrated"}:
+        (tmp_path / "telemetry.d").mkdir()
+    if empty_store == "empty-legacy":
+        path.write_text("{}")
+    if empty_store == "empty-migrated":
+        path.write_text("migrated: rollback prohibited")
+        (tmp_path / "telemetry.json.migrated").write_text("{}")
+    hub._export_new_reports()
+    assert hub._seen_report_event_ids == set()
+    assert store.snapshot() == {}
+    assert hub.log_queue.queued == 0
+
+
+def test_report_attribution_store_pins_once_and_reads_bad_state_as_empty(
+        tmp_path):
+    store = report_attribution.ReportAttributionStore(str(tmp_path),
+                                                      now_fn=lambda: 42.0)
+    assert store.get("r1") is None
+    assert store.pin("r1", {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"}) is True
+    # first pin wins: the classification never changes once exported
+    assert store.pin("r1", set(), {}) is False
+    assert store.get("r1") == ({_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+    doc = json.load(open(store.path))
+    assert doc["reports"]["r1"]["pinned_at"] == 42.0
+    store.prune({"r1"})
+    assert store.get("r1") is not None
+    store.prune(set())
+    assert store.get("r1") is None
+    # corrupt file: nothing pinned, nothing raised, and the next pin heals it
+    open(store.path, "w").write("{not json")
+    assert store.get("r1") is None
+    assert store.pin("r1", set(), {}) is True
+    assert store.get("r1") == (set(), {})
+    # an unwritable store costs the pin, never the export
+    reports = {"rtr-04": [_transfer_record_report()]}
+    class Boom:
+        def snapshot(self):
+            raise OSError("disk gone")
+
+        def sync(self, keep, pins):
+            raise OSError("disk gone")
+    hub = telemetry.Telemetry(_seeded_registry(),
+                              reports_info=lambda: reports,
+                              report_attribution=Boom())
+    hub._export_new_reports()
+    assert _peer_rows(hub)[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
+
+
+@pytest.mark.parametrize("writer", ["pin", "sync"])
+def test_report_attribution_repairs_a_rejected_entry_without_rewriting_valid_pins(
+        tmp_path, writer):
+    store = report_attribution.ReportAttributionStore(str(tmp_path),
+                                                      now_fn=lambda: 42.0)
+    store.sync({"r1", "r2"}, {"r1": ({_ORIGIN_IP}, {}),
+                              "r2": (set(), {"10.0.0.7": "rtr-07"})})
+    with open(store.path) as stream:
+        data = json.load(stream)
+    original = dict(data["reports"]["r1"])
+    data["reports"]["r2"] = {"origin": "invalid", "devices": {}}
+    with open(store.path, "w") as stream:
+        json.dump(data, stream)
+    assert store.get("r2") is None and "r2" not in store.snapshot()
+
+    if writer == "pin":
+        changed = store.pin("r2", {_ORIGIN_IP}, {})
+    else:
+        changed = store.sync({"r1", "r2"}, {
+            "r1": (set(), {}), "r2": ({_ORIGIN_IP}, {})})
+    assert changed is True
+    # First *valid* pin still wins; a rejected entry cannot block recovery.
+    recovered = report_attribution.ReportAttributionStore(str(tmp_path))
+    assert recovered.get("r2") == ({_ORIGIN_IP}, {})
+    with open(store.path) as stream:
+        assert json.load(stream)["reports"]["r1"] == original
+
+
+def test_report_attribution_sync_is_one_read_modify_write_per_pass(tmp_path):
+    """The export pass reads the store once (snapshot) and writes it at most
+    once (sync), whatever the fleet size; sync prunes and pins together and
+    leaves the file alone when nothing changed."""
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    assert store.snapshot() == {}
+    assert store.sync({"r1", "r2"}, {"r1": ({_ORIGIN_IP}, {}),
+                                     "r2": (set(), {"10.0.0.7": "rtr-07"})})
+    assert store.snapshot() == {"r1": ({_ORIGIN_IP}, {}),
+                                "r2": (set(), {"10.0.0.7": "rtr-07"})}
+    stamp = os.stat(store.path).st_mtime_ns
+    # nothing to drop, nothing new (r1 is already pinned: first pin wins)
+    assert store.sync({"r1", "r2"}, {"r1": (set(), {})}) is False
+    assert os.stat(store.path).st_mtime_ns == stamp
+    assert store.snapshot()["r1"] == ({_ORIGIN_IP}, {})
+    # r2 left the ring, r3 arrives: one write
+    assert store.sync({"r1", "r3"}, {"r3": (set(), {})}) is True
+    assert set(store.snapshot()) == {"r1", "r3"}
+    # a corrupt entry is not pinned, and does not spoil its neighbours
+    doc = json.load(open(store.path))
+    doc["reports"]["r3"] = {"origin": "not-a-list"}
+    json.dump(doc, open(store.path, "w"))
+    assert set(store.snapshot()) == {"r1"}
+
+
+def test_identity_view_is_cut_down_to_the_block_rows():
+    block = _transfer_record_block([_transfer_record_row(_ORIGIN_IP, 1),
+                                    _transfer_record_row("10.0.0.7", 2),
+                                    _transfer_record_row("10.0.0.8", 3)])
+    origin, devices = report_attribution.identity_view(
+        block, {_ORIGIN_IP, "192.0.2.99"},
+        {"10.0.0.7": "rtr-07", "10.0.0.50": "rtr-50"})
+    assert origin == {_ORIGIN_IP}
+    assert devices == {"10.0.0.7": "rtr-07"}
+    assert report_attribution.identity_view(None, {_ORIGIN_IP}, {}) == \
+        (set(), {})
+    # provisional: no origin known AND a row went unknown
+    assert report_attribution.is_provisional({"unknown_rows": 1}, set())
+    assert not report_attribution.is_provisional({"unknown_rows": 0}, set())
+    assert not report_attribution.is_provisional({"unknown_rows": 1},
+                                                 {_ORIGIN_IP})
+    assert not report_attribution.is_provisional(None, set())
+
+
+def test_origin_addresses_survive_a_restart_through_the_durable_endpoint_map(
+        tmp_path):
+    """The registry is in-memory and empty until the seeder re-announces
+    (minutes, in the lab: aria2 announces before the tracker listens and
+    retries later). The tracker's durable endpoint map already holds the
+    service:seeder principal's addresses, so a fresh hub knows the origin
+    from its first pass. Same principal rule: a DEVICE named seeder is not
+    the origin, and an aged-out endpoint is not the origin's address."""
+    path = str(tmp_path / "peer-endpoints.json")
+    peer_endpoints.record_endpoint(path, auth.Principal("service", "seeder"),
+                                   _ORIGIN_IP, 6881, 1000.0)
+    peer_endpoints.record_endpoint(path, auth.Principal("device", "seeder"),
+                                   "10.0.0.9", 6881, 1000.0)
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        origin_endpoints_info=lambda: peer_endpoints.fresh_endpoints(
+            path, 1010.0))
+    assert hub._origin_swarm_ips() == {_ORIGIN_IP}
+    # union with the live registry, not a replacement
+    hub = telemetry.Telemetry(
+        _seeded_registry(),
+        origin_endpoints_info=lambda: {
+            "service:seeder": {"principal_type": "service",
+                               "principal_id": "seeder",
+                               "endpoints": [{"ipv4": "192.0.2.11"}]}})
+    assert hub._origin_swarm_ips() == {_ORIGIN_IP, "192.0.2.11"}
+    expired = 1000.0 + peer_endpoints.endpoint_ttl() + 1
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        origin_endpoints_info=lambda: peer_endpoints.fresh_endpoints(
+            path, expired))
+    assert hub._origin_swarm_ips() == set()
+
+    def boom():
+        raise RuntimeError("map down")
+    hub = telemetry.Telemetry(PeerRegistry(), origin_endpoints_info=boom)
+    assert hub._origin_swarm_ips() == set()
+    hub = telemetry.Telemetry(PeerRegistry(),
+                              origin_endpoints_info=lambda: "garbage")
+    assert hub._origin_swarm_ips() == set()
+
+
+def test_peer_transfer_records_carry_the_catalog_filename():
+    """iris.image.name is the catalog's filename for iris.image.id, looked up
+    at export; an image gone from the catalog keeps its id and has no name,
+    and an unreadable catalog costs the name, never the export."""
+    reports = {"rtr-04": [_transfer_record_report()]}
+    hub = telemetry.Telemetry(
+        _seeded_registry(), reports_info=lambda: reports,
+        images_info=lambda: {"img-1": {"filename": "cat9k.bin", "size": 1},
+                             "img-2": {"filename": "other.bin"}})
+    hub._export_new_reports()
+    rows = _peer_rows(hub)
+    assert {r["iris.image.id"] for r in rows.values()} == {"img-1"}
+    assert {r["iris.image.name"] for r in rows.values()} == {"cat9k.bin"}
+    hub = telemetry.Telemetry(_seeded_registry(), reports_info=lambda: reports,
+                              images_info=lambda: {"img-2": {"filename": "x"}})
+    hub._export_new_reports()
+    assert all("iris.image.name" not in r for r in _peer_rows(hub).values())
+    assert {r["iris.image.id"] for r in _peer_rows(hub).values()} == {"img-1"}
+
+    def boom():
+        raise RuntimeError("catalog unreadable")
+    hub = telemetry.Telemetry(_seeded_registry(), reports_info=lambda: reports,
+                              images_info=boom)
+    hub._export_new_reports()
+    assert len(_peer_rows(hub)) == 2
+    assert all("iris.image.name" not in r for r in _peer_rows(hub).values())

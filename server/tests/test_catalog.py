@@ -12,10 +12,13 @@ import subprocess
 import sys
 import threading
 import time
+import contextlib
+from pathlib import Path
 
 import pytest
 
 import catalog
+import instructions
 import keyed_state
 import secrets_store
 
@@ -36,6 +39,20 @@ def _mint_catalog_token(secrets_path, device_id, now=None):
     tok = secrets_store.mint(store, device_id, "catalog_token", now)
     secrets_store.save(store, secrets_path)
     return tok
+
+
+def _instruction_record(value, created_at, expires_at=None, revoked=False):
+    """Build the frozen Task 12 instruction record without logging its value."""
+    if expires_at is None:
+        expires_at = created_at + 2592000
+    return {
+        "value": value,
+        "key_id": hashlib.sha256(bytes.fromhex(value)).hexdigest(),
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "revoked": revoked,
+        "_scope": "instructions",
+    }
 
 
 def _store(tmp_path):
@@ -569,7 +586,7 @@ def _serve_with_device(tmp_path, device_id="dev-1"):
 
 
 def test_token_refresh_returns_new_token_and_secret_bag(tmp_path):
-    """POST /v1/devices/<id>/token-refresh → new catalog_token + all 4 keys."""
+    """Refresh lazily provisions and returns the closed instruction-key bag."""
     os.environ["IRIS_AGE_RECIPIENTS"] = ""
     srv, port, old_tok = _serve_with_device(tmp_path, "dev-1")
     try:
@@ -578,15 +595,26 @@ def test_token_refresh_returns_new_token_and_secret_bag(tmp_path):
             "/v1/devices/dev-1/token-refresh",
             token=old_tok,
             body=b"{}")
-        assert status == 200, body_bytes
+        assert status == 200
         resp = json.loads(body_bytes)
         assert "catalog_token" in resp
         assert "expires_at" in resp
         assert "announce_token" in resp
         assert "rpc_secret" in resp
+        assert set(resp["instr_key"]) == {"value", "key_id"}
+        assert "instr_key_prev" not in resp
         assert resp["catalog_token"] != old_tok
     finally:
         srv.shutdown()
+
+    persisted = secrets_store.load(_secrets_path(tmp_path))["devices"]["dev-1"]
+    assert resp["instr_key"] == {
+        "value": persisted["instr_key"]["value"],
+        "key_id": persisted["instr_key"]["key_id"],
+    }
+    with open(str(tmp_path / "audit.jsonl"), encoding="utf-8") as stream:
+        audit_text = stream.read()
+    assert persisted["instr_key"]["value"] not in audit_text
 
 
 def test_token_refresh_omits_absent_announce_and_rpc(tmp_path):
@@ -608,7 +636,7 @@ def test_token_refresh_omits_absent_announce_and_rpc(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-bare/token-refresh",
             token="tok", body=b"{}")
-        assert status == 200, body
+        assert status == 200
         resp = json.loads(body)
         assert "catalog_token" in resp and resp["catalog_token"] != "tok"
         # The absent secrets must NOT be present as empty strings.
@@ -632,12 +660,258 @@ def test_token_refresh_includes_present_announce_and_rpc(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-full/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         resp = json.loads(body)
         assert resp.get("announce_token"), "present announce_token was dropped"
         assert resp.get("rpc_secret"), "present rpc_secret was dropped"
     finally:
         srv.shutdown()
+
+
+def _serve_with_instruction_records(tmp_path, current, previous=None,
+                                    device_id="dev-instr"):
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    token = secrets_store.mint(store, device_id, "catalog_token", now)
+    secrets_store.mint(store, device_id, "announce_token", now)
+    secrets_store.mint(store, device_id, "rpc_secret", now)
+    dev = store["devices"][device_id]
+    if current is not None:
+        dev["instr_key"] = current
+    if previous is not None:
+        dev["instr_key_prev"] = previous
+    secrets_store.save(store, sp)
+    srv = catalog.make_server(
+        "127.0.0.1", 0, _store(tmp_path), sp,
+        audit_path=str(tmp_path / "audit.jsonl"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1], token
+
+
+def test_token_refresh_delivers_expired_current_and_live_previous(tmp_path):
+    now = int(time.time())
+    current = _instruction_record(
+        "11" * 32, now - 2592001, now - 1)
+    previous = _instruction_record(
+        "12" * 32, now - 200, now + 200)
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 200
+        bag = json.loads(body)
+        assert bag["instr_key"] == {
+            "value": current["value"], "key_id": current["key_id"]}
+        assert bag["instr_key_prev"] == {
+            "value": previous["value"], "key_id": previous["key_id"]}
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("previous_state", ["absent", "expired", "boundary",
+                                             "revoked"])
+def test_token_refresh_omits_ineligible_instruction_previous(
+        tmp_path, previous_state):
+    now = int(time.time())
+    current = _instruction_record("13" * 32, now - 100)
+    previous = None
+    if previous_state != "absent":
+        expiry = now if previous_state == "boundary" else now - 1
+        if previous_state == "revoked":
+            expiry = now + 100
+        previous = _instruction_record(
+            "14" * 32, now - 200, expiry,
+            revoked=previous_state == "revoked")
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 200
+        assert "instr_key_prev" not in json.loads(body)
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("previous_state", ["live", "expired", "revoked"])
+def test_token_refresh_refuses_duplicate_instruction_pair_before_omission(
+        tmp_path, previous_state):
+    now = int(time.time())
+    current = _instruction_record("1a" * 32, now - 100)
+    previous = dict(current)
+    if previous_state == "live":
+        previous["expires_at"] = now + 100
+    elif previous_state == "expired":
+        previous["expires_at"] = now - 1
+    else:
+        previous["expires_at"] = now + 100
+        previous["revoked"] = True
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    path = Path(_secrets_path(tmp_path))
+    before = path.read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+        assert current["value"].encode() not in body
+    finally:
+        srv.shutdown()
+    assert path.read_bytes() == before
+
+
+def test_previous_token_recovery_refuses_duplicate_instruction_pair(
+        tmp_path):
+    now = int(time.time())
+    current = _instruction_record("1b" * 32, now - 100)
+    srv, port, token = _serve_with_instruction_records(tmp_path, current)
+    path = _secrets_path(tmp_path)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 200
+        with secrets_store.store_lock(path):
+            stored = secrets_store.load(path)
+            duplicate = dict(stored["devices"]["dev-instr"]["instr_key"])
+            duplicate["expires_at"] = now + 100
+            stored["devices"]["dev-instr"]["instr_key_prev"] = duplicate
+            secrets_store.save(stored, path)
+        before = Path(path).read_bytes()
+
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+        assert current["value"].encode() not in body
+    finally:
+        srv.shutdown()
+    assert Path(path).read_bytes() == before
+
+
+def test_token_refresh_refuses_present_null_instruction_previous(tmp_path):
+    now = int(time.time())
+    current = _instruction_record("1c" * 32, now - 100)
+    srv, port, token = _serve_with_instruction_records(tmp_path, current)
+    path = _secrets_path(tmp_path)
+    with secrets_store.store_lock(path):
+        stored = secrets_store.load(path)
+        stored["devices"]["dev-instr"]["instr_key_prev"] = None
+        secrets_store.save(stored, path)
+    before = Path(path).read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+    finally:
+        srv.shutdown()
+    assert Path(path).read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["missing-current", "bad-current-id",
+                                    "extra-current-field", "bad-previous"])
+def test_token_refresh_refuses_malformed_or_inconsistent_instruction_state(
+        tmp_path, damage):
+    now = int(time.time())
+    current = _instruction_record("15" * 32, now - 100)
+    previous = _instruction_record("16" * 32, now - 50, now + 100)
+    if damage == "missing-current":
+        current = None
+    elif damage == "bad-current-id":
+        current["key_id"] = "canary-malicious-field"
+        previous = None
+    elif damage == "extra-current-field":
+        current["extra"] = "canary-malicious-field"
+        previous = None
+    else:
+        previous["value"] = "canary-malicious-field"
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    path = Path(_secrets_path(tmp_path))
+    before = path.read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+        assert b"canary" not in body
+    finally:
+        srv.shutdown()
+    assert path.read_bytes() == before
+
+
+def test_token_refresh_refuses_revoked_instruction_current_without_disclosure(
+        tmp_path):
+    now = int(time.time())
+    current = _instruction_record("17" * 32, now - 100, revoked=True)
+    srv, port, token = _serve_with_instruction_records(tmp_path, current)
+    path = Path(_secrets_path(tmp_path))
+    before = path.read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 409
+        assert json.loads(body)["error"] == "device revoked"
+        assert current["value"].encode() not in body
+    finally:
+        srv.shutdown()
+    assert path.read_bytes() == before
+
+
+def test_instruction_rotation_winning_lock_is_preserved_by_refresh(
+        tmp_path, monkeypatch):
+    now = int(time.time())
+    old_instruction = _instruction_record("18" * 32, now - 100)
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, old_instruction)
+    path = _secrets_path(tmp_path)
+    real_lock = secrets_store.store_lock
+    reached = threading.Event()
+
+    @contextlib.contextmanager
+    def announced_lock(lock_path):
+        reached.set()
+        with real_lock(lock_path):
+            yield
+
+    monkeypatch.setattr(secrets_store, "store_lock", announced_lock)
+    result = {}
+
+    def refresh():
+        result["status"], _, result["body"] = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+
+    try:
+        with real_lock(path):
+            thread = threading.Thread(target=refresh)
+            thread.start()
+            assert reached.wait(timeout=3)
+            rotated = secrets_store.load(path)
+            secrets_store.rotate_instruction_key(rotated, "dev-instr", now + 1)
+            secrets_store.save(rotated, path)
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert result["status"] == 200
+        bag = json.loads(result["body"])
+    finally:
+        srv.shutdown()
+
+    final = secrets_store.load(path)["devices"]["dev-instr"]
+    assert bag["instr_key"]["key_id"] == final["instr_key"]["key_id"]
+    assert bag["instr_key_prev"]["key_id"] == old_instruction["key_id"]
+    assert final["catalog_token"]["value"] != token
 
 
 def test_refresh_audit_ids_are_hashes_not_token_prefixes(tmp_path):
@@ -651,7 +925,7 @@ def test_refresh_audit_ids_are_hashes_not_token_prefixes(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-1/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         new_tok = json.loads(body)["catalog_token"]
 
         with open(str(tmp_path / "audit.jsonl")) as f:
@@ -682,7 +956,7 @@ def test_token_refresh_prev_stash_uses_int_epochs(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-int/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
     finally:
         srv.shutdown()
 
@@ -793,6 +1067,244 @@ def test_auth_fail_writes_audit_line(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #233: every refused bearer leaves one bounded, token-free stderr line
+# ---------------------------------------------------------------------------
+
+def _refusal_lines(capsys):
+    return [line for line in capsys.readouterr().err.splitlines()
+            if line.startswith("iris-catalog: refused bearer")]
+
+
+def test_refused_bearer_logs_one_bounded_line_without_the_token(
+        tmp_path, capsys):
+    """A 401 outside token-refresh used to be invisible: log_message is
+    suppressed and only token-refresh audits.  Each refusal now writes one
+    stderr line carrying method, route template, device id (from the path,
+    only when id-shaped), source IP and a reason code -- never the token or
+    any prefix of it, and never an attacker-shaped path segment (#233)."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    tok_a = secrets_store.mint(store, "dev-a", "catalog_token", now)
+    tok_b = secrets_store.mint(store, "dev-b", "catalog_token", now)
+    expired_tok = "expiredtokendeadbeef00000000dead"
+    revoked_tok = "revokedtokendeadbeef00000000dead"
+    store["devices"]["dev-x"] = {"catalog_token": {
+        "value": expired_tok, "created_at": now - 7200,
+        "expires_at": now - 3600, "revoked": False}}
+    store["devices"]["dev-r"] = {"catalog_token": {
+        "value": revoked_tok, "created_at": now,
+        "expires_at": now + 3600, "revoked": True}}
+    secrets_store.save(store, sp)
+    s = _store(tmp_path)
+    s.set_policy("dev-a", approved_image_id="img1")
+    srv = catalog.make_server("127.0.0.1", 0, s, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    capsys.readouterr()
+    try:
+        bogus = "bogus-" + "z" * 26
+        status, _, _ = _req(port, "GET", "/v1/devices/dev-a/policy",
+                            token=bogus)
+        assert status == 401
+        lines = _refusal_lines(capsys)
+        assert len(lines) == 1, lines
+        line = lines[0]
+        for field in ("method=GET", "route=/v1/devices/{device_id}/policy",
+                      "device=dev-a", "src=127.0.0.1",
+                      "reason=unknown_token"):
+            assert field in line, line
+        assert bogus not in line and bogus[:8] not in line
+        # The correlation id is the audit log's truncated sha256, not the
+        # token: an operator can match it against mint/refresh old_id/new_id.
+        assert "token_id=" + catalog._audit_id(bogus) in line
+
+        # The same refusal again inside the window is counted, not repeated.
+        status, _, _ = _req(port, "GET", "/v1/devices/dev-a/policy",
+                            token=bogus)
+        assert status == 401
+        assert _refusal_lines(capsys) == []
+
+        # Another device's live token on a device-bound route.
+        _req(port, "POST", "/v1/devices/dev-a/heartbeat", token=tok_b,
+             body=b"{}")
+        (line,) = _refusal_lines(capsys)
+        assert "reason=wrong_principal" in line, line
+        assert "route=/v1/devices/{device_id}/heartbeat" in line
+        assert "method=POST" in line
+        assert tok_b not in line and tok_b[:8] not in line
+
+        _req(port, "POST", "/v1/devices/dev-x/telemetry", token=expired_tok,
+             body=b"{}")
+        (line,) = _refusal_lines(capsys)
+        assert "reason=expired" in line and "device=dev-x" in line, line
+        assert "expiredtoken" not in line
+
+        # Image routes carry no device id in the path.
+        _req(port, "GET", "/v1/images", token=revoked_tok)
+        (line,) = _refusal_lines(capsys)
+        assert "reason=revoked" in line and "route=/v1/images" in line, line
+        assert "device=-" in line
+        assert "revokedtoken" not in line
+
+        status, _, _ = _req(port, "GET", "/v1/images")
+        assert status == 401
+        (line,) = _refusal_lines(capsys)
+        assert "reason=missing_bearer" in line, line
+        assert "token_id=" not in line
+
+        # Unregistered methods authenticate first and log the same way.
+        status, _, _ = _req(port, "PUT", "/v1/images/img1", token=bogus)
+        assert status == 401
+        (line,) = _refusal_lines(capsys)
+        assert "method=PUT" in line and "route=unmatched" in line, line
+
+        # The path segment is unauthenticated input: an id-shaped value is
+        # logged, anything else is a placeholder, never echoed.
+        attacker_id = "x" * 32000
+        _req(port, "GET", "/v1/devices/" + attacker_id + "/policy",
+             token=bogus)
+        (line,) = _refusal_lines(capsys)
+        assert "device=invalid" in line, line
+        assert "x" * 65 not in line and len(line) < 400
+
+        # An accepted request writes nothing.
+        status, _, _ = _req(port, "GET", "/v1/devices/dev-a/policy",
+                            token=tok_a)
+        assert status == 200
+        assert _refusal_lines(capsys) == []
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("endpoint", ["instructions", "instruction-keylist"])
+@pytest.mark.parametrize("case, expected_status, reason", [
+    ("missing", 401, "missing_bearer"),
+    ("unknown", 401, "unknown_token"),
+    ("expired", 401, "expired"),
+    ("revoked", 401, "revoked"),
+    ("previous", 401, "previous_token"),
+    ("wrong-device", 403, "wrong_principal"),
+    ("invalid-device-path", 403, "wrong_principal"),
+])
+def test_instruction_bearer_refusals_use_bounded_redacted_logger(
+        tmp_path, capsys, endpoint, case, expected_status, reason):
+    """The specialized instruction handler must retain the ordinary route's
+    diagnostics without changing its distinct 401/403 response contract."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    own = secrets_store.mint(store, "dev-a", "catalog_token", now)
+    other = secrets_store.mint(store, "dev-b", "catalog_token", now)
+    record = store["devices"]["dev-a"]["catalog_token"]
+    token, device = own, "dev-a"
+    if case == "missing":
+        token = None
+    elif case == "unknown":
+        token = "unknown-catalog-bearer-for-test"
+    elif case == "expired":
+        record["expires_at"] = now - 3600
+    elif case == "revoked":
+        record["revoked"] = True
+    elif case == "previous":
+        store["devices"]["dev-a"]["catalog_token_prev"] = dict(record)
+        record["value"] = "replacement-catalog-bearer-for-test"
+    elif case == "wrong-device":
+        token = other
+    elif case == "invalid-device-path":
+        device = "x" * 300
+    secrets_store.save(store, sp)
+    srv = catalog.make_server("127.0.0.1", 0, _store(tmp_path), sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    path = "/v1/devices/%s/%s" % (device, endpoint)
+    capsys.readouterr()
+    try:
+        status, _, _ = _req(srv.server_address[1], "GET", path, token=token)
+        assert status == expected_status
+        lines = _refusal_lines(capsys)
+        assert len(lines) == 1
+        line = lines[0]
+        assert "method=GET" in line
+        assert "route=/v1/devices/{device_id}/" + endpoint in line
+        assert "reason=" + reason in line
+        assert "device=" + ("invalid" if len(device) > 64 else device) in line
+        assert "src=127.0.0.1" in line
+        assert len(line) < 400 and "x" * 65 not in line
+        if token:
+            assert token not in line and token[:8] not in line
+            assert "token_id=" + catalog._audit_id(token) in line
+        else:
+            assert "token_id=" not in line
+        # Specialized endpoints share the logger's same repeat suppression.
+        status, _, _ = _req(srv.server_address[1], "GET", path, token=token)
+        assert status == expected_status
+        assert _refusal_lines(capsys) == []
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_rolled_old_token_on_a_device_route_logs_previous_token(
+        tmp_path, capsys):
+    """The lab symptom behind #233: a device still presenting its pre-rotation
+    token on heartbeat.  The line says so, so an operator can tell a missed
+    refresh delivery from a device that never called home."""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-pt")
+    capsys.readouterr()
+    try:
+        status, _, _ = _req(port, "POST", "/v1/devices/dev-pt/token-refresh",
+                            token=old_tok, body=b"{}")
+        assert status == 200
+        assert _refusal_lines(capsys) == []
+        status, _, _ = _req(port, "POST", "/v1/devices/dev-pt/heartbeat",
+                            token=old_tok, body=b"{}")
+        assert status == 401
+        (line,) = _refusal_lines(capsys)
+        assert "reason=previous_token" in line and "device=dev-pt" in line
+        assert old_tok not in line and old_tok[:8] not in line
+    finally:
+        srv.shutdown()
+
+
+def test_refusal_log_dedupes_and_caps_lines_per_window(capsys):
+    clock = [1000.0]
+    log = catalog._RefusalLog(window=60, max_keys=8, max_lines=3,
+                              now_fn=lambda: clock[0])
+    key = ("10.0.0.1", "dev-a", "/v1/images", "unknown_token")
+    assert log.refused(*key, method="GET", token_id="abcd1234")
+    assert not log.refused(*key)
+    assert not log.refused(*key)
+    clock[0] += 60
+    assert log.refused(*key)
+    err = capsys.readouterr().err
+    assert err.count("refused bearer") == 2
+    assert "token_id=abcd1234" in err.splitlines()[0]
+    assert "repeats=2" in err.splitlines()[-1]
+    # Three lines per window across all keys; the shortfall is reported on
+    # the next line that does get written.
+    assert log.refused("10.0.0.2", "dev-b", "/v1/images", "unknown_token")
+    assert log.refused("10.0.0.3", "dev-c", "/v1/images", "unknown_token")
+    assert not log.refused("10.0.0.4", "dev-d", "/v1/images", "unknown_token")
+    assert not log.refused("10.0.0.5", "dev-e", "/v1/images", "unknown_token")
+    assert capsys.readouterr().err.count("refused bearer") == 2
+    clock[0] += 60
+    assert log.refused("10.0.0.6", "dev-f", "/v1/images", "unknown_token")
+    err = capsys.readouterr().err
+    assert err.count("refused bearer") == 1 and "dropped=2" in err
+
+
+def test_refusal_log_key_table_stays_bounded(capsys):
+    log = catalog._RefusalLog(window=60, max_keys=2, max_lines=100,
+                              now_fn=lambda: 5.0)
+    for i in range(6):
+        assert log.refused("10.0.0.%d" % i, "dev", "/v1/images", "revoked")
+        assert len(log._seen) <= 2
+    assert capsys.readouterr().err.count("refused bearer") == 6
+
+
+# ---------------------------------------------------------------------------
 # Task 4: old token overlap grace after refresh
 # ---------------------------------------------------------------------------
 
@@ -835,15 +1347,16 @@ def test_lost_refresh_response_retry_reissues_current_token(tmp_path):
         status, _, first_body = _req(
             port, "POST", "/v1/devices/dev-lost/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, first_body
+        assert status == 200
         first_bag = json.loads(first_body)
         current_tok = first_bag["catalog_token"]
+        instruction = first_bag["instr_key"]
 
         # Model a lost/truncated response: the next request still carries OLD.
         status, _, retry_body = _req(
             port, "POST", "/v1/devices/dev-lost/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, retry_body
+        assert status == 200
         assert json.loads(retry_body) == first_bag
     finally:
         srv.shutdown()
@@ -851,6 +1364,45 @@ def test_lost_refresh_response_retry_reissues_current_token(tmp_path):
     final = secrets_store.load(_secrets_path(tmp_path))["devices"]["dev-lost"]
     assert final["catalog_token"]["value"] == current_tok
     assert final["catalog_token_prev"]["value"] == old_tok
+    assert instruction == {
+        "value": final["instr_key"]["value"],
+        "key_id": final["instr_key"]["key_id"],
+    }
+
+
+def test_previous_token_recovery_lazily_persists_missing_instruction_key(
+        tmp_path):
+    """A legacy store can first encounter Task 12 on the recovery branch."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_token = _serve_with_device(tmp_path, "dev-recovery-lazy")
+    path = _secrets_path(tmp_path)
+    try:
+        status, _, first_body = _req(
+            port, "POST", "/v1/devices/dev-recovery-lazy/token-refresh",
+            token=old_token, body=b"{}")
+        assert status == 200
+        current_token = json.loads(first_body)["catalog_token"]
+
+        # Reconstruct the valid legacy shape that can exist during a rolling
+        # upgrade: current+recovery catalog credentials but no instruction key.
+        with secrets_store.store_lock(path):
+            legacy = secrets_store.load(path)
+            legacy["devices"]["dev-recovery-lazy"].pop("instr_key")
+            secrets_store.save(legacy, path)
+
+        status, _, recovery_body = _req(
+            port, "POST", "/v1/devices/dev-recovery-lazy/token-refresh",
+            token=old_token, body=b"{}")
+        assert status == 200
+        recovery_bag = json.loads(recovery_body)
+        assert recovery_bag["catalog_token"] == current_token
+        assert set(recovery_bag["instr_key"]) == {"value", "key_id"}
+    finally:
+        srv.shutdown()
+
+    persisted = secrets_store.load(path)["devices"]["dev-recovery-lazy"]
+    assert recovery_bag["instr_key"]["key_id"] == (
+        persisted["instr_key"]["key_id"])
 
 
 def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
@@ -869,7 +1421,7 @@ def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-write-fail/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         current_tok = json.loads(body)["catalog_token"]
 
         # Advance only the persisted previous-token deadline beyond overlap
@@ -884,7 +1436,7 @@ def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
         status, _, retry_body = _req(
             port, "POST", "/v1/devices/dev-write-fail/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, retry_body
+        assert status == 200
         assert json.loads(retry_body)["catalog_token"] == current_tok
     finally:
         srv.shutdown()
@@ -1061,7 +1613,7 @@ def test_revoke_wins_over_previous_token_recovery(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-recover-revoke/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
 
         result = {}
 
@@ -1177,7 +1729,7 @@ def test_concurrent_token_refresh_keeps_all_new_tokens(tmp_path):
             status, _, body = _req(
                 port, "POST", "/v1/devices/%s/token-refresh" % did,
                 token=old_toks[did], body=b"{}")
-            assert status == 200, body
+            assert status == 200
             with lock:
                 new_toks[did] = json.loads(body)["catalog_token"]
         except Exception as exc:  # pragma: no cover - surfaced via assert
@@ -1265,6 +1817,7 @@ def test_token_refresh_durable_write_failure_keeps_old_token(tmp_path,
     assert final["devices"]["dev-dur"]["catalog_token"]["value"] == old_tok
     # No half-applied rotation: no catalog_token_prev stash either.
     assert "catalog_token_prev" not in final["devices"]["dev-dur"]
+    assert "instr_key" not in final["devices"]["dev-dur"]
 
 
 # ---------------------------------------------------------------------------
@@ -1429,7 +1982,7 @@ def test_token_refresh_reencrypts_to_at_rest_age_volume(tmp_path, monkeypatch):
         status, _, body = _req(port, "POST",
                                "/v1/devices/dev-enc/token-refresh",
                                token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         new_tok = json.loads(body)["catalog_token"]
         assert new_tok != old_tok
     finally:
@@ -1517,6 +2070,7 @@ def test_token_refresh_replace_after_encrypt_failure_keeps_old_token(
     final = secrets_store.load(sp)
     assert final["devices"]["dev-rep"]["catalog_token"]["value"] == old_tok
     assert "catalog_token_prev" not in final["devices"]["dev-rep"]
+    assert "instr_key" not in final["devices"]["dev-rep"]
 
     # Durable .age was rolled back to the OLD store: a restart's decrypt would
     # reproduce the old token (durable is NOT left ahead of live).
@@ -3505,3 +4059,361 @@ def test_main_refuses_plaintext_without_opt_in_then_serves_with_it(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_task13_behavioral_red_set_policy_preserves_instruction_stamp(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    stamp = {
+        "epoch": 100,
+        "instr_serial": 7,
+        "policy_revision": 3,
+        "platform": "guestshell",
+        "role": "default",
+        "role_gen": "a" * 64,
+        "role_body_sha256": "b" * 64,
+        "key_id": "c" * 64,
+        "verify_level": "sig",
+        "issued_at": 101,
+        "expires_at": 101 + 604800,
+        "degraded": False,
+        "part": {
+            "peers": {
+                "mode": "tracker-only",
+                "include_origin": False,
+                "allowed_expires_at": 101 + 604800,
+            },
+            "qos_override": {},
+            "control_override": {},
+            "server_time": 101,
+        },
+    }
+    store._policies.put("d1", {
+        "approved_image_id": None,
+        "approved_image_ids": [],
+        "plans": {},
+        "instr": stamp,
+    })
+
+    store.set_policy("d1", approved_image_ids=[])
+
+    assert store._policies.get("d1")["instr"] == stamp
+
+
+def test_task13_malformed_established_stamp_refuses_policy_rewrite(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    bucket = keyed_state.bucket_of("d1")
+    directory = keyed_state.shard_dir(store.policy_path)
+    os.makedirs(directory, exist_ok=True)
+    shard = os.path.join(directory, "%02x.json" % bucket)
+    malformed = {"d1": {"approved_image_id": None,
+                        "approved_image_ids": [], "plans": {},
+                        "instr": {"instr_serial": 7}}}
+    with open(shard, "w") as stream:
+        json.dump(malformed, stream)
+    before = open(shard, "rb").read()
+    with pytest.raises(catalog.StateFileError,
+                       match="keyed state row is corrupt"):
+        store.set_policy("d1", approved_image_ids=[])
+    assert open(shard, "rb").read() == before
+
+
+def test_task13_unassign_and_concurrent_apply_merge_preserve_stamp(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    stamp = {
+        "epoch": 100, "instr_serial": 7, "policy_revision": 3,
+        "platform": "guestshell", "role": "default", "role_gen": "a" * 64,
+        "role_body_sha256": "b" * 64, "key_id": "c" * 64,
+        "verify_level": "sig", "issued_at": 101, "expires_at": 604901,
+        "degraded": False,
+        "part": {"peers": {"mode": "tracker-only", "include_origin": False,
+                            "allowed_expires_at": 604901},
+                 "qos_override": {}, "control_override": {},
+                 "server_time": 101}}
+    store._policies.update("d1", lambda row: dict(row, instr=stamp))
+    barrier = threading.Barrier(2)
+
+    def apply():
+        barrier.wait()
+        store.set_policy("d1", approved_image_ids=[])
+
+    def stamp_merge():
+        barrier.wait()
+        store._policies.update("d1", lambda row: dict(row, instr=stamp))
+
+    threads = [threading.Thread(target=apply), threading.Thread(target=stamp_merge)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    row = store._policies.get("d1")
+    assert row["approved_image_ids"] == []
+    assert row["instr"] == stamp
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    assert store._policies.get("d1")["instr"] == stamp
+
+
+def test_task13_quarantine_auto_unassign_carries_instruction_stamp(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    store.save_image({
+        "id": "img-a", "filename": "img-a.bin", "size": 5,
+        "sha256": "ab" * 32, "sha512": "aa" * 64,
+        "cisco_signature_verified": False,
+        "info_hash_hex": "cc" * 20, "published_at": 111,
+    })
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    stamp = {
+        "epoch": 100, "instr_serial": 7, "policy_revision": 3,
+        "platform": "guestshell", "role": "default", "role_gen": "a" * 64,
+        "role_body_sha256": "b" * 64, "key_id": "c" * 64,
+        "verify_level": "sig", "issued_at": 101, "expires_at": 604901,
+        "degraded": False,
+        "part": {"peers": {"mode": "tracker-only", "include_origin": False,
+                            "allowed_expires_at": 604901},
+                 "qos_override": {}, "control_override": {},
+                 "server_time": 101}}
+    store._policies.update("d1", lambda row: dict(row, instr=stamp))
+    store.apply_hash_verification({
+        "img-a": {"state": "mismatch", "feed_sha512": "bb" * 64,
+                  "publish_date": "2026-09-07", "deferral": False}},
+        source="scheduled", now=1000)
+    row = store._policies.get("d1")
+    assert row["approved_image_ids"] == []
+    assert row["plans"] == {}
+    assert row["instr"] == stamp
+
+
+# --- Task 14: one raw policy snapshot and catalog regression seams ---------
+
+def _task14_stamp(serial=7):
+    issued, expires = 100, 200
+    return {
+        "epoch": 100, "instr_serial": serial, "policy_revision": 3,
+        "platform": "guestshell", "role": "default",
+        "role_gen": "a" * 64, "role_body_sha256": "b" * 64,
+        "key_id": "c" * 64, "verify_level": "sig",
+        "issued_at": issued, "expires_at": expires, "degraded": False,
+        "part": {"peers": {"mode": "tracker-only",
+                            "include_origin": False,
+                            "allowed_expires_at": expires},
+                 "qos_override": {}, "control_override": {},
+                 "server_time": issued}}
+
+
+def _task14_write_policy_rows(store, rows):
+    grouped = {}
+    for device_id, row in rows.items():
+        grouped.setdefault(keyed_state.bucket_of(device_id), {})[device_id] = row
+    for bucket, shard_rows in grouped.items():
+        path = (Path(keyed_state.shard_dir(store.policy_path)) /
+                ("%02x.json" % bucket))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(shard_rows, allow_nan=False))
+
+
+def test_task14_raw_policy_snapshot_migrates_structurally_raw_first_and_durable(
+        tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    policy = state / "policy.json"
+    policy.write_text(json.dumps({
+        "device-a": {"approved_image_id": "legacy"},
+        # Structurally valid and therefore migrated by the raw view, while a
+        # later strict policy consumer must reject the malformed stamp.
+        "device-b": {"approved_image_id": None, "instr": {"epoch": 1}},
+    }))
+    shard_dir = Path(keyed_state.shard_dir(str(policy)))
+    shard_dir.mkdir()
+    bucket = keyed_state.bucket_of("device-a")
+    (shard_dir / ("%02x.json" % bucket)).write_text(json.dumps({
+        "device-a": {"approved_image_id": "newer-shard"}}))
+    barriers = []
+    real_fsync = keyed_state._fsync_directory
+
+    def counted(directory):
+        barriers.append(os.fspath(directory))
+        return real_fsync(directory)
+
+    monkeypatch.setattr(keyed_state, "_fsync_directory", counted)
+    store = catalog.CatalogStore(str(state))
+    assert store.read_policy_row_snapshot("device-a") == {
+        "approved_image_id": "newer-shard"}
+    assert barriers and Path(str(policy) + ".migrated").exists()
+    assert policy.exists() and "not valid JSON" in policy.read_text()
+    first = store.read_policy_row_snapshot("device-b")
+    assert first["instr"] == {"epoch": 1}
+    first["instr"]["epoch"] = 99
+    assert store.read_policy_row_snapshot("device-b")["instr"] == {"epoch": 1}
+    with pytest.raises(catalog.StateFileError):
+        store.get_policy("device-b")
+
+
+def test_task14_raw_policy_snapshot_rejects_recursive_nonfinite_duplicate_and_shape(
+        tmp_path, monkeypatch):
+    cases = (
+        '{"device-a":{"nested":[1e999]}}',
+        '{"device-a":{},"device-a":{}}',
+        '[]',
+        '{"device-a":[]}',
+    )
+    for index, payload in enumerate(cases):
+        state = tmp_path / str(index)
+        state.mkdir()
+        policy = state / "policy.json"
+        original = payload.encode()
+        policy.write_bytes(original)
+        store = catalog.CatalogStore(str(state))
+        with pytest.raises(catalog.StateFileError):
+            store.read_policy_row_snapshot("device-a")
+        assert policy.read_bytes() == original
+        assert not Path(str(policy) + ".migrated").exists()
+        shard_dir = Path(keyed_state.shard_dir(str(policy)))
+        assert not shard_dir.exists() or not list(shard_dir.glob("*.json"))
+
+    state = tmp_path / "copy-errors"
+    state.mkdir()
+    store = catalog.CatalogStore(str(state))
+    row = {"approved_image_id": None, "approved_image_ids": [],
+           "copy_failure": True}
+    _task14_write_policy_rows(store, {"device-a": row})
+    real_deepcopy = catalog.copy.deepcopy
+    for error_type in (RecursionError, OverflowError):
+        def fail_copy(_value, selected=error_type):
+            raise selected("synthetic copy depth failure")
+
+        monkeypatch.setattr(catalog.copy, "deepcopy", fail_copy)
+        with pytest.raises(catalog.StateFileError):
+            store.read_policy_row_snapshot("device-a")
+        with pytest.raises(catalog.StateFileError):
+            store.device_policy_view_from_row("device-a", row)
+    monkeypatch.setattr(catalog.copy, "deepcopy", real_deepcopy)
+
+
+def test_task14_device_policy_projection_adds_only_stored_instr_rev_with_one_read(
+        tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    stamp = _task14_stamp()
+    _task14_write_policy_rows(store, {"device-a": {
+        "approved_image_id": None, "approved_image_ids": [],
+        "plans": {}, "instr": stamp}})
+    view = store.device_policy_view("device-a")
+    assert view == {"approved_image_id": None, "approved_image_ids": [],
+                    "plans": {},
+                    "instr_rev": {"epoch": 100, "instr_serial": 7}}
+    row = store.read_policy_row_snapshot("device-a")
+    assert store.device_policy_view_from_row("device-a", row) == view
+    row["instr"] = {"epoch": 1}
+    with pytest.raises(catalog.StateFileError):
+        store.device_policy_view_from_row("device-a", row)
+
+
+def test_task14_complete_handler_policy_read_counts_and_legacy_behavior(
+        tmp_path, monkeypatch):
+    real_read = catalog.CatalogStore.read_policy_row_snapshot
+    srv, port = _serve(tmp_path, "tok", device_id="device-a")
+    store = catalog.CatalogStore(str(tmp_path))
+    counts = []
+
+    def counted(state, device_id):
+        if state.policy_path == store.policy_path:
+            counts.append(device_id)
+        return real_read(state, device_id)
+
+    monkeypatch.setattr(catalog.CatalogStore, "read_policy_row_snapshot",
+                        counted)
+    try:
+        checks = (
+            ("GET", "/v1/devices/device-a/policy", None, 200, 1),
+            ("GET", "/v1/devices/device-a/instructions", None, 404, 1),
+            ("GET", "/v1/devices/device-a/instruction-keylist", None, 404, 0),
+            ("POST", "/v1/devices/device-a/heartbeat", "{}", 200, 1),
+        )
+        for method, path, body, expected, reads in checks:
+            counts[:] = []
+            status, _, _ = _req(port, method, path, token="tok", body=body)
+            assert status == expected and len(counts) == reads
+        counts[:] = []
+        status, _, body = _req(port, "GET", "/v1/images", token="tok")
+        assert status == 200 and json.loads(body)["images"][0]["id"] == "img1"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_task14_heartbeat_uses_authoritative_attestation_sanitizer():
+    data = {
+        "current_image_id": "img1", "instr_state": "key_rejected",
+        "instr_reason": "bad_mac", "instr_serial": 4,
+        "verify_level": "sig",
+        "applied": {name: index for index, name in enumerate(
+            instructions.APPLIED_FIELDS, 1)},
+    }
+    expected = instructions.sanitize_instruction_attestation(data)
+    sanitized = catalog.sanitize_heartbeat(data, "192.0.2.1")
+    assert {key: sanitized[key] for key in expected} == expected
+    assert set(sanitized) == {
+        "current_image_id", "free_flash_bytes", "version", "stage_state",
+        "stage_error", "target_fs", "model", "telemetry_enabled",
+        "telemetry_stream_enabled", "staged_image_ids", "errored_image_ids",
+        "swarm_ip", *expected}
+
+
+def test_assignment_result_and_unchanged_cas_are_decided_inside_policy_callback(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    first = store.set_policy("d1", approved_image_ids=["a", "b"])
+    assert first.before_ids == []
+    assert first.after_ids == ["a", "b"]
+    result = store.set_policy("d1", approved_image_ids=["b"],
+                              expect_image_ids=["a", "b"], skip_unchanged=True)
+    assert result.before_ids == ["a", "b"]
+    assert result.after_ids == ["b"]
+    assert result.removed_ids == ["a"]
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=["b"],
+                         expect_image_ids=["a", "b"], skip_unchanged=True)
+
+
+def test_purge_device_serializes_with_low_level_assignment(tmp_path, monkeypatch):
+    """Retirement must not delete just before an in-flight policy write lands."""
+    store = _store(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    purged = threading.Event()
+    errors = []
+    original_update = store._policies.update
+
+    def paused_update(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original_update(*args, **kwargs)
+
+    monkeypatch.setattr(store._policies, "update", paused_update)
+
+    def assign():
+        try:
+            store.set_policy("d1", approved_image_ids=["img1"])
+        except Exception as exc:
+            errors.append(exc)
+
+    def purge():
+        try:
+            store.purge_device("d1")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            purged.set()
+
+    assigning = threading.Thread(target=assign)
+    deleting = threading.Thread(target=purge)
+    assigning.start()
+    assert entered.wait(2)
+    deleting.start()
+    blocked = not purged.wait(0.05)
+    release.set()
+    assigning.join(2)
+    deleting.join(2)
+
+    assert not errors
+    assert blocked, "purge bypassed the image-policy transaction lock"
+    assert store.read_policy_row_snapshot("d1") is None

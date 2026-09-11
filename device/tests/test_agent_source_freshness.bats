@@ -4,6 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+bats_require_minimum_version 1.5.0
+
 # tools/agent-source-freshness.sh (issue #72): device/iox/build.sh and
 # tools/build-xr-package.sh bake in device/agent's CURRENT WORKING-TREE
 # CONTENTS -- whatever checkout/worktree happens to be run from. A worktree
@@ -190,7 +192,7 @@ _stage_iox_build_script() {
   _stage_iox_build_script
   # Let it proceed past the guard, then fail on the NEXT missing input
   # (aria2c) rather than reaching docker -- proves the guard did not block.
-  run env bash "$R/device/iox/build.sh"
+  run -127 env bash "$R/device/iox/build.sh"
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"WARNING"* ]] || { echo "$output"; return 1; }
   [[ "$output" != *"refusing to build a stale agent"* ]]
@@ -210,7 +212,7 @@ _stage_iox_build_script() {
   cp "$REPO_ROOT/device/iox/package.yaml" "$R/device/iox/package.yaml"
   echo "# dummy" > "$R/device/agent/dummy.py"
   # deliberately NO $R/tools at all
-  run env -u ARIA2C_BIN bash "$R/device/iox/build.sh" --arm64
+  run -127 env -u ARIA2C_BIN bash "$R/device/iox/build.sh" --arm64
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   # fails on the NEXT real thing build.sh needs (the common image builder is
   # missing), not on the freshness guard's own sourcing -- the buggy version

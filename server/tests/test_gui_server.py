@@ -1,11 +1,581 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import inspect
+import json
 import os
 import re
 
 import management_api as gui_server
 import pytest
+
+
+def test_management_sigterm_runs_ordered_shutdown_cleanup(tmp_path):
+    """Container stop must enter the same cleanup path as normal return."""
+    import subprocess
+    import sys
+    import time
+
+    ready = tmp_path / "ready"
+    cleaned = tmp_path / "cleaned"
+    program = r'''
+import os
+import signal
+import sys
+import management_api
+
+ready, cleaned = sys.argv[1:]
+
+class Server:
+    def serve_forever(self):
+        with open(ready, "w"):
+            pass
+        while True:
+            signal.pause()
+
+def cleanup():
+    with open(cleaned, "w") as stream:
+        stream.write("drained")
+
+management_api._serve_with_shutdown(Server(), cleanup)
+'''
+    proc = subprocess.Popen(
+        [sys.executable, "-c", program, str(ready), str(cleaned)],
+        cwd=os.path.dirname(gui_server.__file__),
+        env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    try:
+        deadline = time.time() + 3.0
+        while not ready.exists() and proc.poll() is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), proc.communicate(timeout=1)
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 0, (stdout, stderr)
+        assert cleaned.read_text() == "drained"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_management_sigterm_is_latched_before_local_admission(tmp_path):
+    import subprocess
+    import sys
+    import time
+
+    ready = tmp_path / "startup-ready"
+    cleaned = tmp_path / "startup-cleaned"
+    served = tmp_path / "served"
+    admitted = tmp_path / "admitted"
+    program = r'''
+import signal
+import sys
+import time
+import management_api
+
+ready, cleaned, served, admitted = sys.argv[1:]
+latch = management_api._SigtermLatch()
+latch.install()
+with open(ready, "w"):
+    pass
+time.sleep(0.3)
+
+class Server:
+    def serve_forever(self):
+        with open(served, "w"):
+            pass
+
+management_api._serve_with_shutdown(
+    Server(), lambda: open(cleaned, "w").write("drained"), latch=latch,
+    start_admission=lambda: open(admitted, "w").write("accepted"))
+'''
+    proc = subprocess.Popen(
+        [sys.executable, "-c", program, str(ready), str(cleaned), str(served),
+         str(admitted)],
+        cwd=os.path.dirname(gui_server.__file__),
+        env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    try:
+        deadline = time.time() + 3.0
+        while not ready.exists() and proc.poll() is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), proc.communicate(timeout=1)
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 0, (stdout, stderr)
+        assert cleaned.read_text() == "drained"
+        assert not served.exists()
+        assert not admitted.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_role_column_panel_and_modal_are_scoped_and_accessible():
+    html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
+    assert '<th>Device</th><th>Role</th>' in html
+    assert '<td class="dev-role">' in js and 'dash(d.role)' in js
+    assert 'colspan="13"' in js
+    assert html.count('id="dev-filter-role"') == 1
+    assert html.count('id="dev-filter-peer"') == 1
+    assert "peer-intent badge" in js and "Quarantined intent" in js
+    assert 'id="set-role-selected">Set role…</button>' in html
+    modal = html.split('id="role-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    assert 'role="dialog" aria-modal="true" aria-labelledby="role-modal-title"' in modal
+    for cid in ('role-modal-title', 'role-selected', 'role-modal-msg',
+                'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
+        assert 'id="%s"' % cid in modal
+    assert 'aria-live="polite"' in modal
+    assert "wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);" in js
+    assert "'role-modal'" in js.split('var BULK_MODALS = [', 1)[1].split(']', 1)[0]
+    assert "'apply-role-selected'" in js.split('var BULK_BTNS = [', 1)[1].split(']', 1)[0]
+    assert "'set-role-selected'" in js.split('var BULK_OPENERS = [', 1)[1].split(']', 1)[0]
+    assert 'id="peer-policy-panel"' in html and 'id="role-capability-banner"' in html
+    panel = html.split('id="peer-policy-panel"', 1)[1].split('</details>', 1)[0]
+    assert '<textarea' not in panel and '<textarea' not in modal
+    assert '.policy-counts' in css and 'minmax(' in css
+    workflow = js.split('// ---- Role workflow ----', 1)[1].split(
+        '// ---- End role workflow ----', 1)[0]
+    assert workflow.count("'/api/v1/devices/bulk-role'") == 1
+    assert 'forSelected(' not in workflow and "method: 'PUT'" not in workflow
+
+
+def _run_role_console_js(script):
+    """Execute the actual scoped Console code with a small DOM/fetch double.
+
+    This is a request/state-machine check, not a browser-layout claim.
+    """
+    import subprocess
+    js = _webroot('app.js')
+    assert '// ---- Role workflow ----' in js
+    code = js.split('// ---- Role workflow ----', 1)[1].split(
+        '// ---- End role workflow ----', 1)[0]
+    result = subprocess.run(['node', '-'], input=r'''
+const assert = require('node:assert/strict');
+const elements = new Map();
+function el(id) {
+  if (!elements.has(id)) elements.set(id, {
+    value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
+    listeners: {}, addEventListener(k, f) { this.listeners[k] = f; },
+    focus() { this.focused = true; }
+  });
+  return elements.get(id);
+}
+var document = {getElementById: el, querySelectorAll: () => [], querySelector: () => null};
+var confirmPrompts = [], confirmAnswers = [];
+function confirm(text) { confirmPrompts.push(text); return confirmAnswers.length ? confirmAnswers.shift() : true; }
+async function downloadCsv(url, name) { calls.push({url, download: name}); }
+var peerPolicy = {revision: 7, roles_supported: true, roles: {members: {boat: 2}}};
+var peerPolicyReadOk = true, bulkBusy = false, devStatus = el('dev-status');
+var selection = ['on-page', 'off-page'];
+function selectedIds() { return selection.slice(); }
+function setBulkBusy(b) { bulkBusy = b; }
+function claimSelection() { if (bulkBusy) return null; setBulkBusy(true); return selectedIds(); }
+function openModal(id) { el(id).hidden = false; }
+function closeModal(id) { el(id).hidden = true; if (id === 'role-modal') cancelRoleDialog(); if (id === 'role-def-modal') cancelRoleDefinitionDialog(); }
+function csrfHdr(h) { return {...h, 'X-CSRF-Token': 'test-csrf'}; }
+function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
+function fmtDate(v) { return 'time:' + v; }
+var refreshes = 0;
+async function refreshDevices() { refreshes++; }
+var calls = [], replies = [];
+async function fetch(url, opts) {
+  calls.push({url, ...opts, body: opts && opts.body !== undefined ? JSON.parse(opts.body) : undefined});
+  const next = replies.shift();
+  if (next instanceof Error) throw next;
+  if (typeof next === 'function') return await next();
+  return {ok: next.status < 400, status: next.status, json: async () => next.body,
+          headers: {get: (k) => (next.headers || {})[k] || null}};
+}
+function reply(body, status = 200) { replies.push({status, body}); }
+function preview(extra = {}) {
+  return {ok: true, applied: 2, failed: {}, dry_run: true, revision: 8,
+    candidate_revision: 8, confirm_token: 'preview-token', requires_confirmation: true,
+    member_delta: 2, origin_access_lost: 1, empty_permitted_sets: 0,
+    role_pairs_stopped: 1, qos_changed: true, ...extra};
+}
+''' + code + '\n(async () => {\n' + script + '\n})().catch(e => {console.error(e); process.exit(1);});',
+        text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_role_definition_editor_previews_then_commits_with_the_preview_token():
+    """#222: the editor follows the Set role contract exactly -- one dry run
+    on the pre-preview revision, then one commit carrying that preview's
+    token on the SAME revision even when polling has moved on."""
+    _run_role_console_js(r'''
+await el('role-def-new').listeners.click();
+assert.equal(el('role-def-modal').hidden, false);
+el('rd-name').value = 'Bad Name';
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 0, 'invalid input never reaches the server');
+assert.match(el('role-def-msg').textContent, /Role name must/);
+el('rd-name').value = 'boat';
+el('rd-peers').value = 'fiber, boat';
+el('rd-nets').value = '10.20.0.0/16';
+el('rd-restricted').checked = true;
+el('rd-origin').checked = false;
+el('rd-on-stale').value = 'keep';
+reply(preview({member_delta: 0, origin_access_lost: 0, role_pairs_stopped: 0}));
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 1);
+assert.equal(calls[0].method, 'PUT');
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
+assert.deepEqual(calls[0].body, {restricted: true, peers: ['boat', 'fiber'], origin: false,
+  nets: ['10.20.0.0/16'], on_stale: 'keep'});
+assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
+assert.equal(el('role-def-preview').hidden, false);
+assert.match(el('role-def-preview').textContent, /Create role boat/);
+assert.match(el('role-def-preview').textContent, /QoS policy changed: yes/);
+assert.equal(el('role-def-save').textContent, 'Save role');
+peerPolicy.revision = 99; // polling must not replace the preview's base revision
+reply({ok: true, dry_run: false, revision: 8, candidate_revision: 8});
+reply({revision: 8, roles: {boat: {restricted: true, peers: ['boat', 'fiber'], origin: false}}});
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 3);
+assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
+assert.equal(calls[1].body.confirm_token, 'preview-token');
+assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(calls[2].url, '/api/v1/peer-policy/roles', 'definitions re-read after the write');
+assert.equal(el('role-def-modal').hidden, true);
+assert.match(el('role-def-status').textContent, /Role boat saved at policy revision 8/);
+assert.equal(peerPolicy.revision, 8);
+assert.equal(refreshes, 1, 'the Set role dropdown and Role filter follow the device refresh');
+await new Promise(r => setTimeout(r, 0)); // the definitions re-read renders after the dialog closed
+assert.match(el('role-def-rows').innerHTML, /data-role="boat"/);
+assert.match(el('role-def-rows').innerHTML, /fiber/);
+''')
+
+
+def test_role_definition_editor_edit_discards_a_stale_preview_and_carries_qos_state():
+    _run_role_console_js(r'''
+roleDefinitions = {boat: {restricted: true, peers: ['boat'], qos: {seed_up_bps: 12500000},
+  qos_state: {seeder: {numwant: 4}}}};
+roleDefinitionsRevision = 7;
+roleDefinitionsOk = true;
+openRoleDefinitionEditor('boat');
+assert.equal(el('rd-name').disabled, true);
+assert.equal(el('role-def-modal-title').textContent, 'Edit role boat');
+reply(preview());
+await el('role-def-save').listeners.click();
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
+assert.deepEqual(calls[0].body.qos_state, {seeder: {numwant: 4}}, 'a full replacement keeps the tracker overlay');
+assert.match(el('role-def-preview').textContent, /Replace role boat/);
+el('role-def-modal').listeners.input({target: {}});
+assert.equal(el('role-def-preview').hidden, true, 'editing after a preview discards it');
+assert.equal(el('role-def-save').textContent, 'Preview change');
+assert.match(el('role-def-msg').textContent, /Preview again/);
+reply({code: 'revision_conflict', revision: 9}, 409);
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 2, 'a second click previews again rather than committing');
+assert.match(el('role-def-msg').textContent, /Peer policy changed/);
+reply({code: 'role_isolated', role: 'boat'}, 409);
+await el('role-def-save').listeners.click();
+assert.match(el('role-def-msg').textContent, /permit itself/);
+''')
+
+
+def test_role_definition_delete_and_import_preview_then_confirm():
+    _run_role_console_js(r'''
+reply(preview({role_pairs_stopped: 1}));
+replies.push({status: 204, body: null, headers: {ETag: '"iris-peer-policy-9"'}});
+reply({revision: 9, roles: {}});
+await deleteRoleDefinition('boat');
+assert.equal(calls[0].method, 'DELETE');
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
+assert.match(confirmPrompts[0], /Delete role boat/);
+assert.match(confirmPrompts[0], /Role pairings stopped: 1/);
+assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
+assert.equal(calls[1].body.confirm_token, 'preview-token');
+assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(peerPolicy.revision, 9, 'a 204 carries the revision only in its ETag');
+assert.match(el('role-def-status').textContent, /Role boat deleted at policy revision 9/);
+calls.length = 0; confirmPrompts.length = 0;
+// A declined confirmation commits nothing.
+confirmAnswers.push(false);
+reply(preview({roles: 2}));
+await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
+assert.equal(calls.length, 1);
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/import-csv?dry_run=1');
+assert.deepEqual(calls[0].body, {csv: 'role\nboat\nfiber\n'});
+assert.match(confirmPrompts[0], /Replace every role definition with the 2 role\(s\) in roles\.csv/);
+assert.match(confirmPrompts[0], /Roles missing from the file are removed/);
+assert.match(el('role-def-status').textContent, /cancelled; nothing changed/);
+calls.length = 0;
+reply(preview({roles: 2}));
+reply({ok: true, dry_run: false, revision: 10, candidate_revision: 10, roles: 2});
+reply({revision: 10, roles: {boat: {peers: ['boat']}, fiber: {peers: ['fiber']}}});
+await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
+assert.equal(calls[1].url, '/api/v1/peer-policy/roles/import-csv');
+assert.equal(calls[1].body.confirm_token, 'preview-token');
+assert.match(el('role-def-status').textContent, /Imported 2 role definition\(s\) from roles\.csv at policy revision 10/);
+calls.length = 0;
+reply({code: 'invalid_roles_csv', detail: 'unknown roles CSV field: bogus'}, 422);
+await importRoleDefinitions('role,bogus\nx,1\n', 'bad.csv');
+assert.equal(calls.length, 1, 'a refused preview never commits');
+assert.match(el('role-def-status').textContent, /Import refused: unknown roles CSV field: bogus/);
+reply({code: 'role_in_use', roles: ['boat']}, 409);
+await importRoleDefinitions('role\nfiber\n', 'drop.csv');
+assert.match(el('role-def-status').textContent, /declared roles missing from the file: boat/);
+await el('role-def-export').listeners.click();
+assert.deepEqual(calls[calls.length - 1], {url: '/api/v1/peer-policy/roles/export-csv', download: 'roles.csv'});
+''')
+
+
+def test_role_definition_controls_follow_the_capability_banner():
+    _run_role_console_js(r'''
+peerPolicy.roles_supported = false;
+renderPeerPolicyPanel();
+for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, true, id);
+await el('role-def-new').listeners.click();
+assert.equal(calls.length, 0);
+assert.match(el('role-def-status').textContent, /cannot confirm.*role support/i);
+await importRoleDefinitions('role\nboat\n', 'roles.csv');
+await deleteRoleDefinition('boat');
+assert.equal(calls.length, 0, 'no preview while the banner shows');
+peerPolicy.roles_supported = true;
+renderPeerPolicyPanel();
+for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, false, id);
+''')
+
+
+def test_role_bulk_action_uses_one_aggregate_preview_and_commit():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 0, 'untouched picker must be a no-op');
+el('role-selected').value = 'boat';
+reply(preview());
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 1);
+assert.equal(calls[0].url, '/api/v1/devices/bulk-role?dry_run=1');
+assert.deepEqual(calls[0].body, {device_ids: selection, role: 'boat'});
+assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
+assert.equal(bulkBusy, true, 'retain selection lock while the operator reviews');
+assert.match(el('role-preview').textContent, /origin/i);
+assert.match(el('role-preview').textContent, /QoS policy changed: yes/);
+peerPolicy.revision = 99; // polling must not replace the preview's base revision
+reply({ok: true, applied: 2, failed: {}, revision: 8, role_drift: {count: 0}});
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 2);
+assert.equal(calls[1].url, '/api/v1/devices/bulk-role');
+assert.deepEqual(calls[1].body, {device_ids: selection, role: 'boat', confirm_token: 'preview-token'});
+assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(bulkBusy, false);
+assert.match(devStatus.textContent, /2\/2/);
+assert.equal(el('role-modal').hidden, true);
+assert.ok(refreshes);
+''')
+
+
+@pytest.mark.parametrize('status,code', [
+    (412, 'precondition_failed'), (428, 'confirmation_required'),
+    (409, 'operation_backlog_full'), (503, 'policy_unavailable')])
+def test_role_bulk_commit_error_discards_preview_and_never_retries(status, code):
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = '__none';
+reply(preview());
+await el('apply-role-selected').listeners.click();
+assert.equal(calls[0].body.role, null);
+reply({error: CODE, unacknowledged: 256, capacity: 256}, STATUS);
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 2);
+assert.equal(bulkBusy, false);
+assert.equal(el('apply-role-selected').textContent, 'Preview change');
+assert.ok(el('role-modal-msg').textContent.length > 10);
+assert.equal(el('role-modal').hidden, false);
+'''.replace('CODE', repr(code)).replace('STATUS', str(status)))
+
+
+def test_role_bulk_cancellation_partial_and_network_outcomes():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply(preview({applied: 1, failed: {'off-page': 'role_shadowed_by_assignment'}}));
+await el('apply-role-selected').listeners.click();
+assert.match(el('role-preview').textContent, /off-page/);
+closeModal('role-modal');
+assert.equal(bulkBusy, false);
+assert.equal(calls.length, 1, 'cancel must never commit');
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply(preview());
+await el('apply-role-selected').listeners.click();
+reply({error: 'fleet_write_failed', partial: true, applied: 1,
+  failed: {'off-page': 'write_failed'}, role_drift: {count: 1}}, 503);
+await el('apply-role-selected').listeners.click();
+assert.match(devStatus.textContent, /1\/2/);
+assert.match(devStatus.textContent, /off-page/);
+assert.match(devStatus.textContent, /drift.*1|1.*drift/i);
+reply(preview());
+await el('apply-role-selected').listeners.click();
+replies.push(new Error('offline'));
+await el('apply-role-selected').listeners.click();
+assert.match(el('role-modal-msg').textContent, /may have been saved/);
+assert.equal(bulkBusy, false);
+''')
+
+
+def test_role_bulk_pending_cancel_and_changed_choice_invalidate_preview():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+let resolvePreview;
+replies.push(() => new Promise(resolve => {resolvePreview = resolve;}));
+const pending = el('apply-role-selected').listeners.click();
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 1, 'double click must not send a second preview');
+closeModal('role-modal');
+assert.equal(bulkBusy, true, 'retain lock until cancelled preview returns');
+resolvePreview({ok: true, status: 200, json: async () => preview()});
+await pending;
+assert.equal(bulkBusy, false);
+assert.equal(el('role-preview').hidden, true);
+assert.equal(el('role-modal').hidden, true);
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply(preview({requires_confirmation: false, confirm_token: null, qos_changed: false}));
+await el('apply-role-selected').listeners.click();
+assert.match(el('role-preview').textContent, /QoS policy changed: no/);
+el('role-selected').value = '__none';
+el('role-selected').listeners.change();
+assert.equal(bulkBusy, false);
+assert.equal(el('apply-role-selected').textContent, 'Preview change');
+reply(preview());
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.at(-1).url, '/api/v1/devices/bulk-role?dry_run=1');
+assert.equal(calls.at(-1).body.role, null);
+''')
+
+
+def test_role_bulk_all_failed_preview_cannot_commit_and_labels_the_refusal():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply({ok: false, applied: 0, failed: {'off-page': 'role_shadowed_by_assignment'}});
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 1);
+assert.equal(bulkBusy, false);
+assert.equal(el('apply-role-selected').textContent, 'Preview change');
+assert.match(el('role-modal-msg').textContent, /explicit ACL assignment shadows the role/);
+assert.equal(el('role-preview').hidden, true);
+''')
+
+
+def test_peer_policy_panel_distinguishes_unknown_preflight_from_zero():
+    _run_role_console_js(r'''
+peerPolicy = {roles_supported: true, roles_present: true,
+  enforcement: {stale: true, mutual_origin: {mode: 'preflight'}}};
+for (const count of [null, undefined, false, '0', -1, NaN]) {
+  peerPolicy.enforcement.mutual_origin.newly_denied_device_count = count;
+  renderPeerPolicyPanel();
+  const text = el('policy-mutual-origin').textContent;
+  assert.match(text, /preflight count unavailable/i);
+  assert.doesNotMatch(text, /newly denied devices/);
+  assert.match(text, /restriction is not active/);
+  assert.match(text, /Tracker status is stale/);
+}
+peerPolicy.enforcement.mutual_origin.newly_denied_device_count = 0;
+renderPeerPolicyPanel();
+assert.match(el('policy-mutual-origin').textContent, /0 newly denied devices/);
+delete peerPolicy.enforcement.mutual_origin;
+renderPeerPolicyPanel();
+assert.match(el('policy-mutual-origin').textContent, /status unavailable/);
+''')
+
+
+def test_peer_policy_panel_count_only_and_capability_banner_behavior():
+    _run_role_console_js(r'''
+peerPolicy = {revision: 7, roles_supported: true, roles_present: true,
+  roles: {defined: 1, restricted: 1, members: {'boat<script>': 2}, nets: ['192.0.2.4']},
+  role_drift: {count: 3, device_ids: ['192.0.2.5']}, outbox: {unacknowledged: 9, capacity: 256},
+  origin_qos: {state: 'enforced', target_download_count: 4, applied_download_count: 4,
+    last_reconciled_at: 1000, addresses: ['192.0.2.6']},
+  enforcement: {mutual_origin: {mode: 'preflight', newly_denied_device_count: 2}}};
+renderPeerPolicyPanel();
+let rendered = [...elements.values()].map(e => e.textContent + e.innerHTML).join(' ');
+assert.match(rendered, /9\/256/);
+assert.match(rendered, /boat&lt;script>/);
+assert.doesNotMatch(rendered, /192\.0\.2\./);
+assert.match(rendered, /preflight/i);
+assert.equal(el('role-capability-banner').hidden, true);
+peerPolicy.roles_supported = false;
+renderPeerPolicyPanel();
+assert.equal(el('role-capability-banner').hidden, false);
+assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
+assert.equal(el('set-role-selected').disabled, true);
+assert.equal(el('apply-role-selected').disabled, true);
+delete peerPolicy.roles_supported; // genuinely older response, no capability flag
+delete peerPolicy.roles_present;
+renderPeerPolicyPanel();
+let roleWarning = el('role-capability-banner').textContent.toLowerCase();
+assert.match(roleWarning, /cannot confirm.*role support/i);
+let normalizedRoleWarning = roleWarning.replace(/\s+/g, ' ');
+assert.match(normalizedRoleWarning,
+  /independent (?:peer )?quarantine.{0,100}(?:not enforced|ignored|not sufficient|insufficient).{0,100}(?:older|predating) servers?.{0,180}(?:containment|compatibility).{0,100}downgrad/);
+assert.doesNotMatch(roleWarning, /pre-d/);
+assert.doesNotMatch(roleWarning,
+  /quarantine restricted devices before (?:a|any)? ?downgrade/);
+peerPolicy.roles_supported = true;
+peerPolicy.degraded = true;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /degraded/i);
+peerPolicy.fail_closed = true;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /fail.closed/i);
+peerPolicyReadOk = false;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /unavailable/i);
+await el('set-role-selected').listeners.click();
+assert.equal(calls.length, 0);
+''')
+
+
+def test_role_policy_startup_signal_identifies_lost_state_without_addresses(tmp_path, capsys):
+    import peer_policy
+    state_dir = str(tmp_path)
+    auth = str(tmp_path / 'peer-policy.json')
+    gui_server._log_peer_policy_startup(state_dir)
+    assert 'roles supported' in capsys.readouterr().err
+    peer_policy._write_roles_watermark(auth)
+    gui_server._log_peer_policy_startup(state_dir)
+    warning = capsys.readouterr().err
+    assert 'role state lost' in warning
+    assert 'quarantine' in warning and 'downgrade' in warning
+    warning_lower = warning.lower()
+    assert re.search(r"older|predating", warning_lower)
+    assert "independent quarantine" in warning_lower
+    assert re.search(r"independent quarantine.{0,140}"
+                     r"(?:not sufficient|insufficient|cannot|ignore)",
+                     warning_lower, re.DOTALL)
+    assert "pre-d" not in warning_lower
+    assert "quarantine restricted devices before any downgrade" not in warning_lower
+    main = open(gui_server.__file__).read().split('def main():', 1)[1]
+    assert '_log_peer_policy_startup(state_dir)' in main
+
+
+@pytest.mark.parametrize('state,phrase', [
+    ('healthy', 'peer policy is healthy'), ('degraded', 'policy is degraded'),
+    ('fail_closed', 'policy is fail_closed'), ('unavailable', 'policy is unavailable')])
+def test_role_policy_startup_distinguishes_supported_policy_states(tmp_path, capsys, monkeypatch, state, phrase):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc['roles'] = {'defs': {}, 'role_of': {}}
+    def load(*_):
+        if state == 'unavailable':
+            raise OSError('sensitive storage detail 192.0.2.8')
+        return peer_policy.PolicyResult(doc, state in ('degraded', 'fail_closed'),
+                                        state == 'fail_closed')
+    monkeypatch.setattr(peer_policy, 'load_policy', load)
+    gui_server._log_peer_policy_startup(str(tmp_path))
+    logged = capsys.readouterr().err
+    assert 'roles supported' in logged and phrase in logged
+    assert 'role state lost' not in logged and '192.0.2.8' not in logged
 
 
 def test_webroot_assets_exist():
@@ -90,7 +660,10 @@ def test_devices_toolbar_regrouped():
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
-    assert devices_thead.count('<th>') == 11, "peer-policy column added without row action links"
+    assert devices_thead.count('<th>') == 13, \
+        "declared Role and Instructions columns added without row action links"
+    assert devices_thead.count('<th>Role</th>') == 1
+    assert devices_thead.count('<th>Instructions</th>') == 1
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
@@ -628,6 +1201,7 @@ import json
 import threading
 
 import gui_app
+import deployment_records
 
 
 def _serve(tmp_path):
@@ -668,6 +1242,75 @@ def test_login_bad_credentials_401(tmp_path):
         assert status == 401
     finally:
         stop()
+
+
+def test_canonical_quarantine_keeps_gui_filter_explain_and_event_wire_shape(
+        role_api):
+    """The canonical quarantine map has the legacy API's stable projections."""
+    import auth
+    import peer_endpoints
+    import peer_policy
+
+    request, _fleet, cat = role_api
+    policy_path = os.path.join(cat.state_dir, "peer-policy.json")
+    lkg_path = os.path.join(cat.state_dir, "peer-policy.lkg.json")
+    doc = peer_policy.load_policy(policy_path, lkg_path).document
+    doc["acls"]["manual"] = {"rules": [
+        {"seq": 20, "action": "permit", "match": {"type": "any"}},
+    ]}
+    doc["assignments"] = {"d1": "manual", "d2": "quarantine"}
+    doc["roles"]["role_of"] = {"d1": "boat", "d2": "boat"}
+    doc["quarantined_devices"] = {"d1": True}
+    for path in (policy_path, lkg_path):
+        with open(path, "w") as stream:
+            json.dump(doc, stream, sort_keys=True)
+    endpoints = os.path.join(cat.state_dir, "peer-endpoints.json")
+    peer_endpoints.record_endpoint(
+        endpoints, auth.Principal("device", "d1"), "192.0.2.1", 6881,
+        time.time())
+    peer_endpoints.record_endpoint(
+        endpoints, auth.Principal("device", "d2"), "192.0.2.2", 6881,
+        time.time())
+
+    status, _headers, view = request("GET", "/api/peer-policy")
+    assert status == 200
+    assert view["quarantine_assignments"] == ["d1", "d2"]
+    assert "quarantined_devices" not in json.dumps(view)
+
+    status, _headers, filtered = request(
+        "GET", "/api/devices?peer=quarantined")
+    assert status == 200
+    assert filtered["total"] == 2
+    assert [row["device_id"] for row in filtered["devices"]] == ["d1", "d2"]
+
+    status, _headers, explained = request(
+        "GET", "/api/peer-policy/explain?a=device:d1&b=device:d2")
+    assert status == 200
+    assert set(explained["a"]) == {
+        "principal", "acl_name", "acl_source", "matched_seq", "decision",
+        "role", "role_unknown", "role_shadowed_by"}
+    assert explained["a"]["acl_name"] == "quarantine"
+    assert explained["a"]["acl_source"] == "assignment:quarantine"
+    assert explained["a"]["decision"] == "deny"
+    assert explained["a"]["role"] == "boat"
+    assert explained["a"]["role_shadowed_by"] == "boat"
+
+    revision = peer_policy.load_policy(policy_path, lkg_path).document["revision"]
+    before_events = list(peer_policy.load_policy(
+        policy_path, lkg_path).document["operation_outbox"])
+    status, _headers, _ = request(
+        "PUT", "/api/peer-policy/quarantine/d2",
+        {"quarantined": True, "if_revision": revision})
+    assert status == 200
+    saved = peer_policy.load_policy(policy_path, lkg_path).document
+    assert saved["quarantined_devices"] == {"d1": True, "d2": True}
+    assert saved["assignments"] == {"d1": "manual"}
+    assert "d2" not in saved["assignments"]
+    assert saved["operation_outbox"][:-1] == before_events
+    event = saved["operation_outbox"][-1]
+    assert set(event) == {"event_id", "revision", "action", "target",
+                          "actor", "created_at"}
+    assert event["action"] == "assign" and event["target"] == "d2"
 
 
 def test_login_sets_cookie_and_returns_csrf(tmp_path):
@@ -1191,7 +1834,7 @@ import keyed_state
 import peer_enforcement
 
 
-def _serve_full(tmp_path):
+def _serve_full(tmp_path, record_store=None, now_fn=time.time):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path)
     app.set_admin("admin", "pw")
@@ -1208,8 +1851,9 @@ def _serve_full(tmp_path):
     cat = catalog_mod.CatalogStore(state)
     cat.save_image({"id": "img1", "filename": "img1.bin", "sha256": "ab",
                     "published_at": 1})
-    srv = gui_server.make_server("127.0.0.1", 0, app, images, fleet, creds, cat,
-                                 certfile=None)
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, images, fleet, creds, cat, certfile=None,
+        record_store=record_store, now_fn=now_fn)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, (app, fleet, creds, cat), srv.shutdown
@@ -1223,9 +1867,7 @@ def _auth(host, port):
 
 def _policy_device(fleet, device_id="d1"):
     return fleet.upsert({"device_id": device_id, "device_ip": "10.0.0.1",
-                         "vlan": "666", "svi_ip": "10.0.0.2",
-                         "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.3",
-                         "model": "C9300", "platform": "c9300"})
+                         "model": "C9300"})
 
 
 def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
@@ -1260,7 +1902,8 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         assert json.loads(raw) == {"ok": True, "revision": 2, "quarantined": True}
         with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
             doc = json.load(f)
-        assert doc["assignments"] == {"d1": "quarantine"}
+        assert doc["assignments"] == {}
+        assert doc["quarantined_devices"] == {"d1": True}
         event = doc["operation_outbox"][-1]
         assert set(event) == {"event_id", "revision", "action", "target", "actor", "created_at"}
         assert event["action"] == "assign" and event["target"] == "d1"
@@ -1268,8 +1911,14 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         tracker_status = peer_enforcement.build_status(
             "pending", None, None, 1, 3, 10,
             last_operation_exported_revision=2,
-            conflicts=[{"reason": "shared_permit_deny", "ipv4": "10.0.0.99"}],
-            last_effect={"disconnected_peers": 1})
+            operation_ack_epoch=doc["operation_ack_epoch"],
+            conflicts=[{"reason": "shared_permit_deny", "ipv4": "10.0.0.99",
+                        "permitted_principal_type": "service",
+                        "permitted_principal_id": "seeder",
+                        "denied_principal_type": "device",
+                        "denied_principal_id": "d1",
+                        "global_block_applied": False}],
+            last_effect={"disconnected_peers": 1, "removed_peers": 0})
         # A GUI reader must not blindly expose future/untrusted status fields.
         tracker_status["raw_ips"] = ["10.0.0.99"]
         peer_enforcement.write_status(
@@ -1289,11 +1938,67 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         assert compat_headers["Deprecation"] == "true"
         assert compat_headers["Sunset"] == "Sat, 04 Sep 2027 00:00:00 GMT"
         with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
-            assert [e["revision"] for e in json.load(f)["operation_outbox"]] == [3]
+            released = json.load(f)
+        assert [e["revision"] for e in released["operation_outbox"]] == [3]
+        assert released["assignments"] == {}
+        assert "quarantined_devices" not in released
         status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
                               {"quarantined": False, "if_revision": 2}, headers)
         assert status == 409
         assert json.loads(raw)["revision"] == 3
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("count,device_ids", [
+    (2, ["preflight-a", "preflight-b"]), (0, []), (None, None),
+])
+def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(
+        tmp_path, count, device_ids):
+    host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
+    try:
+        cookie, _ = _auth(host, port)
+        tracker_status = peer_enforcement.build_status(
+            "enforced", "session-1", "block-hash", 1, 0, 1000.0,
+            mutual_origin={
+                "mode": "preflight",
+                "newly_denied_device_count": count,
+                "newly_denied_device_ids": device_ids,
+            })
+        tracker_status["endpoint_ips"] = ["10.0.0.99"]
+        peer_enforcement.write_status(
+            os.path.join(cat.state_dir, "peer-enforcement.json"), tracker_status)
+        with open(os.path.join(cat.state_dir, "origin-qos.json"), "w") as handle:
+            json.dump({
+                "schema": 1, "updated_at": 1000.0, "state": "enforced",
+                "aria_session_id": "session-1", "desired_hash": "qos-hash",
+                "global_option_count": 1, "target_download_count": 2,
+                "applied_download_count": 2, "last_reconciled_at": 1000.0,
+                "last_error": "RpcError.10.0.0.97",
+                # Readers must not blindly pass through future identifier fields.
+                "gids": ["secret-target"], "addresses": ["10.0.0.98"],
+            }, handle)
+
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                              headers={"Cookie": cookie})
+        assert status == 200
+        view = json.loads(raw)
+        assert view["enforcement"]["mutual_origin"] == {
+            "mode": "preflight", "newly_denied_device_count": count,
+        }
+        # A syntactically valid file with an impossible enforced state is
+        # neutral as a unit; redaction cannot leave a false success claim.
+        assert view["origin_qos"] == {
+            "state": None, "global_option_count": 0,
+            "target_download_count": 0, "applied_download_count": 0,
+            "last_reconciled_at": None, "last_error": None,
+        }
+        body = raw.decode()
+        for forbidden in ("preflight-a", "preflight-b", "endpoint_ips",
+                          "10.0.0.99", "secret-target", "10.0.0.98",
+                          "RpcError.10.0.0.97", "10.0.0.97",
+                          "aria_session_id", "desired_hash"):
+            assert forbidden not in body
     finally:
         stop()
 
@@ -1378,9 +2083,11 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices",
-                        {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "management_type": "routed", "iris_vlan": "666",
                          "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                         "guest_ip": "10.0.0.3"}, headers=hh)
+                         "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+                         "app_gateway": "10.0.0.1"}, headers=hh)
         assert st == 200
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         devs = json.loads(b)["devices"]
@@ -1431,10 +2138,8 @@ def test_idempotency_capacity_never_evicts_in_flight_work():
     assert cache == {"active": active}
 
 
-def test_device_upsert_ignores_machine_determined_fields(tmp_path):
-    """os_family is classified from the device's own banner and registered_at
-    is the store's own stamp; a client body carrying either used to be
-    merged as-is (a wrong os_family wedged planning until hand-corrected)."""
+def test_device_upsert_rejects_machine_determined_fields(tmp_path):
+    """Public input cannot claim server-owned observation or stamp fields."""
     host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
     try:
         ck, csrf = _auth(host, port)
@@ -1443,16 +2148,21 @@ def test_device_upsert_ignores_machine_determined_fields(tmp_path):
                         {"device_id": "d1", "device_ip": "10.0.0.1",
                          "model": "C9300", "os_family": "xr",
                          "registered_at": 7}, headers=hh)
-        assert st == 200
-        saved = json.loads(b)["device"]
-        assert "os_family" not in saved
-        assert saved["registered_at"] != 7
-        # a cached classification survives an edit that tries to change it
-        fleet.upsert({"device_id": "d1", "os_family": "xe"})
+        assert st == 422
+        assert "server-owned fleet field" in json.loads(b)["error"]
+        assert fleet.get_device("d1") is None
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d2", "device_ip": "10.0.0.2",
+                         "future_inventory_field": "surprise"}, headers=hh)
+        assert st == 422
+        assert "unknown fleet field" in json.loads(b)["error"]
+        assert fleet.get_device("d2") is None
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        fleet.update_observation("d1", os_family="xe")
         st, _, b = _req(host, port, "POST", "/api/devices",
                         {"device_id": "d1", "os_family": "xr"}, headers=hh)
-        assert st == 200
-        assert json.loads(b)["device"]["os_family"] == "xe"
+        assert st == 422
+        assert fleet.get_device("d1")["os_family"] == "xe"
     finally:
         stop()
 
@@ -1465,9 +2175,11 @@ def test_device_delete_purges_catalog_state(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        dev = {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+        dev = {"device_id": "d1", "device_ip": "10.0.0.1",
+               "management_type": "routed", "iris_vlan": "666",
                "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-               "guest_ip": "10.0.0.3"}
+               "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+               "app_gateway": "10.0.0.1"}
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
         assert st == 200
         cat.set_policy("d1", approved_image_id="img1")
@@ -1494,9 +2206,11 @@ def test_device_assign_empty_unassigns(tmp_path):
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices",
-                        {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "management_type": "routed", "iris_vlan": "666",
                          "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                         "guest_ip": "10.0.0.3"}, headers=hh)
+                         "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+                         "app_gateway": "10.0.0.1"}, headers=hh)
         assert st == 200
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "img1"}, headers=hh)
@@ -1542,9 +2256,9 @@ def test_csv_import_export(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
-            ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
-             "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
-             "vpg_number,nat_interface,svi_igp,platform")
+                ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
+                 "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
+                 "vpg_number,nat_interface,svi_igp,role,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -1686,6 +2400,29 @@ def test_assign_singular_body_still_works(tmp_path):
         stop()
 
 
+def test_assign_unknown_fleet_device_is_422_without_catalog_write(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, _fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/ghost/assign",
+                        {"image_ids": ["img1"]}, headers=hh)
+        assert st == 422
+        assert json.loads(b)["error"] == "no such fleet device"
+        assert cat._policies.get("ghost") is None
+        events = [e for e in _read_audit_lines(audit_path)
+                  if e.get("event") == "device_assign"]
+        assert len(events) == 1
+        assert events[0]["target"] == "ghost"
+        assert events[0]["result"] == "fail"
+        prefix, before, after, removed = _assignment_audit_parts(events[0])
+        assert prefix == "assignment failed: no such fleet device"
+        assert before == [] and after == [] and removed == []
+    finally:
+        stop()
+
+
 def test_unassign_clears_the_whole_set(tmp_path):
     host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
     _app, fleet, _creds, cat = _ctx
@@ -1708,8 +2445,11 @@ def test_unassign_clears_the_whole_set(tmp_path):
         # every image the unassign actually removed, not just the set's first:
         # the audit trail is the record of what was done to this device, and
         # "(was img1.bin)" hid two of the three images that were dropped.
-        assert events and events[-1]["detail"] == \
-            "unassigned (was img1.bin, img2.bin, img3.bin)"
+        prefix, before, after, removed = _assignment_audit_parts(events[-1])
+        assert prefix == "unassigned (was img1.bin, img2.bin, img3.bin)"
+        assert before == ["img1", "img2", "img3"]
+        assert after == []
+        assert removed == before
     finally:
         stop()
 
@@ -1723,7 +2463,7 @@ def test_assign_honours_an_expected_set_and_409s_on_a_stale_one(tmp_path):
 
     The picker now sends the set it was opened on. A stored set that has
     moved on is refused with 409 and the CURRENT set, nothing is written, and
-    nothing is audited. A body without the field keeps the unconditional
+    one failed outcome is audited. A body without the field keeps the unconditional
     write, so older clients and API callers are unaffected."""
     host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
     _app, fleet, _creds, cat = _ctx
@@ -1746,10 +2486,14 @@ def test_assign_honours_an_expected_set_and_409s_on_a_stale_one(tmp_path):
         assert body["error"] == "assignment_conflict"
         assert body["assigned_image_ids"] == ["img1"]      # what it really is
         assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
-        # a refused write is not an assignment, so it is not audited as one
+        # The shared service records one sanitized outcome for the refusal.
         assigns = [e for e in _read_audit_lines(audit_path)
                   if e.get("action") == "assign"]
-        assert len(assigns) == 1
+        assert len(assigns) == 2
+        assert assigns[-1]["result"] == "fail"
+        prefix, before, after, removed = _assignment_audit_parts(assigns[-1])
+        assert prefix == "assignment failed: assignment conflict"
+        assert before == ["img1"] and after == ["img1"] and removed == []
 
         # unassign is guarded the same way
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
@@ -1798,8 +2542,12 @@ def test_assign_audit_names_the_images_it_removed(tmp_path):
         assert st == 200
         events = [e for e in _read_audit_lines(audit_path)
                  if e.get("action") == "assign"]
-        assert events[-1]["detail"] == \
+        prefix, before, after, removed = _assignment_audit_parts(events[-1])
+        assert prefix == \
             "assigned 1 image(s): img1.bin; removed: img2.bin, img3.bin"
+        assert before == ["img1", "img2", "img3"]
+        assert after == ["img1"]
+        assert removed == ["img2", "img3"]
 
         # widening removes nothing, so nothing is claimed to have been removed
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
@@ -1807,7 +2555,10 @@ def test_assign_audit_names_the_images_it_removed(tmp_path):
         assert st == 200
         events = [e for e in _read_audit_lines(audit_path)
                  if e.get("action") == "assign"]
-        assert events[-1]["detail"] == "assigned 2 image(s): img1.bin, img2.bin"
+        prefix, before, after, removed = _assignment_audit_parts(events[-1])
+        assert prefix == "assigned 2 image(s): img1.bin, img2.bin"
+        assert before == ["img1"] and after == ["img1", "img2"]
+        assert removed == []
     finally:
         stop()
 
@@ -2204,8 +2955,16 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "model": "C9300",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -2363,11 +3122,13 @@ def test_onboard_cancel_queued_endpoint_and_sse_end(tmp_path):
         stop()
 
 
-def test_devices_view_carries_onboard_state_and_overview_awaits_heartbeat(tmp_path):
+def test_devices_view_carries_onboard_state_and_overview_awaits_heartbeat(
+        tmp_path, monkeypatch):
     """After a successful onboard, the device has no heartbeat yet (the agent
     needs a couple of minutes to bootstrap) — the devices view must carry the
     job outcome so the UI shows 'waiting for heartbeat' instead of the
     misleading 'not enrolled', and the overview counts such devices."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
@@ -2497,8 +3258,13 @@ def test_plan_refuses_device_with_cached_xr_family(tmp_path):
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
-    fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "ASR-9906",
-                  "os_family": "xr", "credential_profile_id": "lab"})
+    fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
+                  "model": "ASR-9906", "credential_profile_id": "lab",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1"})
+    fleet.update_observation("xr1", os_family="xr")
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -2538,9 +3304,10 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
     _app, fleet, _creds, _cat = deps
     try:
         fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
-                      "model": "8201", "os_family": "xr",
+                      "model": "8201",
                       "platform": "xr-appmgr", "management_type": "xr-host",
                       "credential_profile_id": "lab"})
+        fleet.update_observation("xr1", os_family="xr")
         ck, csrf = _auth(host, port)
         status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
                                headers={"Cookie": ck})
@@ -2576,8 +3343,10 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_pat
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
-        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
-                      "model": "8201", "credential_profile_id": "lab"})
+        fleet.import_csv(
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+            "xr1,10.0.0.9,666,10.0.0.10,255.255.255.0,10.0.0.11,8201,\n")
+        fleet.upsert({"device_id": "xr1", "credential_profile_id": "lab"})
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
@@ -2594,20 +3363,7 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_pat
 
 
 def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tmp_path):
-    """gui_server._plan reads management_type off the RAW fleet device
-    (gui_server.py:739), a site the Task 2 eleven-site atomic rename did not
-    cover -- that list was the 'resolved' dict's own writers/readers, not
-    this earlier raw-record read. A fleet.json row still carrying only the
-    retired network_attachment alias (never re-saved since before the
-    rename) is no longer interpreted at all here: it plans exactly like a
-    truly unclassified row -- legacy_routed coerced to 'routed' -- even when
-    the alias claims 'inband' and a stale inband_vlan sits on the row. The
-    stale inband_vlan is echoed back verbatim in the resolved dict (every
-    raw XE field is, regardless of management_type -- pre-existing,
-    unrelated behavior), but the row does NOT plan AS inband: management_type
-    reads 'routed', and the fields that a real inband/routed classification
-    would have populated (iris_vlan/svi_ip) stay empty because nothing in
-    the raw row ever set them."""
+    """A retired alias cannot make incomplete legacy inventory deployable."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -2620,10 +3376,8 @@ def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tm
         ck, _csrf = _auth(host, port)
         status, _, body = _req(host, port, "GET", "/api/devices/d1/plan",
                                headers={"Cookie": ck})
-        assert status == 200, body
-        resolved = json.loads(body)["plan"]["resolved"]
-        assert resolved["management_type"] == "routed"     # not 'inband'
-        assert resolved["iris_vlan"] == "" and resolved["svi_ip"] == ""
+        assert status == 409, body
+        assert json.loads(body)["error"] == "unclassified_management_type"
     finally:
         stop()
 
@@ -2663,12 +3417,7 @@ def test_plan_carries_svi_igp_through_to_the_resolved_record(tmp_path):
 
 
 def test_plan_refuses_xr_appmgr_platform_on_a_network_attachment_alias_only_row(tmp_path):
-    """Same alias-retirement boundary, the xr-appmgr side: a row whose only
-    hint of xr-host is the retired network_attachment alias, with platform
-    explicitly xr-appmgr, still resolves management_type via the alias-free
-    path (legacy_routed -> 'routed'), so the xr-host<->xr-appmgr mutual gate
-    (gui_server.py:769) fires exactly as it would for any other alias-blind
-    xr-appmgr row: a clean 409, not a silent xr-host plan and not a 500."""
+    """An alias-only XR row is still unclassified and cannot onboard."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -2682,9 +3431,7 @@ def test_plan_refuses_xr_appmgr_platform_on_a_network_attachment_alias_only_row(
         status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
                                headers={"Cookie": ck})
         assert status == 409, body
-        assert json.loads(body)["error"] == (
-            "platform xr-appmgr requires management_type xr-host "
-            "(the two are mutually required)")
+        assert json.loads(body)["error"] == "unclassified_management_type"
     finally:
         stop()
 
@@ -2713,6 +3460,18 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
         by_kind = {r["kind"]: r for r in resources}
         assert by_kind["appmgr-application"]["name"] == gui_onboard._XR_APPID
         assert by_kind["appmgr-source"]["name"] == gui_onboard._XR_SOURCE_NAME
+    finally:
+        srv.server_close()
+
+
+def test_owned_resources_for_iox_claim_only_the_iox_application(tmp_path):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        assert srv.RequestHandlerClass._owned_resources({
+            "platform": "iox", "management_type": "routed",
+        }) == [{"kind": "iox-app", "ownership": "iris-created"}]
     finally:
         srv.server_close()
 
@@ -2754,7 +3513,7 @@ def test_router_teardown_resolved_raises_without_management_type(tmp_path):
         srv.server_close()
 
 
-def _serve_inband(tmp_path, run_fn, device=None):
+def _serve_inband(tmp_path, run_fn, device=None, iox_controller=None):
     import deployment_records
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -2771,20 +3530,26 @@ def _serve_inband(tmp_path, run_fn, device=None):
     art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
     for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
+    onboard_kwargs = {}
+    if iox_controller is not None:
+        onboard_kwargs["iox_controller"] = iox_controller
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          record_store=record_store, artifacts_dir=art,
-                                         # this device is platform=guestshell, so
-                                         # the job-start reachability gate (see
-                                         # gui_onboard.py) probes it before run_fn
+                                         # The default Guest Shell device uses
+                                         # the job-start reachability probe.
                                          probe_fn=lambda dev, env: "C9300",
                                          guestshell_preflight_fn=_CLEAN_GUESTSHELL_PREFLIGHT,
                                          iox_preflight_fn=lambda dev, env, resolved: {
                                              "status": "passed",
                                              "device_identity": "FCW0000TEST",
-                                             "detected_model": "IE-3400"})
+                                             "detected_model": "IE-3400"},
+                                         **onboard_kwargs)
+    server_kwargs = {"certfile": None, "record_store": record_store}
+    if iox_controller is not None:
+        server_kwargs["iox_controller"] = iox_controller
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, record_store=record_store)
+                                 onboard, **server_kwargs)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
@@ -2793,14 +3558,17 @@ def _serve_inband(tmp_path, run_fn, device=None):
 def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
     """Inband IOx resolves the iox platform and, with no explicit ios_ssh_host,
     the app SSHes to the switch's management IP (device_ip)."""
-    ran = []
+    raw_runs = []
+    controller = _HttpIoxController()
     host, port, stop = _serve_inband(
-        tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1],
+        tmp_path,
+        lambda *args, **kwargs: raw_runs.append((args, kwargs)) or 0,
         device={"device_id": "ie", "device_ip": "192.0.2.30",
                 "management_type": "inband", "inband_vlan": "120",
                 "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
                 "app_gateway": "192.0.2.1", "model": "IE-3400", "platform": "iox",
-                "credential_profile_id": "lab"})
+                "credential_profile_id": "lab"},
+        iox_controller=controller)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
@@ -2812,14 +3580,31 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
         assert resolved["ios_ssh_host"] == "192.0.2.30"    # defaults to device_ip
         st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
         assert st == 200
-        import time as _t
-        deadline = _t.time() + 3
-        while _t.time() < deadline:
-            if ran:
-                break
-            _t.sleep(0.02)
-        assert ran and ran[-1]["MANAGEMENT_TYPE"] == "inband"
-        assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.30"
+        job_id = json.loads(b)["job_id"]
+        assert _wait_onboard_job(host, port, ck, job_id)["state"] == "done"
+        assert raw_runs == []
+        assert len(controller.requests) == 1
+        request = controller.requests[0]
+        assert _internal_request_value(request, "action") == "install"
+        assert _internal_request_value(request, "device_id") == "ie"
+        assert _internal_request_value(request, "job_id") == job_id
+        assert _internal_request_value(request, "credential_ref") == "lab"
+        assert _internal_request_value(request, "teardown_mode") == "none"
+        assert _internal_request_value(request, "record_id") is None
+        assert _internal_request_has(request, "wrapper_path")
+        assert _internal_request_value(
+            request, "wrapper_path").endswith("iris-arm64.tar")
+        target = _internal_request_value(request, "target")
+        assert {key: target[key] for key in ("host", "port", "platform")} == {
+            "host": "192.0.2.30", "port": 22, "platform": "iox"}
+        assert target["management_type"] == "inband"
+        assert target["ios_ssh_host"] == "192.0.2.30"
+        assert not _internal_request_has(request, "recipe_env")
+        for raw_key in ("credential", "credentials", "credential_profile_id",
+                        "username", "password", "device_user", "device_pass",
+                        "ios_ssh_user", "ios_ssh_pass"):
+            assert not _internal_request_has(request, raw_key)
+            assert raw_key not in target
     finally:
         stop()
 
@@ -3090,7 +3875,7 @@ def test_router_nat_preflight_ownership_persists_and_undeploy_uses_record(tmp_pa
             stop()
 
 
-def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_path):
+def test_platform_endpoint_allows_router_for_router_management_types(tmp_path):
     host, port, fleet, _record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         fleet.upsert({"device_id": "switch", "device_ip": "192.0.2.20",
@@ -3151,7 +3936,7 @@ def test_router_undeploy_uses_record_ip_after_inventory_edit(tmp_path):
         stop()
 
 
-def _serve_nonrouter(tmp_path, run_fn, device):
+def _serve_nonrouter(tmp_path, run_fn, device, iox_controller=None):
     """Record-backed server for a Guest Shell or IOx device, handing back the
     fleet and record store so a test can edit the inventory and read the
     record the way the router variant above does."""
@@ -3167,6 +3952,9 @@ def _serve_nonrouter(tmp_path, run_fn, device):
     art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
     for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
         open(os.path.join(art, pkg), "w").close()
+    onboard_kwargs = {}
+    if iox_controller is not None:
+        onboard_kwargs["iox_controller"] = iox_controller
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=run_fn, record_store=record_store, artifacts_dir=art,
@@ -3176,9 +3964,12 @@ def _serve_nonrouter(tmp_path, run_fn, device):
             "detected_model": "C9300-48P"},
         iox_preflight_fn=lambda dev, env, resolved: {
             "status": "passed", "device_identity": "FCW0000IOX",
-            "detected_model": "IE-3400"})
+            "detected_model": "IE-3400"}, **onboard_kwargs)
+    server_kwargs = {"certfile": None, "record_store": record_store}
+    if iox_controller is not None:
+        server_kwargs["iox_controller"] = iox_controller
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, record_store=record_store)
+                                 onboard, **server_kwargs)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, fleet, record_store, srv.shutdown
@@ -3192,6 +3983,116 @@ _GS_ROW = {"device_id": "edge", "device_ip": "192.0.2.10",
 _IOX_ROW = dict(_GS_ROW, device_id="ie1", model="IE-3400", platform="iox")
 
 
+class _HttpIoxController:
+    def __init__(self):
+        self.requests = []
+
+    def _run(self, operation, request, prepare, preflight, on_output, cancel):
+        self.requests.append(request)
+        assert not (cancel() if callable(cancel) else cancel.is_set())
+        identity = {
+            "board_identity": "FCW0000IOX",
+            "model": "IE-3400", "os_family": "xe", "platform": "iox",
+        }
+        preflight(request, identity)
+        record_id = prepare(request, identity)
+        on_output("stdout", b"controller-authorized IOx work\n")
+        job_id = (request.get("job_id") if isinstance(request, dict)
+                  else getattr(request, "job_id"))
+        assert isinstance(job_id, str)
+        assert re.fullmatch(r"[0-9a-f]{16}", job_id)
+        device_id = (request.get("device_id") if isinstance(request, dict)
+                     else getattr(request, "device_id"))
+        teardown_mode = (
+            request.get("teardown_mode") if isinstance(request, dict)
+            else getattr(request, "teardown_mode"))
+        return {"result_code": 0, "returncode": 0,
+                "recovery_code": None, "record_id": record_id,
+                "iox_verification": None,
+                "iox_session": {
+                    "attempt_id": ("a" if operation == "install" else "b") * 32,
+                    "job_id": job_id,
+                    "device_id": device_id, "board_identity": "FCW0000IOX",
+                    "operation": operation,
+                    "teardown_mode": teardown_mode, "record_id": record_id,
+                    "state": "reaped", "mutation_blocked": False}}
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "install", request, prepare, preflight, on_output, cancel)
+
+    def run_uninstall(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "uninstall", request, prepare, preflight, on_output, cancel)
+
+    def summary_for_device(self, _device_id):
+        return {"iox_verification_obligations": [], "iox_sessions": []}
+
+
+def _internal_request_value(request, key):
+    if isinstance(request, dict):
+        return request.get(key)
+    return getattr(request, key)
+
+
+def _internal_request_has(request, key):
+    if isinstance(request, dict):
+        return key in request
+    return hasattr(request, key)
+
+
+def test_http_iox_force_passes_explicit_controller_mode_without_record_or_vlan(
+        tmp_path):
+    controller = _HttpIoxController()
+    raw_runs = []
+    device = {
+        "device_id": "ie-force", "device_ip": "192.0.2.10",
+        "management_type": "legacy_routed", "model": "IE-3400",
+        "platform": "iox", "credential_profile_id": "lab",
+    }
+    host, port, _fleet, record_store, stop = _serve_nonrouter(
+        tmp_path,
+        lambda *args, **kwargs: raw_runs.append((args, kwargs)) or 0,
+        device, iox_controller=controller)
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "POST", "/api/devices/ie-force/undeploy",
+            {"force": True},
+            headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200, body
+        job_id = json.loads(body)["job_id"]
+        job = _wait_onboard_job(host, port, cookie, job_id)
+        assert job["state"] == "done"
+        assert job["record_id"] is None
+        assert job["result_code"] == 0
+        assert job["returncode"] == 0
+        assert job["recovery_code"] is None
+        assert set(job["iox_session"]) == {
+            "attempt_id", "job_id", "device_id", "board_identity",
+            "operation", "teardown_mode", "record_id", "state",
+            "mutation_blocked"}
+        assert job["iox_session"]["job_id"] == job_id
+        assert raw_runs == []
+        assert record_store.list("ie-force") == []
+        assert len(controller.requests) == 1
+        request = controller.requests[0]
+        assert _internal_request_value(request, "action") == "uninstall"
+        assert _internal_request_value(
+            request, "teardown_mode") == "force_agent_only"
+        assert _internal_request_value(request, "record_id") is None
+        assert _internal_request_value(request, "device_id") == "ie-force"
+        assert _internal_request_value(request, "job_id") == job_id
+        assert _internal_request_value(request, "credential_ref") == "lab"
+        assert not _internal_request_has(request, "wrapper_path")
+        target = _internal_request_value(request, "target")
+        assert {key: target[key] for key in ("host", "port", "platform")} == {
+            "host": "192.0.2.10", "port": 22, "platform": "iox"}
+        assert not target.get("vlan")
+    finally:
+        stop()
+
+
 @pytest.mark.parametrize("device, identity", [(_GS_ROW, "FOC0000GS"),
                                               (_IOX_ROW, "FCW0000IOX")])
 def test_nonrouter_undeploy_uses_record_ip_and_identity_after_inventory_edit(
@@ -3203,34 +4104,85 @@ def test_nonrouter_undeploy_uses_record_ip_and_identity_after_inventory_edit(
     DEVICE_IP from the live fleet row. The recorded teardown could then
     remove an operator VLAN/SVI and IRIS-named config from whatever box
     answered at the edited address, with an empty EXPECTED_DEVICE_IDENTITY."""
-    ran = []
+    raw_runs = []
+    is_iox = device["platform"] == "iox"
+    controller = _HttpIoxController() if is_iox else None
     did = device["device_id"]
     host, port, fleet, record_store, stop = _serve_nonrouter(
-        tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1], device)
+        tmp_path,
+        lambda path, env, on: (raw_runs.append(dict(env)), 0)[1],
+        device, iox_controller=controller)
     try:
         cookie, csrf = _auth(host, port)
         headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
         _, _, body = _req(host, port, "POST", "/api/devices/%s/onboard" % did,
                           {}, headers=headers)
+        install_job_id = json.loads(body)["job_id"]
         assert _wait_onboard_job(host, port, cookie,
-                                 json.loads(body)["job_id"])["state"] == "done"
-        assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
-        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+                                 install_job_id)["state"] == "done"
+        if is_iox:
+            assert raw_runs == []
+            assert len(controller.requests) == 1
+            install_request = controller.requests[0]
+            assert _internal_request_value(install_request, "action") == "install"
+            assert _internal_request_value(install_request, "device_id") == did
+            assert _internal_request_value(
+                install_request, "job_id") == install_job_id
+            assert _internal_request_value(
+                install_request, "credential_ref") == "lab"
+            assert _internal_request_value(
+                install_request, "teardown_mode") == "none"
+            assert _internal_request_value(install_request, "record_id") is None
+            assert _internal_request_has(install_request, "wrapper_path")
+            install_target = _internal_request_value(install_request, "target")
+            assert {key: install_target[key]
+                    for key in ("host", "port", "platform")} == {
+                        "host": "192.0.2.10", "port": 22, "platform": "iox"}
+        else:
+            assert raw_runs[-1]["DEVICE_IP"] == "192.0.2.10"
+            assert raw_runs[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
         record = record_store.active_for_device(did)
         # the record now carries the evidence of the check that ran
         assert record["preflight"]["status"] == "passed"
         assert record["preflight"]["device_identity"] == identity
         assert record["resolved"]["device_identity"] == identity
         assert record["resolved"]["device_ip"] == "192.0.2.10"
+        assert record["resolved"]["management_type"] == "inband"
 
         fleet.upsert({"device_id": did, "device_ip": "203.0.113.99"})
         _, _, body = _req(host, port, "POST", "/api/devices/%s/undeploy" % did,
                           {}, headers=headers)
+        uninstall_job_id = json.loads(body)["job_id"]
         assert _wait_onboard_job(host, port, cookie,
-                                 json.loads(body)["job_id"])["state"] == "done"
-        assert ran[-1]["DEVICE_IP"] == "192.0.2.10", "teardown followed the edited row"
-        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
-        assert ran[-1]["MANAGEMENT_TYPE"] == "inband"
+                                 uninstall_job_id)["state"] == "done"
+        if is_iox:
+            assert raw_runs == []
+            assert len(controller.requests) == 2
+            uninstall_request = controller.requests[1]
+            assert _internal_request_value(
+                uninstall_request, "action") == "uninstall"
+            assert _internal_request_value(uninstall_request, "device_id") == did
+            assert _internal_request_value(
+                uninstall_request, "job_id") == uninstall_job_id
+            assert _internal_request_value(
+                uninstall_request, "credential_ref") == "lab"
+            assert _internal_request_value(
+                uninstall_request, "teardown_mode") == "recorded"
+            assert _internal_request_value(
+                uninstall_request, "record_id") == record["record_id"]
+            assert not _internal_request_has(uninstall_request, "wrapper_path")
+            uninstall_target = _internal_request_value(
+                uninstall_request, "target")
+            assert uninstall_target["host"] == "192.0.2.10", (
+                "teardown followed the edited row")
+            assert uninstall_target["device_identity"] == identity
+            assert uninstall_target["management_type"] == "inband"
+            assert uninstall_target["resources"] == record["resources"]
+        else:
+            assert raw_runs[-1]["DEVICE_IP"] == "192.0.2.10", (
+                "teardown followed the edited row")
+            assert raw_runs[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+            assert raw_runs[-1]["MANAGEMENT_TYPE"] == "inband"
         assert record_store.get(record["record_id"])["state"] == "removed"
     finally:
         stop()
@@ -3329,8 +4281,16 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     audit_path = str(tmp_path / "audit.jsonl")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "model": "C9300",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -4031,9 +4991,11 @@ def test_delete_image_stale_policy_after_device_removed(tmp_path):
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         # img1 preexists in _serve_full's catalog; add d1 and assign it img1
         assert _req(host, port, "POST", "/api/devices",
-                    {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                    {"device_id": "d1", "device_ip": "10.0.0.1",
+                     "management_type": "routed", "iris_vlan": "666",
                      "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                     "guest_ip": "10.0.0.3"}, headers=hh)[0] == 200
+                     "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+                     "app_gateway": "10.0.0.1"}, headers=hh)[0] == 200
         cat.set_policy("d1", approved_image_id="img1")
         # a live assigned device blocks deletion (409)
         st, _, b = _req(host, port, "DELETE", "/api/images/img1", headers=hh)
@@ -4100,8 +5062,8 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         assert st["admin"]["username"] == "admin"
         pkgs = st["packages"]
         assert set(("state", "items", "remedy")) <= set(pkgs)
-        # +1: the IOx tars plus the IOS-XR agent RPM (iris-xr.rpm), Wave C.
-        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 1
+        # +2: the IOS-XR RPM plus the verified Guest Shell agent bundle.
+        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 2
         for item in pkgs["items"]:
             assert "name" in item and "state" in item
     finally:
@@ -4513,9 +5475,9 @@ def test_device_credential_happy_path_preserves_other_fields(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, creds, _cat = deps
     try:
-        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
-                     "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                     "guest_ip": "10.0.0.3"})
+        fleet.import_csv(
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+            "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,,\n")
         creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
                                   "device_pass": "pw"})
         ck, csrf = _auth(host, port)
@@ -4768,7 +5730,9 @@ def test_device_platform_happy_path_and_clear(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
-        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666"})
+        fleet.import_csv(
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+            "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,,\n")
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         # set iox
@@ -4818,6 +5782,15 @@ import audit as audit_mod
 def _read_audit_lines(path):
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def _assignment_audit_parts(event):
+    """Split the stable human prefix from exact machine-readable ID sets."""
+    prefix, rest = event["detail"].split("; before_ids=", 1)
+    before_raw, rest = rest.split("; after_ids=", 1)
+    after_raw, removed_raw = rest.split("; removed_ids=", 1)
+    return (prefix, json.loads(before_raw), json.loads(after_raw),
+            json.loads(removed_raw))
 
 
 # ---- forget SSH host key (issue #84) --------------------------------------
@@ -5217,8 +6190,10 @@ def test_device_assign_credential_and_request_report_emit_audit(tmp_path):
         assign_events = [e for e in lines if e.get("category") == "device"
                          and e.get("action") == "assign"]
         assert assign_events and assign_events[0]["target"] == "d1"
-        # detail names the image (filename + size + retrievable id), not a bare id
-        assert assign_events[0]["detail"] == "assigned img1.bin (3 B) id=img1"
+        # detail names the image, while the suffix pins authoritative ID sets.
+        prefix, before, after, removed = _assignment_audit_parts(assign_events[0])
+        assert prefix == "assigned img1.bin (3 B) id=img1"
+        assert before == [] and after == ["img1"] and removed == []
         cred_events = [e for e in lines if e.get("action") == "credential"]
         assert cred_events[0]["detail"] == "profile (none) -> (cleared)"
         report_events = [e for e in lines if e.get("category") == "telemetry"]
@@ -5241,8 +6216,10 @@ def test_device_assign_detail_notes_previous_image(tmp_path):
                     {"image_id": "img2"}, headers=hh)[0] == 200
         assigns = [e for e in _read_audit_lines(audit_path)
                    if e.get("action") == "assign"]
-        assert assigns[-1]["detail"] == \
-            "assigned img2.bin (1.2 GiB) id=img2, was img1.bin"
+        prefix, before, after, removed = _assignment_audit_parts(assigns[-1])
+        assert prefix == "assigned img2.bin (1.2 GiB) id=img2, was img1.bin"
+        assert before == ["img1"] and after == ["img2"]
+        assert removed == ["img1"]
     finally:
         stop()
 
@@ -5459,15 +6436,15 @@ def test_device_upsert_create_and_update_details(tmp_path):
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         _req(host, port, "POST", "/api/devices",
-             {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+             {"device_id": "d1", "device_ip": "10.0.0.1", "iris_vlan": "666",
               "model": "C9300"}, headers=hh)
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "model": "IE-3400"}, headers=hh)
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "model": "IE-3400"}, headers=hh)
         _req(host, port, "POST", "/api/devices",
-             {"device_id": "d1", "device_ip": "10.0.0.9", "vlan": "777",
-              "svi_ip": "1.1.1.1", "guest_ip": "2.2.2.2"}, headers=hh)
+             {"device_id": "d1", "device_ip": "10.0.0.9", "iris_vlan": "777",
+              "svi_ip": "1.1.1.1", "app_ip": "2.2.2.2"}, headers=hh)
         ups = [e for e in _read_audit_lines(audit_path)
                if e.get("event") == "device_upsert"]
         assert [e["action"] for e in ups] == \
@@ -5476,9 +6453,9 @@ def test_device_upsert_create_and_update_details(tmp_path):
         assert ups[1]["detail"] == "changed model: C9300 -> IE-3400"
         assert ups[2]["detail"] == "no fields changed"
         # 4 changed fields -> first 3 alphabetically + a (+1 more) suffix
-        assert ups[3]["detail"] == ("changed device_ip: 10.0.0.1 -> 10.0.0.9, "
-                                    "guest_ip: (none) -> 2.2.2.2, "
-                                    "svi_ip: (none) -> 1.1.1.1 (+1 more)")
+        assert ups[3]["detail"] == ("changed app_ip: (none) -> 2.2.2.2, "
+                                    "device_ip: 10.0.0.1 -> 10.0.0.9, "
+                                    "iris_vlan: 666 -> 777 (+1 more)")
     finally:
         stop()
 
@@ -5533,7 +6510,8 @@ def test_csv_import_route_stats_and_detail(tmp_path):
                         raw=csv_in.encode())
         assert st == 200
         body = json.loads(b)
-        assert body == {"imported": 2, "new": 1, "updated": 1, "skipped": 2}
+        assert body == {"imported": 2, "new": 1, "updated": 1, "skipped": 2,
+                        "roles_cleared": 0}
         ev = [e for e in _read_audit_lines(audit_path)
               if e.get("event") == "device_csv_import"][0]
         assert ev["detail"] == \
@@ -5754,9 +6732,7 @@ def test_device_view_exposes_telemetry_flags(tmp_path):
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         for did in ("d-stream", "d-quiet", "d-old"):
             _req(host, port, "POST", "/api/devices",
-                 {"device_id": did, "device_ip": "10.0.0.1", "vlan": "666",
-                  "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                  "guest_ip": "10.0.0.3"}, headers=hh)
+                 {"device_id": did, "device_ip": "10.0.0.1"}, headers=hh)
         cat.record_heartbeat("d-stream", {"stage_state": "ready",
                                           "telemetry_enabled": True,
                                           "telemetry_stream_enabled": True})
@@ -6993,17 +7969,42 @@ def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
 
 # ---- GET /api/devices/<id>/deployment (deployment config visibility) ------
 
-def _serve_records(tmp_path, now_fn=None):
-    """A server with ONLY a record store wired (the deployment route needs
-    nothing else). Returns the store so tests can seed records directly."""
+class _DeploymentProjectionController:
+    def __init__(self, result=None, error=None):
+        self.result = (result if result is not None else {
+            "iox_verification_obligations": [], "iox_sessions": []})
+        self.error = error
+        self.requested = []
+
+    def summary_for_device(self, device_id):
+        self.requested.append(device_id)
+        if self.error is not None:
+            raise self.error
+        # Return a detached value, as the real controller does across its
+        # read-only authority boundary.
+        return json.loads(json.dumps(self.result))
+
+
+_READABLE_IOX_AUTHORITY = object()
+
+
+def _serve_records(tmp_path, now_fn=None,
+                   iox_controller=_READABLE_IOX_AUTHORITY,
+                   record_store_override=None):
+    """Serve deployment records with explicit readable IOx authority."""
     import deployment_records
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
     app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
-    record_store = (deployment_records.DeploymentRecordStore(state, now_fn=now_fn)
-                if now_fn else deployment_records.DeploymentRecordStore(state))
-    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
-                                 record_store=record_store)
+    record_store = record_store_override or (
+        deployment_records.DeploymentRecordStore(state, now_fn=now_fn)
+        if now_fn else deployment_records.DeploymentRecordStore(state))
+    if iox_controller is _READABLE_IOX_AUTHORITY:
+        iox_controller = _DeploymentProjectionController()
+    server_kwargs = {"certfile": None, "record_store": record_store}
+    if iox_controller is not None:
+        server_kwargs["iox_controller"] = iox_controller
+    srv = gui_server.make_server("127.0.0.1", 0, app, **server_kwargs)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, record_store, srv.shutdown
@@ -7040,7 +8041,9 @@ def test_deployment_route_null_then_newest_then_active(tmp_path):
         st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                         headers={"Cookie": ck})
         assert st == 200
-        assert json.loads(b) == {"record": None, "total": 0}
+        assert json.loads(b) == {
+            "record": None, "total": 0,
+            "iox_verification_obligations": [], "iox_sessions": []}
         # two non-active, non-recoverable records -> the newest by
         # timestamps.planned_at wins
         r1 = record_store.create(_record_stub("d1"))
@@ -7074,7 +8077,9 @@ def test_deployment_route_null_then_newest_then_active(tmp_path):
         # records are per-device: another device still sees null
         _, _, b = _req(host, port, "GET", "/api/devices/other/deployment",
                        headers={"Cookie": ck})
-        assert json.loads(b) == {"record": None, "total": 0}
+        assert json.loads(b) == {
+            "record": None, "total": 0,
+            "iox_verification_obligations": [], "iox_sessions": []}
     finally:
         stop()
 
@@ -7096,6 +8101,296 @@ def test_deployment_route_recoverable_beats_newer_planned(tmp_path):
         assert got["record"]["record_id"] == r1["record_id"]
         assert got["record"]["state"] == "needs-reconcile"
         assert got["total"] == 2
+    finally:
+        stop()
+
+
+class _RawProjectionRecordStore:
+    def __init__(self, records, selected):
+        self.records = list(records)
+        self.selected = selected
+
+    def list(self, device_id, *args, **kwargs):
+        return [record for record in self.records
+                if record["device_id"] == device_id]
+
+    def recoverable_for_device(self, device_id, *args, **kwargs):
+        return (self.selected
+                if self.selected["device_id"] == device_id else None)
+
+
+class _StrictProjectionRecordStore(_RawProjectionRecordStore):
+    def __init__(self, records, selected):
+        _RawProjectionRecordStore.__init__(self, records, selected)
+        self.strict_reads = []
+
+    def list(self, device_id, *args, **kwargs):
+        self.strict_reads.append(("list", kwargs.get("strict")))
+        if kwargs.get("strict") is not True:
+            raise AssertionError("deployment list was not a strict read")
+        return _RawProjectionRecordStore.list(
+            self, device_id, *args, **kwargs)
+
+    def recoverable_for_device(self, device_id, *args, **kwargs):
+        self.strict_reads.append(("recoverable", kwargs.get("strict")))
+        if kwargs.get("strict") is not True:
+            raise AssertionError("deployment selection was not a strict read")
+        return _RawProjectionRecordStore.recoverable_for_device(
+            self, device_id, *args, **kwargs)
+
+
+def _verification_observation(state="enabled", at=10, command_id=1):
+    return {
+        "state": state, "observed_at": at, "command_id": command_id,
+        "transcript_id": "d" * 32, "stdout_offset": 0,
+        "stdout_length": 7, "stderr_offset": 0, "stderr_length": 0,
+        "returncode": 0, "timed_out": False, "truncated": False,
+        "framing_complete": True,
+    }
+
+
+def _internal_terminal_verification():
+    return {
+        "schema_version": 1, "transaction_id": "a" * 32, "revision": 1,
+        "record_id": "record-1", "controller_id": "b" * 32,
+        "board_identity": "FDO2547X9AB", "wrapper_sha256": "c" * 64,
+        # An enabled initial observation may close directly as unchanged when
+        # either native marker is present.
+        "package_sign_present": True, "package_cert_present": False,
+        "prior_state": "enabled", "current_state": "enabled",
+        "phase": "unchanged", "unresolved": False, "created_at": 10,
+        "updated_at": 12, "observed_at": 10, "terminal_at": 12,
+        "initial_observation": _verification_observation(),
+        "pre_disable_observation": None, "disable_confirmation": None,
+        "restore_observation": None, "error": None,
+        "transcript_refs": [{
+            "id": "d" * 32, "attempt_id": "d" * 32,
+            "stored_bytes": 4096, "observed_bytes": 7,
+            "dropped_bytes": 0, "truncated": False,
+        }],
+    }
+
+
+def _internal_indeterminate_verification():
+    value = _internal_terminal_verification()
+    value.update({
+        "transaction_id": "e" * 32, "revision": 2,
+        "record_id": "record-2", "package_sign_present": False,
+        "current_state": "disabled", "phase": "indeterminate",
+        "unresolved": True, "updated_at": 13, "observed_at": 12,
+        "terminal_at": None,
+        "pre_disable_observation": _verification_observation(
+            state="enabled", at=11, command_id=2),
+        "restore_observation": _verification_observation(
+            state="disabled", at=12, command_id=3),
+        "error": {
+            "category": "reconciliation_required",
+            "detail": "disabled state requires operator reconciliation",
+            "at": 13, "transcript_id": "d" * 32,
+        },
+    })
+    value["transcript_refs"][0].update({"observed_bytes": 21})
+    return value
+
+
+def _public_verification(record_id="record-1", transaction_id=None,
+                         revision=1, current_state="enabled",
+                         phase="unchanged", unresolved=False,
+                         updated_at=12, observed_at=10,
+                         error_category=None):
+    return {
+        "schema_version": 1, "record_id": record_id,
+        "transaction_id": transaction_id or "a" * 32,
+        "revision": revision,
+        "board_identity": "FDO2547X9AB", "prior_state": "enabled",
+        "current_state": current_state, "phase": phase,
+        "unresolved": unresolved, "created_at": 10,
+        "updated_at": updated_at, "observed_at": observed_at,
+        "terminal_at": None if unresolved else updated_at,
+        "error_category": error_category,
+    }
+
+
+def test_deployment_route_projects_only_safe_iox_authority_fields(tmp_path):
+    internal_terminal = _internal_terminal_verification()
+    internal_terminal_before = json.loads(json.dumps(internal_terminal))
+    raw_record = {
+        "record_id": "record-1", "controller_id": "iris",
+        "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "h" * 64, "state": "active",
+        "resolved": {"platform": "iox", "device_ip": "10.0.0.1"},
+        "preflight": {"status": "passed"}, "resources": [],
+        "timestamps": {"planned_at": 1},
+        "iox_verification": internal_terminal,
+    }
+    obligation = _public_verification(
+        record_id="record-2", transaction_id="e" * 32,
+        revision=2, current_state="disabled", phase="indeterminate",
+        unresolved=True, updated_at=13, observed_at=12,
+        error_category="reconciliation_required")
+    unresolved_record = {
+        "record_id": "record-2", "controller_id": "iris",
+        "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "i" * 64, "state": "abandoned",
+        "resolved": {"platform": "iox", "device_ip": "10.0.0.2",
+                     "device_identity": "FDO2547X9AB"},
+        "preflight": {"status": "passed"}, "resources": [],
+        "timestamps": {"planned_at": 2},
+        "iox_verification": _internal_indeterminate_verification(),
+    }
+    session = {
+        "attempt_id": "f" * 32, "job_id": "fedcba9876543210",
+        "device_id": "d1",
+        "board_identity": "FDO2547X9AB", "operation": "install",
+        "teardown_mode": "none", "record_id": "record-2",
+        "state": "active", "mutation_blocked": True,
+    }
+    controller = _DeploymentProjectionController({
+        "iox_verification_obligations": [obligation],
+        "iox_sessions": [session],
+    })
+    host, port, _store, stop = _serve_records(
+        tmp_path, iox_controller=controller,
+        record_store_override=_RawProjectionRecordStore(
+            [raw_record, unresolved_record], raw_record))
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 200, body
+        result = json.loads(body)
+        assert controller.requested == ["d1"]
+        assert set(result) == {
+            "record", "total", "iox_verification_obligations", "iox_sessions"}
+        assert result["total"] == 2
+        assert result["iox_verification_obligations"] == [obligation]
+        assert result["iox_sessions"] == [session]
+        assert result["record"]["iox_verification"] == _public_verification()
+        # Projection is copy-only: serving it must not replace authority in
+        # the record-store object supplied to the controller.
+        assert raw_record["iox_verification"] == internal_terminal_before
+        assert raw_record["iox_verification"]["controller_id"] == "b" * 32
+        public_bytes = json.dumps(result, sort_keys=True)
+        for private_value in ("b" * 32, "c" * 64, "transcript_refs",
+                              "initial_observation", "command_id",
+                              "package_sign_present", "package_cert_present"):
+            assert private_value not in public_bytes
+    finally:
+        stop()
+
+
+def test_deployment_route_uses_strict_record_reads(tmp_path):
+    raw_record = {
+        "record_id": "record-1", "controller_id": "iris",
+        "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "h" * 64, "state": "active",
+        "resolved": {"platform": "iox", "device_ip": "10.0.0.1"},
+        "preflight": {"status": "passed"}, "resources": [],
+        "timestamps": {"planned_at": 1},
+    }
+    store = _StrictProjectionRecordStore([raw_record], raw_record)
+    host, port, _unused, stop = _serve_records(
+        tmp_path, record_store_override=store)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 200, body
+        assert store.strict_reads == [("list", True), ("recoverable", True)]
+    finally:
+        stop()
+
+
+def test_local_recovery_deduplicates_one_board_across_authority_sources():
+    class Fleet:
+        @staticmethod
+        def get_device(device_id):
+            return ({"device_id": "d1", "credential_profile_id": "lab"}
+                    if device_id == "d1" else None)
+
+    class Credentials:
+        @staticmethod
+        def list_profiles():
+            return [{"id": "lab"}]
+
+    class Controller:
+        @staticmethod
+        def summary_for_device(device_id):
+            assert device_id == "d1"
+            return {
+                "iox_verification_obligations": [{
+                    "board_identity": "FCW0000IOX",
+                    "record_id": "record-1",
+                }],
+                "iox_sessions": [{
+                    "board_identity": "FCW0000IOX",
+                    "record_id": None,
+                }],
+            }
+
+    class Onboard:
+        def __init__(self):
+            self.recoveries = []
+
+        def start_iox_recovery(self, device_id, credential_ref,
+                               board_identity, record_id=None):
+            self.recoveries.append((device_id, credential_ref,
+                                    board_identity, record_id))
+            return "0123456789abcdef"
+
+        @staticmethod
+        def get_job(job_id):
+            return {"id": job_id, "state": "queued", "record_id": None}
+
+    onboard = Onboard()
+    adapter = gui_server._OnboardSubmissionAdapter(
+        Fleet(), Credentials(), None, onboard, Controller(),
+        lambda *_args: None, lambda *_args: None, lambda *_args: None,
+        lambda *_args: None, None, lambda: 0)
+
+    result = adapter.dispatch({
+        "operation": "recover", "device_id": "d1", "wait": False,
+    })
+
+    assert result == {
+        "accepted": True, "job_id": "0123456789abcdef", "state": "queued",
+        "terminal": False, "record_id": None, "result_code": None,
+    }
+    assert onboard.recoveries == [
+        ("d1", "lab", "FCW0000IOX", "record-1")]
+
+
+def test_deployment_route_returns_503_when_iox_authority_is_unreadable(tmp_path):
+    controller = _DeploymentProjectionController(
+        error=OSError("/private/authority/token-super-secret"))
+    host, port, _record_store, stop = _serve_records(
+        tmp_path, iox_controller=controller)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 503
+        result = json.loads(body)
+        assert controller.requested == ["d1"]
+        assert isinstance(result.get("error"), str)
+        assert "token-super-secret" not in result["error"]
+    finally:
+        stop()
+
+
+def test_deployment_route_returns_503_without_an_authority_controller(tmp_path):
+    host, port, _record_store, stop = _serve_records(
+        tmp_path, iox_controller=None)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 503
+        assert isinstance(json.loads(body).get("error"), str)
     finally:
         stop()
 
@@ -7336,9 +8631,91 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'id="help-btn"' in html
     assert 'href="/help-device.html"' in html
     assert 'href="/help-server.html"' in html
+    # The bundled API reference is a Console-served page too; the menu must
+    # use the canonical trailing-slash path (bare /swagger only redirects).
+    assert 'id="help-api-reference" href="/swagger/"' in html
+    with open(os.path.join(gui_server.WEBROOT, "help-server.html")) as f:
+        server_guide = f.read()
+    assert 'href="/swagger/"' in server_guide
+    assert 'href="/openapi.yaml"' in server_guide
 
 
-def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
+@pytest.mark.parametrize("options,expected", [
+    ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
+], ids=["default", "off", "on"])
+def test_job_log_option_reaches_onboard_and_recorded_undeploy(
+        tmp_path, monkeypatch, options, expected):
+    monkeypatch.setenv("IRIS_LOG", str(tmp_path / "server-log"))
+    seen = []
+
+    def run_fn(path, env, output):
+        seen.append(env.copy())
+        return 0
+
+    host, port, stop = _serve_inband(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for action in ("onboard", "undeploy"):
+            body = dict(options)
+            if action == "onboard":
+                body.update(telemetry=False, telemetry_stream=True)
+            status, _, response = _req(
+                host, port, "POST", "/api/devices/edge/" + action,
+                body, headers=headers)
+            assert status == 200, response
+            job = _wait_onboard_job(
+                host, port, ck, json.loads(response)["job_id"])
+            assert job["state"] == "done", job
+            assert seen[-1].get("IRIS_LOG") == expected, action
+            assert "IRIS_FORCE_AGENT_ONLY" not in seen[-1], action
+            if action == "onboard":
+                assert seen[-1]["IRIS_TELEMETRY"] == "off"
+                assert seen[-1]["IRIS_TELEMETRY_STREAM"] == "on"
+        assert len(seen) == 2
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("action,force", [
+    ("onboard", False), ("undeploy", False), ("undeploy", True),
+], ids=["onboard", "recorded-undeploy", "forced-undeploy"])
+@pytest.mark.parametrize("value", [
+    None, 0, 1, 0.0, "on", "false", [], {},
+], ids=["null", "zero", "one", "float", "on", "false", "list", "object"])
+def test_job_log_option_rejects_non_boolean_before_planning_or_enqueue(
+        tmp_path, monkeypatch, action, force, value):
+    reached = []
+
+    def forbidden(*args, **kwargs):
+        reached.append(True)
+        raise ValueError("unexpected planning or enqueue")
+
+    host, port, stop = _serve_inband(tmp_path, forbidden)
+    adapter = stop.__self__.onboard_submission
+    for owner, name in (
+            (adapter, "_plan"), (adapter, "_teardown_plan"),
+            (adapter.record_store, "recoverable_for_device"),
+            (adapter.record_store, "create"), (adapter.onboard, "start")):
+        monkeypatch.setattr(owner, name, forbidden)
+    try:
+        ck, csrf = _auth(host, port)
+        status, _, response = _req(
+            host, port, "POST", "/api/devices/edge/" + action,
+            {"log": value, "force": force},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert status == 400, response
+        assert json.loads(response)["error"] == "log must be a bool"
+        assert reached == []
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("options,expected", [
+    ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
+], ids=["default", "off", "on"])
+def test_force_undeploy_delivers_the_force_flag_to_the_recipe(
+        tmp_path, options, expected):
     """A forced undeploy must reach the teardown recipe with
     IRIS_FORCE_AGENT_ONLY=1.
 
@@ -7359,24 +8736,29 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         st, _, b = _req(host, port, "POST", "/api/devices/edge/undeploy",
-                        {"force": True},
+                        dict(options, force=True),
                         headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
             "forced undeploy reached the recipe without the force flag")
+        assert seen.get("IRIS_LOG") == expected
     finally:
         stop()
 
 
-def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
+@pytest.mark.parametrize("options,expected", [
+    ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
+], ids=["default", "off", "on"])
+def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(
+        tmp_path, options, expected):
     """The same force-flag delivery test above, but for an xr-host/xr-appmgr
     device: force must resolve to device/xr-uninstall.sh (not one of the
     IOS-XE teardown scripts) and IRIS_FORCE_AGENT_ONLY=1 must reach it the
     same way it reaches the Guest Shell/IOx recipes. XR force never touches
-    a record -- os_family xr + platform xr-appmgr resolve straight to the
-    XR recipe with no probe or preflight involved, so a bare device record
-    is enough here, unlike an onboard test."""
+    a record -- model 8201 + platform xr-appmgr resolve straight to the XR
+    recipe with no probe or preflight involved, so a bare device record is
+    enough here, unlike an onboard test. os_family remains server-owned."""
     seen = {}
     ran_script = {}
 
@@ -7388,17 +8770,18 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
     host, port, stop = _serve_inband(
         tmp_path, run_fn,
         device={"device_id": "xr1", "device_ip": "10.0.0.9", "model": "8201",
-                "os_family": "xr", "platform": "xr-appmgr",
-                "management_type": "xr-host", "credential_profile_id": "lab"})
+                "platform": "xr-appmgr", "management_type": "xr-host",
+                "credential_profile_id": "lab"})
     try:
         ck, csrf = _auth(host, port)
         st, _, b = _req(host, port, "POST", "/api/devices/xr1/undeploy",
-                        {"force": True},
+                        dict(options, force=True),
                         headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
             "forced XR undeploy reached the recipe without the force flag")
+        assert seen.get("IRIS_LOG") == expected
         assert ran_script.get("path", "").endswith("device/xr-uninstall.sh"), (
             "forced XR undeploy did not run device/xr-uninstall.sh: %r"
             % ran_script.get("path"))
@@ -8027,6 +9410,141 @@ def test_delete_abandons_records_so_a_readded_device_can_onboard(tmp_path, monke
         st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {},
                         headers=hh)
         assert st == 200, b
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("pause", ["before_records", "after_records"])
+def test_delete_finishes_old_cleanup_before_replacement_can_onboard(
+        tmp_path, monkeypatch, pause):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    paused, continue_delete = threading.Event(), threading.Event()
+    preflight_entered, continue_job = threading.Event(), threading.Event()
+    replacement_started, replacement_submitted = threading.Event(), threading.Event()
+    executed, outcomes = [], {}
+
+    def preflight(dev, env, resolved):
+        preflight_entered.set()
+        assert continue_job.wait(5)
+        return {"status": "passed", "device_identity": "NEWBOARDID",
+                "detected_model": "C8000V", "nat_interface": "GigabitEthernet1"}
+
+    def runner(path, env, output, on_proc):
+        executed.append(True)
+        return 0
+
+    host, port, fleet, records, stop = _serve_router(
+        tmp_path, runner, preflight_fn=preflight)
+    threads = []
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        old = _stranded_record(records)
+        if pause == "before_records":
+            # No old recoverable record masks the first gap. The other case
+            # pauses just after retiring a genuinely stranded predecessor.
+            records.transition(old, "abandoned")
+        real_retire = records.retire_device
+
+        def retire(device_id, reason, *args, **kwargs):
+            if pause == "after_records":
+                value = real_retire(device_id, reason, *args, **kwargs)
+            paused.set()
+            assert continue_delete.wait(5)
+            if pause == "before_records":
+                value = real_retire(device_id, reason, *args, **kwargs)
+            return value
+
+        monkeypatch.setattr(records, "retire_device", retire)
+
+        def delete():
+            outcomes["delete"] = _req(
+                host, port, "DELETE", "/api/devices/r1", headers=headers)[0]
+
+        def replace():
+            replacement_started.set()
+            outcomes["add"] = _req(
+                host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                headers=headers)[0]
+            status, _, body = _req(
+                host, port, "POST", "/api/devices/r1/onboard", {},
+                headers=headers)
+            outcomes["onboard"] = status
+            outcomes["job_id"] = json.loads(body).get("job_id")
+            replacement_submitted.set()
+
+        threads = [threading.Thread(target=delete), threading.Thread(target=replace)]
+        threads[0].start()
+        assert paused.wait(3)
+        assert fleet.get_device("r1") is None
+        threads[1].start()
+        assert replacement_started.wait(3)
+        blocked_during_cleanup = not replacement_submitted.wait(0.15)
+        continue_delete.set()
+        for thread in threads:
+            thread.join(3)
+            assert not thread.is_alive()
+        assert outcomes["delete"] == outcomes["add"] == outcomes["onboard"] == 200
+        assert preflight_entered.wait(3)
+        new = next(record["record_id"] for record in records.list(device_id="r1")
+                   if record["record_id"] != old)
+        state_after_delete = records.get(new)["state"]
+        continue_job.set()
+        job = _wait_onboard_job(host, port, cookie, outcomes["job_id"])
+        assert blocked_during_cleanup
+        assert records.get(old)["state"] == "abandoned"
+        assert state_after_delete != "abandoned"
+        assert job["state"] == "done"
+        assert records.get(new)["state"] == "active"
+        assert "[abort requested by operator]" not in job["lines"]
+        assert executed == [True]
+    finally:
+        continue_delete.set()
+        continue_job.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(3)
+        stop()
+
+
+@pytest.mark.parametrize("failure", ["records", "jobs"])
+def test_delete_cleanup_failure_retains_degraded_response_and_releases_guard(
+        tmp_path, monkeypatch, failure):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    audit_path = str(tmp_path / "audit.jsonl")
+    host, port, fleet, records, stop = _serve_router(
+        tmp_path, lambda path, env, output: 0, audit_path=audit_path)
+    called = []
+
+    def retire(device_id, reason):
+        called.append("records")
+        if failure == "records":
+            raise OSError("injected record failure")
+        return []
+
+    def cancel(service, device_id):
+        called.append("jobs")
+        if failure == "jobs":
+            raise OSError("injected job failure")
+        return {"cancelled": 0, "aborted": 0}
+
+    monkeypatch.setattr(records, "retire_device", retire)
+    monkeypatch.setattr(gui_onboard.OnboardService, "cancel_device", cancel)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, body = _req(
+            host, port, "DELETE", "/api/devices/r1", headers=headers)
+        assert status == 207
+        assert json.loads(body) == {"deleted": True, "degraded": [failure]}
+        assert called == ["records", "jobs"]
+        assert fleet.get_device("r1") is None
+        assert _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                    headers=headers)[0] == 200
+        events = _read_audit_lines(audit_path)
+        deletion = next(event for event in events if event["event"] == "device_delete")
+        assert deletion["result"] == "degraded"
+        assert "partial cleanup: " + failure in deletion["detail"]
     finally:
         stop()
 
@@ -9780,7 +11298,7 @@ def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
 
 def test_devices_table_gets_the_dense_type_modifier():
     """Wave D fix 1 (operator, AFTER the Wave A type-role fix had already
-    landed: "still different fonts"). Devices is an 11-column table where a
+    landed: "still different fonts"). Devices is a 12-data-column table where a
     single row mixed 14px sans (.dev-id, plain-text cells like Management
     type), 12px mono (.machine), and 14px inherited control text (row
     selects/buttons) -- individually "correct" per type role, but
@@ -10420,7 +11938,7 @@ def test_devices_offset_past_the_end_is_an_empty_page_not_an_error(tmp_path):
         stop()
 
 
-# --- server-side parity for the six console column filters (#112) ----------
+# --- server-side parity for the nine console column filters (#112) ---------
 # app.js's deviceMatchesFilters() decides these client-side over the whole
 # fleet; a paged table can only offer a filter the server can also apply, or
 # a page would silently disagree with what the filter bar promises. Every
@@ -10555,6 +12073,550 @@ def test_devices_peer_filter_uses_quarantine_assignments(tmp_path):
         assert body["total"] == 1 and body["devices"][0]["device_id"] == "nq1"
     finally:
         stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 declared device roles: coordinated API writes and filter parity
+# ---------------------------------------------------------------------------
+
+def _define_device_role(cat, name="boat", restricted=True, **extra):
+    import peer_policy
+    definition = {"restricted": restricted, "peers": [name]}
+    definition.update(extra)
+    return peer_policy.define_role(
+        os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"),
+        name, definition, actor="test", now=1.0)
+
+
+def _loaded_peer_policy(cat):
+    import peer_policy
+    return peer_policy.load_policy(
+        os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"))
+
+
+def test_device_role_and_bulk_role_routes_coordinate_fleet_and_policy(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        hh["If-Match"] = gui_server._revision_etag(
+            "peer-policy", _loaded_peer_policy(cat).document["revision"])
+        preview = json.loads(_req(host, port, "POST", "/api/devices/d1/role?dry_run=1",
+                                  {"role": "boat"}, headers=hh)[2])
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/role",
+                        {"role": "boat", "confirm_token": preview["confirm_token"]}, headers=hh)
+        assert st == 200, b
+        assert fleet.get_device("d1")["role"] == "boat"
+        assert _loaded_peer_policy(cat).roles.role_of["d1"] == "boat"
+        before = _loaded_peer_policy(cat).document
+        hh["If-Match"] = gui_server._revision_etag("peer-policy", before["revision"])
+        body = {"device_ids": ["d1", "d2"], "role": "boat"}
+        preview = json.loads(_req(host, port, "POST", "/api/devices/bulk-role?dry_run=1",
+                                  body, headers=hh)[2])
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-role",
+                        dict(body, confirm_token=preview["confirm_token"]), headers=hh)
+        assert st == 200, b
+        body = json.loads(b)
+        assert body["applied"] == 2 and body["role_drift"]["count"] == 0
+        after = _loaded_peer_policy(cat).document
+        assert after["revision"] == before["revision"] + 1
+        assert len(after["operation_outbox"]) == \
+            len(before["operation_outbox"]) + 1
+    finally:
+        stop()
+
+
+def test_device_role_routes_refuse_unknown_role_before_either_write(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        ck, csrf = _auth(host, port)
+        before = fleet.snapshot(), _loaded_peer_policy(cat).document
+        st, _, b = _req(
+            host, port, "POST", "/api/devices/d1/role", {"role": "missing"},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf, "If-Match":
+                     gui_server._revision_etag("peer-policy", before[1]["revision"])})
+        assert st == 404
+        assert json.loads(b)["error"] == "role_not_found"
+        assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+    finally:
+        stop()
+
+
+def test_device_role_ingress_rejects_nonstring_and_surrounding_whitespace(
+        tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+        before = fleet.snapshot(), _loaded_peer_policy(cat).document
+        headers["If-Match"] = gui_server._revision_etag("peer-policy", before[1]["revision"])
+        for value in (123, " boat", "boat\t"):
+            st, _, body = _req(
+                host, port, "POST", "/api/devices/d1/role",
+                {"role": value}, headers=headers)
+            assert st == 422, body
+            assert json.loads(body)["error"] == "bad_role"
+        st, _, body = _req(
+            host, port, "POST", "/api/devices",
+            {"device_id": "new", "device_ip": "10.0.0.9", "role": 123},
+            headers=headers)
+        assert st == 400, body
+        assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+    finally:
+        stop()
+
+
+def test_generic_device_post_and_csv_import_with_roles_are_coordinated(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        _define_device_role(cat, restricted=False)
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "role": "boat"}, headers=hh)
+        assert st == 200, b
+        assert _loaded_peer_policy(cat).roles.role_of["d1"] == "boat"
+
+        row = fleet.get_device("d1")
+        text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + \
+            ",".join(str(row.get(key, ""))
+                     for key in gui_fleet.CSV_V2_COLS) + "\n"
+        before = _loaded_peer_policy(cat).document["revision"]
+        st, _, b = _req(host, port, "POST", "/api/devices/import-csv",
+                        raw=text.encode(), headers=dict(hh, **{
+                            "Content-Type": "text/csv"}))
+        assert st == 200, b
+        assert json.loads(b)["roles_cleared"] == 0
+        # An unchanged role import does not manufacture a membership event.
+        assert _loaded_peer_policy(cat).document["revision"] == before
+    finally:
+        stop()
+
+
+def test_role_compile_failure_returns_partial_and_bounded_drift(
+        tmp_path, monkeypatch):
+    import peer_policy
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf, "If-Match":
+                   gui_server._revision_etag("peer-policy", _loaded_peer_policy(cat).document["revision"])}
+        preview = json.loads(_req(host, port, "POST", "/api/devices/d1/role?dry_run=1",
+                                  {"role": "boat"}, headers=headers)[2])
+        original = peer_policy.commit_mutation
+        def fail_real_commit(*args, **kwargs):
+            if kwargs.get("dry_run"):
+                return original(*args, **kwargs)
+            raise peer_policy.OperationBacklogFull("full")
+        monkeypatch.setattr(peer_policy, "commit_mutation", fail_real_commit)
+        st, _, b = _req(
+            host, port, "POST", "/api/devices/d1/role",
+            {"role": "boat", "confirm_token": preview["confirm_token"]}, headers=headers)
+        body = json.loads(b)
+        assert st == 409 and body["partial"] is True
+        assert body["role_drift"] == {
+            "count": 1, "device_ids": ["d1"], "truncated": False}
+        assert fleet.get_device("d1")["role"] == "boat"
+    finally:
+        stop()
+
+
+def test_device_delete_cleans_role_membership_and_device_qos(tmp_path):
+    import peer_policy
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        _define_device_role(cat)
+        auth_path = os.path.join(cat.state_dir, "peer-policy.json")
+        lkg_path = os.path.join(cat.state_dir, "peer-policy.lkg.json")
+
+        def seed(candidate):
+            roles = candidate["roles"]
+            roles["role_of"]["d1"] = "boat"
+            roles["qos_device"]["d1"] = {"max_peers": 4}
+        peer_policy.commit_mutation(
+            auth_path, lkg_path, "seed", "d1", "test", 2, seed)
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(
+            host, port, "DELETE", "/api/devices/d1",
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, b
+        doc = _loaded_peer_policy(cat).document
+        assert "d1" not in doc.get("assignments", {})
+        assert "d1" not in doc["roles"]["role_of"]
+        assert "d1" not in doc["roles"]["qos_device"]
+    finally:
+        stop()
+
+
+def test_devices_role_filter_matches_exact_role_and_unassigned(tmp_path):
+    host, port, (_, fleet, _, _cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "role": "boat"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+        ck, _ = _auth(host, port)
+        for value, expected in (("boat", "d1"), ("__none", "d2")):
+            st, _, b = _req(host, port, "GET", "/api/devices?role=" + value,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert st == 200 and body["total"] == 1
+            assert body["devices"][0]["device_id"] == expected
+    finally:
+        stop()
+
+
+def test_declared_role_filter_has_server_and_client_parity():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="dev-filter-role"' in html
+    assert '<option value="__none">— no role —</option>' in html
+    assert 'role: val(\'dev-filter-role\')' in js
+    assert "role: 'role'" in js
+    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
+    predicate = predicate.split("\n  }", 1)[0]
+    assert "f.role" in predicate and "d.role" in predicate
+    assert "Object.keys(" in js.split("function syncDeviceFilterOptions()", 1)[1]
+    assert ".roles || {}).members" in js
+
+
+def test_target_filters_use_fleet_and_deployment_facts_not_heartbeat(tmp_path):
+    class Records:
+        def list(self, strict=False):
+            assert strict is True
+            return [{
+                "record_id": "r1", "device_id": "auto-1", "state": "active",
+                "timestamps": {"planned_at": 10, "finished_at": 11},
+                "resolved": {"platform": "guestshell", "os_family": "xe"},
+            }]
+
+    host, port, (_, fleet, _, cat), stop = _serve_full(
+        tmp_path, record_store=Records(), now_fn=lambda: 4242.9)
+    try:
+        fleet.upsert({"device_id": "auto-1", "device_ip": "10.0.0.1",
+                      "model": "C9300", "role": "boat"})
+        fleet.upsert({"device_id": "missing-os", "device_ip": "10.0.0.2",
+                      "model": "IE-3400", "role": "boat"})
+        # A device controls heartbeat_model. It may be displayed and searched,
+        # but it must never change a targeting family.
+        cat.record_heartbeat("auto-1", {"model": "8201"}, now=4000)
+        ck, _ = _login(host, port)
+        st, _, raw = _req(
+            host, port, "GET",
+            "/api/devices?role=boat&model_family=C9xxx&os_family=xe&platform=guestshell",
+            headers={"Cookie": ck})
+        body = json.loads(raw)
+        assert st == 200
+        assert [row["device_id"] for row in body["devices"]] == ["auto-1"]
+        assert body["devices"][0]["model_family"] == "C9xxx"
+        assert body["devices"][0]["platform_resolved"] == "guestshell"
+        assert body["devices"][0]["heartbeat_model"] == "8201"
+        assert body["total"] == 1
+        assert body["revision"] == fleet.revision()
+        assert body["now"] == 4242
+        assert body["target_facts"] == {
+            "missing_os_family": 0, "role_drift": 1}
+
+        # The missing fact is counted inside the other target dimensions even
+        # though os_family=xe necessarily excludes that row from total.
+        st, _, raw = _req(
+            host, port, "GET", "/api/devices?role=boat&os_family=xe",
+            headers={"Cookie": ck})
+        body = json.loads(raw)
+        assert st == 200 and body["total"] == 1
+        assert body["target_facts"]["missing_os_family"] == 1
+        assert "1 devices have no os_family yet" in body["target_warnings"]
+
+        # Targeting follows the declared fleet role even while compiled
+        # enforcement is absent/drifted.
+        assert body["target_facts"]["role_drift"] == 1
+        assert "1 devices have declared role drift" in body["target_warnings"]
+
+        # Missing-fact counting composes with the peer quarantine predicate;
+        # the row is relevant to every other target dimension even though the
+        # absent OS fact keeps it out of the final xe result.
+        ck, csrf = _auth(host, port)
+        revision = _loaded_peer_policy(cat).document["revision"]
+        st, _, raw = _req(
+            host, port, "PUT",
+            "/api/peer-policy/quarantine/missing-os",
+            {"quarantined": True, "if_revision": revision},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, raw
+        st, _, raw = _req(
+            host, port, "GET", "/api/devices?peer=quarantined&os_family=xe",
+            headers={"Cookie": ck})
+        body = json.loads(raw)
+        assert st == 200 and body["total"] == 0
+        assert body["target_facts"]["missing_os_family"] == 1
+    finally:
+        stop()
+
+
+def test_target_role_drift_includes_ordinary_assignment_shadowing(tmp_path):
+    import peer_policy
+
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "model": "C9300", "role": "boat"})
+        _define_device_role(cat)
+
+        def shadow_role(document):
+            document["roles"]["role_of"]["d1"] = "boat"
+            document["acls"]["manual"] = {
+                "rules": [{"seq": 17, "action": "deny",
+                           "match": {"type": "any"}}]}
+            document["assignments"]["d1"] = "manual"
+
+        peer_policy.commit_mutation(
+            os.path.join(cat.state_dir, "peer-policy.json"),
+            os.path.join(cat.state_dir, "peer-policy.lkg.json"),
+            action="shadow", target="d1", actor="test", now=2,
+            mutate=shadow_role)
+        cookie, _ = _login(host, port)
+        status, _, raw = _req(
+            host, port, "GET", "/api/devices?role=boat",
+            headers={"Cookie": cookie})
+        body = json.loads(raw)
+        assert status == 200 and body["total"] == 1
+        assert body["target_facts"]["role_drift"] == 1
+        assert "1 devices have declared role drift" in body["target_warnings"]
+    finally:
+        stop()
+
+
+def test_record_backed_target_facts_are_stable_across_preview_filters(tmp_path):
+    class Records:
+        def __init__(self):
+            self.calls = []
+
+        def list(self, strict=False):
+            self.calls.append(strict)
+            return [{
+                "record_id": "r1", "device_id": "record-backed",
+                "state": "active", "timestamps": {"planned_at": 10},
+                "resolved": {"platform": "guestshell", "os_family": "xe"},
+            }]
+
+    records = Records()
+    host, port, (_, fleet, _, _cat), stop = _serve_full(
+        tmp_path, record_store=records)
+    try:
+        fleet.upsert({"device_id": "record-backed",
+                      "device_ip": "10.0.0.1", "model": "C9300",
+                      "role": "boat"})
+        fleet.upsert({"device_id": "missing", "device_ip": "10.0.0.2",
+                      "model": "C9300", "role": "boat"})
+        cookie, _ = _login(host, port)
+        for query in ("", "?role=boat", "?role=boat&os_family=xe"):
+            status, _, raw = _req(
+                host, port, "GET", "/api/devices" + query,
+                headers={"Cookie": cookie})
+            body = json.loads(raw)
+            assert status == 200
+            by_id = {row["device_id"]: row for row in body["devices"]}
+            if "record-backed" in by_id:
+                assert by_id["record-backed"]["os_family"] == "xe"
+                assert by_id["record-backed"]["platform_resolved"] == \
+                    "guestshell"
+            assert body["target_facts"]["missing_os_family"] == 1
+            assert "1 devices have no os_family yet" in \
+                body["target_warnings"]
+        assert records.calls == [True, True, True]
+    finally:
+        stop()
+
+
+def test_device_type_filters_have_server_and_client_preview_parity():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="dev-filter-model-family"' in html
+    assert 'id="dev-filter-os-family"' in html
+    assert "modelFamily: val('dev-filter-model-family')" in js
+    assert "osFamily: val('dev-filter-os-family')" in js
+    assert "modelFamily: 'model_family'" in js
+    assert "osFamily: 'os_family'" in js
+    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
+    predicate = predicate.split("\n  }", 1)[0]
+    assert "d.model_family" in predicate
+    assert "d.os_family" in predicate
+    assert "d.platform_resolved || d.platform" in predicate
+    assert "target_warnings" in js
+    assert 'id="dev-target-warning"' in html
+    refresh = js.split("async function refreshDevices() {", 1)[1].split(
+        "\n  function syncDeviceFilterOptions()", 1)[0]
+    failed = refresh.split("if (!dr.ok)", 1)[1].split(
+        "var dbody = await dr.json()", 1)[0]
+    assert "devStatus.textContent" in failed
+    assert "targetWarning.textContent" in failed
+    assert "document.getElementById('dev-rows').innerHTML" in failed
+    assert "Device target preview unavailable." in failed
+    assert "document.getElementById('dev-count').textContent = " \
+        "'Results unavailable'" in failed
+    assert "devTotal = 0" in failed and "devOffset = 0" in failed
+    assert "updateDevPager(0)" in failed
+    assert "markAll.checked = false" in failed
+    assert "markAll.indeterminate = false" in failed
+    assert "delete SELECTED" not in failed
+
+    # Task 22 consumes this same pure predicate; the HTTP handler delegates to
+    # it rather than owning a second copy of the target language.
+    row = {"device_id": "d1", "role": "boat", "model_family": "C9xxx",
+           "os_family": "xe", "platform": "",
+           "platform_resolved": "guestshell"}
+    assert gui_server.target_row_matches(
+        row, {"role": "boat", "model_family": "C9xxx",
+              "os_family": "xe", "platform": "guestshell"}, now=1)
+    assert not gui_server.target_row_matches(
+        row, {"role": "fiber"}, now=1)
+    with pytest.raises(
+            ValueError, match="peer targeting requires quarantine assignments"):
+        gui_server.target_row_matches(
+            row, {"peer": "not-quarantined"}, now=1)
+    assert gui_server.target_row_matches(
+        row, {"peer": "not-quarantined"}, now=1,
+        quarantined_ids=set())
+    projected = gui_server.trusted_target_projection(
+        {"model": "C9300", "heartbeat_model": "8201", "os_family": "xe"},
+        {"platform": "guestshell"})
+    assert projected == {"model_family": "C9xxx", "os_family": "xe",
+                         "platform_resolved": "guestshell"}
+    assert "return target_row_matches(" in inspect.getsource(
+        gui_server.make_server)
+
+
+def test_failed_target_preview_cannot_be_replayed_from_selection_cache():
+    import subprocess
+
+    js = _webroot("app.js")
+    refresh = "async function refreshDevices() {" + js.split(
+        "async function refreshDevices() {", 1)[1].split(
+            "\n\n  // Populate the credential filter", 1)[0]
+    select_all = "async function selectAllMatchingDevices() {" + js.split(
+        "async function selectAllMatchingDevices() {", 1)[1].split(
+            "\n  // Every selected-action shares one lock", 1)[0]
+    script = r'''
+const assert = require('node:assert/strict');
+const elements = new Map();
+function el(id) {
+  if (!elements.has(id)) elements.set(id, {
+    textContent: '', innerHTML: '', checked: true, indeterminate: true,
+    disabled: false
+  });
+  return elements.get(id);
+}
+var document = {getElementById: el};
+class AbortController {
+  constructor() { this.signal = {}; }
+  abort() {}
+}
+var devicesRefreshGeneration = 0, devicesRefreshController = null;
+var LAST_DEVICES = [{device_id: 'stale-row'}], LAST_DEV_NOW = 77;
+var devTotal = 1, devOffset = 0, DEV_PAGE_SIZE = 200;
+var SELECTED = {'keep-selected': true};
+var peerPolicyReadOk = true, peerPolicy = {}, devStatus = el('dev-status');
+var selectAllMatchingBusy = false;
+function applyPendingDevFilter() {}
+function devicesPageQuery() { return ''; }
+function deviceFilterState() { return {}; }
+function deviceFilterQuery() { return ''; }
+function renderPeerPolicyPanel() {}
+// The schedule read rides along with the device read and is advisory; this
+// harness is about the device projection, so it stands in for it.
+async function refreshScheduleList() {}
+var pagerTotal = null;
+function updateDevPager(total) { pagerTotal = total; }
+var replayed = null;
+function renderDevices(devices) { replayed = devices.slice(); }
+async function fetch(url) {
+  if (url.startsWith('/api/v1/devices?')) {
+    return {ok: false, status: 503, json: async () => ({})};
+  }
+  if (url === '/api/v1/onboard/jobs') {
+    return {ok: true, status: 200, json: async () => ({jobs: []})};
+  }
+  return {ok: true, status: 200, json: async () => ({})};
+}
+''' + refresh + '\n' + select_all + r'''
+(async () => {
+  await refreshDevices();
+  assert.deepEqual(LAST_DEVICES, []);
+  assert.equal(LAST_DEV_NOW, 0);
+  assert.match(el('dev-rows').innerHTML, /preview unavailable/i);
+  assert.equal(el('dev-count').textContent, 'Results unavailable');
+  assert.equal(pagerTotal, 0);
+  assert.equal(el('mark-all').checked, false);
+  assert.equal(el('mark-all').indeterminate, false);
+  await selectAllMatchingDevices();
+  assert.deepEqual(replayed, []);
+  assert.deepEqual(SELECTED, {'keep-selected': true});
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        ["node", "-"], input=script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_resolved_type_filter_fails_visible_on_unreadable_record_state(tmp_path):
+    calls = []
+
+    class BrokenRecords:
+        def list(self, strict=False):
+            calls.append(strict)
+            raise deployment_records.RecordStoreUnreadable("broken")
+
+    host, port, (_, fleet, _, _cat), stop = _serve_full(
+        tmp_path, record_store=BrokenRecords())
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "model": "C9300"})
+        ck, _ = _login(host, port)
+        st, _, raw = _req(host, port, "GET", "/api/devices",
+                          headers={"Cookie": ck})
+        assert st == 503 and calls == [True]
+        problem = json.loads(raw)
+        assert problem["code"] == "service-unavailable"
+    finally:
+        stop()
+
+
+def test_role_filter_facet_is_complete_when_role_is_absent_from_current_page(
+        tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        _define_device_role(cat, "alpha", restricted=False)
+        _define_device_role(cat, "zeta", restricted=True)
+        for index in range(201):
+            fleet.upsert({"device_id": "d%03d" % index,
+                          "device_ip": "10.0.%d.%d" %
+                          (index // 250, index % 250 + 1),
+                          "role": "zeta" if index == 200 else "alpha"})
+        ck, _ = _auth(host, port)
+        st, _, raw = _req(
+            host, port, "GET", "/api/devices?limit=200&offset=0",
+            headers={"Cookie": ck})
+        page = json.loads(raw)
+        assert st == 200 and len(page["devices"]) == 200
+        assert all(row.get("role") != "zeta" for row in page["devices"])
+        st, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                          headers={"Cookie": ck})
+        assert st == 200
+        assert set(json.loads(raw)["roles"]["members"]) == {"alpha", "zeta"}
+    finally:
+        stop()
+
 
 
 def test_devices_status_filter_matches_every_key_deviceStatus_can_produce(tmp_path):
@@ -10727,3 +12789,1637 @@ def test_swarm_page_params_are_rejected_not_defaulted(tmp_path):
         assert st == 400
     finally:
         stop()
+
+
+@pytest.fixture
+def role_api(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+    _define_device_role(cat)
+    ck, csrf = _auth(host, port)
+    headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+
+    def request(method, path, body=None, match=True):
+        hh = dict(headers)
+        if match:
+            hh["If-Match"] = (gui_server._revision_etag(
+                "peer-policy", _loaded_peer_policy(cat).document["revision"])
+                if match is True else match)
+        status, response_headers, raw = _req(
+            host, port, method, path, body, headers=hh)
+        return status, response_headers, json.loads(raw) if raw else None
+
+    def request_raw(method, path):
+        return _req(host, port, method, path, headers=dict(headers))
+
+    request.raw = request_raw
+    yield request, fleet, cat
+    stop()
+
+
+@pytest.mark.parametrize("method,path,body", [
+    ("PUT", "/api/peer-policy/roles/fiber", {"restricted": False}),
+    ("DELETE", "/api/peer-policy/roles/boat", None),
+    ("POST", "/api/peer-policy/roles/import-csv", {"csv": "role\nboat\n"}),
+    ("PUT", "/api/peer-policy/qos", {"qos": {"numwant": 25}}),
+    ("POST", "/api/devices/d1/role", {"role": "boat"}),
+    ("POST", "/api/devices/bulk-role", {"device_ids": ["d1"], "role": "boat"}),
+])
+def test_role_qos_routes_require_exact_strong_cas(role_api, method, path, body):
+    request, fleet, cat = role_api
+    before = fleet.snapshot(), _loaded_peer_policy(cat).document
+    status, headers, problem = request(method, path, body, match=False)
+    assert status == 428
+    assert problem["code"] == "precondition_required"
+    assert problem["type"].endswith("#precondition_required")
+    current = gui_server._revision_etag("peer-policy", before[1]["revision"])
+    assert headers["ETag"] == current
+    for supplied in ('*', 'W/' + current, current + ', ' + current,
+                     '"iris-peer-policy-0"'):
+        status, headers, problem = request(method, path, body, match=supplied)
+        assert status == 412
+        assert problem["type"].endswith("#precondition_failed")
+        assert headers["ETag"] == current
+    assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+
+
+def test_role_qos_preview_confirmation_and_delete(role_api):
+    from pathlib import Path
+    request, fleet, cat = role_api
+    request("GET", "/api/peer-policy")
+    def snapshot():
+        return {str(p.relative_to(cat.state_dir)): p.read_bytes()
+                for p in Path(cat.state_dir).rglob('*')
+                if p.is_file() and not p.name.endswith('.lock')}
+    before = snapshot()
+    status, headers, preview = request("PUT", "/api/peer-policy/qos?dry_run=1",
+                                       {"qos": {"numwant": 25}})
+    assert status == 200
+    assert snapshot() == before
+    assert preview["dry_run"] and preview["qos_changed"]
+    assert preview["requires_confirmation"]
+    assert all(preview[key] == 0 for key in (
+        "member_delta", "origin_access_lost", "empty_permitted_sets",
+        "role_pairs_stopped"))
+    status, _, problem = request("PUT", "/api/peer-policy/qos",
+                                 {"qos": {"numwant": 25}, "confirm": True})
+    assert status in (422, 428)
+    status, _, problem = request("PUT", "/api/peer-policy/qos",
+                                 {"qos": {"numwant": 24},
+                                  "confirm_token": preview["confirm_token"]})
+    assert status == 428 and problem["code"] == "confirmation_required"
+    status, headers, committed = request("PUT", "/api/peer-policy/qos",
+        {"qos": {"numwant": 25}, "confirm_token": preview["confirm_token"]})
+    assert status == 200
+    assert headers["ETag"] == gui_server._revision_etag(
+        "peer-policy", committed["revision"])
+    assert request("PUT", "/api/peer-policy/roles/empty",
+                   {"restricted": False})[0] == 200
+    status, _, preview = request("DELETE", "/api/peer-policy/roles/empty?dry_run=1")
+    assert status == 200
+    status, headers, body = request("DELETE", "/api/peer-policy/roles/empty",
+                                    {"confirm_token": preview["confirm_token"]})
+    assert status == 204 and body is None and "ETag" in headers
+
+
+ROLES_CSV = (
+    "role,restricted,peers,origin,nets,on_stale,seed_up_bps,telemetry_pause\n"
+    "boat,true,boat;fiber,true,10.20.0.0/16,keep,12500000,false\n"
+    "fiber,true,fiber;boat,,,,,\n")
+
+
+def test_role_definitions_csv_import_previews_then_replaces_every_definition(role_api):
+    """#222: the Console's Import CSV is one atomic replacement in the
+    iris-role grammar, behind the same CAS + preview + confirmation contract
+    as every other policy write; the export is that grammar byte for byte."""
+    import role_csv
+    request, fleet, cat = role_api
+    before = _loaded_peer_policy(cat).document
+    status, headers, preview = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1", {"csv": ROLES_CSV})
+    assert status == 200, preview
+    assert preview["dry_run"] is True and preview["roles"] == 2
+    assert preview["confirm_token"]
+    assert _loaded_peer_policy(cat).document == before
+    status, headers, committed = request(
+        "POST", "/api/peer-policy/roles/import-csv",
+        {"csv": ROLES_CSV, "confirm_token": preview["confirm_token"]})
+    assert status == 200, committed
+    assert committed["dry_run"] is False and committed["roles"] == 2
+    assert headers["ETag"] == gui_server._revision_etag(
+        "peer-policy", committed["revision"])
+    doc = _loaded_peer_policy(cat).document
+    assert set(doc["roles"]["defs"]) == {"boat", "fiber"}
+    assert doc["roles"]["defs"]["boat"] == {
+        "restricted": True, "peers": ["boat", "fiber"], "origin": True,
+        "nets": ["10.20.0.0/16"], "on_stale": "keep",
+        "qos": {"seed_up_bps": 12500000, "telemetry_pause": False}}
+    status, headers, raw = request.raw("GET", "/api/peer-policy/roles/export-csv")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/csv")
+    assert headers["Content-Disposition"].endswith("; filename=roles.csv")
+    assert headers["ETag"] == gui_server._revision_etag(
+        "peer-policy", committed["revision"])
+    assert raw.decode("utf-8") == role_csv.export_roles_csv(doc)
+    # The export re-imports as a no-op candidate: same definitions, same file.
+    assert role_csv.parse_roles_csv(raw.decode("utf-8")) == doc["roles"]["defs"]
+
+
+def test_role_definitions_csv_import_refuses_bad_grammar_with_the_cell_named(role_api):
+    request, fleet, cat = role_api
+    before = _loaded_peer_policy(cat).document
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,bogus\nboat,1\n"})
+    assert status == 422
+    assert problem["code"] == "invalid_roles_csv"
+    assert problem["detail"] == "unknown roles CSV field: bogus"
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,seed_up_bps\nboat,fast\n"})
+    assert status == 422 and problem["code"] == "invalid_roles_csv"
+    assert problem["detail"] == "seed_up_bps must be an integer"
+    # A well-formed file with a policy refusal keeps the policy code, and the
+    # message still reaches the operator.
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,peers\nboat,boat;ghost\n"})
+    assert status == 422 and problem["code"] == "invalid_policy"
+    assert problem["detail"] == "peer references unknown role"
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1", {"csv": 7})
+    assert status == 422 and problem["code"] == "invalid_policy_request"
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role\nboat\n", "extra": 1})
+    assert status == 422 and problem["code"] == "invalid_policy_request"
+    assert _loaded_peer_policy(cat).document == before
+
+
+def test_role_definitions_csv_import_cannot_drop_a_declared_role(role_api):
+    request, fleet, cat = role_api
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "role": "boat"})
+    before = _loaded_peer_policy(cat).document
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,restricted\nfiber,true\n"})
+    assert status == 409, problem
+    assert problem["code"] == "role_in_use"
+    assert problem["roles"] == ["boat"]
+    assert _loaded_peer_policy(cat).document == before
+
+
+def test_role_definitions_export_refuses_degraded_policy(role_api):
+    request, fleet, cat = role_api
+    path = os.path.join(cat.state_dir, "peer-policy.json")
+    with open(path, "w") as f:
+        f.write("{not json")
+    status, headers, raw = request.raw("GET", "/api/peer-policy/roles/export-csv")
+    assert status == 503
+    assert headers["Content-Type"] == "application/problem+json"
+    assert json.loads(raw)["code"] == "policy_unavailable"
+
+
+def test_role_definitions_editor_wired_in_console():
+    """#222: definitions are created, edited, deleted, imported and exported
+    from the Console through the Set role contract (dry run, then commit with
+    the preview token), not through a JSON blob."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    panel = html.split('id="peer-policy-panel"')[1].split("</details>")[0]
+    for cid in ('id="role-def-new"', 'id="role-def-import"', 'id="role-def-export"',
+                'id="role-def-file"', 'id="role-def-rows"', 'id="role-def-status"'):
+        assert cid in panel, cid + " must live inside the Peer policy panel"
+    modal = html.split('id="role-def-modal"')[1].split('id="sched-modal"')[0]
+    for cid in ('id="rd-name"', 'id="rd-peers"', 'id="rd-nets"', 'id="rd-on-stale"',
+                'id="rd-restricted"', 'id="rd-origin"', 'id="rd-rates"', 'id="rd-swarm"',
+                'id="role-def-preview"', 'id="role-def-save"'):
+        assert cid in modal, cid + " must live inside the role editor"
+    assert "managed through the API or CLI" not in html
+    assert "/api/v1/peer-policy/roles/import-csv?dry_run=1" in js
+    assert "/api/v1/peer-policy/roles/export-csv" in js
+    save = js.split("getElementById('role-def-save').addEventListener")[1]
+    assert "?dry_run=1" in save and "confirm_token" in save
+    assert "wireModal('role-def-modal'" in js
+    # every role-scoped QoS key is editable, none of the global-only ones is
+    import role_csv
+    for key in role_csv.ROLE_QOS_FIELDS:
+        assert "['%s'," % key in js, key
+    for key in ("origin_up_bps", "origin_per_torrent_up_bps", "origin_max_peers"):
+        assert "'%s'" % key not in js.split("ROLE_QOS_FIELDS = [")[1].split("];")[0]
+
+
+def test_role_policy_view_and_effective_qos(role_api):
+    request, fleet, cat = role_api
+    for i in range(12):
+        fleet.upsert({"device_id": "drift%02d" % i,
+                      "device_ip": "10.1.0.%d" % (i + 1), "role": "boat"})
+    status, _, view = request("GET", "/api/peer-policy")
+    assert status == 200
+    assert view["roles_present"] is True
+    assert view["roles"] == {"defined": 1, "restricted": 1,
+                              "members": {"boat": 0}}
+    assert view["role_drift"] == {"count": 12,
+        "device_ids": ["drift%02d" % i for i in range(10)], "truncated": True}
+    assert view["outbox"] == {"unacknowledged": 1, "capacity": 256}
+    assert view["fleet_rollup"] == {"issued_revision": None, "applied": {},
+                                   "states": {"pre-instructions": 14}}
+    assert "10.1.0." not in json.dumps(view)
+    status, _, qos = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200 and qos["delivery_state"] == "pre-instructions"
+    assert qos["instruction"]["display_state"] == "pre-instructions"
+    assert qos["instruction"]["accepted_identity"] is None
+    assert qos["qos"]["numwant"]["source"] == "builtin"
+    assert qos["qos"]["numwant"]["effective_ceiling"] == 50
+    assert qos["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+    assert qos["qos"]["catalog_tick_s"]["offline_horizon_s"] == 600
+    assert qos["qos"]["catalog_tick_s"]["heartbeat_always"] is True
+    assert request("GET", "/api/devices/missing/effective-qos")[0] == 404
+
+
+def test_effective_qos_uses_one_keyed_heartbeat_read_and_projects_identity(
+        role_api, monkeypatch):
+    request, _, cat = role_api
+    cat.record_heartbeat("d1", {
+        "instr_protocol": 1, "instr_state": "applied",
+        "instr_epoch": 9, "instr_serial": 17,
+        "instr_policy_revision": 4, "verify_level": "sig",
+        "pointer_skew": False, "private": "must-not-cross-projection",
+    }, now=time.time())
+    original_get = cat.get_device
+    calls = []
+
+    def keyed_get(device_id):
+        calls.append(device_id)
+        return original_get(device_id)
+
+    def forbid_bulk_read(*args, **kwargs):
+        raise AssertionError("effective-QoS must not scan all heartbeats")
+
+    monkeypatch.setattr(cat, "get_device", keyed_get)
+    monkeypatch.setattr(cat, "list_devices", forbid_bulk_read)
+    status, _, body = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200
+    assert calls == ["d1"]
+    assert body["instruction"]["display_state"] == "applied"
+    assert body["instruction"]["accepted_identity"] == {
+        "epoch": 9, "instr_serial": 17, "policy_revision": 4}
+    assert "private" not in body["instruction"]
+    assert body["delivery_state"] == "pre-instructions"
+
+
+def test_effective_qos_keeps_desired_explanation_when_heartbeat_is_unreadable(
+        role_api, monkeypatch):
+    request, _, cat = role_api
+    calls = []
+
+    def unreadable(device_id):
+        calls.append(device_id)
+        raise catalog_mod.StateFileError("unreadable heartbeat shard")
+
+    monkeypatch.setattr(cat, "get_device", unreadable)
+    status, _, body = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200
+    assert calls == ["d1"]
+    assert body["qos"]["numwant"]["source"] == "builtin"
+    assert body["instruction"]["display_state"] == "unknown"
+    assert body["instruction"]["evidence"] == "server-observed"
+    assert body["delivery_state"] == "pre-instructions"
+
+
+def test_effective_qos_keeps_underlying_report_when_revocation_is_unavailable(
+        role_api, monkeypatch):
+    request, _, cat = role_api
+    cat.record_heartbeat("d1", {
+        "instr_protocol": 1, "instr_state": "applied",
+        "instr_epoch": 9, "instr_serial": 17,
+        "instr_policy_revision": 4, "last_seen": time.time(),
+    })
+    monkeypatch.setattr(
+        gui_server, "_instruction_revoked_principals", lambda store: None)
+    status, _, body = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200
+    assert body["instruction"]["display_state"] == "unknown"
+    assert body["instruction"]["underlying_state"] == "applied"
+    assert body["instruction"]["accepted_identity"] == {
+        "epoch": 9, "instr_serial": 17, "policy_revision": 4}
+    assert body["instruction"]["revoked"] is None
+    assert body["qos"]["numwant"]["source"] == "builtin"
+
+
+# Task 19: the state-owning management API provides one bounded instruction
+# projection to both the Devices rows and the fleet roll-up.  These tests are
+# intentionally written against the final producer field names from the frozen
+# Task 19 preflight addendum; the producer workstream supplies their ingest.
+
+def _task19_stamp(policy_revision, serial=1, epoch=100):
+    import instructions
+    issued, expires = epoch, epoch + 100
+    stamp = {
+        "epoch": epoch, "instr_serial": serial,
+        "policy_revision": policy_revision, "platform": "guestshell",
+        "role": "default", "role_gen": "1" * 64,
+        "role_body_sha256": "2" * 64, "key_id": "3" * 64,
+        "verify_level": "sig", "issued_at": issued,
+        "expires_at": expires, "degraded": False,
+        "part": {
+            "peers": {"mode": "tracker-only", "include_origin": False,
+                      "allowed_expires_at": expires},
+            "qos_override": {}, "control_override": {},
+            "server_time": issued,
+        },
+    }
+    instructions.validate_stamp(stamp)
+    return stamp
+
+
+@pytest.mark.parametrize("raw_state,display_state,label", [
+    ("applied", "applied", "applied r9223372036854775807"),
+    ("reasserted", "applied", "applied r9223372036854775807"),
+    ("lkg", "lkg", "lkg"),
+    ("stale_expired", "stale", "stale"),
+    ("allowlist_expired", "stale", "stale"),
+    ("rollback_rejected", "rejected", "rejected"),
+    ("audience_mismatch", "rejected", "rejected"),
+    ("key_rejected", "rejected", "rejected"),
+    ("tamper_rejected", "rejected", "rejected"),
+    ("verifier_missing", "unavailable", "verifier unavailable"),
+    ("lkg_rejected", "rejected", "rejected"),
+    ("lkg_unreadable", "unavailable", "LKG unavailable"),
+    ("oversize", "rejected", "rejected"),
+    ("tracker-only", "tracker-only", "tracker-only"),
+    ("instr_pending", "pending", "pending"),
+    ("instr_unavailable", "unavailable", "unavailable"),
+    ("instr_forbidden", "forbidden", "forbidden"),
+    ("floor_reset", "floor_reset", "floor reset"),
+    ("none", "none", "no accepted instruction"),
+])
+def test_instruction_chip_projection_covers_closed_device_states(
+        raw_state, display_state, label):
+    heartbeat = {
+        "last_seen": 100.0, "instr_protocol": 1,
+        "instr_state": raw_state, "instr_epoch": 11,
+        "instr_serial": (1 << 63) - 1, "instr_policy_revision": 44,
+        "verify_level": "sig", "pointer_skew": False,
+    }
+    if raw_state == "key_rejected":
+        heartbeat["instr_reason"] = "unknown_key"
+    projected = gui_server._instruction_device_projection(
+        heartbeat, revoked=False, observed_at=200.0)
+    assert projected["display_state"] == display_state
+    assert projected["label"] == label
+    assert projected["underlying_state"] == raw_state
+    assert projected["accepted_identity"] == {
+        "epoch": 11, "instr_serial": (1 << 63) - 1,
+        "policy_revision": 44,
+    }
+    assert projected["report_age_seconds"] == 100
+    assert projected["report_stale"] is False
+    assert projected["pointer_skew"] is False
+    assert projected["evidence"] == "agent-asserted"
+
+
+def test_instruction_projection_distinguishes_capability_identity_and_revocation():
+    legacy = gui_server._instruction_device_projection(
+        {"instr_serial": 9, "instr_state": "applied"}, False, 10)
+    assert legacy["display_state"] == "pre-instructions"
+    assert legacy["reported_instr_serial"] == 9
+    assert legacy["accepted_identity"] is None
+
+    for marker in (None, True, "1", 2, {"future": 2}):
+        projected = gui_server._instruction_device_projection(
+            {"instr_protocol": marker, "instr_state": "applied",
+             "instr_epoch": 1, "instr_serial": 2,
+             "instr_policy_revision": 3}, False, 10)
+        assert projected["display_state"] == "unknown"
+        assert projected["label"] == "unknown"
+
+    partial = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied",
+         "instr_serial": 44, "private": "do-not-project",
+         "instr_reason": "<img src=x onerror=alert(1)>"}, False, 10)
+    assert partial["display_state"] == "unknown"
+    assert partial["accepted_identity"] is None
+    assert "private" not in str(partial)
+    assert "<img" not in str(partial)
+
+    raw_lkg = {"instr_protocol": 1, "instr_state": "lkg", "instr_epoch": 8,
+               "instr_serial": 9, "instr_policy_revision": 10,
+               "pointer_skew": "yes", "last_seen": 9}
+    lkg = gui_server._instruction_device_projection(raw_lkg, True, 10)
+    assert lkg["display_state"] == "revoked"
+    assert lkg["label"] == "revoked"
+    assert lkg["underlying_state"] == "lkg"
+    assert lkg["accepted_identity"]["policy_revision"] == 10
+    assert lkg["revoked"] is True
+    assert lkg["pointer_skew"] is None
+    assert lkg["evidence"] == "server-observed"
+    assert lkg["underlying_evidence"] == "agent-asserted"
+    assert gui_server._instruction_device_projection(
+        raw_lkg, revoked=None, observed_at=10)["display_state"] == "unknown"
+
+    stale = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied", "instr_epoch": 8,
+         "instr_serial": 9, "instr_policy_revision": 10, "last_seen": 1},
+        False, 1000)
+    assert stale["display_state"] == "stale"
+    assert stale["label"] == "stale · last reported applied r9"
+    assert stale["underlying_state"] == "applied"
+    assert stale["accepted_identity"]["policy_revision"] == 10
+    assert stale["report_age_seconds"] == 999
+    assert stale["report_stale"] is True
+    assert stale["evidence"] == "server-observed"
+    assert stale["underlying_evidence"] == "agent-asserted"
+    for bad_last_seen in (None, float("inf"), 1001):
+        report = {"instr_protocol": 1, "instr_state": "applied",
+                  "instr_epoch": 8, "instr_serial": 9,
+                  "instr_policy_revision": 10,
+                  "last_seen": bad_last_seen}
+        unknown_age = gui_server._instruction_device_projection(
+            report, False, 1000)
+        assert unknown_age["display_state"] == "unknown"
+        assert unknown_age["report_age_seconds"] is None
+        assert unknown_age["evidence"] == "server-observed"
+    for hostile_last_seen in (-1, -0.5, 10 ** 400):
+        hostile_age = gui_server._instruction_device_projection(
+            {"instr_protocol": 1, "instr_state": "applied",
+             "instr_epoch": 8, "instr_serial": 9,
+             "instr_policy_revision": 10, "last_seen": hostile_last_seen},
+            False, 1000)
+        assert hostile_age["display_state"] == "unknown"
+        assert hostile_age["report_age_seconds"] is None
+
+
+@pytest.mark.parametrize("hostile_reason", [[], {}])
+def test_instruction_projection_rejects_unhashable_key_reason_without_raising(
+        hostile_reason):
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "key_rejected",
+         "instr_reason": hostile_reason, "last_seen": 9}, False, 10)
+    assert projected["display_state"] == "unknown"
+    assert projected["underlying_state"] is None
+    assert projected["reason"] is None
+
+
+@pytest.mark.parametrize("hostile_reason", [[], {}])
+def test_instruction_chip_api_contains_unhashable_key_reason(tmp_path,
+                                                             hostile_reason):
+    import json
+    import time
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "a", "device_ip": "10.0.0.1"})
+        cat.record_heartbeat("a", {
+            "instr_protocol": 1, "instr_state": "key_rejected",
+            "instr_reason": hostile_reason,
+        }, now=time.time())
+        cookie, _ = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices",
+                               headers={"Cookie": cookie})
+        assert status == 200
+        instruction = json.loads(body)["devices"][0]["instruction"]
+        assert instruction["display_state"] == "unknown"
+        assert instruction["underlying_state"] is None
+        assert instruction["reason"] is None
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("hostile_drift", [
+    {}, [], "bad", {"options": "bad"},
+    {"options": [{"option": "bt_max_peers", "expected": 1}]},
+])
+def test_instruction_projection_keeps_malformed_present_drift_unknown(
+        hostile_drift):
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied",
+         "instr_epoch": 1, "instr_serial": 2, "instr_policy_revision": 3,
+         "last_seen": 9, "qos_drift": hostile_drift}, False, 10)
+    assert projected["qos_drift_count"] is None
+
+
+def test_instruction_projection_counts_absent_supported_drift_as_zero():
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied",
+         "instr_epoch": 1, "instr_serial": 2, "instr_policy_revision": 3,
+         "last_seen": 9}, False, 10)
+    assert projected["qos_drift_count"] == 0
+
+
+def test_instruction_rollup_unavailable_sources_are_not_zero_evidence():
+    inventory = [{"device_id": "a"}, {"device_id": "b"}]
+    result = gui_server._instruction_fleet_projection(
+        inventory, heartbeat_rows=None, raw_policies=None,
+        revoked_principals=None, observed_at=123)
+    assert result["fleet_rollup"] == {
+        "issued_revision": None, "applied": {}, "states": {"unknown": 2}}
+    assert result["instruction_status"] == {
+        "observed_at": 123, "instr_stamp_missing": None,
+        "pointer_skew": None, "issued_revision_label": None,
+    }
+
+    invalid = {"a": {"instr": {"policy_revision": 99}}, "b": {}}
+    result = gui_server._instruction_fleet_projection(
+        inventory, heartbeat_rows=[], raw_policies=invalid,
+        revoked_principals=set(), observed_at=123)
+    assert result["fleet_rollup"]["issued_revision"] is None
+    assert result["instruction_status"]["instr_stamp_missing"] is None
+    assert result["fleet_rollup"]["states"] == {"pre-instructions": 2}
+
+    maximum = (1 << 63) - 1
+    result = gui_server._instruction_fleet_projection(
+        [{"device_id": "a"}], [],
+        {"a": {"instr": _task19_stamp(maximum)}}, set(), 123)
+    assert result["fleet_rollup"]["issued_revision"] == maximum
+    assert result["instruction_status"]["issued_revision_label"] == (
+        "r9223372036854775807")
+
+
+def test_instruction_rollup_mixed_context_revocation_and_orphans():
+    inventory = [{"device_id": name} for name in "abcdefgh"]
+    def hb(device_id, state, epoch, serial, revision, **extra):
+        row = {"device_id": device_id, "last_seen": 990,
+               "instr_protocol": 1, "instr_state": state,
+               "instr_epoch": epoch, "instr_serial": serial,
+               "instr_policy_revision": revision}
+        row.update(extra)
+        return row
+    heartbeats = [
+        hb("a", "applied", 1, 10, 7, pointer_skew=True),
+        hb("b", "lkg", 2, 11, 7),
+        hb("c", "tamper_rejected", 2, 12, 8),
+        hb("d", "instr_pending", 3, 13, 8),
+        {"device_id": "e", "last_seen": 990, "instr_protocol": 1,
+         "instr_state": "applied", "instr_serial": 14},
+        hb("f", "applied", 4, 15, 9, last_seen=1),
+        hb("g", "lkg", 4, 16, 9),
+        hb("orphan-heartbeat", "applied", 99, 99, 99,
+           pointer_skew=True),
+    ]
+    raw = {
+        "a": {"instr": _task19_stamp(7, 10, 100)},
+        "b": {"instr": _task19_stamp(8, 11, 101)},
+        "orphan-policy": {"instr": _task19_stamp(999, 999, 102)},
+    }
+    result = gui_server._instruction_fleet_projection(
+        inventory, heartbeats, raw, {"device:g"}, 1000)
+    assert result["fleet_rollup"] == {
+        "issued_revision": 8,
+        "applied": {"7": 2, "8": 2, "9": 2},
+        "states": {"applied": 1, "lkg": 1, "pending": 1,
+                   "pre-instructions": 1, "rejected": 1, "revoked": 1,
+                   "stale": 1, "unknown": 1},
+    }
+    assert sum(result["fleet_rollup"]["states"].values()) == len(inventory)
+    assert result["instruction_status"] == {
+        "observed_at": 1000, "instr_stamp_missing": 6,
+        "pointer_skew": 1, "issued_revision_label": "r8",
+    }
+
+    no_revocation = gui_server._instruction_fleet_projection(
+        inventory, heartbeats, raw, None, 1000)
+    assert no_revocation["fleet_rollup"]["states"] == {"unknown": 8}
+    unknown = gui_server._instruction_device_projection(
+        heartbeats[0], revoked=None, observed_at=1000)
+    assert unknown["display_state"] == "unknown"
+    assert unknown["evidence"] == "server-observed"
+    assert unknown["revoked"] is None
+    assert unknown["underlying_state"] == "applied"
+    assert unknown["underlying_evidence"] == "agent-asserted"
+
+    # Map insertion order is the O(n) server contract. The browser owns the
+    # display sort, including exact decimal strings above JS's safe integers.
+    ordered = gui_server._instruction_fleet_projection(
+        [{"device_id": "x"}, {"device_id": "y"}],
+        [hb("x", "applied", 1, 1, 9),
+         hb("y", "applied", 1, 2, 7)], {}, set(), 1000)
+    assert list(ordered["fleet_rollup"]["applied"]) == ["9", "7"]
+
+
+@pytest.mark.parametrize("store", [
+    {"devices": []},
+    {"devices": {"bad/id": {"catalog_token": {"revoked": True}}}},
+    {"devices": {"a": {"catalog_token": "not-a-record"}}},
+    {"devices": {"a": {"catalog_token": {"revoked": "yes"}}}},
+])
+def test_instruction_revocation_corruption_is_unknown_not_not_revoked(store):
+    revoked = gui_server._instruction_revoked_principals(store)
+    assert revoked is None
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "lkg", "instr_epoch": 1,
+         "instr_serial": 2, "instr_policy_revision": 3, "last_seen": 9},
+        revoked, 10)
+    assert projected["display_state"] == "unknown"
+    assert projected["revoked"] is None
+    assert projected["underlying_state"] == "lkg"
+
+
+def test_instruction_rollup_uses_one_bulk_snapshot_at_10000_devices(
+        tmp_path, monkeypatch):
+    import json
+    import threading
+    import gui_app
+
+    rows = [{"device_id": "dev-%05d" % i, "device_ip": "10.0.0.1"}
+            for i in range(10000)]
+    heartbeats = []
+    for i in range(5000):
+        heartbeats.append({
+            "device_id": "dev-%05d" % i, "last_seen": 49999,
+            "instr_protocol": 1, "instr_state": "applied",
+            "instr_epoch": 100 + (i % 2), "instr_serial": i + 1,
+            "instr_policy_revision": 7,
+            "pointer_skew": i % 100 == 0,
+        })
+    raw = {"dev-%05d" % (i * 1000): {
+        "instr": _task19_stamp(i + 1, serial=i + 1, epoch=100 + i)}
+        for i in range(10)}
+
+    class FleetProbe:
+        calls = 0
+        def snapshot(self):
+            self.calls += 1
+            return 77, list(rows)
+
+    class CatalogProbe:
+        def __init__(self, state_dir):
+            self.state_dir = state_dir
+            self.heartbeat_calls = 0
+            self.raw_policy_calls = 0
+        def list_devices(self):
+            self.heartbeat_calls += 1
+            return list(heartbeats)
+        def list_raw_policies(self):
+            self.raw_policy_calls += 1
+            return dict(raw)
+        def list_policies(self):
+            raise AssertionError("strict or second policy read is forbidden")
+
+    fleet = FleetProbe()
+    catalog = CatalogProbe(str(tmp_path / "state"))
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    custody_calls = []
+    monkeypatch.setattr(gui_server, "instruction_custody_view",
+                        lambda _path: custody_calls.append(True) or None)
+    original_revoked = gui_server.secrets_store.revoked_device_principals
+    revocation_calls = []
+    def revoked_once(store):
+        revocation_calls.append(True)
+        return original_revoked(store)
+    monkeypatch.setattr(gui_server.secrets_store,
+                        "revoked_device_principals", revoked_once)
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=fleet, catalog=catalog,
+        certfile=None, now_fn=lambda: 50000)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", srv.server_address[1])
+        status, _, body = _req(
+            "127.0.0.1", srv.server_address[1], "GET", "/api/peer-policy",
+            headers={"Cookie": cookie})
+        view = json.loads(body)
+        assert status == 200
+        assert view["fleet_rollup"] == {
+            "issued_revision": 10, "applied": {"7": 5000},
+            "states": {"applied": 5000, "pre-instructions": 5000},
+        }
+        assert view["instruction_status"] == {
+            "observed_at": 50000, "instr_stamp_missing": 9990,
+            "pointer_skew": 50, "issued_revision_label": "r10",
+        }
+        assert fleet.calls == 1
+        assert catalog.heartbeat_calls == 1
+        assert catalog.raw_policy_calls == 1
+        assert len(revocation_calls) == 1
+        assert len(custody_calls) == 1
+    finally:
+        srv.shutdown()
+
+
+def test_instruction_rollup_marks_unreadable_bulk_sources_unavailable(
+        tmp_path):
+    import gui_app
+    import json
+    import threading
+    import catalog as catalog_mod
+    class Fleet:
+        def snapshot(self):
+            return 1, [{"device_id": "a", "device_ip": "10.0.0.1"}]
+    class BrokenCatalog:
+        state_dir = str(tmp_path / "state")
+        def list_devices(self):
+            raise catalog_mod.StateFileError("broken heartbeat snapshot")
+        def list_raw_policies(self):
+            raise catalog_mod.StateFileError("broken raw policy snapshot")
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=Fleet(), catalog=BrokenCatalog(),
+        certfile=None, now_fn=lambda: 123)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", srv.server_address[1])
+        status, _, body = _req(
+            "127.0.0.1", srv.server_address[1], "GET", "/api/peer-policy",
+            headers={"Cookie": cookie})
+        response = json.loads(body)
+        assert status == 200
+        assert response["fleet_rollup"] == {
+            "issued_revision": None, "applied": {},
+            "states": {"unknown": 1}}
+        assert response["instruction_status"] == {
+            "observed_at": 123, "instr_stamp_missing": None,
+            "pointer_skew": None, "issued_revision_label": None}
+    finally:
+        srv.shutdown()
+
+
+def test_instruction_chip_is_in_each_paged_device_row_with_revocation_precedence(
+        tmp_path):
+    import json
+    import time
+    import secrets_store
+    host, port, (app, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        for device_id in ("a", "b"):
+            fleet.upsert({"device_id": device_id,
+                          "device_ip": "10.0.0.%s" % (1 if device_id == "a" else 2)})
+        now = time.time()
+        cat.record_heartbeat("a", {
+            "instr_protocol": 1, "instr_state": "applied",
+            "instr_epoch": 4, "instr_serial": (1 << 63) - 1,
+            "instr_policy_revision": 7, "private": "must-not-leak",
+        }, now=now)
+        cat.record_heartbeat("b", {
+            "instr_protocol": 1, "instr_state": "lkg", "instr_epoch": 5,
+            "instr_serial": 6, "instr_policy_revision": 7,
+        }, now=now)
+        store = secrets_store.load(app.secrets_path)
+        store["devices"]["b"] = {
+            "catalog_token": {"revoked": True}}
+        secrets_store.save(store, app.secrets_path)
+        cookie, _ = _auth(host, port)
+        pages = []
+        for offset in (0, 1):
+            status, _, body = _req(
+                host, port, "GET", "/api/devices?limit=1&offset=%d" % offset,
+                headers={"Cookie": cookie})
+            response = json.loads(body)
+            assert status == 200
+            assert response["total"] == 2 and len(response["devices"]) == 1
+            pages.append(response["devices"][0])
+        assert [row["device_id"] for row in pages] == ["a", "b"]
+        assert pages[0]["instruction"]["label"] == (
+            "applied r9223372036854775807")
+        assert pages[0]["instruction"]["display_state"] == "applied"
+        assert "private" not in json.dumps(pages[0]["instruction"])
+        assert pages[1]["instruction"]["display_state"] == "revoked"
+        assert pages[1]["instruction"]["evidence"] == "server-observed"
+        assert pages[1]["instruction"]["underlying_state"] == "lkg"
+        assert pages[1]["instruction"]["underlying_evidence"] == "agent-asserted"
+    finally:
+        stop()
+
+
+def test_devices_preserves_fail_closed_heartbeat_snapshot_behavior(tmp_path):
+    import gui_app
+    import threading
+    import catalog as catalog_mod
+    class Fleet:
+        def snapshot(self):
+            return 1, [{"device_id": "a", "device_ip": "10.0.0.1"}]
+    class BrokenCatalog:
+        state_dir = str(tmp_path / "state")
+        def list_devices(self):
+            raise catalog_mod.StateFileError("broken heartbeat snapshot")
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=Fleet(), catalog=BrokenCatalog(),
+        certfile=None)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", srv.server_address[1])
+        status, _, body = _req(
+            "127.0.0.1", srv.server_address[1], "GET", "/api/devices",
+            headers={"Cookie": cookie})
+        assert status == 503
+        assert "unavailable" in json.loads(body)["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_role_drift_accepts_preloaded_rows_without_a_second_fleet_read(
+        tmp_path):
+    import peer_policy
+    import role_management
+    result = peer_policy.load_policy(
+        str(tmp_path / "missing.json"), str(tmp_path / "missing-lkg.json"))
+    class FleetMustNotBeRead:
+        def snapshot(self):
+            raise AssertionError("preloaded rows must be authoritative")
+    report = role_management.drift_report(
+        FleetMustNotBeRead(), result,
+        rows=[{"device_id": "a", "role": "missing-role"}])
+    assert report == {"count": 1, "device_ids": ["a"], "truncated": False}
+
+
+def _run_instruction_console_js(script):
+    import subprocess
+    js = _webroot("app.js")
+    code = js.split("// ---- Instruction status projection ----", 1)[1].split(
+        "// ---- End instruction status projection ----", 1)[0]
+    result = subprocess.run(["node", "-"], input=r'''
+const assert = require('node:assert/strict');
+const elements = new Map();
+function el(id) {
+  if (!elements.has(id)) elements.set(id, {
+    textContent: '', innerHTML: '', hidden: false, className: ''
+  });
+  return elements.get(id);
+}
+var document = {getElementById: el};
+function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
+function fmtDate(v) { return 'time:' + v; }
+function policyCount(v) { return Number.isSafeInteger(v) && v >= 0 ? v : '—'; }
+''' + code + '\n' + script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
+    html, js = (_webroot(name) for name in ("index.html", "app.js"))
+    assert "<th>Instructions</th>" in html
+    assert 'colspan="13"' in js
+    for identifier in (
+            "policy-issued-revision", "policy-applied-revisions",
+            "policy-instruction-states", "policy-instr-stamp-missing",
+            "policy-pointer-skew", "policy-instruction-observed",
+            "instruction-key-state", "instruction-cert-days",
+            "instruction-keylist-age", "instruction-root-ceremony",
+            "instruction-root-quorum", "instruction-key-actions"):
+        assert 'id="%s"' % identifier in html
+    assert "Server-observed" in html
+    assert "Device-authored" in html
+    assert "Agent-asserted" in html
+    assert "violation = 0 does not mean compliant" in html
+    block = js.split("// ---- Instruction status projection ----", 1)[1].split(
+        "// ---- End instruction status projection ----", 1)[0]
+    assert "fetch(" not in block
+    assert "setTimeout(" not in block
+
+
+def test_instruction_console_renders_exact_escaped_chip_rollup_and_custody():
+    _run_instruction_console_js(r'''
+let cell = instructionCell({instruction: {
+  label: 'stale · last reported applied r9223372036854775807<img>', display_state: 'stale',
+  underlying_state: 'applied', evidence: 'server-observed',
+  report_age_seconds: 601, report_stale: true, pointer_skew: true,
+  qos_drift_count: 0
+}});
+assert.match(cell, /applied r9223372036854775807&lt;img>/);
+assert.doesNotMatch(cell, /9223372036854776000/);
+assert.doesNotMatch(cell, /<img>/);
+assert.match(cell, /server-observed/);
+assert.match(cell, /last agent report \(agent-asserted\): applied/);
+assert.match(cell, /report 601s old/);
+assert.match(cell, /pointer skew/);
+let rejected = instructionCell({instruction: {label: 'rejected',
+  display_state: 'rejected', underlying_state: 'key_rejected',
+  evidence: 'agent-asserted', reason: 'unknown_key', report_age_seconds: 1}});
+assert.match(rejected, /reason: unknown_key/);
+
+renderInstructionPanel({
+  fleet_rollup: {issued_revision: 12,
+    applied: {'7': 2, '9223372036854775807': 1},
+    states: {applied: 3, unknown: 1}},
+  instruction_status: {observed_at: 456, instr_stamp_missing: 4,
+    pointer_skew: 1},
+  instruction_keys: {state: 'signing_refused',
+    enabled: true, certificate_renewal_due: true, signing_refused: true,
+    keylist_resign_due: true,
+    certificate_days_to_expiry: -2, keylist_age_days: 136,
+    root_ceremony_overdue: 'critical', root_quorum_degraded: true,
+    roots_attested_180d: 1, roots_configured: 2}
+});
+assert.equal(el('policy-issued-revision').textContent, 'r12');
+assert.match(el('policy-applied-revisions').innerHTML,
+  /r9223372036854775807<\/span>: 1/);
+assert.equal(el('policy-instr-stamp-missing').textContent, '4 devices');
+assert.equal(el('policy-pointer-skew').textContent, '1 device');
+assert.equal(el('policy-instruction-observed').textContent, 'time:456');
+assert.equal(el('instruction-cert-days').textContent, '-2 days');
+assert.match(el('instruction-root-ceremony').textContent, /critical/);
+assert.match(el('instruction-root-quorum').textContent, /degraded/);
+assert.match(el('instruction-key-actions').textContent, /certificate renewal due/);
+assert.match(el('instruction-key-actions').textContent, /signing refused/);
+assert.match(el('instruction-key-actions').textContent, /key list re-sign due/);
+
+renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
+  instruction_status: {observed_at: 500, instr_stamp_missing: null,
+    pointer_skew: null}, instruction_keys: null});
+assert.equal(el('policy-instr-stamp-missing').textContent, 'unavailable');
+assert.equal(el('policy-pointer-skew').textContent, 'unavailable');
+assert.equal(el('instruction-cert-days').textContent, 'unavailable');
+assert.equal(el('instruction-root-ceremony').textContent, 'unknown');
+assert.equal(el('instruction-key-actions').textContent, 'unavailable');
+assert.match(el('policy-applied-revisions').innerHTML, /unavailable/);
+
+let unknownDrift = instructionCell({instruction: {label: 'unknown',
+  display_state: 'unknown', evidence: 'agent-asserted',
+  report_age_seconds: 1, qos_drift_count: null}});
+assert.match(unknownDrift, /QoS drift unavailable/);
+
+renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, states: {applied: 1}},
+  instruction_status: {observed_at: 501, instr_stamp_missing: 0,
+    pointer_skew: 0}, instruction_keys: {state: 'ready',
+    enabled: true, certificate_renewal_due: false, signing_refused: false,
+    keylist_resign_due: true,
+    certificate_days_to_expiry: 0, keylist_age_days: 100,
+    root_ceremony_overdue: 'warn', root_quorum_degraded: false,
+    roots_attested_180d: 2, roots_configured: 2}});
+assert.equal(el('policy-issued-revision').textContent, 'r0');
+assert.equal(el('policy-instr-stamp-missing').textContent, '0 devices');
+assert.equal(el('policy-pointer-skew').textContent, '0 devices');
+assert.equal(el('instruction-cert-days').textContent, '0 days');
+assert.match(el('instruction-root-ceremony').textContent, /warn/);
+assert.match(el('instruction-root-quorum').textContent, /healthy/);
+assert.equal(el('instruction-key-actions').textContent, 'key list re-sign due');
+
+renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
+  instruction_status: {observed_at: 502, instr_stamp_missing: 0,
+    pointer_skew: 0}, instruction_keys: {state: 'phase0', enabled: false,
+    certificate_renewal_due: false, signing_refused: false,
+    keylist_resign_due: false, certificate_days_to_expiry: null,
+    keylist_age_days: null, root_ceremony_overdue: 'unknown',
+    root_quorum_degraded: false, roots_attested_180d: 0,
+    roots_configured: 0}});
+assert.equal(el('instruction-root-quorum').textContent, 'not enabled');
+assert.equal(el('instruction-key-actions').textContent, 'not enabled');
+''')
+
+
+def test_role_explain_requires_current_unambiguous_typed_endpoints(role_api):
+    import auth
+    import peer_endpoints
+    request, fleet, cat = role_api
+    path = os.path.join(cat.state_dir, "peer-endpoints.json")
+    assert request("GET", "/api/peer-policy/explain?a=d1&b=d2")[0] == 422
+    for device_id, ip in (("d1", "192.0.2.1"), ("d2", "192.0.2.2")):
+        peer_endpoints.record_endpoint(path, auth.Principal("device", device_id),
+                                       ip, 6881, time.time())
+    status, _, result = request("GET", "/api/peer-policy/explain?a=device:d1&b=d2")
+    assert status == 200 and result["mutual"] is True
+    assert result["a"]["principal"] == {"type": "device", "id": "d1"}
+    assert result["a"]["acl_source"] == "none"
+    assert "192.0.2." not in json.dumps(result)
+    assert request("GET", "/api/peer-policy/explain?a=legacy:d1&b=d2")[0] == 422
+    peer_endpoints.record_endpoint(path, auth.Principal("device", "d2"),
+                                   "192.0.2.1", 6881, time.time())
+    assert request("GET", "/api/peer-policy/explain?a=d1&b=d2")[0] == 422
+
+
+@pytest.mark.parametrize("name", ["default", "quarantine", "origin", "seeder", "legacy"])
+def test_role_reserved_problem_identity(role_api, name):
+    request, _, _ = role_api
+    status, _, problem = request("PUT", "/api/peer-policy/roles/" + name,
+                                 {"restricted": False})
+    assert status == 409
+    assert problem["code"] == "role_reserved_name"
+    assert problem["type"].endswith("#role_reserved_name")
+
+
+def test_role_locked_race_backlog_and_invalid_qos(role_api, monkeypatch):
+    import peer_policy
+    request, fleet, cat = role_api
+    original = peer_policy.commit_mutation
+    def racing(*args, **kwargs):
+        raise peer_policy.RevisionConflict(99)
+    monkeypatch.setattr(peer_policy, "commit_mutation", racing)
+    status, headers, problem = request("PUT", "/api/peer-policy/qos",
+                                       {"qos": {"numwant": 25}})
+    assert status == 409 and problem["code"] == "revision_conflict"
+    assert headers["ETag"] == '"iris-peer-policy-99"'
+    def backlog(*args, **kwargs):
+        raise peer_policy.OperationBacklogFull("private path")
+    monkeypatch.setattr(peer_policy, "commit_mutation", backlog)
+    status, _, problem = request("PUT", "/api/peer-policy/qos", {"qos": {}})
+    assert status == 409 and problem["code"] == "operation_backlog_full"
+    assert problem["capacity"] == 256 and "private" not in json.dumps(problem)
+    monkeypatch.setattr(peer_policy, "commit_mutation", original)
+    for qos in ({"numwant": -1}, {"catalog_tick_s": 61}, {"http_rate": 123}):
+        status, _, problem = request("PUT", "/api/peer-policy/qos", {"qos": qos})
+        assert status == 422
+        assert problem["type"].endswith("#" + problem["code"])
+
+
+def test_role_single_bulk_confirm_and_shadow(role_api):
+    import peer_policy
+    request, fleet, cat = role_api
+    path = "/api/devices/bulk-role"
+    body = {"device_ids": ["d2", "missing", "d1"], "role": "boat"}
+    status, _, preview = request("POST", path + "?dry_run=1", body)
+    assert status == 200 and preview["requires_confirmation"]
+    assert preview["failed"] == {"missing": "no such device"}
+    assert not fleet.get_device("d1").get("role")
+    status, _, problem = request("POST", path, body)
+    assert status == 428 and problem["code"] == "confirmation_required"
+    status, headers, result = request("POST", path,
+        dict(body, confirm_token=preview["confirm_token"]))
+    assert status == 200 and result["applied"] == 2
+    assert result["failed"] == {"missing": "no such device"}
+    assert request("POST", "/api/devices/missing/role", {"role": "boat"})[0] == 404
+    assert request("POST", "/api/devices/d1/role", {"role": "unknown"})[0] == 404
+    status, _, problem = request("DELETE", "/api/peer-policy/roles/boat")
+    assert status == 409 and problem["member_count"] == 2
+    assert problem["referring_roles"] == []
+    def assign(doc):
+        doc["acls"]["manual"] = {"rules": [{"seq": 17, "action": "deny",
+                                               "match": {"type": "any"}}]}
+        doc["assignments"]["d1"] = "manual"
+    peer_policy.commit_mutation(os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"), action="assign",
+        target="d1", actor="test", now=1, mutate=assign)
+    for path, body in (("/api/devices/d1/role", {"role": "boat"}),
+                       ("/api/devices/bulk-role", {"device_ids": ["d1"], "role": "boat"})):
+        status, _, problem = request("POST", path, body)
+        assert status == 409 and problem["code"] == "role_shadowed_by_assignment"
+        assert request("POST", path, dict(body, allow_shadow=True))[0] == 422
+
+
+def test_role_explain_loaded_roles_shadow_quarantine_and_fail_closed(role_api, monkeypatch):
+    import auth
+    import peer_policy
+    import peer_endpoints
+    request, fleet, cat = role_api
+    endpoints = os.path.join(cat.state_dir, "peer-endpoints.json")
+    for kind, did, ip in (("device", "d1", "192.0.2.1"),
+                          ("device", "d2", "192.0.2.2"),
+                          ("service", "seeder", "192.0.2.3")):
+        peer_endpoints.record_endpoint(endpoints, auth.Principal(kind, did), ip, 6881, time.time())
+    doc = _loaded_peer_policy(cat).document
+    doc["roles"]["role_of"] = {"d1": "boat", "d2": "boat"}
+    compiled = peer_policy.compile_roles(doc)
+    policy = peer_policy.PolicyResult(doc, False, False, compiled)
+    original = peer_policy.evaluate_for
+    seen = []
+    def evaluate(*args, **kwargs):
+        assert kwargs["compiled"] is policy.roles
+        seen.append(args[1].id)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(peer_policy, "evaluate_for", evaluate)
+    monkeypatch.setattr(peer_policy, "load_policy", lambda *_: policy)
+    status, _, result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")
+    assert status == 200 and result["mutual"] and seen == ["d1", "d2"]
+    assert result["a"]["matched_seq"] == 10
+    assert result["a"]["acl_name"] == "role:boat"
+    assert result["a"]["role_shadowed_by"] is None
+    assert request("GET", "/api/peer-policy/explain?a=d1&b=service:seeder")[2]["a"]["matched_seq"] == 20
+    doc["acls"]["manual"] = {"rules": [{"seq": 17, "action": "deny",
+                        "match": {"type": "cidr", "value": "192.0.2.0/24"}}]}
+    doc["assignments"]["d1"] = "manual"
+    policy = policy._replace(roles=peer_policy.compile_roles(doc))
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert not result["mutual"]
+    assert result["a"]["acl_name"] == "manual" and result["a"]["matched_seq"] == 17
+    assert result["a"]["role_shadowed_by"] == "boat"
+    doc["assignments"]["d1"] = "quarantine"
+    policy = policy._replace(roles=peer_policy.compile_roles(doc))
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert result["a"]["role_shadowed_by"] is None
+    assert result["a"]["acl_name"] == "quarantine" and result["a"]["decision"] == "deny"
+    doc["assignments"].clear()
+    doc["roles"]["role_of"]["d1"] = "missing"
+    policy = policy._replace(roles=peer_policy.compile_roles(doc))
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert result["a"]["role_unknown"] is True
+    assert result["a"]["decision"] == "deny" and result["a"]["matched_seq"] == 40
+    policy = policy._replace(fail_closed=True, degraded=True)
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert not result["mutual"]
+    assert all(result[side]["decision"] == "deny" and result[side]["matched_seq"] is None
+               for side in ("a", "b"))
+
+
+def test_role_policy_view_effective_outbox_and_status_redaction(role_api):
+    request, _, cat = role_api
+    status_path = os.path.join(cat.state_dir, "peer-enforcement.json")
+    with open(status_path, "w") as stream:
+        json.dump({"last_operation_exported_revision": 999,
+                   "last_error": "10.0.0.8", "conflicts": [{"reason": "device:private"}]}, stream)
+    view = request("GET", "/api/peer-policy")[2]
+    assert view["outbox"]["unacknowledged"] == 1
+    assert "10.0.0.8" not in json.dumps(view) and "device:private" not in json.dumps(view)
+    with open(status_path, "w") as stream:
+        json.dump({"last_operation_exported_revision": view["revision"]}, stream)
+    assert request("GET", "/api/peer-policy")[2]["outbox"]["unacknowledged"] == 1
+    assert request("PUT", "/api/peer-policy/roles/fiber", {"restricted": True})[0] == 200
+    current = _loaded_peer_policy(cat).document
+    assert len(current["operation_outbox"]) == 2
+    peer_enforcement.write_status(status_path, peer_enforcement.build_status(
+        "enforced", "s", "h", None, 0, time.time(),
+        last_operation_exported_revision=current["revision"],
+        operation_ack_epoch=current.get("operation_ack_epoch")))
+    view = request("GET", "/api/peer-policy")[2]
+    assert view["enforcement"]["state"] == "enforced"
+    assert view["outbox"]["unacknowledged"] == 0
+    assert request("PUT", "/api/peer-policy/roles/copper", {"restricted": True})[0] == 200
+    assert len(_loaded_peer_policy(cat).document["operation_outbox"]) == 1
+
+
+def test_role_put_normalizes_reciprocal_edges_and_reports_isolation(role_api):
+    request, _, cat = role_api
+    before = _loaded_peer_policy(cat).document
+    for query in ("", "?dry_run=1"):
+        status, _, problem = request("PUT", "/api/peer-policy/roles/boat" + query,
+                                     {"restricted": True, "peers": ["boat", "boat"]})
+        assert status == 422 and problem["code"] == "invalid_policy"
+        assert _loaded_peer_policy(cat).document == before
+    assert request("PUT", "/api/peer-policy/roles/fiber", {"restricted": True})[0] == 200
+    definition = {"restricted": True, "peers": ["boat", "fiber"],
+                  "nets": ["192.0.2.1", "192.0.2.1/024", "192.0.2.1/255.255.255.0",
+                           "192.0.2.1/0.0.0.255"]}
+    status, _, preview = request("PUT", "/api/peer-policy/roles/boat?dry_run=1", definition)
+    assert status == 200
+    status, _, _ = request("PUT", "/api/peer-policy/roles/boat",
+                           dict(definition, confirm_token=preview["confirm_token"]))
+    assert status == 200
+    assert _loaded_peer_policy(cat).document["roles"]["defs"]["fiber"]["peers"] == ["fiber", "boat"]
+    assert _loaded_peer_policy(cat).document["roles"]["defs"]["boat"]["nets"] == definition["nets"]
+    status, _, problem = request("PUT", "/api/peer-policy/roles/boat",
+                                 {"restricted": True, "peers": []})
+    assert status == 409 and problem["code"] == "role_isolated"
+
+
+def test_role_qos_confirmation_expires_after_another_revision(role_api):
+    request, _, _ = role_api
+    body = {"qos": {"numwant": 25}}
+    status, _, preview = request("PUT", "/api/peer-policy/qos?dry_run=1", body)
+    assert status == 200
+    assert request("PUT", "/api/peer-policy/roles/fiber", {"restricted": False})[0] == 200
+    status, _, problem = request("PUT", "/api/peer-policy/qos",
+                                 dict(body, confirm_token=preview["confirm_token"]))
+    assert status == 428 and problem["code"] == "confirmation_required"
+
+
+def test_role_mutation_preserves_failure_audit_and_preview_is_read_only(tmp_path):
+    host, port, (_, fleet, _, cat), audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "192.0.2.1"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf, "If-Match":
+                   gui_server._revision_etag("peer-policy", _loaded_peer_policy(cat).document["revision"])}
+        def events():
+            with open(audit_path) as stream:
+                return [json.loads(line) for line in stream if line.strip()]
+        before = events()
+        assert _req(host, port, "POST", "/api/devices/d1/role?dry_run=1",
+                    {"role": "boat"}, headers=headers)[0] == 200
+        assert events() == before
+        assert _req(host, port, "POST", "/api/devices/d1/role",
+                    {"role": "unknown"}, headers=headers)[0] == 404
+        row = events()[-1]
+        assert row["event"] == "device_role_change" and row["result"] == "fail"
+        assert row["target"] == "d1" and "role_not_found" in row["detail"]
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("filename,payload", [
+    ("peer-enforcement.json", {"state": "enforced", "last_reconciled_at": 1}),
+    ("peer-enforcement.json", {"conflicts": [{"reason": []}]}),
+    ("peer-enforcement.json", {"conflicts": [{"reason": {}}]}),
+    ("peer-enforcement.json", {"last_error": "abc123deadbeef"}),
+    ("origin-qos.json", {"state": "enforced", "global_option_count": 0,
+                         "target_download_count": 2, "applied_download_count": 2}),
+    ("origin-qos.json", {"state": [], "last_error": "abc123deadbeef"}),
+])
+def test_policy_contract_invalid_auxiliary_status_is_neutral(role_api, filename, payload):
+    request, _, cat = role_api
+    with open(os.path.join(cat.state_dir, filename), "w") as stream:
+        json.dump(payload, stream)
+    status, _, view = request("GET", "/api/peer-policy")
+    assert status == 200
+    key = "origin_qos" if filename == "origin-qos.json" else "enforcement"
+    assert view[key]["state"] is None
+    assert view[key]["last_error"] is None
+    assert "abc123deadbeef" not in json.dumps(view)
+
+
+def test_policy_contract_roles_capability_is_independent_of_presence(tmp_path):
+    host, port, _, stop = _serve_full(tmp_path)
+    try:
+        cookie, _ = _auth(host, port)
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy", headers={"Cookie": cookie})
+        view = json.loads(raw)
+        assert status == 200 and view["roles_supported"] is True
+        assert view["roles_present"] is False
+    finally:
+        stop()
+
+
+def test_policy_contract_live_success_and_request_schemas(role_api):
+    from openapi_schema_validator import OAS32Validator
+    import openapi_contract
+    request, _, cat = role_api
+    spec = openapi_contract.build_document()
+    cases = [
+        ("PUT", "/api/peer-policy/roles/new?dry_run=1", "/peer-policy/roles/{name}", {"restricted": False}),
+        ("DELETE", "/api/peer-policy/roles/boat?dry_run=1", "/peer-policy/roles/{name}", {}),
+        ("PUT", "/api/peer-policy/qos?dry_run=1", "/peer-policy/qos", {"qos": {"max_peers": 4}}),
+        ("PUT", "/api/peer-policy/qos?dry_run=1", "/peer-policy/qos", {"qos": {}}),
+        ("POST", "/api/devices/d1/role?dry_run=1", "/devices/{device_id}/role", {"role": None}),
+        ("POST", "/api/devices/bulk-role?dry_run=1", "/devices/bulk-role", {"role": None, "device_ids": ["d1"]}),
+        ("POST", "/api/devices/d1/role?dry_run=1", "/devices/{device_id}/role", {"role": "boat"}),
+        ("POST", "/api/devices/d1/role", "/devices/{device_id}/role", {"role": None}),
+        ("POST", "/api/devices/bulk-role", "/devices/bulk-role", {"role": None, "device_ids": ["d1"]}),
+    ]
+    for method, path, suffix, body in cases:
+        operation = spec["paths"]["/api/v1" + suffix][method.lower()]
+        OAS32Validator(operation["requestBody"]["content"]["application/json"]["schema"]).validate(body)
+        status, _, payload = request(method, path, body)
+        assert status == 200, payload
+        schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        OAS32Validator(schema).validate(payload)
+
+
+@pytest.mark.parametrize("origin", [False, True])
+def test_policy_contract_complete_auxiliary_semantics_and_known_errors(role_api, origin):
+    import origin_qos
+    request, _, cat = role_api
+    if origin:
+        base = origin_qos.build_status("enforced", "session", "hash", 1, 2, 2, 1000)
+        filename, key = "origin-qos.json", "origin_qos"
+        mutations = [{"global_option_count": 0}, {"applied_download_count": 3},
+                     {"target_download_count": True}]
+    else:
+        base = peer_enforcement.build_status("enforced", "session", "hash", 2, 3, 1000)
+        filename, key = "peer-enforcement.json", "enforcement"
+        mutations = [{"desired_ip_count": -1}, {"applied_revision": True},
+                     {"conflicts": [{"reason": []}]}]
+    def view(payload):
+        with open(os.path.join(cat.state_dir, filename), "w") as stream:
+            json.dump(payload, stream)
+        status, _, result = request("GET", "/api/peer-policy")
+        assert status == 200
+        return result[key]
+    assert view(base)["state"] == "enforced"
+    error = "origin_reconcile_failed" if origin else "peer_reconcile_failed"
+    degraded = dict(base, state="degraded", last_error=error)
+    assert view(degraded)["last_error"] == error
+    mutations += [{"aria_session_id": None}, {"desired_hash": None},
+                  {"last_reconciled_at": float("nan")},
+                  {"state": "degraded", "last_error": "abc123deadbeef"},
+                  {"state": []}, {"last_error": {}}]
+    for change in mutations:
+        projected = view(dict(base, **change))
+        assert projected["state"] is None, change
+        assert projected["last_error"] is None, change
+
+
+def test_policy_contract_actual_reads_confirmed_qos_and_role_definition(role_api):
+    import auth
+    import peer_endpoints
+    import openapi_contract
+    from openapi_schema_validator import OAS32Validator
+    request, _, cat = role_api
+    spec = openapi_contract.build_document()
+    def check(method, path, pattern, body=None):
+        operation = spec["paths"]["/api/v1" + pattern][method.lower()]
+        if body is not None:
+            OAS32Validator(operation["requestBody"]["content"]["application/json"]["schema"]).validate(body)
+        status, headers, payload = request(method, "/api" + path, body)
+        assert status == 200, payload
+        OAS32Validator(operation["responses"]["200"]["content"]["application/json"]["schema"]).validate(payload)
+        assert "ETag" in headers
+        return payload
+    definition = {"restricted": False, "peers": ["complete"], "origin": True,
+                  "nets": ["192.0.2.0/24"], "on_stale": "defaults", "qos": {}}
+    preview = check("PUT", "/peer-policy/roles/complete?dry_run=1", "/peer-policy/roles/{name}", definition)
+    check("PUT", "/peer-policy/roles/complete", "/peer-policy/roles/{name}",
+          dict(definition, confirm_token=preview["confirm_token"]))
+    check("GET", "/peer-policy", "/peer-policy")
+    check("GET", "/peer-policy/roles", "/peer-policy/roles")
+    check("GET", "/devices/d1/effective-qos", "/devices/{device_id}/effective-qos")
+    for did, address in (("d1", "192.0.2.1"), ("d2", "192.0.2.2")):
+        peer_endpoints.record_endpoint(os.path.join(cat.state_dir, "peer-endpoints.json"),
+                                      auth.Principal("device", did), address, 6881, time.time())
+    check("GET", "/peer-policy/explain?a=d1&b=d2", "/peer-policy/explain")
+    preview = check("PUT", "/peer-policy/qos?dry_run=1", "/peer-policy/qos", {"qos": {"max_peers": 4}})
+    assert preview["requires_confirmation"]
+    check("PUT", "/peer-policy/qos", "/peer-policy/qos",
+          {"qos": {"max_peers": 4}, "confirm_token": preview["confirm_token"]})
+
+
+def test_tracker_state_write_retains_success_failure_audit_and_read_only_preview(tmp_path):
+    host, port, (_, fleet, _, cat), audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "192.0.2.1"})
+        _define_device_role(cat)
+        cookie, csrf = _auth(host, port)
+
+        def request(path, body):
+            headers = {"Cookie": cookie, "X-CSRF-Token": csrf, "If-Match":
+                       gui_server._revision_etag("peer-policy",
+                           _loaded_peer_policy(cat).document["revision"])}
+            status, response_headers, raw = _req(
+                host, port, "PUT", path, body, headers=headers)
+            return status, response_headers, json.loads(raw)
+
+        def events():
+            with open(audit_path) as stream:
+                return [json.loads(line) for line in stream if line.strip()]
+
+        before = events()
+        prior = _loaded_peer_policy(cat).document
+        body = {"qos_state": {"seeder": {"numwant": 4}}}
+        status, _, preview = request("/api/peer-policy/qos?dry_run=1", body)
+        assert status == 200 and preview["qos_changed"] is True
+        assert events() == before
+        assert _loaded_peer_policy(cat).document == prior
+        status, _, committed = request("/api/peer-policy/qos",
+            dict(body, confirm_token=preview["confirm_token"]))
+        assert status == 200 and committed["revision"] == prior["revision"] + 1
+        after = events()
+        assert len(after) == len(before) + 1
+        assert after[-1]["event"] == "peer_policy_change"
+        assert after[-1]["action"] == "put" and after[-1]["target"] == "qos"
+        assert after[-1]["result"] == "ok"
+        before_policy = _loaded_peer_policy(cat).document
+        status, _, problem = request("/api/peer-policy/qos", {
+            "qos_state": {"seeder": {"numwant": 3}}})
+        assert status == 422 and problem["code"] == "invalid_policy"
+        failed = events()
+        assert len(failed) == len(after) + 1
+        assert failed[-1]["event"] == "peer_policy_change"
+        assert failed[-1]["target"] == "qos" and failed[-1]["result"] == "fail"
+        assert "invalid_policy" in failed[-1]["detail"]
+        assert _loaded_peer_policy(cat).document == before_policy
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2, Task 25: schedules list and the "Schedule…" bulk action
+# ---------------------------------------------------------------------------
+
+def _schedule_projections():
+    """The console's own schedule projections, run under Node.
+
+    They are pure string builders over the schedule/occurrence documents the
+    API returns, so they are executed here rather than pattern-matched: a
+    console that renders a wave's counts or an orphaned creator wrongly is a
+    console the operator cannot plan a window from.
+    """
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for console schedule projection tests")
+    source = _webroot("app.js")
+    start = source.index("  // ---- schedule projections")
+    end = source.index("  // ---- end schedule projections")
+    return node, source[start:end]
+
+
+def _run_schedule_projections(script):
+    import json as _json
+    import subprocess
+    node, block = _schedule_projections()
+    program = (block + "\nconst esc = value => String(value);\n" + script)
+    result = subprocess.run([node], input=program, text=True,
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return _json.loads(result.stdout)
+
+
+_SCHEDULE_ROW = {
+    "id": "s-core", "kind": "assign", "state": "pending",
+    "target": {"filters": {"role": "core", "status": "deployed"},
+               "device_ids": [], "bind": "late"},
+    "payload": {"image_ids": ["image-a"], "mode": "merge"},
+    "when": {"kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+             "tz": "Europe/Stockholm", "window_seconds": 3600},
+    "created_by": "console:alice", "created_at": 1788883200, "rev": 1,
+    "generation": "0" * 32, "creator_exists": True,
+    "preview": {"revision": 2, "now": 1788883200,
+                "device_ids": ["edge-1", "edge-2"]},
+    "etag": '"iris-schedule-s-core-1"',
+    "next_fire": {"scheduled_at": 1789000200, "window_end": 1789003800,
+                  "status": "future", "resolution": "normal",
+                  "tz": "Europe/Stockholm", "local_time": "2026-09-13T02:30",
+                  "next_at": 1789605000},
+}
+
+_SCHEDULE_OCCURRENCE = {
+    "id": "a" * 32, "schedule_id": "s-core", "state": "running",
+    "scheduled_at": 1788940200, "window_end": 1788943800,
+    "delta": {"added": 3, "removed": 1},
+    "annotations": {"wave": {
+        "schedule_id": "s-before", "occurrence_id": "b" * 32, "total": 10,
+        "staged": 7, "errored": 1, "missing": 2, "gate": "held",
+        "observed_at": 1788940260}},
+}
+
+
+def test_schedules_panel_lists_the_schedule_facts_an_operator_plans_from():
+    html = _webroot("index.html")
+    assert 'id="manage-schedules"' in html
+    panel = html.split('id="sched-panel"', 1)[1].split("</div>", 1)[0] + \
+        html.split('id="sched-panel"', 1)[1]
+    for column in ("Action", "Target", "Next run", "State",
+                   "Latest run", "Created by"):
+        assert ">" + column + "<" in panel, column
+    assert 'id="sched-rows"' in html and 'id="sched-close"' in html
+
+    js = _webroot("app.js")
+    assert "function renderSchedules(" in js
+    assert "'/api/v1/schedules'" in js
+    # The list reads the schedule's own next-fire slot rather than
+    # recomputing DST-aware weekly arithmetic in the browser.
+    assert "row.next_fire" in js
+
+
+def test_schedule_row_projections_report_target_delta_and_wave_counts():
+    out = _run_schedule_projections(
+        "const row = " + json.dumps(_SCHEDULE_ROW) + ";"
+        "const occ = " + json.dumps(_SCHEDULE_OCCURRENCE) + ";"
+        "process.stdout.write(JSON.stringify({"
+        "target: scheduleTargetSummary(row),"
+        "fleet: scheduleTargetSummary({target: {filters: {}, device_ids: [],"
+        " bind: 'late'}}),"
+        "next: scheduleNextFireText(row),"
+        "paused: scheduleNextFireText({state: 'paused', next_fire: null}),"
+        "delta: scheduleDeltaText(occ),"
+        "nodelta: scheduleDeltaText(null),"
+        "wave: scheduleWaveText(occ),"
+        "nowave: scheduleWaveText({id: 'x'})}));")
+    assert out["target"] == \
+        "role=core, status=deployed · resolved at each run"
+    assert out["fleet"] == "whole fleet · resolved at each run"
+    assert out["next"] == "2026-09-13T02:30 Europe/Stockholm (future)"
+    assert out["paused"] == "paused"
+    assert out["delta"] == "+3 / −1 since preview"
+    assert out["nodelta"] == ""
+    # Missing is reported apart from errored, and the gate says whether the
+    # wave is still waiting on them.
+    assert out["wave"] == ("wave held · 7 staged / 1 errored / "
+                           "2 missing of 10")
+    assert out["nowave"] == ""
+
+
+def test_orphaned_schedule_names_the_missing_actor_and_can_be_reaffirmed():
+    out = _run_schedule_projections(
+        "const row = " + json.dumps(_SCHEDULE_ROW) + ";"
+        "process.stdout.write(JSON.stringify({"
+        "present: scheduleCreatorText(row),"
+        "gone: scheduleCreatorText(Object.assign({}, row,"
+        " {created_by: 'console:departed', creator_exists: false}))}));")
+    assert out["present"] == "console:alice"
+    assert out["gone"] == "console:departed (actor no longer exists)"
+
+    js = _webroot("app.js")
+    assert "'/reaffirm'" in js
+    # Re-affirming rewrites created_by and bumps rev, so it carries the
+    # revision the operator was looking at.
+    reaffirm = js.split("async function reaffirmSchedule(", 1)[1] \
+        .split("\n  }", 1)[0]
+    assert "'If-Match': row.etag" in reaffirm and "csrfHdr(" in reaffirm
+    assert "method: 'POST'" in reaffirm
+    assert "sched-reaffirm" in js and "#sched-rows .sched-reaffirm" in js
+
+
+def test_schedule_bulk_action_targets_the_current_device_filter():
+    html = _webroot("index.html")
+    assert 'id="schedule-selected"' in html
+    for element in ('id="sched-modal"', 'id="sched-modal-scope"',
+                    'id="sched-modal-kind"', 'id="sched-modal-when"',
+                    'id="sched-modal-preview"', 'id="create-schedule"'):
+        assert element in html, element
+
+    js = _webroot("app.js")
+    block = js.split("var BULK_BTNS = [")[1].split("]")[0]
+    assert "'create-schedule'" in block
+    assert "'schedule-selected'" in js.split("var BULK_OPENERS = [")[1] \
+        .split("]")[0]
+
+    out = _run_schedule_projections(
+        "const f = {q: 'edge', role: 'core', status: 'deployed',"
+        " managementType: '', platform: '', cred: '', telemetry: '',"
+        " peer: '', modelFamily: '', osFamily: ''};"
+        "process.stdout.write(JSON.stringify({"
+        "filter: scheduleTargetFromFilters(f, ['edge-1'], 'filter'),"
+        "selection: scheduleTargetFromFilters(f, ['edge-1', 'edge-2'],"
+        " 'selection')}));")
+    # The filter itself is the target: it is re-resolved at each run, which
+    # is the whole reason to schedule against it rather than a row list.
+    assert out["filter"] == {
+        "filters": {"q": "edge", "role": "core", "status": "deployed"},
+        "device_ids": [], "bind": "late"}
+    assert out["selection"] == {
+        "filters": {}, "device_ids": ["edge-1", "edge-2"], "bind": "late"}
+
+
+def test_schedule_creation_posts_one_normalized_definition():
+    out = _run_schedule_projections(
+        "const target = {filters: {role: 'core'}, device_ids: [],"
+        " bind: 'late'};"
+        "process.stdout.write(JSON.stringify({"
+        "once: scheduleDefinitionFromForm({id: 'win-1', kind: 'assign',"
+        " target: target, imageIds: ['image-a'], mode: 'merge',"
+        " recurring: false, at: 1789000200, tz: 'UTC', windowSeconds: 3600}),"
+        "weekly: scheduleDefinitionFromForm({id: 'win-2', kind: 'onboard',"
+        " target: target, maxDevices: 20, telemetry: true,"
+        " telemetryStream: false, recurring: true, weekday: 6, hour: 2,"
+        " minute: 30, tz: 'Europe/Stockholm', windowSeconds: 3600})}));")
+    assert out["once"] == {
+        "id": "win-1", "kind": "assign",
+        "target": {"filters": {"role": "core"}, "device_ids": [],
+                   "bind": "late"},
+        "payload": {"image_ids": ["image-a"], "mode": "merge"},
+        "when": {"kind": "once", "at": 1789000200, "tz": "UTC",
+                 "window_seconds": 3600}}
+    assert out["weekly"] == {
+        "id": "win-2", "kind": "onboard",
+        "target": {"filters": {"role": "core"}, "device_ids": [],
+                   "bind": "late"},
+        "payload": {"telemetry": True, "telemetry_stream": False,
+                    "mode": "new-only", "max_devices": 20},
+        "when": {"kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+                 "tz": "Europe/Stockholm", "window_seconds": 3600}}
+
+
+def test_device_row_shows_a_pending_schedule_before_a_manual_conflict():
+    out = _run_schedule_projections(
+        "const rows = [" + json.dumps(_SCHEDULE_ROW) + ","
+        " Object.assign({}, " + json.dumps(_SCHEDULE_ROW) +
+        ", {id: 'paused-one', state: 'paused'})];"
+        "process.stdout.write(JSON.stringify({"
+        "hit: pendingScheduleText('edge-1', rows),"
+        "miss: pendingScheduleText('edge-9', rows),"
+        "none: pendingScheduleText('edge-1', [])}));")
+    # A paused schedule is not pending work, and must not read as a conflict.
+    assert out["hit"] == "Scheduled: s-core"
+    assert out["miss"] == "" and out["none"] == ""
+
+    js = _webroot("app.js")
+    assert "pendingScheduleText(d.device_id" in js
+    assert "sched-chip" in js
+
+
+def test_schedule_view_carries_its_own_next_fire_slot(tmp_path):
+    """The console must not recompute DST-aware weekly arithmetic itself."""
+    import schedules
+    row = {"id": "s-core", "generation": "0" * 32, "rev": 1,
+           "created_by": "console:alice", "created_at": 1788883200,
+           "preview": {"revision": 1, "now": 1788883200, "device_ids": []},
+           "kind": "assign",
+           "target": {"filters": {}, "device_ids": [], "bind": "late"},
+           "payload": {"image_ids": ["image-a"], "mode": "merge"},
+           "when": {"kind": "recurring", "weekday": 6, "hour": 2,
+                    "minute": 30, "tz": "Europe/Stockholm",
+                    "window_seconds": 3600},
+           "state": "pending"}
+    slot = schedules.occurrence_slot(row, 1788883200)
+    assert slot["tz"] == "Europe/Stockholm" and slot["local_time"]
+    source = inspect.getsource(gui_server.make_server)
+    assert 'view["next_fire"] = schedules.occurrence_slot(' in source
+
+
+def test_schedule_next_run_never_renders_an_unreadable_row_as_undefined():
+    out = _run_schedule_projections(
+        "process.stdout.write(JSON.stringify({"
+        "empty: scheduleNextFireText({}),"
+        "missing: scheduleNextFireText(null),"
+        "done: scheduleNextFireText({state: 'completed', next_fire: null})}));")
+    assert out["empty"] == "no further run"
+    assert out["missing"] == "no further run"
+    assert out["done"] == "completed"
+
+
+def test_agent_install_dropdown_offers_only_what_the_row_can_take():
+    """An operator picked IOx for a C8000V on a router management type and
+    watched the dropdown snap back: the fleet store refused it with a 400 and
+    the next refresh re-rendered the stored value, with the reason parked in
+    the status line. The row now carries the server's own answer
+    (install_options) and refuses the choice up front, with the reason on the
+    option itself. The stored value stays selectable so the inventory is never
+    hidden. The server-side rule (install_options_for_record) stays the one
+    source of truth; this is presentation of it, not a second rule."""
+    js = _webroot("app.js")
+    render = js.split("var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr']", 1)[1].split(".join('')", 1)[0]
+    assert "d.install_options" in js
+    assert "allowed.indexOf(key) === -1" in render
+    assert "key !== platVal" in render          # the stored value is never disabled
+    assert "disabled title=" in render
+    assert "installRefusal(d, key)" in render
+    refusal = js.split("function installRefusal(d, platform) {", 1)[1].split("\n  }", 1)[0]
+    assert "router-routed" in refusal and "router-nat" in refusal and "xr-host" in refusal
+    # the failure path keeps surfacing the server's reason and reverting
+    handler = js.split("querySelectorAll('#dev-rows .platform')", 1)[1].split("\n    });", 1)[0]
+    assert "Agent install update failed" in handler and "refreshDevices()" in handler
+    source = inspect.getsource(gui_server.make_server)
+    assert 'row["install_options"] = gui_fleet.install_options_for_record(d)' in source

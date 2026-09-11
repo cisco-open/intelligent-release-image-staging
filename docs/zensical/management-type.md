@@ -77,7 +77,9 @@ The supported management-type cells:
 | Inband | static | IOx (IE-3400, Catalyst 9300) | supported |
 | Inband | DHCP | any | rejected — separate capability gate |
 | `router-routed` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
+| `router-routed` | static | IOx (Catalyst 8000) | supported; the app attaches through the same VirtualPortGroup |
 | `router-nat` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
+| `router-nat` | static | IOx (Catalyst 8000) | supported; the app attaches through the same VirtualPortGroup and NAT footprint |
 | `xr-host` | none | XR appmgr container (Cisco 8000 series, IOS-XR) | supported |
 
 Inband install and teardown command streams never contain `vlan`,
@@ -111,7 +113,8 @@ improvement that applies equally to both.
 
 ## Router routed and router NAT — IRIS-managed VirtualPortGroup
 
-Catalyst 8000 routers use Guest Shell through `VirtualPortGroup<N>` (VPG), not
+Catalyst 8000 routers run either Guest Shell or an IOx app through
+`VirtualPortGroup<N>` (VPG), not
 a VLAN/SVI or AppGigabitEthernet interface. Support is **designed for the
 Catalyst 8000 family, lab-tested on Catalyst 8000V**. Both router modes onboard, stage a
 verified image, and undeploy from their deployment record, and both appear on the Swarm Map
@@ -127,6 +130,14 @@ with telemetry when observability is enabled.
   rules. The outside interface is canonicalized before rendering. Its deployment
   record notes whether `ip nat outside` already existed; a pre-existing marking is
   preserved and undeploy removes that marking only when IRIS created it.
+
+  Several `router-nat` participants can share one translated outside address.
+  If origin policy would permit one of those principals and deny another, IRIS
+  reports a `shared_permit_deny` conflict and leaves the shared address
+  unblocked rather than cutting off the permitted principal. The additional
+  mutual-origin deny proposed by issue #153 remains a count-only preflight in
+  Phase 0; use distinct outside addresses when address-level isolation is
+  required.
 
 `device/router-install.sh` destroys any pre-existing Guest Shell before
 applying config, then enables it with the selected VPG networking. Agent
@@ -198,7 +209,7 @@ Inventory is a management-type-aware, named-header CSV. The header is required a
 validated; extra, missing, or misplaced columns are rejected.
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,role,platform
 ```
 
 - **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
@@ -218,6 +229,11 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   IOx app SSHes to for the placement copy. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
   asymmetric topology; Guest Shell never uses it.
+- `role` is optional server-side peer-policy membership. It uses the same
+  meaning for routed, inband, router-routed, router-nat, and xr-host devices and
+  never renders an IOS/IOS-XR ACL or changes the device network configuration.
+  A blank import preserves existing membership; clear it through the explicit
+  role action.
 
 The same server-side validator is applied to the Console, the API, and CSV
 import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and
@@ -303,6 +319,13 @@ management type. Saving a model name does not establish hardware support.
 The device table shows each device's **Management type**, and onboarding uses
 an applied deployment record. See
 [Web Console](console.md).
+
+A scheduled onboarding needs the same choice: a row that is still inventory
+only has no plan to run, so a scheduled window records it as
+`unclassified_management_type` and moves on rather than guessing a network for
+it. Classify the row, then let the next window pick it up — a late-bound
+target re-resolves at each run. See
+[Scheduled outcomes](operations.md#scheduled-outcomes).
 
 ## Deployment environments
 

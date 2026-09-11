@@ -15,16 +15,17 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | --- | --- |
 | `docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap` | Initialize a fresh encrypted server config volume. |
 | `docker compose -f server/docker-compose.yml up -d --build` | Build and start the IRIS server and state-free Console. |
-| `tools/start-compose-server.sh` | Bootstrap/start Compose and automatically stage both IOx packages. |
+| `tools/start-compose-server.sh` | The complete first start: list every missing hand-in up front, grant uid 10001 `artifacts/`, build, bootstrap, install the two public instruction roots from `IRIS_INSTRUCTION_ROOTS_DIR`, start, and stage the Guest Shell bundle, both IOx packages and the XR RPM (`IRIS_SKIP_XR=1` to omit). It never creates roots. |
 | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<image>.bin` | Publish an image into the catalog and seeder. In place: the image is seeded from its own directory and nothing is copied. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign` | Show images and assignments. |
-| `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image>` | Assign one image to one device. |
+| `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image> [<image> ...]` | Merge one or more images into the device's ordered assignment. Use `iris-assign --replace <device> <image> [<image> ...]` to replace and intentionally narrow it. |
 | `tools/gen-device-installers.sh fleet/devices.csv` | Generate per-device installers. |
 | `tools/apply-assignments.sh fleet/assignments.csv` | Validate and apply assignment CSV. |
-| `tools/make-agent-bundle.sh` | Build the Guest Shell agent bundle manually. |
+| `tools/make-agent-bundle.sh` | Build the x86_64 Guest Shell bundle; `--arch arm64 --aria2 PATH` builds the ARM bundle from a verified aarch64 binary. |
 | `device/device-uninstall.sh` | Remove Guest Shell IRIS wiring from a device. |
-| `device/iox/install.sh` | Install the IOx app path. |
-| `device/iox/uninstall.sh` | Remove the IOx app path. |
+| `device/iox/install.sh` | Private controller recipe; use Console/API Onboard or the IOx control CLI's `submit-install`. Direct execution refuses without the inherited controller channel. |
+| `device/iox/uninstall.sh` | Private controller recipe; use Console/API Undeploy or the IOx control CLI's `submit-uninstall`. Direct execution refuses without the inherited controller channel. |
+| `docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris python3 iox_verification.py <operation> ...` | Local IOx control client: submit, recover, reconcile, or read an IOx job from inside the server container. See [IOx control CLI](#iox-control-cli). |
 | `device/iox/build.sh --image-only` | Build or verify the one persisted OCI archive containing both linux/amd64 and linux/arm64 device images. |
 | `tools/provision-iox-packages.sh` | Build and stage both architecture-specific IOx packages. |
 | `tools/build-xr-package.sh --out artifacts/` | Build the deployment-neutral IOS-XR appmgr RPM and its canonical-image provenance manifest. |
@@ -117,7 +118,7 @@ Console has its own [deployment variables](docker-hosts.md#deployment-settings).
 | `IRIS_HEALTH_LISTENERS` | `tracker:6969,catalog:8443,artifacts:8000,management:9443` | What the server tier's `:9101/readyz` TCP-probes, as `name:port,name:port`. Console readiness is local to its own `/readyz`; the server does not depend on it. Blank keeps the default set; the literal `off` checks nothing, for a deployment that runs a subset of the services and does not want the missing ones reported down. |
 | `IRIS_AUDIT_RETENTION_DAYS` | `90` days | Audit entries older than this are dropped by timestamp on the next amortized prune. A non-integer or non-positive value falls back to the default. |
 | `IRIS_AUDIT_MAX_EVENTS` | `50000` | Hard cap on surviving audit entries. A prune above the cap evicts the **oldest by file position** (append order), so a forged far-future timestamp cannot shield an entry and a wrong clock cannot mass-delete fresh ones. A non-integer or non-positive value falls back to the default. Raise both of these if you have a longer retention obligation — the trail is append-only JSONL and prunes itself. |
-| `SEED_MAX_CONCURRENT` | `1000` | `--max-concurrent-downloads` for the origin seeder's aria2c. See [Operations](operations.md#scaling-notes) for when this matters; the device-side equivalent is `IRIS_MAX_CONCURRENT` in the container agents. |
+| `SEED_MAX_CONCURRENT` | `1000` | `--max-concurrent-downloads` for the origin seeder's aria2c. See [Operations](operations.md#scaling-notes) for when this matters; device concurrency is signed/default `max_concurrent`; legacy launcher inputs have no enduring policy authority. |
 | `IRIS_SSH_LEGACY` | `0` | `1` re-enables SHA-1 KEX, `ssh-rsa` and CBC ciphers for server-side device sessions, for IOS-XE images that offer no modern alternative. |
 | `IRIS_SSH_HOST_KEY` | unset | Pin one device/stage-host public host key (`<type> <base64>`) for strict verification. See [Security](security.md#device-ssh-host-keys). |
 | `IRIS_SSH_KNOWN_HOSTS` | unset | Path to a `known_hosts` file to verify strictly against. With neither this nor `IRIS_SSH_HOST_KEY` set, host keys are recorded on first contact into a persistent `known_hosts` under `$IRIS_STATE/ssh` and must match afterwards; `/dev/null` is never used. |
@@ -176,7 +177,12 @@ see [Kubernetes](kubernetes.md).
 Onboarding reads the public device certificate from `$IRIS_CONFIG/tls/crt.pem`,
 unless `IRIS_CRT_PUBLIC` selects another public certificate file. The server's
 `IRIS_LOG` names its log directory. It is kept out of device installer options;
-the device-side `IRIS_LOG` switch controls aria2 logging separately.
+the device-side `IRIS_LOG` switch controls aria2 logging separately. The Console's
+**Detailed logs** checkbox, or the onboard/undeploy API's optional boolean `log`,
+sets this switch explicitly (`false` or omitted means off). For an IOx job it
+also controls detailed device-session output in the Console job log, with
+credential redaction retained. Onboarding enables download logs on IOx and
+IOS-XR; Guest Shell uses its separate persistent `iris_log` config key.
 
 ### TLS trust and console certificate
 
@@ -268,13 +274,27 @@ startup log states which posture is in effect at boot.
 
 ## Console API
 
-The checked-in [OpenAPI 3.2 contract](openapi.yaml) describes the Console,
-management, catalog, tracker, telemetry, and artifact operations. It is generated
-from `server/openapi_contract.py`, validated against OpenAPI 3.2, and checked
-against the runtime route registry. Job streams describe each parsed SSE event;
-image, artifact and torrent bodies are raw bytes. The API paths remain versioned
-as `/api/v1`, `/internal/v1`, and `/v1`.
-This section explains the operator-facing behavior.
+The Console serves a read-only API reference at
+`https://<console-host>:<console-port>/swagger/`, equivalently
+`<IRIS_CONSOLE_URL>/swagger/`, and the canonical contract at `/openapi.yaml`.
+**Help → Local API reference (Swagger)** opens the local UI. `GET` and `HEAD`
+serve these files publicly. Other methods retain the Console's existing
+authenticated API and unknown-route handling; Swagger adds no write route. The
+files use the Console's existing HTTPS listener and browser certificate and add
+no port, credential, session, or CSRF behavior. Every stylesheet and script is
+bundled in the Console image, so the page needs no Internet access.
+
+The same read-only UI is available on the documentation site as the
+[published API reference](swagger/index.html), backed by the checked-in
+[OpenAPI 3.2 contract](openapi.yaml). The UI has no **Try it out** or
+authorization controls and never executes a documented API operation. The
+contract describes the Console, management, catalog, tracker, telemetry, and
+artifact operations.
+It is generated from `server/openapi_contract.py`, validated against OpenAPI
+3.2, and checked against the runtime route registry. Job streams describe each
+parsed SSE event; image, artifact and torrent bodies are raw bytes. The API
+paths remain versioned as `/api/v1`, `/internal/v1`, and `/v1`. This section
+explains the operator-facing behavior.
 
 The browser calls `/api/v1` on the Console container's HTTPS listener, normally
 port 8080. The Console proxies registered operations to `/internal/v1` on the
@@ -408,7 +428,7 @@ verification](operations.md#image-verification).
 | Route | Body / result |
 | --- | --- |
 | `GET /api/v1/devices` | `{devices: [...], now, total, offset, limit, revision}`. Optional `limit` (1–1000, larger values clamped) and `offset` (≥ 0) page results sorted by `device_id`; malformed values, non-positive limits, and negative offsets return 400. Without a limit, `limit` is `null` and all matching rows from the offset onward are returned. Filters apply before paging, so `total` is the filtered count. Compare `revision` across pages and restart the read if inventory changed. See the filter table below. |
-| `POST /api/v1/devices` | Creates or updates one inventory row; returns `{device: ...}`. |
+| `POST /api/v1/devices` | Creates or updates one inventory row; returns `{device: ...}`. The JSON field set is closed: unknown fields and server-owned `schema_version`, `registered_at`, `registration_id`, and `os_family` return 422 without changing inventory or role policy. Historical `vlan` and `guest_ip` aliases are accepted through legacy CSV import only. |
 | `DELETE /api/v1/devices/<id>` | Retires the device: revokes its credentials first, then clears peer-policy assignment, inventory row, and catalog state. `{deleted: <bool>, degraded: [...]}` — 200 when cleanup was complete, 207 when part of it failed (`degraded` names the areas), 500 `{deleted: false, error: "secret revoke failed"}` when the revoke could not be persisted, in which case nothing was changed. Endpoint rows are retained until they age out. See [Retiring a device](operations.md#retiring-a-device). |
 | `GET /api/v1/devices/export-csv`, `GET /api/v1/devices/example-csv` | The inventory as `devices.csv`, and a blank example. |
 | `POST /api/v1/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
@@ -416,13 +436,13 @@ verification](operations.md#image-verification).
 | `GET /api/v1/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/v1/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
 | `GET /api/v1/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
-| `POST /api/v1/devices/<id>/assign` | `{image_ids: [...]}` replaces the ordered approved set, up to ten images; an empty array unassigns all. `{image_id: <id>}` selects one image, and `{image_id: null}` unassigns all. Optional `expect_image_ids` compares against the stored set and returns 409 with `assigned_image_ids` if it changed. More than ten ids, duplicates, unknown ids, and quarantined images return 400. Assignment approves staging only. See [Policy schema](#policy-schema) and [Image verification](#image-verification). |
+| `POST /api/v1/devices/<id>/assign` | `{image_ids: [...]}` replaces the ordered approved set, up to ten images; an empty array unassigns all. `{image_id: <id>}` selects one image, and `{image_id: null}` unassigns all. Optional `expect_image_ids` compares against the stored set and returns 409 with `assigned_image_ids` if it changed. Success returns `{ok, assigned_image_ids, removed_image_ids}` from the committed transaction. An id absent from fleet inventory returns 422 and creates no policy or transfer plan. More than ten ids, duplicates, unknown image ids, and quarantined images return 400. Assignment approves staging only. See [Policy schema](#policy-schema) and [Image verification](#image-verification). |
 | `POST /api/v1/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
 | `POST /api/v1/devices/bulk-credential` | `{device_ids: [...], credential_profile_id: <id or "">}` sets ONE credential profile on every listed device in a single call — the bulk form of the route above, backing the console's "Select all *N* matching devices" bulk credential action. 400 for a non-array/empty `device_ids`, one over the supported fleet size, or an unknown `credential_profile_id`. Not all-or-nothing: returns `{ok: true, applied: <count>, failed: {<device_id>: <reason>, ...}}`, naming exactly which selected ids (e.g. one deleted out from under a stale selection) did not apply, while every other id still does. Audited once as `device_credential_bulk_change`, not once per device. |
 | `POST /api/v1/devices/<id>/forget-host-key` | Removes the device's entry from the persistent SSH known_hosts accept-new mode records into (`lab/iris-ssh-policy.sh`) — for a device that was re-imaged or replaced and now fails every session with a changed-key error. `{ok: true, peer: <device_ip>}` on success, including when nothing was recorded (already effectively forgotten). 400 `{error: ...}` when the device has no `device_ip` on record or the removal itself fails. Audited as `device_forget_host_key` (device id, actor, and the peer address). Only the persistent accept-new file is touched — an `IRIS_SSH_HOST_KEY` pin or an operator-supplied `IRIS_SSH_KNOWN_HOSTS` file is untouched. The next session re-verifies and pins the device's new key; this never disables verification. See [Operations → Forgetting a device's SSH host key](operations.md#forgetting-a-devices-ssh-host-key). |
 | `POST /api/v1/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/v1/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
-| `POST /api/v1/devices/<id>/onboard`, `POST /api/v1/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. A `503` naming an unreadable `deployment_records.json` is a different answer: the records cannot be read at all, so whether this device has a deployment is unknown — repair the file rather than adopting the device. |
+| `POST /api/v1/devices/<id>/onboard`, `POST /api/v1/devices/<id>/undeploy` | Starts the job; `{job_id}`. Both routes accept optional `log: true` for detailed IOx command output (default `false`; see [Onboarding jobs](#onboarding-jobs)). 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. A `503` naming an unreadable `deployment_records.json` is a different answer: the records cannot be read at all, so whether this device has a deployment is unknown — repair the file rather than adopting the device. |
 
 Router deployments carry extra preflight and ownership rules — see
 [Management Type and VLAN Ownership](management-type.md#router-preflight-and-ownership).
@@ -437,6 +457,7 @@ Device list filters can be combined:
 | `cred` | Credential profile id; `__none` selects devices with no profile. |
 | `telemetry` | `on`, `off`, or `unknown` when the device has not reported its posture. |
 | `peer` | `quarantined` or `not-quarantined`. |
+| `role` | Exact declared role name; `__none` selects a row with no declared role. |
 | `status` | `onboarding`, `undeploying`, `waiting-heartbeat`, `waiting-staging`, `onboard-failed`, `undeploy-failed`, `deployed`, `placement-failed`, `image-failed`, `copying`, `staging`, `unassigned`, `enrolled`, `not-enrolled`, `offline`, or `__attention`. |
 
 `offline` selects heartbeats at least 600 seconds old; `__attention` selects
@@ -451,28 +472,218 @@ first shows `waiting-heartbeat`, then follows the agent's reported status.
 
 ### Peer policy
 
-The read side of the swarm's isolation posture, and the one compare-and-set
-write in the whole API.
+`enforcement.mutual_origin` contains `mode: "preflight"` and the nullable
+`newly_denied_device_count`. A `null` count means the result is unavailable,
+including when the protected seeder IPv4 address is unknown. Zero means the
+evaluation completed with no newly denied devices. This observation does not
+activate additional mutual-origin enforcement.
+
+Role and QoS writes share the peer-policy revision. Read the current ETag first,
+send that exact strong value in `If-Match`, preview with `dry_run=1`, and send
+the preview's `confirm_token` with the identical candidate. The confirmation
+threshold is zero: any membership/access count or QoS change needs a token.
+A token is bound to the prior revision and candidate content; another policy
+commit makes it stale.
 
 | Route | Body / result |
 | --- | --- |
-| `GET /api/v1/peer-policy` | The count-only policy view: `schema`, `revision`, `degraded`, `fail_closed`, `quarantine` (the reserved-ACL descriptor), `quarantine_assignments` (the sorted device ids currently quarantined), and `enforcement` — the tracker's reconciler status as `state`, `desired_ip_count`, `applied_revision`, `last_reconciled_at`, `conflict_count`, `conflict_types`, `last_effect` (aggregate `disconnected_peers` / `removed_peers` counts only), `last_error`, and `last_operation_exported_revision`. Deliberately count-only: no peer address ever crosses this boundary. |
+| `GET /api/v1/peer-policy` | Count-only policy view and ETag. It includes role definition/restriction/member counts, at most ten drift IDs with a truncation flag, outbox occupancy, tracker enforcement, future mutual-origin preflight count, origin-QoS apply counts, and a fleet rollup by accepted policy revision and canonical instruction display state, plus nullable observation/custody status. No peer address or raw deny list crosses this boundary. `roles_supported` is the binary capability; `roles_present` records that role state has existed. |
+| `GET /api/v1/peer-policy/roles` | Full sorted role definitions and the current revision/ETag. Definitions contain policy values, never membership IDs. |
+| `PUT /api/v1/peer-policy/roles/<name>` | Create or replace a definition. Body fields are `restricted`, `peers`, `origin`, `nets`, `on_stale`, `qos`, optional `qos_state`, plus `confirm_token` on apply. Preview with `?dry_run=1`. A full role-definition replacement must include `qos_state` to retain the stored state object. |
+| `GET /api/v1/peer-policy/roles/export-csv` | The complete definition set as `text/csv` in the `iris-role export` grammar (semicolon lists, bytes/second rates), plus the current ETag. Degraded or fail-closed policy returns `503 policy_unavailable` rather than exporting a fallback document. |
+| `POST /api/v1/peer-policy/roles/import-csv` | `{"csv": "<roles CSV text>"}` replaces **every** role definition in one revision, exactly like `iris-role import`: the whole graph is validated first, a role a device still declares or a schedule still names cannot be dropped (`role_in_use`), and a grammar problem returns `422 invalid_roles_csv` whose `detail` names the row or field. Preview with `?dry_run=1`; apply with the pre-preview `If-Match` and the preview's `confirm_token`. The split Console accepts the 8 MiB CSV body. |
+| `DELETE /api/v1/peer-policy/roles/<name>` | Delete an unused role after preview/confirmation. The preview returns 200 JSON with candidate revision/ETag; the committed DELETE returns 204 with an empty body and the committed ETag. A role with members or another role referring to it returns `role_in_use` with counts/names. |
+| `PUT /api/v1/peer-policy/qos` | Replace global QoS keys with `{"qos": {...}}`, or one role's QoS with `{"role": "<name>", "qos": {...}}`; the optional `qos_state` object selects the seeder/leecher tracker layers at the same scope. Omitted `qos_state` preserves its stored object. Explicit `qos_state: {}` removes only the selected state layer and preserves scalar QoS. At least one of `qos` or `qos_state` is required; preview and confirmation rules apply. |
+| `POST /api/v1/devices/<id>/role` | `{"role": "<name>"}` sets membership; `{"role": null}` clears it. The fleet declaration and compiled membership are coordinated and the response reports partial failure/drift. |
+| `POST /api/v1/devices/bulk-role` | `{"device_ids": [...], "role": "<name-or-null>"}` applies one membership change as one policy revision and one outbox entry, with `applied`, `failed`, `partial`, and drift detail. The request cap is the supported fleet size and the split Console accepts the 2 MiB bulk body. |
+| `GET /api/v1/devices/<id>/effective-qos` | Without a query, the legacy scalar `qos` object remains byte-compatible. With exactly one `tracker_state=seeder|leecher`, the response retains scalar `qos` and adds paired `tracker_state`/`tracker_qos` values and sources; invalid, blank, duplicate, or unknown query input returns `422 invalid_policy_request` after an unknown device returns 404. `delivery_state: pre-instructions` is a deprecated legacy Phase 0 sentinel, not a current delivery observation. The required `instruction` object uses the same canonical bounded projection as `/api/v1/devices`, including unavailable/invalid evidence; `/api/v1/peer-policy` supplies fleet rollups. |
+| `GET /api/v1/peer-policy/explain?a=&b=` | Resolve each argument as a device id, `device:<id>`, or `service:seeder`; require one fresh, unambiguous attributed address per side; then return both directional decisions, matched sequences, effective ACL/source, role/shadow facts, `mutual`, revision, and ETag. Returns 422 rather than guessing when identity or address attribution is ambiguous. |
 | `PUT /api/v1/peer-policy/quarantine/<device_id>` | Quarantines or releases one device. The body must be **exactly** `{"quarantined": <bool>, "if_revision": <int ≥ 1>}` — no other keys, no other types. `if_revision` is the revision you read from `GET /api/v1/peer-policy`, and the write commits only if the policy is still at that revision. 200 `{ok: true, revision, quarantined}` on success. |
 
-Refusals on the write, all of them fail-closed:
+The public routes above map one-for-one to `/internal/v1/...` on the private
+management listener. That listener additionally requires its scoped tier
+credential; browser sessions and CSRF still protect mutations at either
+topology boundary.
 
-| Status | Body | Meaning |
+Every role-policy read returns 200 JSON plus the current ETag, but the JSON
+wrappers differ: the policy view is a sanitized count/status object, the role
+list wraps definitions under `roles`, effective QoS wraps per-key provenance
+under `qos`, and pair explain wraps directional `a`/`b` results. Every mutation
+preview returns 200 JSON with the candidate revision and candidate ETag. That
+preview ETag does **not** replace the prior strong ETag: apply the unchanged
+candidate with the original pre-preview `If-Match` and its `confirm_token`.
+Committed PUT/POST operations return 200 JSON plus the committed ETag; committed
+role DELETE alone returns 204 empty plus its ETag.
+
+On `/api/v1`, a missing or expired browser session, including expiry between
+preview and apply, returns 401 `console-session-required`; the operator must log
+in, reread, and preview again. On `/internal/v1`, a missing/invalid scoped tier
+credential returns 401 `management-authentication-required`. A browser mutation
+also requires its current CSRF value. Neither interface silently retries a
+policy mutation.
+
+Role names use `^[a-z0-9][a-z0-9._-]{0,31}$`, at most 256 roles may exist, and
+`default`, `quarantine`, `origin`, `seeder`, and `legacy` are reserved. A role
+definition has these fields:
+
+| Field | Default / bound | Meaning |
 | --- | --- | --- |
-| 400 | `{"error": "bad peer-policy request"}` | The body is not exactly the two required keys with the required types. |
-| 409 | `{"error": "revision_conflict", "revision": <current>}` | Someone else committed since you read; re-read and retry against the revision returned. |
-| 422 | `{"error": "unknown device"}` | No such device in inventory (an encoded `/` in the id is rejected here too). |
-| 422 | `{"error": "policy_error"}` | The policy document is degraded, or the mutation was refused. |
-| 503 | `{"error": "policy_fail_closed"}` | The policy could not be loaded; nothing is mutated. |
-| 503 | `{"error": "operation_backlog_full"}` | Too many committed operations still un-exported to the tracker. |
-| 413 | `{"error": "payload too large"}` | Body over the 64 KiB cap. |
+| `restricted` | `false` | When true, compile a virtual ACL; false retains implicit permit. |
+| `peers` | the role itself; at most 64 | Permitted role names. The list must contain itself. Links between two restricted roles must be symmetric; lifecycle writes normalize reciprocal links. |
+| `origin` | `true` | Whether the tracker may introduce `service:seeder` to this restricted role. Issue #153 origin-side mutual blocking remains preflight-only. |
+| `nets` | empty IPv4 list | Optional, validated subnet hints for role management. They do not classify tracker announces or install a network ACL. |
+| `on_stale` | `keep` for restricted roles, `defaults` otherwise | Instruction-expiry fallback: retain verified QoS with `keep`, or restore defaults. Peer allow-list expiry independently falls back to tracker-only. |
+| `qos` | empty | Overrides the global scalar layer for keys allowed at role scope. |
+| `qos_state` | omitted | Closed `seeder`/`leecher` tracker cadence and `numwant` overlays for this role; tracker-only and API-configured. |
+
+The `roles` member is optional in a legacy schema-1 policy document. When it is
+present, the roles container, every definition, and every QoS layer are closed,
+typed objects; unknown keys are refused. `peers` must be a non-null array of
+unique role names, must contain the role itself, and cannot contain more than
+64 entries. The role schema sets no per-role member cap; operational membership
+still cannot exceed the devices in the supported Fleet. An
+unrestricted role permits by default only on its own side of evaluation; the
+other principal's restricted ACL still governs the pair. A restricted
+`origin:false` role is valid. `origin_unreachable` is an advisory when neither
+that role nor a permitted role provides a path to the origin.
+
+Role networks accept bare IPv4 addresses and IPv4 prefixes with host bits.
+Prefix syntax may use a decimal length, a contiguous dotted netmask, or a
+contiguous dotted hostmask. Address octets with leading zeroes and IPv6 are
+refused; a decimal prefix spelling is bounded to 32 digits. Valid supplied text
+is preserved rather than canonicalized in raw policy. `iris-role` CSV/import is
+the owning interface for canonical-equivalent duplicate detection: it compares
+canonical networks while preserving the first valid spelling. The raw policy
+validator does not promise duplicate-net rejection.
+
+Stored ACLs still allow 64 names and 256 rules each. Virtual role ACLs consume
+none of those slots. One explicit stored-ACL assignment **shadows** role policy;
+it does not combine with it. `iris-role migrate ACL ROLE --dry-run` only
+previews the two-step migration and persists nothing. A confirmed `--apply`
+first stages membership behind the existing shadow, then removes matching
+explicit assignments in a second policy commit. Quarantine cannot be migrated.
+
+#### QoS keys
+
+Values are integers. Rates are bytes per second; `0` means unlimited, while a
+nonzero rate must be at least 8,192 B/s. Scalar QoS retains its existing
+compilation precedence. The exact tracker-state precedence is builtin →
+`roles.qos_default` → `roles.qos_state_default.<state>` →
+`roles.defs.<role>.qos` → `roles.defs.<role>.qos_state.<state>`; a partial state
+map overrides only its supplied key. Phase 1 delivers verified device QoS and
+logical cadence through encrypted instructions; there is still no public
+device-QoS mutation. Tracker-state overlays stay on the tracker and never enter
+the device envelope. Server tracker/origin controls remain independent of
+device cooperation.
+
+| Key | Default | Range | Allowed scope | Current behavior |
+| --- | ---: | ---: | --- | --- |
+| `max_peers` | 10 | 1–1,000 | global, role, device | Verified/default hard per-torrent peer cap, including pending outbound peers. |
+| `per_peer_bps` | 12,500,000 | 0 or 8,192–10,000,000,000 | global, role, device | A modelling input only. The builtin does not create a cap; when explicitly set it derives absent per-torrent rates as `per_peer_bps × fanout`. |
+| `fanout` | 1 | 1–1,000 and no greater than `max_peers` | global, role, device | Modelling input for derived per-torrent rates. |
+| `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
+| `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
+| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
+| `max_concurrent` | 100 | 1–1,000 | global, role, device | Applied from verified/default device policy. |
+| `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | Applied from verified/default device policy. |
+| `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | Tracker resolves state before applying exactly one bounded ±10% jitter and returns the issued value as both `interval` and `min interval`; a peerless leecher in the pinned client still has a 120 s floor. |
+| `numwant` | 50 | 4–200 | global, role, state overlay | Tracker ceiling after selected-state resolution and before selection. The pinned client requests at most 50; an explicit client `numwant=0` receives no peers. |
+| `handout_budget` | 0 (off) | 0–1,000 | global, role | Accepted policy input for a later phase; handout-budget accounting is not active. |
+| `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | Signed logical catalog/staging cadence; mechanical tick timing remains separate. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
+| `telemetry_every_ticks` | 1 | 1–60 | global, role, device | Applied from verified/default device policy. |
+| `telemetry_pause` | `false` | boolean | global, role, device | Applied from verified/default device policy. |
+| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | Verified instruction-expiry fallback. |
+| `origin_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Active origin-wide upload limit; unlimited by default. |
+| `origin_per_torrent_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Active per-image origin upload limit; unlimited by default. |
+| `origin_max_peers` | 55 | 1–1,000 | global only | Active origin per-torrent peer cap. |
+
+Numeric QoS values reject booleans even though Python treats booleans as an
+integer subtype; `telemetry_pause` alone is boolean. Connection limits are
+connections per torrent, `max_concurrent` is torrents, `fanout` is a multiplier,
+`numwant` is peers per announce, `handout_budget` is handouts per window,
+telemetry cadence is ticks, and interval fields are seconds. To convert a
+decimal display rate once, use `Mbit/s × 1,000,000 ÷ 8`; API and CSV `*_bps`
+values are already bytes per second.
+
+An explicitly supplied per-torrent rate wins over a rate derived from
+`per_peer_bps × fanout` at the same or a more-specific layer. A derived value
+above the 10,000,000,000 B/s bound is refused. A QoS PUT replaces the selected
+global or role QoS object. A subset is the complete replacement; `{}` clears
+that layer. Role membership accepts only an explicit role string or `null` to
+clear. The top-level global QoS object may carry `on_stale`; a role uses the
+separate definition field. `defs.<role>.qos.on_stale` and device placement are
+forbidden. Omitted `qos_state` preserves the stored state object; explicit
+`qos_state: {}` removes only the selected state layer while preserving scalar
+QoS. A full role-definition replacement must include `qos_state` to retain it.
+Tracker state is selected before exactly one jitter operation; the same issued
+interval is returned in both response fields and each row expires after twice
+its issued interval. Tracker state is tracker-only, and heartbeats remain
+outside any catalog or telemetry pause gate.
+
+Zero is unlimited, so no rate key expresses **never upload**. Use assignment
+and peer-access policy to avoid creating an upload path, while accounting for
+connections aria2 already retained. Device upload rates are reasserted from
+verified/default policy, but a privileged device administrator can bypass them.
+
+Per-role origin shaping is not expressible with aria2's global/per-download
+controls. The origin can shape all traffic or one image and the tracker can
+withhold the origin from a restricted role, but the origin cannot rate-limit
+one role within a shared swarm. Verified device downlink limits remain
+cooperative under the privileged-administrator boundary.
+
+Refusals on role/QoS writes use Problem Details. Important codes are:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 428 | `precondition_required` | New role/QoS write omitted `If-Match`. |
+| 412 | `precondition_failed` | The header-time check found an ETag that is stale, weak, duplicated, wildcard, or otherwise not the exact current strong value. Re-read before previewing again. |
+| 428 | `confirmation_required` | The candidate changes access/membership/QoS and lacks its exact preview token. |
+| 409 | `revision_conflict` | The ETag passed the first check, but another writer committed before the under-lock revision check. Refresh and preview the candidate again. |
+| 409 | `role_in_use`, `role_isolated`, `role_reserved_name`, `role_shadowed_by_assignment` | Lifecycle/shadow guard refused the change. Only the migration coordinator may deliberately work beneath an explicit assignment. |
+| 409 | `operation_backlog_full` | 256 mutations remain unacknowledged. A backlog seen during preflight refuses before durable mutation; a direct writer racing after Fleet-first preflight can still return a partial outcome. |
+| 404 | `device_not_found`, `role_not_found` | The named device or role does not exist on the route that owns it. |
+| 422 | `bad_role`, `incomparable_role_change`, `mixed_role_direction`, `invalid_policy`, `invalid_policy_request` | Membership, graph/QoS content, or request fields violate the route's closed grammar or cannot be safely ordered as one bulk change. |
+| 503 | `fleet_write_failed` | Policy-first relaxation committed policy but a later Fleet write failed, or a Fleet write itself was partial. Inspect outcome detail. |
+| 503 | `policy_unavailable` | Policy was degraded/fail-closed before mutation, a required store failed, or a Fleet-first change wrote Fleet and the later policy write failed. The last case preserves `partial`, `applied`, `failed`, revision, and drift detail. |
+
+Precondition and degraded-state refusals happen before mutation; a backlog
+observed during normal preflight does too. Actual store failures are different:
+one coordinated store may already have committed. On any error response, inspect
+`partial`, `applied`, `failed`, revision, and `role_drift` when present, then
+refresh both policy and Fleet state and review before retrying. Never infer
+"nothing written" from HTTP 503 alone.
+
+`asymmetric_peers` belongs to raw policy/CSV graph validation. The public role
+PUT normalizes reciprocal edges atomically, so a valid one-sided edit through
+that lifecycle route updates the other definition in the same candidate.
+
+Legacy quarantine retains its body-carried `if_revision` compatibility shape
+and its older refusal bodies. New clients should also send the strong ETag.
 
 The backlog bound and what to do about each refusal are in
 [Peer-policy operations and their backlog](operations.md#peer-policy-operations-and-their-backlog).
+
+An abbreviated preview/apply sequence (cookie and CSRF setup omitted) is:
+
+```bash
+curl -sS -D headers -b session.cookie \
+  https://console.example/api/v1/peer-policy -o policy.json
+ETAG=$(awk 'tolower($1)=="etag:" {print $2}' headers | tr -d '\r')
+
+curl -sS -b session.cookie -H "X-CSRF-Token: $CSRF" \
+  -H "If-Match: $ETAG" -H 'Content-Type: application/json' \
+  -X PUT 'https://console.example/api/v1/peer-policy/roles/wan?dry_run=1' \
+  --data '{"restricted":true,"peers":["wan"],"origin":true,
+           "qos":{"announce_min_interval_s":60,"numwant":20}}'
+
+# Copy confirm_token from that preview without changing the body or ETag.
+curl -sS -b session.cookie -H "X-CSRF-Token: $CSRF" \
+  -H "If-Match: $ETAG" -H 'Content-Type: application/json' \
+  -X PUT https://console.example/api/v1/peer-policy/roles/wan \
+  --data '{"restricted":true,"peers":["wan"],"origin":true,
+           "qos":{"announce_min_interval_s":60,"numwant":20},
+           "confirm_token":"<preview token>"}'
+```
 
 ### Onboarding jobs
 
@@ -489,6 +700,13 @@ Jobs cover onboarding and undeploy. Their states are `queued`, `running`,
 finished; it does not mean an assigned image has staged. Use the device's
 heartbeat status for that.
 
+Both device job submission routes accept an optional boolean `log`, default
+`false`. Send `{"log": true}` for detailed IOx command output; onboarding also
+enables download logs on IOx and IOS-XR. It can be combined with onboarding's
+`telemetry` / `telemetry_stream` flags or undeploy's `force` flag. Strings,
+numbers and `null` are rejected for `log` before a job is prepared or queued.
+Guest Shell logging remains controlled by the device's `iris_log` config key.
+
 The stream sends each log line as an unnamed text `data:` event, with
 `: keepalive` comments during quiet periods. The named `end` event carries
 `done`, `error`, `cancelled`, `idle`, or `unknown`. `idle` means the stream
@@ -499,6 +717,46 @@ closed or idle stream as a job failure.
 
 Successful logs end with `onboard complete: <IP>` or
 `undeploy complete: <IP>`. Use the job's `state` and `rc` for automation.
+Two maintenance actions, `iox-recover` and `iox-reconcile-enabled`, are
+queued only by the [IOx control CLI](#iox-control-cli) below.
+
+### IOx control CLI
+
+`server/iox_verification.py` doubles as a local control client for the IOx
+authority. It talks to the running server over `$IRIS_STATE/iox/control.sock`,
+a mode-0600 Unix socket that only the server's own uid may open, so it runs
+inside the server container as the service user with the server's
+`IRIS_STATE`:
+
+```bash
+docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris \
+  python3 iox_verification.py <operation> [arguments] [--wait [--wait-timeout <seconds>]]
+```
+
+There is no network endpoint for it and no Console equivalent yet.
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `submit-install` | `--device-id <id>` | Queues the IOx device's onboard, as `POST /api/v1/devices/<id>/onboard` would, with actor `local-control`. |
+| `submit-uninstall` | `--device-id <id>` `[--force-agent-only]` | Queues the IOx device's undeploy. `--force-agent-only` is the Console's **Force** ([Bulk device actions](console.md#bulk-device-actions)) and is accepted by this operation only. |
+| `recover` | `--device-id <id>` | Queues an `iox-recover` job that replays the device's one outstanding verification obligation under the board lock — the same recovery every onboard and undeploy runs first. Refused when the device's obligations and sessions do not name exactly one board and at most one record. |
+| `reconcile-enabled` | `--record-id <id>` `--transaction-id <hex32>` `--revision <n>` `--acknowledge-external-resolution` | Queues an `iox-reconcile-enabled` job: after the operator has restored app signature verification on the device by hand, one fresh read that reports `enabled` closes a journal in phase `indeterminate`. All four arguments are required, and the record id, transaction id and revision must match the stored journal exactly or the request is rejected. See [Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run). |
+| `job` | `--job-id <hex16>` | Reads one job by id, or waits for it with `--wait`. |
+
+Every operation accepts `--wait` and `--wait-timeout <seconds>` (1 through
+7200, default 7200; the timeout is checked only with `--wait`). Without
+`--wait` a submit returns as soon as the job is queued, with `accepted: true`.
+
+The command prints one JSON line, the job projection: `job_id`, `state`,
+`record_id`, `terminal`, `result_code`, and on a terminal job `returncode` and
+`recovery_code`; `wait_timed_out: true` when the wait expired; or
+`{"error": ...}` — `request rejected`, `authority unavailable`, or `job not
+found`. The job's log lines are not included: read them in the Console or
+with `GET /api/v1/onboard/jobs/<id>`. Exit status is `2` on an `error`
+response, `4` when the wait timed out, the job's `result_code` once it is
+terminal (`0` done, `2` request refused at admission, `3` reconciliation
+required, `4` device or transport failure, `5` journal or authority fault,
+`130` cancelled), and otherwise `0`.
 
 ### Credentials
 
@@ -507,6 +765,39 @@ Successful logs end with `onboard complete: <IP>` or
 | `GET /api/v1/credentials` | `{profiles: [...]}` — id, name, and device user only, never passwords. |
 | `POST /api/v1/credentials` | Creates or updates a profile; returns `{profile}` redacted the same way. |
 | `DELETE /api/v1/credentials/<id>` | `{deleted: <bool>}`. |
+
+### Schedules
+
+Every mutation is CAS-protected: a write carries the schedule's strong
+`If-Match` ETag, and a stale or missing one is a refusal rather than an
+overwrite. Occurrence and outcome history stays readable after a definition is
+deleted.
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/v1/schedules` | `{schedules: [...], total}`. Each view is the stored definition plus three response-only fields: `etag`, `creator_exists`, and `next_fire`. |
+| `POST /api/v1/schedules` | Creates one schedule from `{id, kind, target, payload, when, after?, state?}`; 201 with `Location` and `ETag`. `kind` is `assign` or `onboard` — there is no third verb, and neither installs, activates or reloads anything. |
+| `GET /api/v1/schedules/{id}` | `{schedule}` with its `ETag`. |
+| `PUT /api/v1/schedules/{id}` | Replaces the whole definition. Requires `If-Match`. |
+| `PATCH /api/v1/schedules/{id}` | Changes named fields only; `{"after": null}` removes a wave gate. Requires `If-Match`. |
+| `DELETE /api/v1/schedules/{id}` | 204. Requires `If-Match`. Occurrences and outcomes are retained. |
+| `POST /api/v1/schedules/{id}/reaffirm` | Empty body. Rewrites `created_by` to the calling operator and bumps `rev`, for a schedule whose creator no longer exists. Requires `If-Match`. |
+| `GET /api/v1/schedules/{id}/occurrences` | `{occurrences: [...], total, offset, truncated}`, oldest first, `limit` ≤ 100. Each occurrence carries its frozen definition, slot, target snapshot, `delta`, state, and annotations. `target_snapshot.registration_ids` maps each fired target name to the registration identity frozen at claim time, or to `null` when identity was unavailable then; legacy snapshots can omit the map. |
+| `GET /api/v1/schedules/{id}/receipts` | `{receipts: [...], total, offset, truncated}` — the durable per-device outcome for every occurrence of the schedule, `limit` ≤ 1000. `fleet_registration_id` identifies the bound registration for prepared or recovered work when present. The response cap bounds the page, never the durable evidence. |
+
+A receipt reason of `conflict` can mean the current same-name fleet row has a
+different registration than the occurrence binding. `identity_unavailable`
+means fresh work could not prove a durable target identity. Follow the
+[scheduled outcome recovery actions](operations.md#scheduled-outcomes); do not
+redirect an old occurrence to a replacement device.
+
+`next_fire` is the schedule's current or next slot, computed by the **server**
+from the same authority the runner fires from — `{scheduled_at, window_end,
+status, resolution, tz, local_time, next_at}` — so no client recomputes local
+weekly time across a daylight-saving boundary. It is `null` for a paused or
+completed schedule, and for a one-time schedule with no further slot.
+`resolution` is `normal`, `gap`, or `fold`; see
+[Scheduling](fleet-workflows.md#scheduling).
 
 ### Monitoring
 
@@ -572,7 +863,8 @@ Every route requires `Authorization: Bearer <token>`; a missing or invalid
 bearer answers a Problem Details 401 before any route is matched. Authorization
 is narrower than successful authentication:
 
-* **Identity-bound** (`heartbeat`, `telemetry`, `policy`, `token-refresh`): the
+* **Identity-bound** (`heartbeat`, `telemetry`, `policy`, `instructions`,
+  `instruction-keylist`, `token-refresh`): the
   token must resolve to that path's own `<device_id>` under `catalog_token` —
   or, on `token-refresh` only, the immediately preceding
   `catalog_token_prev`, so a device that never saw the response to its own
@@ -591,9 +883,16 @@ is narrower than successful authentication:
 | `GET /v1/images/<id>` | Assignment-bound | Device-facing view of one approved image; an unassigned and nonexistent id both return 404. |
 | `GET /v1/torrents/<id>` (also accepts `<id>.torrent`) | Assignment-bound | An IOx/XR request advertises `X-IRIS-Tracker-Auth: bearer` and receives a torrent with a token-free tracker URL; its agent supplies the separately rotated announce bearer as an aria2 per-download header. A request without that opt-in receives query-token personalization used by Guest Shell bundles. Both forms carry `Cache-Control: private, no-store` and `Vary: Authorization, X-IRIS-Tracker-Auth`. 404 means the id is not approved or no torrent exists; 503 means the identity-compatibility gate is closed; missing announce material or personalization failure is a redacted 500. There is no cross-device or shared-token fallback. |
 | `GET /v1/devices/<id>/policy` | Identity-bound | The device's own policy view — see [Policy schema](#policy-schema). |
+| `GET /v1/devices/{device_id}/instructions` | Current catalog bearer, identity-bound | Bounded sealed per-device envelope, maximum 256 KiB; strong ETag/304 on unchanged bytes. 404 missing stamp/artifact, 409 `stale_pointer`, 429 rate limit, 503 unavailable state. |
+| `GET /v1/devices/{device_id}/instruction-keylist` | Current catalog bearer, identity-bound | Root-signed keylist/KRL, maximum 128 KiB; ETag/304. 404 missing, 503 unavailable. |
 | `POST /v1/devices/<id>/heartbeat` | Identity-bound | Body: the device's heartbeat JSON — see [Keyed per-device state](#keyed-per-device-state). 200 `{ok: true, stream_every, stream_pause, report_requested?, report_request_id?}`. |
 | `POST /v1/devices/<id>/telemetry` | Identity-bound | Body: the device telemetry report. Malformed input is a Problem Details 400; a report naming an image outside the device's currently approved set is invalid. 200 `{ok: true}`. |
-| `POST /v1/devices/<id>/token-refresh` | Identity-bound (current **or** previous token) | Rotates `catalog_token`. A request presenting the just-rotated previous token replays the same successor rather than rotating again, so a lost response cannot strand the device. Errors use Problem Details; 200 returns `{catalog_token, expires_at, announce_token?, rpc_secret?}` — the last two appear only when the device actually has one, never as an empty string that would overwrite the agent's working value. |
+| `POST /v1/devices/<id>/token-refresh` | Identity-bound (current **or** previous token) | Rotates `catalog_token`. A request presenting the just-rotated previous token replays the same successor rather than rotating again, so a lost response cannot strand the device. Errors use Problem Details; 200 returns `{catalog_token, expires_at, instr_key, instr_key_prev?, announce_token?, rpc_secret?}`. Current/bounded prior instruction keys are private refresh material; optional announce/RPC fields appear only when present, never as empty strings that overwrite working values. |
+
+The instruction and keylist GET routes share one per-device request bucket:
+burst 2, refilling one request every 10 seconds. Both consume that same budget;
+exhaustion returns 429 with a bounded `Retry-After`. This request limiter does
+not authorize an in-tick sleep/retry loop in the agent.
 
 Every POST additionally requires `Content-Length` (a chunked or length-less
 body is refused with 411), rejects a non-numeric or negative
@@ -621,7 +920,7 @@ follow the `IRIS_SEEDER_PREV_TTL` overlap.
 
 | Route | Body / result |
 | --- | --- |
-| `GET /announce` | Query: `info_hash` (20 raw bytes, percent-encoded), `peer_id`, `port` (1-65535), `left`, `event`, `numwant` (default 50), `compact` (`1` for BEP23 compact peers), and an `ip` override honoured **only** for the service origin-seeder principal and only for a private/CGNAT IPv4 address. A malformed hash is a bencoded 400 after auth. Success is bencoded `{interval, min interval, peers}`; peer policy filters candidates before return. |
+| `GET /announce` | Query: `info_hash` (20 raw bytes, percent-encoded), `peer_id`, `port` (1-65535), `left`, `event`, `numwant` (default 50), `compact` (`1` for BEP23 compact peers), and an `ip` override honoured **only** for the service origin-seeder principal and only for a private/CGNAT IPv4 address. Exact `left == 0` selects seeder; positive, omitted, malformed, and negative values select leecher. State QoS is resolved before one jitter, with the issued value returned as both `interval` and `min interval`; a valid registration expires after twice that issued interval, while an invalid port receives cadence without registration. A malformed hash is a bencoded 400 after auth. Success is bencoded `{interval, min interval, peers}`; peer policy filters candidates before return. |
 | `GET /scrape` | Query: `info_hash`; the same bearer rules apply. A missing/malformed hash is a bencoded 400. Success is bencoded `{"files": {<raw info_hash bytes>: {complete, incomplete, downloaded}}}` (BEP48). |
 
 Every valid, port-bearing announce from a device or service principal durably
@@ -653,11 +952,11 @@ variable controls which path.
 Authenticated static-file GET/HEAD under
 `/v1/devices/<device-id>/artifacts/<path>` over `IRIS_ARTIFACTS_DIR`. HTTP Basic
 uses the device id as username and that device's current/overlap catalog token
-as password. This API is available to explicit HTTPS clients; shipped device
-onboarding does not call it because IOS-XE has no safe per-copy channel for
-supplying HTTP Basic credentials. The server-side installer instead pushes its
-locally generated enrollment files and package over the already authenticated,
-host-key-checked device SCP session. The server authenticates and binds an
+as password. IOx onboarding calls it from the device: IOS attaches the
+credential from `ip http client username` / `ip http client password`, which
+the controller configures for the span of each `copy https:` and removes
+afterwards, and the device's sealed instruction envelope is published under
+`staging/<device-id>/` for that one fetch. The server authenticates and binds an
 artifact API credential to `<device-id>` before
 decoding/translating the path or testing existence. Directory listing is
 disabled, and a resolved path escaping the root through traversal or symlink is
@@ -668,7 +967,8 @@ bootstrap flow. Its static bootstrap, bundle, certificate, and
 `staging/<128-bit-capability>` paths therefore remain available over verified
 HTTPS without HTTP Basic. The secret-bearing names are generated per install,
 written mode `0600`, redacted from access logs, and swept after one hour. This
-is the Guest Shell enrollment path; IOx and XR use server-initiated SCP.
+is the Guest Shell enrollment path; IOx uses the authenticated API above and
+XR uses server-initiated SCP.
 
 `GET` additionally enforces the `staging/` permission contract: a file under
 `staging/` must be mode `0600`-or-tighter before it is served — the server
@@ -695,7 +995,7 @@ written to `<state>/torrents/<image_id>.torrent`, never next to the image itself
 | `source_dir` | Absolute directory the image is seeded from. Set by `publish()`. |
 | `size` | Image size in bytes. What the agent attests the placed copy against. |
 | `sha256` | Checked by the agent against the staged file. |
-| `sha512` | Computed at publish time and compared with Cisco's Bulk Hash feed. Guest Shell also uses it when checking a pre-existing IOS root file with native `verify /sha512` before adopting that file. See [Image verification](#image-verification) and [same-name placement](device-agents.md#crash-safe-same-name-replacement). |
+| `sha512` | Computed at publish time and compared with Cisco's Bulk Hash feed. Guest Shell and IOx also use it when checking a pre-existing IOS root file with native `verify /sha512` before adopting that file. See [Image verification](#image-verification) and [same-name placement](device-agents.md#crash-safe-same-name-replacement). |
 | `cisco_signature_verified` | `True` when `hash_verification.state` is `verified`, otherwise `False`. The Cisco Bulk Hash reconciler maintains this field. It records the server-side source verdict, separately from the agent's content and placement checks and the operator attestation below. |
 | `operator_attested_signature` | `True` when `iris-publish` was run with `--signature-verified` — the publishing operator's own attestation that the Cisco signature was checked elsewhere. Written once, at publish time, by `publish.py` alone; the Cisco Bulk Hash reconciler never reads or writes it, so it survives every reconciliation run untouched. Advisory only — nothing on the device consults it. |
 | `hash_verification` | `{state, checked_at, feed_published_at, source, deferral}` — the reconciler's most recent verdict for this image; absent until the first reconciliation run covers this entry. See [Image verification](#image-verification). |
@@ -863,6 +1163,34 @@ Prometheus family (see
 [Observability](observability.md#metrics-names-operator-contract)): a bound
 nothing reports is a bound an operator cannot check.
 
+### `report-attribution.json`
+
+`<state>/report-attribution.json` pins, per exported device report, the sender
+classification of its `peer_transfer_records` rows. The classification reads
+two volatile inputs — the addresses the `service:seeder` principal announces
+from and the swarm-address → device join — and a report is re-exported under
+the same `event.id` after every process start, before the seeder's first
+re-announce has reached the fresh registry. Without the pin the replay
+classified the origin's rows `unknown` where the first export said `origin`,
+and a backend that deduplicates by `event.id` saw two different records with
+one id. The file is **derived state**, not credential or assignment authority,
+but preserve it to keep replay attribution stable. If it is lost, pins are
+rebuilt when those reports are exported again; already delivered reports are
+not repinned on the next ordinary pass. A later process replay can therefore
+classify historical rows differently using the then-current identity view.
+The tracker process is its only writer.
+
+| Field | Meaning |
+| --- | --- |
+| `reports.<event_id>.origin` | The origin addresses among the report's rows when it was first exported. |
+| `reports.<event_id>.devices` | The `address → device_id` join among the report's rows at that time. |
+| `reports.<event_id>.pinned_at` | When the entry was written. |
+
+A classification made while the server knew **no** origin address at all and
+left a row `unknown` is not pinned, so the startup gap never becomes the
+permanent answer; the next export classifies it again. Entries are dropped
+when their report leaves the report ring, so the file is bounded by the ring.
+
 ### Lifecycle events
 
 Two events per plan, in this order and no other: `planned` when the assignment
@@ -1029,14 +1357,14 @@ and overload backoff](device-agents.md#cadence-jitter-and-overload-backoff).
 | `CAF_APP_APPDATA_DIR` | **required; supplied by CAF** | IOx only | Application-data directory containing the runtime-delivered `iris-catalog.pem`. The entrypoint derives and validates this trust path before starting either catalog or tracker traffic. XR instead uses the fixed `harddisk:` bind path `/hostmount/iris-catalog.pem`. |
 | `IRIS_TELEMETRY` | `on` | IOx, XR | Enables normal device reports. Only the documented boolean spellings are accepted. A redeploy value reconciles an existing persistent config. |
 | `IRIS_TELEMETRY_STREAM` | `off` | IOx, XR | Enables live transfer samples when telemetry is on. A redeploy value reconciles an existing persistent config. |
-| `IRIS_TICK_SECONDS` | `60` | IOx, XR | Base interval for the common agent loop; integer 1–86400. |
+| `IRIS_TICK_SECONDS` | `60` | IOx, XR | Mechanical launcher interval/floor; integer 1–86400. Signed `catalog_tick_s` governs logical catalog/staging cadence; every mechanical tick still reasserts QoS and sends heartbeat. |
 | `IRIS_TICK_JITTER_PCT` | `10` | IOx, XR | Dithers every ordinary tick by ±this percent of `IRIS_TICK_SECONDS`. |
 | `IRIS_STARTUP_JITTER` | `1` (on) | IOx, XR | Spreads the first tick after container start across the whole `IRIS_TICK_SECONDS` window. `0` disables it. |
 | `IRIS_TICK_BACKOFF_MAX` | `600` (seconds) | IOx, XR, Guest Shell, router | Cap on the exponential backoff applied after a tick's agent process fails outright. |
 | `IRIS_TICK_JITTER_MAX` | `8` (seconds) | Guest Shell, router | Bound (0..N-1, uniform) on the per-tick sleep `bootstrap.sh` takes before contacting the catalog. The EEM timer's own 60s period is unaffected — IOS owns that clock. |
 | `IRIS_RPC_PORT` | `6800` | IOx, XR | Local aria2 JSON-RPC port; integer 1–65535. It is persisted as `rpc_port`. |
-| `IRIS_MAX_PEERS` | `10` | IOx, XR | Per-torrent peer limit; integer 1–1000. It is persisted as `max_peers`. |
-| `IRIS_MAX_CONCURRENT` | `100` | IOx, XR | aria2 concurrent-download ceiling; integer 1–1000. |
+| `IRIS_MAX_PEERS` | launcher fallback `10`; absent from Dockerfile defaults | IOx, XR | Legacy provisional launch value, integer 1–1000; verified/default policy supersedes it at the first successful tick, before any restored download starts. No enduring policy authority. |
+| `IRIS_MAX_CONCURRENT` | launcher fallback `100`; absent from Dockerfile defaults | IOx, XR | Legacy provisional launch ceiling, integer 1–1000; first successful tick writes verified/default global and active-GID options before reconciliation. Every future `addTorrent` uses verified/default values. |
 | `CAF_APP_PERSISTENT_DIR` | `/data` | IOx only | CAF persistent root. The profile stages and keeps its work/config/state under `<root>/iris`; it must be an absolute path without `..`. XR neither reads nor accepts it as a storage selector. |
 | `IRIS_TARGET_FS` | unset (auto-detect) | IOx only | Optional IOS filesystem preference such as `sdflash:`. The prefix grammar is checked here and the agent still requires live proof that the filesystem is writable and is not `crashinfo:`. XR rejects the variable and always uses `harddisk:`. |
 | `IRIS_SHARE_DIR` | `/mnt/share` | IOx only | Container side of the optional IOx host-data share; absolute path without `..`. If it is not usable, IOx uses SCP. XR rejects it. |
@@ -1047,7 +1375,7 @@ and overload backoff](device-agents.md#cadence-jitter-and-overload-backoff).
 | `IRIS_DEVICE_SSH_PORT` | `22` | IOx only | SSH-to-self port; integer 1–65535. |
 | `IRIS_DEVICE_SSH_KNOWN_HOSTS` | unset | IOx only | Optional absolute `known_hosts` path; enables strict host-key verification. |
 | `IRIS_MODEL` / `IRIS_VERSION` | unset | XR only | Optional observed device metadata persisted as `device_model` / `device_version`. XR has no SSH discovery path. |
-| `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Enables `aria2c.log` with `on`, `1`, `true`, or `yes` (case-insensitive). IOx/XR installers pass the value to the container; on Guest Shell set `iris_log` in `iris-agent.conf`. IOx/XR cap the file at 50 MiB; Guest Shell trims it through `rotate-logs.sh` and EEM. Keep it off for normal operation to reduce flash writes. It does not control `%IRIS-6-<MNEMONIC>` status messages or heartbeat errors. See [Device-side logging](device-agents.md#device-side-logging-flash-write-endurance). |
+| `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Enables `aria2c.log` with `on`, `1`, `true`, or `yes` (case-insensitive). IOx/XR installers pass the value to the container; on Guest Shell set `iris_log` in `iris-agent.conf`. IOx/XR cap the file at 50 MiB; Guest Shell trims it through `rotate-logs.sh` and EEM. Keep it off for normal operation to reduce flash writes. It does not control `%IRIS-6-<MNEMONIC>` status messages or heartbeat errors. On an IOx onboard or undeploy job the same value also makes the Console job log carry the raw IOS session the controller drove; off keeps that log at step level (headers, poll outcomes, one line per controller operation, and a failed step's `% ...` verdict). See [Device-side logging](device-agents.md#device-side-logging-flash-write-endurance). |
 | XR container logs | 3 × 1 MiB | XR | The installer configures Docker `json-file` logging with `max-size=1m` and `max-file=3`. This captures startup and `%IRIS` diagnostics even with `IRIS_LOG=off`. Read it with `show appmgr application name iris logs`. |
 
 There is no production `IRIS_CATALOG_CA` override: IOx trust must come from CAF
@@ -1080,13 +1408,70 @@ rejects production path overrides.
 | `telemetry_stream` | `off` | Live transfer-sample streaming ([Transfer streaming](observability.md#transfer-streaming)). Fail-closed: only an explicit `on`/`1`/`true`/`yes` enables; requires `telemetry` on. Delivered by the installers (`TELEMETRY_STREAM`) and IOx deploy env (`IRIS_TELEMETRY_STREAM`), and changed by redeploy. |
 | `iris_log` | unset (off) | Guest Shell's only persistent path to the `IRIS_LOG` device-side logging opt-in — see [Device agents → Device-side logging (flash write endurance)](device-agents.md#device-side-logging-flash-write-endurance). `bootstrap.sh` reads this key on every EEM tick and exports it as `IRIS_LOG` before running `guestshell-start.sh`; an operator sets `iris_log = on` in the device's `iris-agent.conf` and the next tick picks it up, no reinstall. Validated before export: only letters/digits are accepted (`on`/`1`/`true`/`yes` enable it, case-insensitive, matching every other platform's parsing), anything else — including an attempt to inject shell syntax — is dropped with a warning and the built-in default (off) applies. |
 | `rpc_port` | `6800` | Also read by `bootstrap.sh` and exported as `RPC_PORT` for `guestshell-start.sh`'s own aria2c launch line, in addition to the Python agent's existing use of this key for its own RPC calls to aria2c. Validated as an integer 1–65535; an out-of-range or non-numeric value is dropped with a warning and `guestshell-start.sh`'s built-in default (`6800`) applies. |
-| `max_peers` | `10` | Also read by `bootstrap.sh` and exported as `MAX_PEERS` for `guestshell-start.sh`'s `--bt-max-peers`. Validated as an integer 1–65535; an out-of-range or non-numeric value is dropped with a warning and `guestshell-start.sh`'s built-in default (`10`) applies. |
+| `max_peers` | legacy only | Parsed-but-ignored for upgrade compatibility, with a value-free `MAX-PEERS-IGNORED` notice once. Guest Shell no longer exports it; active `max_peers` policy uses the signed/default 1–1000 bound above. |
 
 `device_ssh_known_hosts` controls only the IOx agent's SSH-to-self connection.
 Strict checking requires both the setting and a file at that path; IRIS does
 not create it. Guest Shell uses the on-box `cli` module and XR uses its host
 mount, so neither agent opens that SSH connection. Server-initiated onboarding
 has its own [SSH host-key policy](security.md#device-ssh-host-keys).
+
+## Instruction protocol and state reference
+
+The [OpenAPI contract](openapi.yaml) defines the bounded wire schema. Device
+heartbeat `instr_protocol: 1` denotes capability; `version` continues to mean
+IOS software. An absent protocol marker is legacy `pre-instructions`, while a
+present invalid/future marker is unknown. Accepted identity is complete
+`{instr_epoch, instr_serial, instr_policy_revision}` or absent; legacy
+standalone serial remains compatible but is not a complete acceptance claim.
+
+| Revision term | Meaning |
+| --- | --- |
+| `policy_revision` | Server-issued role/QoS intent; fleet applied counts group by this value. |
+| `instr_serial` with `instr_epoch` | Per-device sealed instruction freshness identity; monotonic `(epoch, instr_serial)` replay floor. |
+| `enforcement.applied_revision`, `iris_peer_enforcement_applied_revision` | aria2 blocklist change counters, unrelated to policy revision or instruction serial. |
+
+The nineteen raw agent states are `none`, `applied`, `lkg`, `stale_expired`,
+`allowlist_expired`, `rollback_rejected`, `floor_reset`, `audience_mismatch`,
+`key_rejected`, `tamper_rejected`, `verifier_missing`, `lkg_rejected`,
+`lkg_unreadable`, `oversize`, `reasserted`, `instr_unavailable`, `instr_pending`,
+`instr_forbidden`, and `tracker-only`. The server display vocabulary is
+`applied`, `lkg`, `stale`, `rejected`, `tracker-only`, `pre-instructions`,
+`unknown`, `unavailable`, `pending`, `forbidden`, `floor_reset`, `none`, and
+`revoked`. Display classifications are not raw device-authored states. For
+condition, retained QoS/peer state and retry action, use the complete
+[failure table](device-agents.md#instruction-failures-and-recovery).
+
+Each `/api/v1/devices` row and successful
+`/api/v1/devices/<id>/effective-qos` response has one canonical `instruction`
+object:
+`display_state`, `label`, `evidence`, `underlying_state`, `underlying_label`,
+`underlying_evidence`, `reason`, `reported_instr_serial`, `accepted_identity`,
+`verify_level`, `pointer_skew`, `qos_drift_count`, `report_age_seconds`,
+`report_stale`, `revoked`, and `revocation_evidence`. `accepted_identity` is
+null or complete `{epoch, instr_serial, policy_revision}`. Durable revocation
+and report age are server-observed; raw state, accepted identity, verification
+level and QoS drift are agent-asserted. Device-authored reports are statements
+from the device, not independent server measurements. Exact i63 identity
+labels are server-created strings so browser number rounding cannot alter them.
+
+`/api/v1/peer-policy` adds `fleet_rollup` with exactly `issued_revision`,
+`applied` (decimal policy-revision keys), and `states`; `instruction_status`
+with `observed_at`, current inventory-device `instr_stamp_missing`,
+`pointer_skew` count and exact `issued_revision_label`; and nullable validated
+`instruction_keys` custody status. Inventory devices count once and orphan
+heartbeats are excluded. Accepted identities remain visible even under stale,
+rejected or revoked display states. Null means unavailable/invalid evidence,
+not healthy zero. Missing or corrupt heartbeat, policy, revocation and custody
+sources remain explicit unknown/unavailable. **violation = 0 does not mean compliant**.
+
+The 256 KiB envelope uses a per-device KDF and audience binding, signature and
+MAC-before-decrypt checks. Both authenticated instruction GET paths use existing
+8443; 9443 is management-only. The [state path inventory](server.md#instruction-state-and-processes)
+distinguishes `$IRIS_CONFIG/instr/signing-key.age`, runtime
+`$IRIS_RUN/instr/signing-key`, and `$IRIS_STATE` durable producer state. No
+instruction/LKG/online/offline private key enters platform config; IOx/XR
+bootstrap enrollment credentials remain a documented [exception](security.md#two-root-trust-and-custody).
 
 ## Generated outputs
 

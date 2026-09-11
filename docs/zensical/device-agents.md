@@ -32,7 +32,7 @@ onboarding is not saved. IOS-XR has no running/startup split to bridge — a
 
 ## Guest Shell path
 
-Catalyst 9300 devices and Catalyst 8000 routers use Guest Shell (routers through an IRIS-managed VirtualPortGroup, staging to `bootflash:`). The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.
+Catalyst 9300 devices and Catalyst 8000 routers use Guest Shell (routers through an IRIS-managed VirtualPortGroup, staging to `bootflash:`; a router can run the [IOx app](iox.md#catalyst-8000-routers) through that same VirtualPortGroup instead). The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.
 
 ```mermaid
 flowchart TB
@@ -83,16 +83,18 @@ event manager applet IRIS-AGENT authorization bypass
  action 200 cli command "guestshell run bash <fs>guest-share/bootstrap.sh"
 ```
 
-Every 60 seconds it runs `bootstrap.sh` inside Guest Shell, which moves any
-freshly dropped files into its own guest-owned working directory, unpacks a
-new `bundle.tgz` if one arrived (copying its `bootstrap.sh` back over the
-running copy), makes sure `aria2c` is up and serving, and finally runs
-`iris_agent.py --once`.
+Every 60 seconds it runs `bootstrap.sh` inside Guest Shell. Bootstrap collects
+the SHA-256 sidecar before the archive and validates bounded archive/member
+contents and coordinated bootstrap/root evidence before adopting a new
+`bundle.tgz`. Missing, malformed or mismatched evidence refuses adoption and
+preserves the prior runnable bundle; dropping an archive alone is insufficient.
+It then makes sure `aria2c` is up and serving and runs `iris_agent.py --once`.
 
-**Dropping a new `bundle.tgz` on the device is the agent upgrade** for Guest
-Shell and router — the next tick unpacks it and runs the new code. There is no
-separate upgrade command. Re-running the installer script directly has the same
-effect (it mints a new capability and re-copies the bundle). A console
+**A validated bundle plus its SHA-256 sidecar and coordinated bootstrap/root
+evidence is the agent upgrade** for Guest Shell and router. A successful
+bootstrap transaction adopts it; there is no separate upgrade command.
+Re-running the installer script directly delivers the coordinated set (it
+mints a new capability and re-copies bundle and evidence). A console
 re-onboard is not that path: its preflight refuses a device that still carries
 the live agent, so undeploy first and then onboard again. `router-install.sh`
 additionally destroys any pre-existing Guest Shell before re-applying config,
@@ -100,13 +102,19 @@ so a re-onboard never leaves the guest running on stale networking from a
 previous install — see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-### IOx: what the installer pushes
+### IOx: what the installer delivers
 
-`device/iox/install.sh` never touches Guest Shell. It pushes the built package
-(`iris-arm64.tar` or `iris-amd64.tar`) and current public catalog certificate
-from the server host to the target IOS filesystem over the same authenticated,
-host-key-checked SCP transport. After the app reaches `ACTIVATED`, the installer
-copies the certificate into app-hosting application data, then starts the app.
+The controller's private `device/iox/install.sh` recipe never touches Guest
+Shell. Over its authenticated, host-key-checked SSH session it installs the
+catalog trustpoint, then has the device itself `copy https:` the built package (`iris-arm64.tar` or
+`iris-amd64.tar`) and the current public catalog certificate from the artifact
+server to the target IOS filesystem, authenticating with its own enrollment
+credential (`ip http client username` / `password`, configured for each copy
+and removed after it). After the app reaches `ACTIVATED`, the device fetches
+its sealed instruction envelope the same way, the installer copies both into
+app-hosting application data, then starts the app. Nothing is pushed over
+SCP; the `ip scp server enable` the installer still configures serves the
+agent's runtime image hand-off, not onboarding.
 The package contains no server certificate; the container reads the copy from
 CAF's app-data directory. Deployment-specific values — the enrollment
 token, device id, and SSH-to-self credentials — are passed as numbered
@@ -119,16 +127,13 @@ supervisor loop, running the agent once every `IRIS_TICK_SECONDS` (default 60s).
 
 Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
 
-**Upgrade on IOx is uninstall, then reinstall** — there is no in-place package
-update. `device/iox/install.sh` is idempotent by design: its first step always
-stops, deactivates, and uninstalls any existing `iris` app before copying the
-new package and reinstalling, so re-running `device/iox/install.sh` directly
-with a freshly built package is the supported upgrade path. The same upgrade
-from the Console needs an undeploy first when the app is running. An incomplete
-IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried directly; see
+**Upgrade on IOx is undeploy, then onboard** with the rebuilt package. Use the
+Console, API, or the [IOx control CLI](reference.md#iox-control-cli)'s
+`submit-uninstall` and `submit-install` commands. The install and uninstall
+shell recipes require the controller's private channel; neither is a
+standalone operator command. A running app requires undeploy first. An incomplete
+IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried with Onboard; see
 [First install of a new package version](iox.md#first-install-of-a-new-package-version).
-`device/iox/uninstall.sh`
-performs the same teardown standalone, for a clean removal with no reinstall.
 
 ### IOS-XR: what the installer pushes
 
@@ -216,6 +221,24 @@ healthy daemon trusting the previous certificate. A changed digest forces
 one restart; a malformed or
 unverifiable snapshot fails before launch.
 
+### Failure mode: a recreated container forgets what it is seeding
+
+Recreating a container — an IOS-XR appmgr re-onboard or restart, an IOx CAF
+restart — starts a new aria2c with an empty session while the persistent mount
+keeps the images and the agent keeps its state file. A transfer still in
+progress is re-added from its `.aria2` checkpoint. A *finished* image has no
+checkpoint, because aria2 deletes it at completion, so the agent re-adds that
+one from its own evidence instead: the staged file is exactly the catalog size
+and the content check recorded for it is `verified`. The re-add emits `RESEED`
+and puts the device back in the swarm without re-downloading, re-hashing or
+re-placing the image, and an adopted in-place file stays adopted. With either
+fact missing — a short file, or no recorded verification — nothing is
+announced, because a re-add with no checkpoint seeds without hashing and IRIS
+never offers peers bytes it cannot vouch for. Missing or stale torrent metainfo
+is fetched automatically before the re-add. If that fetch or the re-add fails
+(for example, aria2c is not serving yet), the agent emits
+`RESEED-DEFERRED`, still reports the image as staged, and retries next tick.
+
 ### Failure mode: a busy aria2c read as a dead one
 
 A daemon built without asynchronous DNS can pause its event loop while
@@ -230,44 +253,138 @@ URL avoids a hostname lookup on that path.
 
 ## Agent loop
 
-Each tick:
+Each mechanical tick loads configuration, refreshes credentials when needed,
+verifies available instructions/LKG and reasserts verified/default aria2 options.
+It sends a heartbeat even when signed logical catalog cadence is not due. On a
+due tick with readable assignment policy and successful option application:
 
-1. Load device config and token material.
-2. Refresh the token when needed.
-3. Read the current assigned set and stop torrents for removed assignments.
-4. Skip acquisition for images already staged and verified.
-5. Download missing content through `aria2c`.
-6. Verify each completed file against its catalog SHA-256.
-7. Place the image at the storage root and attest it by exact byte size. On
+1. Read the current assigned set and stop torrents for removed assignments.
+2. Skip acquisition for images already staged and verified.
+3. Download missing content through `aria2c`.
+4. Verify each completed file against its catalog SHA-256.
+5. Place the image at the storage root and attest it by exact byte size. On
    IOS-XE that is a copy — [crash-safely, never deleting a
    pre-existing same-named file first](#crash-safe-same-name-replacement); on
    IOS-XR the download already landed there through the bind mount, so the
    agent only attests it.
-8. Report per-image state and one combined heartbeat. A catalog or transfer
+6. Report per-image state and one combined heartbeat. A catalog or transfer
    error for one image does not prevent the remaining assignments from being
    checked.
+
+## Instruction trust by platform
+
+Read the [device administrator trust boundary](security.md#device-administrator-trust-boundary)
+before treating an instruction report as compliance. The same verified policy
+engine runs on all supported agents; the trust boundary differs:
+
+| Property | Unified IOx/XR image | Guest Shell |
+| --- | --- | --- |
+| Two distinct public roots | Embedded mode-0444 signer/root files; image pin depends on enforced package signature | Same public roots in a replaceable bundle on flash; tamper-evidence |
+| Signature verifier | Bundled OpenSSH verifier on both architectures | Runtime probe of `ssh-keygen -Y verify`; absent support gives `verifier_missing` and tracker-only peers, not silent acceptance |
+| Mechanical tick | Container supervisor; `IRIS_TICK_SECONDS` interval/floor | IOS-owned 60-second EEM timer with bounded startup jitter |
+| Agent update evidence | Canonical image and wrapper provenance; native signing is a separate gate | Digest-only bundle update with adjacent SHA-256 sidecar, bounded members and prior-bundle rollback |
+| Compatibility | Shared agent sources | Python 3.6 compatible; no claim that every Guest Shell includes a verifier |
+
+For IOx, onboarding controls the device-global verification setting through a
+durable owned transaction: signed/no mutation; unsigned with initial enabled →
+disable for installation → restore and read-back before activation/start;
+initial disabled stays disabled; unknown refuses. Interruption/resume and
+uninstall recovery honor recorded obligations without blindly enabling an
+operator-changed/unowned state. See [IOx verification](iox.md#device-global-package-verification).
+
+The instruction envelope is capped at 256 KiB and bound to this device/platform.
+MAC-before-decrypt, signature verification and a monotonic `(epoch, instr_serial)`
+floor precede application. Authenticated refresh places current/prior instruction
+keys in mode-0600 agent configuration; the LKG key is generated locally. None
+of these keys belongs in platform activation arguments. F3 offline delivery
+carries a ciphertext bootstrap envelope, never a secret key; normal authenticated
+refresh self-heals its key availability. See the [redelivery runbook](operations.md#f3-offline-bootstrap-envelope-redelivery).
+
+### Instruction files on each platform
+
+`instr.paths_for()` uses the configured `stage_dir` to locate device state:
+
+| Platform | Instruction work directory | Public signer/root trust directory |
+| --- | --- | --- |
+| Guest Shell / router | `stage_dir`, normally `/flash/guest-share/iris` | The same replaceable `stage_dir` |
+| IOx | `stage_dir`, derived as `$CAF_APP_PERSISTENT_DIR/iris` (default `/data/iris`; `/iox_data/iris` where CAF supplies that mount) | `/opt/iris/agent` in the image |
+| IOS-XR appmgr | `/hostmount/iris-work`, from `stage_dir=/hostmount`; visible in IOS as `harddisk:iris-work/` | `/opt/iris/agent` in the image |
+
+Each instruction work directory contains `iris-instructions.lkg`,
+`iris-instructions.bootstrap`, `iris-instruction-keylist.current` and
+`iris-instruction-keylist-state.json`. The public trust directory contains
+`iris-signers.allowed_signers` and `iris-root.allowed_signers`. The installer
+may first land the bootstrap envelope in platform application data or at the
+XR mount root; the runtime adopts it into the work-directory path above.
+Accepted identities/replay facts persist in the agent state, normally
+`iris-agent.state` in its work directory. The device-local `lkg_key` and refreshed
+instruction keys are in mode-0600 `iris-agent.conf`, not a public trust file.
+Do not delete these state/key files to force acceptance of an older envelope.
+
+## Instruction failures and recovery
+
+Instruction-body fetch/verification failures affect the instruction step only; heartbeat/staging
+continue when usable LKG or defaults can be applied. An aria2 RPC apply failure
+still sends heartbeat but skips staging for that tick. An unreadable assignment
+policy also skips staging reconciliation while heartbeat and existing aria2
+transfers continue. A rejected candidate
+leaves the prior verified LKG's QoS/peer posture in place where usable, otherwise
+defaults apply. Server tracker/origin controls remain
+in force. The state below is agent-asserted unless explicitly marked
+server-observed; it does not prove device compliance.
+
+| Condition / visible state | Retained QoS/peer state | Retry or operator action |
+| --- | --- | --- |
+| First tick/no file: `none` | Defaults and tracker-only peers | Await a stamp and authenticated refresh. Missing protocol marker on a legacy agent yields server display `pre-instructions`; IOS `version` is not capability evidence. |
+| Valid fresh envelope: `applied` | Verified QoS and peer posture | Normal cadence; accepted identity is reported. |
+| Valid cached instructions during catalog loss: `lkg` fallback | Locally re-encrypted verified LKG | LKG survives instruction-key rotations. A request-error state may override the raw `lkg` label while this accepted identity/posture is retained; retry on a later ordinary tick. |
+| Instruction expires: `stale_expired` | Role `on_stale: keep` retains verified QoS; `defaults` restores defaults | Restore authenticated catalog time and fresh instructions. Peer expiry is independent. |
+| Attribution expires: `allowlist_expired` | Expired allow-list falls back to tracker-only; an expired deny-list remains effective independently of `on_stale` | Refresh endpoint attribution/instructions. Never turn an expired allow-list into open access. |
+| Older identity: `rollback_rejected`; authenticated reset: `floor_reset` | Reject older candidate; a validated reset adopts its new floor | Repair server epoch/stamp through the recovery runbook; do not delete local replay state. |
+| Wrong device/platform: `audience_mismatch` | Retain usable LKG/defaults | Redeliver the envelope for the exact inventory device/platform. |
+| Unknown per-device key: `key_rejected`, reason `unknown_key` | Retain usable LKG/defaults | At most one unscheduled refresh in the tick, latched by unknown key ID; retry a later tick. |
+| Known-key bad MAC: `key_rejected`, reason `bad_mac` | Retain usable LKG/defaults | Record a violation and inspect integrity; bad MAC does not trigger key refresh. |
+| Bad/revoked signer, invalid envelope or equal identity/different bytes: `tamper_rejected` | Retain only independently usable LKG/defaults | Repair signer/keylist or envelope provenance; never bypass verification. |
+| Missing verifier: `verifier_missing` | Tracker-only peers, with verified/default QoS | Supply a supported verifier through the agent package; Guest Shell availability is probed at runtime. |
+| Rejected/unreadable local cache: `lkg_rejected`, `lkg_unreadable` | Defaults and tracker-only peers when no usable LKG exists | Obtain a fresh envelope; preserve evidence for diagnosis. |
+| Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer/transport and retry on a later tick; never raise the 256 KiB cap as a recovery shortcut. |
+| aria2 session restart: `reasserted`; same-session drift correction | Unconditionally reapply verified/default global and active-GID options before reconciliation | Inspect agent-asserted `qos_drift_count`; every future `addTorrent` uses the same verified/default policy. |
+| Instructions 404, 429, 5xx or transport failure: `instr_unavailable` | Retain usable LKG/defaults | Later-tick retry; investigate stamp/state and bounded retry hints. No in-tick sleep/retry loop. |
+| Instructions 409 `stale_pointer`: `instr_pending` | Retain usable LKG/defaults | Later-tick retry; inspect producer convergence. No in-tick sleep/retry loop. |
+| Instructions 401/403: `instr_forbidden` | Retain usable LKG/defaults | One-shot authenticated token refresh, then later-tick retry with no in-tick retry loop; durable revocation cannot be healed by rotation. |
+| Durable revoked principal: display `revoked` (server-observed) | Underlying agent LKG/state remains visible as agent-asserted evidence | Resolve the retirement/compromise decision on the server; do not rotate to spare the device. |
+| Pointer/body race | A valid higher body serial applies; a lower-but-fresh body above the accepted floor applies with `pointer_skew`; a candidate below the accepted floor reports `rollback_rejected` | After three skew observations, report the latch and inspect producer convergence. At equal identity, identical envelope bytes are accepted idempotently; different bytes report `tamper_rejected`. |
+| Explicit `tracker-only` peer posture | Tracker supplies peers under server policy | No device peer-list enforcement is claimed. |
+
+The closed raw state list and the separate display classifications are in
+[Reference](reference.md#instruction-protocol-and-state-reference). A rejection
+can coexist with a complete older accepted identity; never treat a reported
+candidate failure as proof that the older policy was erased.
 
 ## Crash-safe same-name replacement
 
 Placing an image under a name IRIS finds already on the storage root — the
 operator's ordinary republish flow, or a name the `BOOT` variable currently
-points at — never deletes the old file first. On Guest Shell, the agent first
-reads the root file's size through IOS and compares its native SHA-512 with
-the catalog. Guest Shell mounts only `guest-share`, so its local `/flash`
-directory cannot attest the IOS root. A one-shot `IRIS-ROOT-HASH` EEM policy
-runs the read-only hash with a 600-second limit and returns the result through
-a unique completion record under the IRIS share. The filename and digest must match,
-and IOS must report the expected size both before and after hashing.
-An exact match is adopted in
-place, including on IOS releases where `rename` will not overwrite an existing
+points at — never deletes the old file first. Guest Shell and IOx can adopt
+an existing root file after reading its size through IOS and comparing its
+native SHA-512 with the catalog. The filename and digest must match, and IOS
+must report the expected size both before and after hashing. An exact match
+is adopted in place, including on IOS releases where `rename` will not overwrite an existing
 destination. An unreadable or mismatched root file is left untouched and
 reported as `copy_failed`; replacing it is an explicit operator decision, not
 a destructive guess by IRIS.
 
-Native hash jobs are serialized. A failed hash waits five minutes after
-completion before another attempt; adoption does not rehash an already placed
-image. An interrupted launch whose completion cannot be determined remains
-blocked for operator inspection. See [root-hash recovery](reference.md#guestshell-root-hash-recovery).
+Guest Shell mounts only `guest-share`, so its local `/flash` directory cannot
+attest the IOS root. Its one-shot `IRIS-ROOT-HASH` EEM policy runs the read-only
+hash with a 600-second limit and returns a unique completion record under the
+IRIS share. These Guest Shell hash jobs are serialized; a failed hash waits
+five minutes after completion before another attempt. An interrupted launch
+whose completion cannot be determined remains blocked for operator inspection.
+See [root-hash recovery](reference.md#guestshell-root-hash-recovery).
+IOx runs the native hash directly through SSH-to-self, with a 900-second
+command limit. IOx checks for adoption after downloading and verifying the
+scratch file; its earlier root-presence check only protects the existing file
+from reclaim. Adoption does not rehash an already placed image.
 Ordinary placement continues to verify the downloaded SHA-256 and the copied
 file's exact IOS byte size; it does not run native `verify`.
 
@@ -276,18 +393,23 @@ name (`<image>.iris-tmp`), verifies presence and exact byte size there, and
 then renames the proven copy to the real name. A failure or power loss before
 that rename leaves any previous file exactly as it was; a failure at the
 rename step is not assumed to mean it failed — the agent re-checks the real
-name afterwards and reports whichever state it actually finds. IOS-XR is
-unaffected: `attest_in_place` never writes a second copy at all.
+name and the temporary file's absence afterwards and reports the observed
+result. IOS-XR is unaffected: `attest_in_place` never writes a second copy at all.
 
 A leftover temp-name file — from an attempt that crashed before its own
 retry could clean up after it — is covered by the same low-space
 bundle-reclaim sweep as any other unused image artifact on a **bundle-mode**
-device, so it does not sit invisible on an otherwise-full box there. On an
+device, so it does not sit invisible on an otherwise-full box there. When
+`BOOT` names a `.conf` provisioning file, the sweep keeps every `.pkg` and
+`.conf` file, including packages that provisioning file may reference. Only
+otherwise-reclaimable bundle images and IRIS temp files remain candidates.
+An unreadable `BOOT` setting defers the sweep, and keeping every candidate
+does not consume the once-per-cycle reclaim attempt. On an
 **install-mode** device this sweep does not apply: low-space reclaim there
 runs `install remove inactive`, which manages installed packages and does
 not touch a stray `.bin.iris-tmp` at the storage root, so a temp-name
 leftover on an install-mode device is not automatically reclaimed by
-either path. The narrow exception is Guest Shell adoption of an already
+either path. The narrow exception is Guest Shell or IOx adoption of an already
 size-and-SHA-verified root file: if the failed attempt's reserved
 `<image>.iris-tmp` also exists, IRIS reclaims exactly that temp name after
 checking the running image and `BOOT` targets, then confirms its absence
@@ -300,9 +422,32 @@ attempt.
 
 An existing file already consumes space and is excluded from the device's
 reported free bytes. The placement check budgets for the new copy. Guest
-Shell's same-name adoption path does not overwrite a conflicting root file;
+Shell and IOx same-name adoption do not overwrite a conflicting root file;
 an operator must resolve that conflict. See
 [Sizing the storage root](management-type.md#sizing-the-storage-root).
+
+Before a low-space IOx download would trigger reclaim, the agent checks for
+the destination through IOS. If it exists, IRIS preserves it and reserves
+one image plus headroom for the download; an unreadable destination check
+defers staging. This presence check does not attest the file or mark it
+staged. After downloading, the normal native size and SHA-512 checks must
+still pass before adoption. A mismatch remains an operator decision.
+
+## Verified policy and mechanical ticks
+
+Legacy `max_peers` remains parseable for upgrade compatibility but is ignored
+as policy. The agent emits the value-free `MAX-PEERS-IGNORED` notice once;
+Guest Shell no longer exports that setting. Container `IRIS_MAX_PEERS` and
+`IRIS_MAX_CONCURRENT` are absent from Dockerfile defaults but remain provisional
+launcher inputs until the first successful agent tick. No restored download
+starts in that interval. The agent unconditionally writes verified/default
+global and active-GID options before reconciliation, and every future
+`addTorrent` uses verified/default values.
+
+`IRIS_TICK_SECONDS` is an explicit mechanical launcher interval/floor. Signed
+`catalog_tick_s` controls logical catalog/staging cadence; every mechanical
+tick still reasserts QoS and sends a heartbeat. Telemetry cadence/pause gates
+cannot stop heartbeats, key refresh or the agent recovery path.
 
 ## Cadence jitter and overload backoff
 
@@ -334,9 +479,8 @@ per-device state](reference.md#keyed-per-device-state)):
   restart, say) get their first catalog contact spread out instead of firing
   together. Set it to `0` for a single-device debug session watching for the
   first tick.
-- **Failure backoff.** After a tick fails outright — the catalog unreachable,
-  timed out, or answering a non-2xx status, the same shape a saturated
-  server produces — the next contact backs off exponentially, capped at
+- **Failure backoff.** When the agent process exits unsuccessfully, the
+  launcher backs off the next contact exponentially, capped at
   `IRIS_TICK_BACKOFF_MAX` (600s by default), instead of retrying on the
   ordinary cadence. IOx/XR skip the whole tick (`next_tick_sleep` in
   `entrypoint.sh`); Guest Shell/router cannot skip an EEM-fired tick, so
@@ -346,9 +490,15 @@ per-device state](reference.md#keyed-per-device-state)):
   `$STAGE/.iris-tick-backoff`. A success immediately clears the streak and
   resumes ordinary cadence. The cap is comfortably inside the catalog
   token's multi-day refresh slack, so a run of backed-off ticks never
-  strands a device.
+  strands a device. A tick whose catalog policy fetch fails outright
+  (unreachable, timed out, or a non-2xx answer) is reported as the contained
+  result `catalog-unavailable` and the agent exits non-zero for it, so a
+  catalog outage or a saturated server engages this backoff. Other handled
+  Phase 1 instruction fetch or apply failures, and a per-image staging error,
+  return a contained tick result with exit 0 and do not trigger it; their
+  retry is on a later ordinary tick, with no in-tick sleep/retry loop.
 
-All of these are tuning knobs, not protocol values — see [Reference →
+These launcher controls set mechanical timing, not signed policy authority — see [Reference →
 Device container environment variables](reference.md#device-container-environment-variables)
 for defaults and ranges.
 
@@ -370,14 +520,17 @@ that container log with `--log-driver json-file --log-opt max-size=1m
 unbounded log on the app-hosting partition. XR agent messages do not appear
 in the router's `show logging` output.
 
-For an IOx or XR deployment, set `IRIS_LOG=on` when running its installer.
-The installer passes the setting to the common container. Use the normal
+For an IOx or XR deployment, select **Detailed logs** in the Console's Onboard
+dialog, or send `"log": true` in the onboard API request. This passes
+`IRIS_LOG=on` to the common container and, for IOx, includes command output in
+the onboarding job log. The Undeploy dialog has its own **Detailed logs**
+switch for that job's output. Both switches default to off. Use the normal
 undeploy/onboard sequence when changing a deployed app's run options.
 
 For Guest Shell, add `iris_log = on` to the persisted `iris-agent.conf`.
 Bootstrap reads it on each EEM tick before checking aria2. Settings made only
-in an interactive shell do not survive that tick. `rpc_port` and `max_peers`
-are read from the same configuration file. Invalid Guest Shell values fall
+in an interactive shell do not survive that tick. `rpc_port`
+is read from the same configuration file. Invalid Guest Shell values fall
 back to launcher defaults; the common container rejects invalid environment
 values at startup.
 
@@ -385,6 +538,13 @@ See [Device agent config keys](reference.md#device-agent-config-keys) and
 [Device container environment variables](reference.md#device-container-environment-variables)
 for the supported values. Disabling the aria2 log does not disable writes
 needed for downloads, checkpoints, agent state, or telemetry.
+
+Guest Shell writes its RPC secret into mode-0600 `$EXEC_DIR/aria2.conf`
+(default `/home/guestshell/aria2.conf`). aria2 receives the config path, and the
+RPC readiness probe reads the protected secret file; neither receives the
+secret value in process arguments. Treat these files and the mode-0600
+`iris-agent.conf` as private. This file boundary does not hide credentials from
+a privileged device administrator.
 
 ## Verification gates
 
@@ -396,7 +556,7 @@ catalog values:
 | Torrent pieces | aria2 on every device | Checks pieces during transfer and validates saved pieces when resuming an incomplete download. |
 | SHA-256 | Shared agent, on the completed staging file | Confirms the file matches the value recorded at publication. |
 | Exact byte size | IOS-XE `dir`, or XR `stat` on the bind mount | Confirms final placement. IOS-XE copies the already-verified file; XR has downloaded directly to its final location. |
-| SHA-512 and size for an existing Guest Shell root file | Bounded IOS-XE native verification | Allows adoption when Guest Shell cannot read the IOS root itself. This is an existing-file check, not an extra native hash after every placement. |
+| SHA-512 and size for an existing Guest Shell or IOx root file | Bounded IOS-XE native verification | Allows adoption when the agent cannot read the IOS root itself. IOx checks after the scratch download. This is an existing-file check, not an extra native hash after every placement. |
 
 Cisco Bulk Hash verification on the server separately compares the catalog's
 SHA-512 with Cisco's signed feed; see [Image verification](operations.md#image-verification).
@@ -416,7 +576,10 @@ lets the agent check and reuse that copy.
 
 On XR, the staging file is already on the storage root. Unassigning removes
 files IRIS downloaded; files adopted from the operator, or whose origin is
-unknown, remain in place.
+unknown, remain in place. When multiple historical image records name the same
+root file, every record must establish downloaded ownership before parking can
+delete it. An adopted or unknown claim protects the file even if that record
+is already parked.
 
 If a later IOS-XE assignment needs more space, the agent can reclaim parked
 root copies during its storage check.
@@ -427,7 +590,8 @@ IOS-XE cleanup protects two files:
 * the file named by the **`BOOT` variable** (`show boot`).
 
 When either read fails, the agent skips deletion, logs
-`RECLAIM-DEFERRED` or `CLEANUP-PENDING`, and retries on the next tick.
+`RECLAIM-DEFERRED` or `CLEANUP-PENDING`, and retries on a later successful
+due staging tick.
 
 !!! warning "Storage capacity"
     Allow room for all resident images plus working space; see
@@ -468,6 +632,7 @@ selection shown below.
 | Catalyst 9300 IOx | `iox` | Live writable-media policy, normally `flash:` via the SSD share | Common device container and SSH-to-self IOS commands. |
 | IE-3400 IOx | `iox` | Live writable-media policy, normally `sdflash:` | Common device container and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | n/a | `bootflash:` | Guest Shell through a VirtualPortGroup. |
+| Catalyst 8000 IOx | `iox` | `bootflash:` | The IOx app (amd64 package) through the same VirtualPortGroup; see [IOx](iox.md#catalyst-8000-routers). |
 | Cisco 8000 series (IOS-XR) | `xr-appmgr` | Fixed `harddisk:` | Common device container with a verified direct bind mount and no SSH path. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see

@@ -364,6 +364,14 @@ def test_both_pods_satisfy_restricted_pod_security_profile():
             assert not any("hostPort" in port for port in container.get("ports", []))
 
 
+def test_server_pvc_remount_preserves_private_authority_file_modes():
+    security = _pod(_load("deployment.yaml"))["securityContext"]
+    # With the documented PVC root already prepared, kubelet must leave the
+    # 0600 authority locks/transcripts untouched. Always (including omission)
+    # adds group write on remount and makes the strict authority readers fail.
+    assert security.get("fsGroupChangePolicy") == "OnRootMismatch"
+
+
 def test_every_container_has_explicit_resource_requests_and_limits():
     for deployment_name in ("deployment.yaml", "console-deployment.yaml"):
         for container in _all_containers(_pod(_load(deployment_name))):

@@ -97,19 +97,448 @@ device session each. State-polling loops make a fresh observation on every
 iteration. Guest Shell readiness waits 2, 4, 6, and then up to 15 seconds
 between observations.
 
+## Sizing a maintenance window
+
+A scheduled window is only as long as the work it has to fit. The numbers that
+decide that are the same ones onboarding uses every day:
+
+| Budget | Value | Where it comes from |
+| --- | --- | --- |
+| Worker pool | 25 simultaneous jobs | `IRIS_ONBOARD_CONCURRENCY` |
+| Queue depth | 1000 waiting jobs | fixed; a submission past it is refused, not silently dropped |
+| Per-job deadline | 7200 s | `IRIS_ONBOARD_JOB_TIMEOUT` |
+| First device contact | 75 s | the reachability/`show version` probe |
+| Preflight session | 90 s | the job's first real session against the device |
+| Router recipe | 7-10 minutes | measured, per router, end to end |
+
+Half the pool is **reserved for manual work** and can never be taken by a
+schedule: with the default pool of 25, at most 12 scheduled jobs run at once
+and 13 slots stay available to an operator. The same split applies to the
+queue. A maintenance window therefore never starves an operator out of their
+own console, and it also means a window has half the pool, not all of it, when
+you size it.
+
+Size from pool rounds, not from device count. A **250-device** wave of routers
+needs at least **21 rounds** of the scheduled half of the pool, and each round
+costs a router recipe, so budget on the order of 147-210 minutes of window for
+it plus margin. At the window end, admission closes and queued jobs are
+cancelled; already-running jobs are allowed to finish. Every device the
+window never reached receives a `window_closed` outcome.
+
+## Scheduled outcomes
+
+Every scheduled attempt against one device leaves a durable outcome, and every
+outcome carries a reason. Work is **idempotent per occurrence and device**: an
+attempt already recorded for that pair is never repeated, so a restart in the
+middle of a window cannot double-assign or double-onboard.
+
+A restart **resumes its own records only**. Interrupted occurrences are
+re-entered, their existing outcomes are kept as they stand, and work already
+admitted is reconciled by its own identity rather than re-submitted — a job
+that succeeded just before the process lost its result is recognised, not run
+again.
+
+Reasons an operator will actually meet:
+
+| Reason | What it means |
+| --- | --- |
+| `conflict` | Another writer changed the device, or the current same-name fleet row has a different registration identity from the occurrence binding. Manual work wins the conflict. Inspect `target_snapshot.registration_ids` and receipt `fleet_registration_id`. Do not force the old occurrence onto a replacement; verify it and schedule new work if intended. |
+| `identity_unavailable` | A legacy or unbound claimed target cannot prove a durable registration identity for fresh work. Inspect the occurrence and receipts. Recover prepared work only when its receipt records `fleet_registration_id`; otherwise verify the current registration and schedule new work. |
+| `vanished` | The device is no longer in the fleet. |
+| `device_revoked` | The device's credentials are revoked; nothing was attempted. |
+| `unclassified_management_type` | The row is inventory only and has no management type yet, so there is no plan to run. See [Management type](management-type.md). |
+| `window_closed` | The window ended before this device was reached. The occurrence is closed honestly instead of running late. |
+| `wave_deadline` | A wave gate never opened before its deadline; the occurrence ends `stalled` carrying the counts that held it. |
+| `gate_unavailable` | The wave gate could not be evaluated at all. Nothing is admitted on an unreadable gate. |
+
+Two of them are recorded as notes beside the outcome rather than as refusals:
+`peer_quarantined` marks a device that is quarantined from peering but was
+still assigned to (quarantine controls peering, not approval), and
+`all_targets_quarantined` marks an occurrence whose entire target set was
+quarantined at window start. Both are facts about the run; neither stops it.
+
+## Deployment waves
+
+A schedule with an `after` gate waits for the preceding schedule's own
+occurrence to reach the ratios the operator set, and is re-read inside the
+window on its own cadence until it does. The gate reports three counts over
+that preceding occurrence's target:
+
+* **staged** — the device's heartbeat reports every image of that run staged,
+  corroborated where the tracker has anything to say by its own `left == 0`.
+  The tracker can contradict a staged claim but never creates one, and its
+  silence is never read as "not staged": the registry is in memory and is
+  empty for one prune horizon after a tracker restart.
+* **errored** — the run failed for that device, or its heartbeat reports the
+  image as errored.
+* **missing** — no evidence at all: a powered-off device, or one whose
+  heartbeat cadence has not reported since. Missing is counted **apart** from
+  errored on purpose. Folding the two together would either raise an alarm
+  nobody can act on or let one dark device hold a wave chain open forever, so
+  `max_missing_ratio` is the operator's own answer to how many silent devices
+  a wave may proceed over.
+
+The remainder is still in flight and is deliberately not named as anything
+else.
+
+The wave gate is an **operational** signal about when work is admitted. It is
+**not a security** boundary: it decides only when the next wave starts, never what
+that wave may do, and every per-device authority check still runs afterwards.
+An occurrence whose gate never opens ends `stalled` — at `deadline_seconds`, or
+at the window edge — carrying the three counts on the occurrence and on the
+outcomes that closed it, so a chain that stopped says why it stopped.
+
+## Role-policy operations and rollback
+
+Treat a role change like a network-policy change. Read the current policy and
+ETag, call the same mutation with `dry_run=1`, review
+`member_delta`, `origin_access_lost`, `empty_permitted_sets`,
+`role_pairs_stopped`, and `qos_changed`, then apply the unchanged request with
+its `confirm_token` and the same strong `If-Match`. The zero blast-radius
+threshold means every effective access, membership, or QoS change requires
+confirmation. A concurrent commit invalidates both the ETag and token; read and
+preview again rather than replaying either.
+
+Create definitions before assigning members. Clear or move every member and
+remove every referring peer-role before deleting a definition. A direct role
+assignment is refused when a non-quarantine explicit ACL already shadows that
+device. For a deliberate conversion, use `iris-role migrate ACL ROLE --dry-run`
+to preview without persisting anything. A confirmed `--apply` migration first
+records the role membership while the old ACL still shadows it, then a second
+policy commit removes the matching ACL assignments.
+If the second commit fails, the shadow remains and enforcement stays on the old
+ACL; inspect `role_drift`, correct the failure, and rerun the preview.
+
+Fleet declaration and compiled policy membership are separate durable stores.
+IRIS serializes their writers and chooses an order that leaves a more permissive
+residue on failure: a restriction writes the fleet declaration before policy;
+a relaxation writes policy before the declaration. Bulk results report exact
+`applied` and `failed` rows plus a bounded drift summary. Do not interpret a
+partial response as rollback. Repair the failed store and repeat the same
+idempotent membership intent.
+
+Neither order is a distributed rollback. A policy restore changes policy
+content only and does not roll back a completed Fleet write. Before repairing
+or restoring policy, preserve `peer-policy.json`, Fleet state,
+`peer-enforcement.json`, `origin-qos.json`, the LKG/ring, and the roles-ever
+watermark. Then compare declared and compiled membership and repair the reported
+drift.
+
+For an intentional policy rollback, the internal restore primitive copies
+reviewed historical content into a monotonic new revision, preserves the live
+outbox, appends a restore event, and rotates its acknowledgement epoch. There is
+no public restore route or CLI. Do not overwrite a healthy authoritative file
+with a ring snapshot; arrange a reviewed maintenance procedure around the
+primitive. Copying verified LKG bytes is reserved for repair of an already
+corrupt authoritative store.
+
+Peer quarantine is independent of a device's ordinary ACL assignment. Applying
+peer quarantine preserves the current ordinary ACL; an ACL changed while
+quarantine is active stays suppressed until release, when the then-current
+ordinary ACL, role, or established unassigned fallback becomes effective.
+Reads enforce both independent membership and legacy
+`assignments[device-id] == "quarantine"` rows. The next successful policy
+mutation migrates legacy rows to the independent container without adding a
+second revision or outbox event. A legacy quarantine row has no surviving
+ordinary ACL, so IRIS cannot recover the assignment that older behavior already
+overwrote. Repeating quarantine or release at the current revision still
+creates one revision and one outbox event. Pure credential revoke clears only
+the ordinary ACL assignment and retains peer quarantine, Fleet and policy role
+membership, and device QoS. Device retirement clears peer quarantine along with
+the ordinary ACL, role membership, and device QoS. Peer quarantine controls
+device peer discovery and is separate from catalog image quarantine.
+
+Tracker/quarantine discovery alone does not sever a live connection or erase
+aria2's retained peer list. Applied verified device deny lists may
+cooperatively disconnect matching peers. To request containment, unassign every
+image from the affected device; its agent removes torrents only after the next
+successful due policy poll and successful aria2 policy apply. Signed logical
+`catalog_tick_s`, mechanical scheduling, and catalog/RPC failures can delay
+removal, so this is not immediate
+isolation. This remains a staging operation and never installs, activates,
+reloads, or changes boot state.
+
+Before rolling the server back to an older binary, treat peer-policy containment
+and compatibility as a separately reviewed change. Any restricted-role downgrade
+requires this separately reviewed containment and compatibility procedure. Older
+servers that predate independent quarantine ignore that membership, so
+independent quarantine is not sufficient containment for a downgrade even after
+the current tracker has
+exported the operation. Do not convert the membership for compatibility by
+overwriting the preserved ordinary ACL.
+
+For a binary that also predates roles or state-aware QoS, use the newer binary
+to remove every global and role state container, then make one additional
+scalar-only policy commit. Verify that both `peer-policy.json` and
+`peer-policy.lkg.json` contain state-free schema-1 documents before starting the
+older binary; do not supply it a retained state-bearing ring snapshot. These
+schema preparations do not make an older server enforce independent quarantine.
+Code predating roles ignores `roles_present` and cannot enforce or warn about
+role definitions. After restoring a role-capable, independent-quarantine-aware
+version, verify the retained quarantine intent, repair any `role_drift`, verify
+the policy and origin-QoS status, and deliberately release each quarantine. Do
+not delete `peer-policy.json` or its LKG to silence a warning: doing so loses
+role, ACL, and quarantine intent.
+
+## Instruction-root ceremony and recovery
+
+These procedures describe operator actions; they are not a record of a
+production ceremony or release. Use the selected deployment's server shell
+(`docker compose -f server/docker-compose.yml exec iris sh`, the split-host
+server equivalent, or `kubectl -n iris exec -it deployment/iris-seed-server -c
+iris -- sh`). Its existing `IRIS_CONFIG`, `IRIS_STATE`, `IRIS_RUN` and age
+identity must stay with that deployment. Offline-root private material never
+enters this shell, the server, installer arguments or device platform config.
+
+Exactly two distinct public roots belong in `$IRIS_CONFIG/instr/roots.d/`, with
+private material held by separate custodians at separate sites. The optional
+encrypted online key is `$IRIS_CONFIG/instr/signing-key.age`; runtime plaintext
+is `$IRIS_RUN/instr/signing-key`. Keep the [durable state inventory](server.md#instruction-state-and-processes)
+with its deployment: epochs, serial history, admission/activation records,
+role artifacts and keylist authority must not be restored backwards.
+
+### Quarterly two-root ceremony
+
+1. Have both custodians verify separate custody/sites and compare public
+   fingerprints with the approved inventory (`ssh-keygen -lf root-a.pub` and
+   `ssh-keygen -lf root-b.pub`, on public copies). Record identities,
+   fingerprints, times and outcomes; never record private keys or bearer values.
+2. In the server shell, inspect `iris-instructions --status` and export only
+   the online public half to a controlled exchange directory. Create that
+   directory before these commands:
+
+   ```bash
+   install -d -m 0700 "$IRIS_RUN/ceremony"
+   iris-instructions --export-public "$IRIS_RUN/ceremony/signing-key.pub"
+   iris-instructions --status
+   ```
+
+   On the first setup only, generate the server's online key with
+   `iris-instructions --generate-online-key` before exporting it. This uses the
+   configured age recipients and keeps the plaintext in the runtime directory.
+3. Take the public key to one offline custodian. Issue a 30-day certificate
+   for exactly the `iris-server` principal. The private-key path below exists
+   only on that offline station; use its normal passphrase prompt:
+
+   ```bash
+   ssh-keygen -s /offline/root-a -I iris-online -n iris-server \
+     -V +0s:+30d signing-key.pub
+   ```
+
+   Return only `signing-key-cert.pub` to the server exchange directory and
+   validate/import it:
+
+   ```bash
+   iris-instructions --import-certificate "$IRIS_RUN/ceremony/signing-key-cert.pub"
+   ```
+
+   Renew at half of the 30-day lifetime; signing refuses with seven days or
+   less remaining. An instruction stamp lasts at most seven days. Renewal is
+   therefore a scheduled action, not something to defer to certificate expiry.
+4. Re-sign the current approved KRL with a strictly increasing keylist sequence.
+   Retain all intended revocations. Set `IRIS_CEREMONY_SEQ` to the next reviewed
+   sequence and `IRIS_CEREMONY_ROOT_ID` to the configured public-root ID (for
+   example `root-a`); neither is a secret. In the server shell:
+
+   ```bash
+   iris-instructions --keylist-request "$IRIS_RUN/ceremony/revocations.krl" \
+     --keylist-seq "$IRIS_CEREMONY_SEQ" --root-id "$IRIS_CEREMONY_ROOT_ID" \
+     --output "$IRIS_RUN/ceremony/keylist.payload"
+   ```
+
+   Move only that public payload offline. Sign its exact bytes there:
+
+   ```bash
+   ssh-keygen -Y sign -f /offline/root-a -n iris-keylist-v1 keylist.payload
+   ```
+
+   Return only `keylist.payload.sig`; in the server shell assemble and install
+   it against the unchanged request:
+
+   ```bash
+   iris-instructions --assemble-keylist "$IRIS_RUN/ceremony/keylist.payload.sig" \
+     --payload "$IRIS_RUN/ceremony/keylist.payload" \
+     --output "$IRIS_RUN/ceremony/keylist.envelope"
+   iris-instructions --install-keylist "$IRIS_RUN/ceremony/keylist.envelope"
+   iris-instructions --status
+   ```
+
+   Repeat with the other custodian/root and the next sequence so both roots
+   are independently attested. The CLI accepts no root private-key input and
+   independently verifies the claimed root. An identical artifact retry can
+   repair interrupted metadata publication; do not change bytes at the same
+   sequence. Re-signing is due at 90 days, warning at 100, critical at 135;
+   both roots must have attestations within 180 days for healthy quorum.
+5. Check the Console custody panel and `iris_instruction_*` metrics against
+   the recorded certificate/keylist windows. `enabled: false` is not enabled,
+   null/unknown is unavailable, and degraded quorum needs custody investigation.
+   Verify a current stamp and the authorized device's reported acceptance separately; never
+   call command success live-device validation. Preserve public ceremony
+   evidence and dispose of exchange copies according to local custody policy.
+
+### One-root loss
+
+1. Preserve the two public-root files and existing device trust bytes. Identify
+   the surviving offline custodian; do not delete the lost root's public key
+   from provisioned trust merely because its private copy is unavailable.
+2. Use the quarterly export/issue/import procedure with the surviving root for
+   the next online certificate and keylist. No device trust change is required
+   for this failover, so loss of one private root is invisible to provisioned
+   devices until custody evidence ages.
+3. Record quorum as degraded operationally until the replacement-root plan and
+   next signed device release are complete. The automated 180-day attestation
+   metric can remain healthy temporarily; it cannot detect physical key loss.
+   A replacement changes trust bytes and must propagate through every package
+   and affected device. Never substitute disposable proof roots.
+
+### Both-roots-lost break glass
+
+1. Preserve public/state evidence, declare the custody outage and retain server
+   tracker/origin enforcement. Devices use usable LKG, then the documented
+   stale behavior. Do not weaken signature, audience or replay verification.
+2. At two separate offline sites, create two new independent roots with normal
+   passphrase protection (`ssh-keygen -t ed25519 -f /offline/root-a`, and the
+   corresponding root-b command at its site). Record their public fingerprints.
+   Complete recovery requires a reviewed maintenance procedure that reconciles
+   root configuration, existing keylist/revocation state and sequence before
+   provisioning the new online certificate/keylist. Individual custody commands
+   do not provide supported complete in-place fleet recovery after both roots
+   are lost. This is an intentional break-glass boundary: no code path claims
+   recovery. Preserve existing revocations and evidence; complete the reviewed
+   server-state recovery before rebuilding trust into every artifact and
+   re-onboarding the fleet as described below.
+3. Build fresh Guest Shell bundles, unified OCI, both IOx tars and XR RPM with
+   the new public roots and the current pinned aria2c binaries. Typical build
+   entry points are `tools/make-agent-bundle.sh --instruction-roots-dir DIR`,
+   `IRIS_INSTRUCTION_ROOTS_DIR=DIR tools/provision-iox-packages.sh`, and
+   `tools/build-xr-package.sh --instruction-roots-dir DIR --out artifacts/`.
+   Build the ARM Guest Shell variant with `--arch arm64 --aria2 PATH` too.
+   Supply the canonical binaries for both architectures, inspect trust/source
+   byte identity and wrapper provenance, and obtain native signatures before
+   claiming signed-image trust. No staged IOS image is installed or activated.
+4. Re-onboard every device with the new trust material. A disconnected device
+   uses [F3 bootstrap-envelope redelivery](#f3-offline-bootstrap-envelope-redelivery)
+   after the fresh agent/trust package arrives. Verify the accepted identity
+   and custody state on each device; publishing packages alone is not fleet
+   recovery. An intentional server authority recovery uses
+   `iris-instr-key recover`, which advances the epoch; fresh activation uses
+   `iris-instr-key initialize`. Do not delete local replay floors to force
+   acceptance or report the fleet recovered while devices remain on old roots.
+
+### Instruction failure and key response
+
+Instruction-body fetch/verification failures affect the instruction step only; heartbeat/staging
+continue when usable LKG or defaults can be applied. If aria2 RPC policy apply
+fails, the heartbeat is still sent but staging is skipped for that tick. Repair
+the RPC failure before claiming staging progress. An unreadable assignment
+policy also skips staging reconciliation; heartbeat and existing aria2
+transfers continue. The [failure table](device-agents.md#instruction-failures-and-recovery)
+covers expiry, allow-list/deny-list asymmetry, bad audience/signature/MAC,
+rollback/floor reset, missing verifier, rejected LKG, 256 KiB oversize,
+pointer/body races, one-shot refresh and later-tick retries.
+
+For a leaked instruction key on an otherwise honest device:
+
+```bash
+iris-instr-key rotate --no-overlap <device_id>
+```
+
+A committed rotation can report incomplete restamping. After fixing producer
+state, run `iris-instr-key restamp <device_id>`; do not repeatedly rotate.
+For retirement or compromise, use `iris-revoke <device_id>` instead. Durable
+revocation wins over an agent-reported LKG and must not be avoided by rotation.
+`iris-instr-key rotate` refuses a revoked device.
+
+## F3 offline bootstrap-envelope redelivery
+
+F3 transports a ciphertext bootstrap envelope for one device; it is not a
+secret key, an OS image, or a bypass of signature/audience/replay checks. In the
+server shell, materialize it to a controlled private destination:
+
+```bash
+install -d -m 0700 "$IRIS_RUN/ceremony"
+iris-instruction-bootstrap <device_id> --output "$IRIS_RUN/ceremony/bootstrap.envelope"
+```
+
+The output is mode 0600 and bounded; the CLI prints no envelope or key bytes.
+Transfer it through the authorized platform installer/controller. Guest Shell
+installer generation (`tools/gen-device-installers.sh`) stages a short-lived
+capability-bound envelope and the installer places
+`iris-instructions.bootstrap`; IOx uses its owned application-data delivery;
+XR snapshots `IRIS_INSTRUCTION_BOOTSTRAP_FILE` and copies the ciphertext to
+`harddisk:iris-instructions.bootstrap`. Preserve exact bytes and device identity,
+never place a key in activation configuration. Disconnected here means the
+normal instruction body needs redelivery: fresh authenticated refresh/time and
+usable verification trust are still required before the agent can accept it.
+A new-root recovery first needs the new agent/trust package.
+
+Authenticated refresh can self-heal current/prior key availability. The agent
+consumes a verified envelope transactionally at a successful due policy poll;
+application also requires successful aria2 policy apply. Signed logical cadence
+and catalog/RPC failures can delay this beyond the next mechanical tick.
+Retryable delivery/durability failures retain the envelope; rejected evidence
+never replaces working LKG. Observe accepted identity and application state
+after that successful poll/apply and follow the failure table if the device
+remains pending or unavailable.
+
+## Guest Shell fleet bundle drop
+
+Treat a Phase 1 Guest Shell agent update as a fleet operation. Build each
+required architecture with `tools/make-agent-bundle.sh --arch amd64|arm64
+--aria2 PATH --instruction-roots-dir DIR --out OUTPUT`, using the canonical
+binary and exactly two approved public roots. Record archive/sidecar hashes
+and source provenance. The adjacent 64-hex SHA-256 sidecar is digest evidence,
+not a detached signature.
+
+Publish the bundle and sidecar together on the existing artifact server, with
+coordinated installer/bootstrap evidence for both public-root files. Deliver
+sidecar before archive and observe bootstrap's outcome: missing, malformed or
+mismatched evidence, unsafe members or incomplete writes must refuse the new
+bundle and preserve the prior runnable bundle. Never remove the prior runnable
+agent to force a refused update through. Check the next tick's
+`instr_protocol`, accepted identity and instruction state, including
+tracker-only fallback where Guest Shell lacks `ssh-keygen -Y verify`.
+Roll back by restoring the reviewed prior bundle/evidence as one set; do not
+rewind replay state or substitute trust roots. This changes the agent only;
+it never installs or activates the staged IOS image.
+
+IOx recovery differs: its device-global verification controller records and
+restores only an owned initial enabled state, with read-back before
+activation/start; initial disabled stays disabled, unknown refuses, and a
+signed wrapper causes no state change. Interruption/resume and uninstall
+recovery never blindly enables operator-changed or unowned state. See
+[IOx verification](iox.md#device-global-package-verification).
+
 ## Peer-policy operations and their backlog
 
-Every policy mutation — a quarantine assignment from the console, or its removal
-— is committed under a single lock and appends a stable entry to an **outbox**
-that the tracker drains. The tracker reports how far it has consumed through
-`last_operation_exported_revision` in the enforcement status file, and entries at
-or below that watermark are pruned on the next commit.
+Every policy mutation — role definitions, memberships, QoS, migration,
+quarantine, and release — is committed under a single policy lock and appends a
+stable entry to an **outbox** that the tracker drains. One bulk membership
+change creates one revision and one outbox entry. Each commit also creates a new
+acknowledgement epoch. The tracker may advance
+`last_operation_exported_revision` only when the status epoch matches the
+current policy history and after it appends the local audit record and accepts
+the event into its queue. Each outbox row has a stable event ID, so a failed
+export or history mismatch replays the same event at least once. Only entries at
+or below a valid revision-and-epoch watermark are pruned on the next commit.
+The tracker persists both the accepted revision and its epoch in enforcement
+status.
 
-The outbox is capped at **256** unacknowledged entries, and the cap is checked
-*before any write*. A mutation that would exceed it is refused with
-`503 operation_backlog_full`, so a stalled consumer blocks new operations instead
-of silently discarding them. A 503 here means the tracker is not draining — check
-that it is running and reconciling before retrying the mutation.
+The outbox is capped at **256** unacknowledged entries. A mutation that observes
+a full backlog in preflight is refused before its normal Fleet/policy write with
+`operation_backlog_full`, so a stalled consumer blocks new operations instead
+of silently discarding them. New role/QoS routes use 409; the legacy quarantine
+route retains its 503 compatibility response. Either means the tracker is not
+draining — check that it is running and reconciling before retrying. A direct
+writer racing after a Fleet-first preflight can still fail partially; inspect
+`partial`, `applied`, `failed`, revision, and `role_drift` on every error before
+retrying.
+
+Do not manually advance or clear the acknowledgement fields to suppress a
+backlog. A number from another acknowledgement epoch is treated as zero and all
+stable event IDs replay; changing it by hand can only obscure the state that
+the tracker still needs to export. Reads, refusals, and dry runs commit no new
+revision or acknowledgement epoch.
 
 The same route separates its other refusals, and they mean different things:
 
@@ -119,6 +548,58 @@ The same route separates its other refusals, and they mean different things:
 | `422 policy_error` | Policy is degraded — running on the last-known-good copy. Repair the authoritative file. |
 | `503 policy_fail_closed` | Policy is fail-closed; mutations are refused entirely. |
 | `503 operation_backlog_full` | 256 operations are unacknowledged. The tracker is not draining. |
+
+New role and QoS routes instead use exact strong ETags (`428
+precondition_required`, `412 precondition_failed`) and return `409
+operation_backlog_full`. See [Peer policy](reference.md#peer-policy).
+
+### Tracker cadence, selection, and origin QoS
+
+On every authenticated announce, the tracker
+loads the current compiled policy and resolves the parsed state before applying
+exactly one bounded ±10% jitter within 10–300 seconds. Exact `left == 0`
+selects seeder; positive, omitted, malformed, and negative values select
+leecher. The service origin seeder selects its parsed state with
+global scalar and global state cadence and remains outside the handout ledger. An unattributed
+legacy principal uses the selected `global-state:<state>` cadence. An
+attributed legacy principal resolves the selected state separately for
+every possible owner before aggregation. A shared legacy/NAT address therefore
+considers all possible owners; each owner's selected state is aggregated with
+the maximum interval and minimum `numwant`. If
+attribution is unreadable, the global cadence fallback applies; the tracker
+remains fail-closed and withholds candidates. The issued value is returned as both
+`interval` and `min interval`; the peer row expires after twice its own issued
+interval. Candidate return is capped by the smaller of the request and the
+effective selected-state `numwant`; `numwant=0` returns no peers. A valid
+port-bearing announce registers its issued interval; an invalid port receives
+cadence without registration. Selection starts at a randomized registry
+position and inspects at most the smaller of four times that ceiling or the
+whole swarm, so policy denials can make a response shorter than its ceiling.
+Restricted-role selection uses role indexes but still evaluates mutual policy
+for every candidate. A role edit therefore affects the next requester announce
+without waiting for every candidate to reannounce.
+
+The same serialized reconciler applies origin QoS. It forces a complete apply
+on first run, aria2 session change, desired-option or active-GID-set change, and
+recovery after a failed pass. A global-option failure stops that pass. A
+per-download failure does not skip later downloads, but the entire pass remains
+degraded and is retried. `origin-qos.json` and the management view expose only
+state, option/download counts, timestamp, and a closed error code. They contain
+no GIDs, addresses, option values, or hashes.
+
+The mutual-origin result beside that status is still #153 preflight evidence.
+An unknown protected seeder IPv4 address makes the count unavailable (`null`),
+and the Console labels it accordingly. A count of zero means the evaluation
+completed with no newly denied devices. Preflight does not change the applied
+blocklist. A `shared_permit_deny` NAT conflict is
+counted and the shared address stays unblocked, because a global IP block would
+also cut off the permitted principal.
+
+Keep #153 open until one full release of preflight observation has completed.
+Only a later reviewed activation may union the current self-evaluation set with
+mutual-origin evaluation for every ACL, including hand-written ACLs. This
+runbook neither starts the tagged-release dwell nor authorizes an activation
+release or lab/live validation of the union.
 
 ## Endpoint writes that fail
 
@@ -350,11 +831,22 @@ torrent, so it repairs that case too.
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
 
-On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed; Catalyst 9300 Guest Shell writes through the guest-share; Catalyst 8000 routers stage over Guest Shell to `bootflash:`. On IE-3400 (or a Catalyst 9300 that fell back to the scp push) that transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s; IRIS never modifies CoPP.
+On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed; Catalyst 9300 Guest Shell writes through the guest-share; Catalyst 8000 routers stage over Guest Shell or the IOx app to `bootflash:`. On IE-3400 (or a Catalyst 9300 that fell back to the scp push) that transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s; IRIS never modifies CoPP.
 
 ### How many torrents are served at once
 
-Both the origin seeder and every device agent raise aria2's concurrency limit well above any realistic catalog, because a *seeding* torrent never finishes and so would otherwise hold one of aria2's five default slots forever. Left at the default, the sixth published image is never served at all and any device assigned it reports staging indefinitely — aria2 treats a held-back torrent as waiting rather than as an error, so nothing is logged. Override with `SEED_MAX_CONCURRENT` (origin, default 1000) or `IRIS_MAX_CONCURRENT` / `MAX_CONCURRENT` (devices, default 100). These are not throughput controls: bandwidth is governed by peer limits and transfer policy, and lowering these only starves images.
+A seeding torrent holds an aria2 concurrency slot indefinitely. The origin's
+`SEED_MAX_CONCURRENT` defaults to 1000; device verified/default
+`max_concurrent` defaults to 100. Configure device concurrency through signed
+QoS intent, not launcher variables. Legacy `IRIS_MAX_CONCURRENT` and
+`IRIS_MAX_PEERS` are provisional until the first successful tick, with restored
+downloads held until verified/default options are written. Parsed legacy
+`max_peers` is ignored and produces the value-free `MAX-PEERS-IGNORED` notice
+once. `IRIS_TICK_SECONDS` controls the mechanical interval/floor; signed
+`catalog_tick_s` controls logical catalog/staging cadence. Every mechanical
+tick reasserts QoS and sends a heartbeat; all future `addTorrent` calls use
+verified/default policy. A low concurrency cap can leave assigned images
+waiting even when bandwidth remains available.
 
 `iris_seeder_queued_torrents` is the signal to watch. Any non-zero value means the origin is holding back a published image; alert on it.
 
@@ -434,8 +926,108 @@ agent is running: the agent can remove files it recorded as downloaded by
 IRIS, while retaining adopted files and files of unknown origin. See
 [Unassigned image park](device-agents.md#unassigned-image-park).
 
+When multiple historical image records name the same IOS-XR root file, every
+record must prove downloaded ownership before parking can delete it. An adopted
+or unknown claim protects the file even when that record is already parked.
+
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
+
+### Recovering an IOx attempt cut off mid-run
+
+An IOx onboard or undeploy that the server did not finish — typically a
+server redeploy or restart while the job was running — can leave the device's
+IOx verification journal in phase `indeterminate`. The symptom is that every
+later job on the device, onboard, undeploy and **Force** alike, ends in
+`error` with a job-log line of the form
+
+```
+IOx controller: predecessor recovery failed: IOx verification journal for record <record-id> (transaction <transaction-id>, revision <revision>) is indeterminate; enable app signature verification on the device, then run iox_verification.py reconcile-enabled with these values (...)
+```
+
+with `error_category` `reconciliation_required` and result code 3, while the
+deployment record the cut-off attempt left behind stays recoverable rather
+than `active` (`unknown` after a server restart, `needs-reconcile` after a
+failed job). Force does not get past this:
+Force is read before the deployment record, but the outstanding verification
+obligation lives on the board, and the controller recovers it under the board
+lock before any teardown.
+
+What happened: the wrapper was unsigned and the device had app signature
+verification enabled, so the controller recorded the obligation to restore it
+(the journal's `prior_state` is `enabled`), disabled device-global
+verification for the install, and was cut off before it could restore
+verification and read the result back. On recovery it cannot tell whether
+its disable took effect or what else changed the state since, so it refuses
+to issue a blind enable, and the refusal is durable: the phase stays
+`indeterminate` until an operator resolves it. Resolution is a two-part
+acknowledgement — you put the device back into the enabled state yourself,
+then tell the controller that you did.
+
+1. **Read the binding.** Take the record id, transaction id and revision
+   from the job-log line above, or from the device's deployment record:
+   `GET /api/v1/devices/<id>/deployment` returns `record.iox_verification`
+   with `record_id`, `transaction_id`, `revision`, `phase`, `prior_state`
+   and `unresolved` (the same summary is listed under
+   `iox_verification_obligations`). Inside the server container the same
+   fields are in `$IRIS_STATE/deployment_records.json` under
+   `records.<record-id>.iox_verification` — read it, never edit it. `phase`
+   must be `indeterminate` and `prior_state` `enabled`. Use the journal's
+   current revision: the recovery that declared the journal indeterminate
+   wrote an event, and every event advances the revision, so an older number
+   from an earlier log is refused as a stale binding.
+
+2. **Restore verification on the device.** In privileged EXEC:
+
+   ```
+   show app-hosting infra | include App signature verification
+   app-hosting verification enable
+   show app-hosting infra | include App signature verification
+   ```
+
+   The second read must report `App signature verification: enabled`.
+   Verification is device-global, so check the other IOx applications on the
+   device first ([IOx prerequisites](iox.md#device-global-package-verification)).
+   This restores a setting IRIS itself disabled; it stages nothing and changes
+   no software state.
+
+3. **Reconcile the journal** from inside the server container, as the service
+   user (the control socket under `$IRIS_STATE/iox/` is mode 0600 and only the
+   server's own uid may connect):
+
+   ```bash
+   docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris \
+     python3 iox_verification.py reconcile-enabled \
+       --record-id <record-id> --transaction-id <transaction-id> \
+       --revision <revision> --acknowledge-external-resolution \
+       --wait --wait-timeout 600
+   ```
+
+   Without the compose file, `docker exec -e IRIS_STATE=/var/lib/iris -w
+   /opt/iris/server iris python3 iox_verification.py reconcile-enabled ...`
+   is the same command. It queues an `iox-reconcile-enabled` job that takes
+   the board lock, performs one fresh verification read over SSH, and only
+   when the device reports `enabled` writes a `reconcile_enabled` event that
+   closes the journal (`phase: relinquished`, `unresolved: false`). It sends
+   no enable or disable command of its own. Exit status `0` means resolved.
+   `3` means the fresh read did not find verification enabled (the job log
+   says `fresh read did not establish enabled`) — go back to step 2. `2`
+   with `{"error": "request rejected"}` means the
+   binding is stale or mistyped (the revision moved, the phase is no longer
+   `indeterminate`, or an id is wrong) — re-read it. `4` is a wait timeout
+   or a transport failure — read the job (`job --job-id <id> --wait`, or the
+   Console's job list) before retrying. `5` is a journal or authority fault —
+   read the server log.
+
+4. **Clear what the cut-off attempt left behind.** Run **Undeploy** with
+   **Force** from the Console (or `submit-uninstall --device-id <id>
+   --force-agent-only --wait`). With the obligation resolved it proceeds,
+   removes the IRIS-named footprint and retires the device's leftover
+   records; then onboard again.
+
+This procedure was validated on a Catalyst 8000V IOx device on 2026-09-10.
+The Console has no control for step 3 yet; the CLI is documented under
+[IOx control CLI](reference.md#iox-control-cli).
 
 ## Rebuilding the catalog from images already on disk
 
@@ -537,28 +1129,46 @@ or XR package may be reused. Console onboarding requires the normal undeploy,
 then onboard sequence because preflight refuses an already-running IRIS agent.
 
 Console **Settings → Device packages** (also linked from the setup flow) keeps
-the two readiness questions separate:
+the readiness checks separate:
 
-- Each package row checks that the wrapper is readable and non-empty, that its
+- Each IOx/XR package row checks that the wrapper is readable and non-empty, that its
   adjacent `.manifest` has the expected wrapper kind, filename, platform, and
   canonical OCI digests, and that the manifest's wrapper SHA-256 matches the
   served bytes. `ok` proves that byte-to-provenance binding only; it does not
   inspect package contents or validate a native signature. `stale` means the
   wrapper digest disagrees with its manifest. Missing, unreadable, or malformed
   evidence reports `absent` or `unknown`, never success.
+- The `iris-agent.tgz` row checks the latest server startup provisioning
+  result and the resulting bundle and `bootstrap.sh` digests. Startup verifies
+  the image-baked aria2c against the x86_64 checksum pin and ELF architecture
+  before replacing the bundle. A verification, packing, or publication failure
+  reports `stale`; absent or invalid evidence reports `unknown`. The server
+  continues running, but an older bundle left on disk cannot appear ready.
+  Inspect startup logs and correct the image input or artifact-directory
+  permissions before restarting. The provisioning record lives at
+  `$IRIS_RUN/served-bundle.json` (default `/run/iris/served-bundle.json`),
+  independently of the artifacts mount so a read-only mount is visible.
+  Readiness also requires this server startup to have confirmed provisioning;
+  a previous successful record cannot hide a failure to write the new record.
 - The card separately compares the certificate the live services present with
   the public `iris-catalog.pem` copy onboarding distributes. A missing copy or
   mismatch means new onboarding is not ready. Reconcile that served artifact;
   rebuilding deployment-neutral packages cannot repair certificate drift.
 
-`tools/check-package-freshness.sh` is the scriptable equivalent. Its default
+`tools/check-package-freshness.sh` checks the IOx/XR wrapper and certificate
+conditions above; the Guest Shell provisioning record is reported by the
+Console setup-status endpoint. Its default
 mode is read-only; `--rebuild` rebuilds wrapper families whose package or
 provenance evidence is missing or invalid, then rechecks. It will not rebuild
 packages to paper over a served-versus-distributed certificate failure.
 
 Package rebuilds remain mandatory after a shared agent or device-image source
-change. Rebuild the server to refresh its Guest Shell bundle, then build both
-IOx wrappers and the XR wrapper with their adjacent provenance manifests:
+change. Before rebuilding, set `IRIS_INSTRUCTION_ROOTS_DIR` to the approved
+two-public-root directory and `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` to the
+current checksum-pinned binaries if fallback artifacts are older. Root private
+keys never enter build inputs. Rebuild the server to refresh its Guest Shell
+bundle, then build both IOx wrappers and the XR wrapper with their adjacent
+provenance manifests:
 
 ```bash
 docker compose -f server/docker-compose.yml up -d --build
@@ -571,6 +1181,37 @@ The force flag allows the local canonical archive to be replaced when source
 changed without a `VERSION` change. To retain that archive, set
 `IRIS_DEVICE_IMAGE_OCI` to a new path for both wrapper commands instead. Both
 families must package the same canonical build.
+
+For a manual Guest Shell bundle build with the approved public-root directory
+configured, the no-argument command still verifies
+`bin/aria2c` against the x86_64 pin and writes `artifacts/iris-agent.tgz`.
+Produce the ARM bundle from an explicitly selected aarch64 binary:
+
+```bash
+tools/make-agent-bundle.sh
+tools/make-agent-bundle.sh --arch arm64 \
+  --aria2 tools/aria2c-build/out/aarch64/aria2c
+```
+
+The ARM command verifies both the static ELF architecture and the aarch64
+entry in `tools/aria2c.sha256`, then writes `artifacts/iris-agent-arm.tgz`.
+It leaves the x86_64 bundle and `bin/aria2c` unchanged. `--out /path/bundle.tgz`
+selects another output path. These commands pack existing binaries; they do
+not rebuild aria2c or contact a device. Refresh the ARM bundle before any
+wrapper build that uses it as an input, or pass the verified binary directly
+with `ARIA2C_BIN_ARM64`.
+
+The pinned amd64 and arm64 aria2 binaries are now built from the documented
+source pin plus all seven patches in `tools/aria2c-patches/`. Patches 0005 and
+0006 make the configured peer admission cap cover stalled/pending connections
+and preserve protocol messages coalesced with the BitTorrent handshake; patch
+0007 keeps a seeder↔seeder connection for 5 s after completion so the device's
+completion hook can still read per-peer transfer bytes over RPC. These
+binaries are the source inputs for the **next** signed IOx wrappers and XR RPM,
+and for refreshed Guest Shell bundles. Their presence in the source tree does
+not mean a release was cut, a package was signed, or any deployed device was
+updated. Build, sign where your platform process requires it, verify the
+adjacent provenance, and redeploy as separate operator actions.
 
 Then redeploy affected devices so they actually run the new agent bytes. A
 green package row verifies the served wrapper against its manifest; it does
@@ -662,10 +1303,11 @@ manifest as evidence in either outcome.
    Do not publish that port for devices or browsers.
 4. From the device's agent network, check the catalog on HTTPS TCP 8443 and
    tracker on HTTPS TCP 6969. Check BitTorrent TCP 6881 to the server seeder
-   and TCP 6881–6999 between device peers. Guest Shell onboarding also needs
-   the artifact server on HTTPS TCP
-   8000; server-to-device onboarding uses SSH/SCP on TCP 22. IOx additionally
-   needs SSH/SCP from the app to IOS. See [Network ports](network-ports.md).
+   and TCP 6881–6999 between device peers. Guest Shell and IOx onboarding
+   also need the artifact server on HTTPS TCP 8000 from the device;
+   server-to-device onboarding uses SSH on TCP 22 (SCP only for the IOS-XR
+   package). IOx additionally needs SSH/SCP from the app to IOS. See
+   [Network ports](network-ports.md).
 5. Confirm the published image still exists in its recorded source directory
    under the import root or uploads volume, and uid 10001 can read it.
 6. Confirm the server can read its age key, state, and artifacts. Check the
@@ -673,3 +1315,9 @@ manifest as evidence in either outcome.
 7. Read the device's job log, heartbeat, and per-image report. Confirm its
    management type, installer, and addresses before retrying. A running agent
    normally requires undeploy before Console onboarding again.
+8. For a scheduled receipt with `conflict` or `identity_unavailable`, read the
+   occurrence `target_snapshot.registration_ids` and receipt
+   `fleet_registration_id` before retrying. Deleting and re-adding the same
+   device name creates a new identity and must not redirect an old occurrence.
+   Recover only prepared work bound to the recorded identity; otherwise verify
+   the current registration and schedule new work.

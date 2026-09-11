@@ -87,25 +87,54 @@ def parse_file_systems(text):
     return out
 
 
+# ``crashinfo:`` must never be CHOSEN as a staging or boot destination -- it is
+# the crash-dump area, small and swept by IOS. It must NOT, however, disqualify
+# the filesystem that merely exposes it as one of several aliases: a Catalyst
+# 8000V publishes ONE writable disk as
+#
+#   *  5173313536  473923584  disk  rw  bootflash: flash: crashinfo:
+#
+# so filtering the whole row out left the box with no writable disk at all, and
+# every agent tick died in iris_agent.target_fs with "no proved writable IOS
+# staging filesystem" -- before the heartbeat, which is a tick's last step, so
+# the device also never reported at all (issue #236, 2026-09-10).  Select
+# among a filesystem's OTHER prefixes instead, and skip only a row that offers
+# nothing but crashinfo:.
+_NEVER_SELECT_PREFIXES = ("crashinfo:",)
+
+
+def selectable_prefixes(file_system):
+    """The prefixes of *file_system* that IRIS may name as a destination."""
+    return [p for p in file_system.get("prefixes", ())
+            if p not in _NEVER_SELECT_PREFIXES]
+
+
+def _writable_disks(file_systems):
+    """Writable disks that expose at least one selectable prefix."""
+    return [f for f in file_systems
+            if f["type"] == "disk" and "rw" in f["flags"]
+            and selectable_prefixes(f)]
+
+
 def choose_target_fs(file_systems, boot_path=None):
     """Prefix (e.g. 'flash:') of the filesystem the device boots from / stages
     to: prefer the writable disk FS whose prefixes include the boot path's
-    prefix; else the '*' default writable disk FS. Never crashinfo:, never
-    non-disk or read-only. Returns None if nothing suitable."""
-    disks = [f for f in file_systems
-             if f["type"] == "disk" and "rw" in f["flags"]
-             and "crashinfo:" not in f["prefixes"]]
+    prefix; else the '*' default writable disk FS. Never returns crashinfo:,
+    never a non-disk or read-only FS -- but a disk that merely lists
+    crashinfo: alongside a real prefix still qualifies, chosen by that other
+    prefix. Returns None if nothing suitable."""
+    disks = _writable_disks(file_systems)
     if not disks:
         return None
     if boot_path and ":" in boot_path:
         want = boot_path.split(":", 1)[0] + ":"
         for f in disks:
-            if want in f["prefixes"]:
-                return f["prefixes"][0]
+            if want in selectable_prefixes(f):
+                return want
     for f in disks:
         if f["is_default"]:
-            return f["prefixes"][0]
-    return disks[0]["prefixes"][0]
+            return selectable_prefixes(f)[0]
+    return selectable_prefixes(disks[0])[0]
 
 
 def _is_ie3k(model):
@@ -134,11 +163,12 @@ def choose_stage_fs(file_systems, model=None, guest_share_fs=None,
       model          : device model; an IE3k selects sdflash: when present — a
                        fast path used before the probe resolves.
 
-    Never returns crashinfo:/ro/non-disk. Returns None when nothing applies."""
-    disks = [f for f in file_systems
-             if f["type"] == "disk" and "rw" in f["flags"]
-             and "crashinfo:" not in f["prefixes"]]
-    prefixes = {p for f in disks for p in f["prefixes"]}
+    Never returns crashinfo:/ro/non-disk, but a writable disk that merely
+    lists crashinfo: as one alias of several (Catalyst 8000V publishes
+    "bootflash: flash: crashinfo:" as one row) still qualifies through its
+    other prefixes. Returns None when nothing applies."""
+    disks = _writable_disks(file_systems)
+    prefixes = {p for f in disks for p in selectable_prefixes(f)}
     if preferred_fs and preferred_fs in prefixes:
         return preferred_fs
     if guest_share_fs and guest_share_fs in prefixes:
@@ -164,8 +194,25 @@ ROOT_COPY_TMP_SUFFIX = ".iris-tmp"
 # Cisco image-artifact names only — anchored on the platform image prefix so we
 # never match unrelated files. Plus the literal packages.conf. Either may also
 # carry ROOT_COPY_TMP_SUFFIX (a root-copy replacement's own in-flight name).
+#
+# This is a DELETION allowlist, so a prefix is added only for a family the
+# agent stages on and whose artifact names were read off real hardware:
+#   cat9k   Catalyst 9300 (cat9k_iosxe .bin/.conf, cat9k-*.pkg)
+#   ie3x00  IE-3x00 (ie3x00-universalk9 .bin)
+#   c8000v  Catalyst 8000V (c8000v-universalk9 .bin; the install-mode set is
+#           c8000v-mono-universalk9 / c8000v-rpboot / c8000v-firmware_* .pkg
+#           plus packages.conf — `dir bootflash:` on a lab C8000V, 2026-09-10)
+# Other Catalyst 8000 hardware (C8200/C8300/C8500) is deliberately NOT listed:
+# its image prefixes have not been confirmed on a box.
+#
+# A .pkg set that is the INSTALLED image (a C8000V deployed from the ISO
+# reports 'System image file is "cdrom0:packages.conf"' while the committed
+# packages sit at bootflash: root) is never a candidate: detect_mode() reads
+# that as install mode, and iris_agent._reclaim_for_mode only consults this
+# allowlist in bundle mode, where the running image is a .bin and the caller
+# protects it (plus the BOOT target and IRIS's own copies) by name.
 _ARTIFACT_RE = re.compile(
-    r"^(cat9k|ie3x00)[A-Za-z0-9._-]*\.(bin|pkg|conf)(\.iris-tmp)?$")
+    r"^(cat9k|ie3x00|c8000v)[A-Za-z0-9._-]*\.(bin|pkg|conf)(\.iris-tmp)?$")
 _TMP_PACKAGES_CONF = "packages.conf" + ROOT_COPY_TMP_SUFFIX
 
 

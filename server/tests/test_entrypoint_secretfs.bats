@@ -121,6 +121,83 @@ teardown() { rm -rf "$TMP"; }
   [ -f "$TMP/run/tls/cert.pem" ]
 }
 
+@test "entrypoint cleanly skips an absent instruction signing key" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TMP/run/instr/signing-key" ]
+}
+
+@test "entrypoint decrypts an optional instruction signing key to mode 0600" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/instr"
+  printf 'AGEFAKE\nfixture-runtime-content\n' \
+    > "$TMP/config/instr/signing-key.age"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMP/run/instr/signing-key")" = \
+    "fixture-runtime-content" ]
+  [ "$(stat -c '%a' "$TMP/run/instr/signing-key")" = "600" ]
+  [ ! -e "$TMP/config/instr/signing-key" ]
+}
+
+@test "entrypoint treats a corrupt present instruction signing key as fatal" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/instr" "$TMP/run/instr"
+  printf 'stale-fixture-content\n' > "$TMP/run/instr/signing-key"
+  printf 'NOT-AGEFAKE\ncorrupt\n' > "$TMP/config/instr/signing-key.age"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"instruction signing key"* ]]
+  [[ "$output" == *"fail closed"* ]]
+  [ ! -e "$TMP/run/instr/signing-key" ]
+}
+
+@test "entrypoint rejects every nonregular instruction signing key ciphertext without opening it" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/instr" "$TMP/run/instr"
+  target="$TMP/regular-target"
+  printf 'AGEFAKE\nfixture-runtime-content\n' > "$target"
+  for kind in directory regular-symlink dangling-symlink fifo; do
+    python3 - "$TMP/config/instr/signing-key.age" <<'PY'
+import os, shutil, stat, sys
+path = sys.argv[1]
+try:
+    mode = os.lstat(path).st_mode
+except FileNotFoundError:
+    pass
+else:
+    if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+PY
+    case "$kind" in
+      directory) mkdir "$TMP/config/instr/signing-key.age" ;;
+      regular-symlink) ln -s "$target" "$TMP/config/instr/signing-key.age" ;;
+      dangling-symlink) ln -s "$TMP/missing-target" "$TMP/config/instr/signing-key.age" ;;
+      fifo) mkfifo "$TMP/config/instr/signing-key.age" ;;
+    esac
+    printf 'stale-fixture-content\n' > "$TMP/run/instr/signing-key"
+    run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" \
+        IRIS_LOG="$TMP/log" IRIS_RUN="$TMP/run" \
+        IRIS_AGE_BIN="$TMP/fake-age" IRIS_AGE_KEY_FILE="$TMP/agekey" \
+        SKIP_SUPERVISE=1 bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+    [ "$status" -ne 0 ]
+    [ "$output" = "FATAL: instruction signing key ciphertext must be a regular non-symlink file (fail closed)" ]
+    [ ! -e "$TMP/run/instr/signing-key" ]
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Console cert override + CA trust bundle (server TLS trust feature).
 # The gui-cert build is best-effort BY DESIGN: a corrupt override must never

@@ -95,11 +95,10 @@
 # rewrite below replaced the listing+targeted-delete design with three
 # unconditional harddisk: root globs, hardware-proven safe -- see
 # sweep_verify_request()'s comment.) The safety reason stands on its own:
-# there is no interactive transport here to react to a login's output before
-# it ends (lab/xr-run.sh pipes the whole request in and reads the whole
-# transcript back only once the session is over; making it react mid-stream
-# is out of this script's own scope), so "adjudicate deactivate, THEN decide
-# whether to compose and send anything destructive" can only happen BETWEEN
+# this script adjudicates the captured output only after a login ends.
+# lab/xr-run.sh waits for prompts between commands but does not interpret
+# their results or change the prepared request, so "adjudicate deactivate,
+# THEN decide whether to compose and send anything destructive" can only happen BETWEEN
 # two separate logins -- never within a single one, no matter what CLI
 # syntax the destructive step itself uses. At most two logins is still a
 # large win over the old per-step design's 6-11: worst case, a wedged router
@@ -423,6 +422,18 @@ files_line_match() {
 #     for free, since that line rides the SAME prompt.
 #   - XR timestamp lines, shaped "<weekday> <month> <day> <time> UTC"
 #     (`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$`).
+# IRIS's OWN verification scratch directory is stripped too. The agent
+# creates it as tempfile.TemporaryDirectory(prefix='.iris-verify-',
+# dir=work_dir) (device/agent/instr.py) and normally removes it on context
+# exit -- but an agent killed mid-verification orphans it, and killing the
+# agent is precisely what this teardown does when it deactivates the app.
+# It then cannot be removed at all: the sweep's iris-work/* glob does not
+# match a dot-entry, and XR has no prompt-free directory removal (see
+# sweep_verify_request()'s comment). Left counted, a force teardown failed
+# on residue IRIS itself created, and no operator action could clear it.
+# This is the same ruling already applied to an empty iris-work: IRIS's own
+# inert artifact is not a leftover. Anything NOT matching this exact prefix
+# still counts, so real residue is never waved through (issue #223).
 # Anything else surviving that strip still counts as a real entry (this
 # hardware's nonempty rows are shaped
 # "<inode> <perms>. <n> <size> <date> <name>", same family as [5/5]'s own
@@ -438,6 +449,7 @@ workdir_has_entries() {
     | grep -vE '^[0-9]+ kbytes total \([0-9]+ kbytes free\)$' \
     | grep -vE '^[^[:space:]]*#' \
     | grep -vE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$' \
+    | grep -vE '(^|[[:space:]])\.iris-(verify|krl)-[A-Za-z0-9_]+$' \
     | grep -q .
 }
 

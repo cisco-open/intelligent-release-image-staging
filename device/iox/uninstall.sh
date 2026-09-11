@@ -11,7 +11,8 @@
 #     and with it $CAF_APP_PERSISTENT_DIR/iris where aria2 stages images and
 #     the --on-bt-download-complete hook leaves its <image>.peers.json
 #     snapshots; the hook program itself lives in the app image)
-#   - remove the app-hosting appid + the IRIS VLAN/SVI
+#   - remove the app-hosting appid + the IRIS VLAN/SVI (or, on a router,
+#     the IRIS VirtualPortGroup and, for router-nat, its NAT footprint)
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
 #     runtime for its plain-copy placement (no-op if absent — IOx has no 60s
 #     timer)
@@ -21,14 +22,17 @@
 #     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
 #     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
-# idempotently; the last two are generic + a delivered artifact):
-#   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
-#   the staged OS image on the selected IOS disk. Successful cleanup is
+# idempotently; the rest are generic + a delivered artifact):
+#   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable
+#   (onboarding no longer pushes anything over SCP -- the device fetches its
+#   package over HTTPS -- but the agent's runtime guest-share hand-off used
+#   the device's SCP server, and whether IRIS or the operator enabled it is
+#   not recorded; see issue #228), the staged OS image on the selected IOS
+#   disk. Successful cleanup is
 #   persisted to startup-config so a reload cannot restore IRIS configuration.
-# IRIS_FORCE_AGENT_ONLY=1 forces the same reduction MANAGEMENT_TYPE=inband
-#   already applies, regardless of MANAGEMENT_TYPE: preserve the operator's
-#   VLAN/SVI network, but remove appid, applets, IRISQ, and IRIS PKI because
-#   those globals carry IRIS's own name.
+# In a real run, recorded versus force-agent-only authority comes exclusively
+# from the controller ready frame. IRIS_FORCE_AGENT_ONLY affects dry-run text
+# only and cannot authorize teardown.
 #
 # Env (subset of the installer's, supplied by OnboardService._build_env):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] [VLAN=666]
@@ -55,6 +59,15 @@ if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
   exit 1
 fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
+# Dry-run text for the block-emptying lines (issue #230): the live teardown
+# renders them from the deployment record; here they mirror the installer's
+# own defaults so an operator reads the same sequence the router will get.
+APP_GATEWAY="${APP_GATEWAY:-${SVI_IP:-<app-gateway>}}"
+case "$MANAGEMENT_TYPE" in
+  router-routed|router-nat)
+    VNIC_REMOVAL="gateway0 virtualportgroup ${VPG_NUMBER:-<vpg>} guest-interface 0" ;;
+  *) VNIC_REMOVAL="AppGigabitEthernet trunk" ;;
+esac
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 # See header: force preserves only the operator's VLAN/SVI network. Everything
@@ -73,6 +86,64 @@ TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_STAGE_DIR="${TARGET_FS}guest-share/iris"
 APPID=iris
 
+_dry_single_line() {
+  case "$2" in *$'\n'*|*$'\r'*)
+    echo "ERROR: $1 must be a single line" >&2
+    exit 2 ;;
+  esac
+}
+
+_dry_fs() {
+  _dry_single_line "$1" "$2"
+  [[ "$2" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] || {
+    echo "ERROR: $1 must be an IOS filesystem prefix" >&2
+    exit 2
+  }
+}
+
+_dry_validate() {
+  case "$MANAGEMENT_TYPE" in routed|inband|router-routed|router-nat) ;; *)
+    echo "ERROR: MANAGEMENT_TYPE must be routed, inband, router-routed, or router-nat" >&2; exit 2 ;;
+  esac
+  case "$FORCE_AGENT_ONLY" in 0|1) ;; *)
+    echo "ERROR: IRIS_FORCE_AGENT_ONLY must be 0 or 1" >&2; exit 2 ;;
+  esac
+  if { [ "$MANAGEMENT_TYPE" = router-routed ] || [ "$MANAGEMENT_TYPE" = router-nat ]; } \
+      && [ "$FORCE_AGENT_ONLY" != 1 ]; then
+    # The router footprint is only removed under a record, and the record
+    # names the group; a dry run must say what is missing rather than die on
+    # an unbound variable inside a heredoc.
+    [[ "${VPG_NUMBER:-}" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] && [ "$VPG_NUMBER" -le 31 ] || {
+      echo "ERROR: VPG_NUMBER must be an integer from 0 to 31" >&2; exit 2; }
+    if [ "$MANAGEMENT_TYPE" = router-nat ]; then
+      [ -n "${NAT_INTERFACE:-}" ] || { echo "ERROR: router-nat needs NAT_INTERFACE" >&2; exit 2; }
+      [ -n "${APP_IP:-}" ] || { echo "ERROR: router-nat needs APP_IP for the swarm-port translation" >&2; exit 2; }
+      [[ "${BT_LISTEN_PORT:-6881}" =~ ^[0-9]+$ ]] && [ "${BT_LISTEN_PORT:-6881}" -ge 1 ] \
+        && [ "${BT_LISTEN_PORT:-6881}" -le 65535 ] || {
+        echo "ERROR: BT_LISTEN_PORT must be an integer from 1 to 65535" >&2; exit 2; }
+    fi
+  fi
+  if [ "$MANAGEMENT_TYPE" = routed ] && [ "$FORCE_AGENT_ONLY" != 1 ]; then
+    [[ "$VLAN" =~ ^[0-9]+$ ]] && [ "${#VLAN}" -le 4 ] &&
+      [ "$VLAN" -ge 1 ] && [ "$VLAN" -le 4094 ] || {
+        echo "ERROR: VLAN must be an integer from 1 to 4094" >&2; exit 2;
+      }
+  fi
+  _dry_single_line PKG "$PKG"
+  [[ "$PKG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+    echo "ERROR: PKG must be a safe basename" >&2; exit 2;
+  }
+  _dry_fs PKG_FS "$PKG_FS"
+  _dry_fs TARGET_FS "$TARGET_FS"
+  if [ -n "$SHARE_IOS_PATH" ]; then
+    _dry_single_line SHARE_IOS_PATH "$SHARE_IOS_PATH"
+    [[ "$SHARE_IOS_PATH" =~ ^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] &&
+      [[ "/${SHARE_IOS_PATH#*:}/" != *"/../"* ]] || {
+        echo "ERROR: SHARE_IOS_PATH must be a safe IOS filesystem path" >&2; exit 2;
+      }
+  fi
+}
+
 config_cleanup() {
 # Every EEM applet the SHARED agent may have created (the IOx agent runs the
 # same reclaim/copy-root code as Guest Shell over its SSH-to-self CLI): the
@@ -87,6 +158,12 @@ config_cleanup() {
 # preflight refuses while any of them is present.
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
+app-hosting appid $APPID
+ no app-resource docker
+ no app-resource profile custom
+ no app-default-gateway $APP_GATEWAY guest-interface 0
+ no app-vnic $VNIC_REMOVAL
+exit
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
@@ -102,7 +179,55 @@ yes
 EOF
 return
 fi
+if [ "$MANAGEMENT_TYPE" = "router-routed" ] || [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+# Router: remove the VirtualPortGroup and NAT footprint the install created,
+# in device/router-uninstall.sh's order and under its ownership rules: the
+# swarm-port static translation and the overload rule go before the ACL they
+# reference (IOS keeps an overload rule while translations still use it, and
+# the residue probe reports that rather than guessing); a NAT outside
+# interface is only un-marked when the record says IRIS marked it.
 cat <<EOF
+app-hosting appid $APPID
+ no app-resource docker
+ no app-resource profile custom
+ no app-default-gateway $APP_GATEWAY guest-interface 0
+ no app-vnic $VNIC_REMOVAL
+exit
+no app-hosting appid $APPID
+no event manager applet IRIS-AGENT
+no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-RECLAIM
+no event manager applet IRIS-RECLAIM-BUNDLE
+EOF
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+cat <<EOF
+no ip nat inside source static tcp $APP_IP ${BT_LISTEN_PORT:-6881} interface $NAT_INTERFACE ${BT_LISTEN_PORT:-6881}
+no ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload
+no ip access-list standard IRIS-NAT-$VPG_NUMBER
+EOF
+  if [ "${NAT_OUTSIDE_OWNED:-0}" = "1" ]; then
+cat <<EOF
+interface $NAT_INTERFACE
+ no ip nat outside
+exit
+EOF
+  fi
+fi
+cat <<EOF
+no interface VirtualPortGroup$VPG_NUMBER
+no ip http client secure-trustpoint IRIS
+no crypto pki trustpoint IRIS
+yes
+EOF
+return
+fi
+cat <<EOF
+app-hosting appid $APPID
+ no app-resource docker
+ no app-resource profile custom
+ no app-default-gateway $APP_GATEWAY guest-interface 0
+ no app-vnic $VNIC_REMOVAL
+exit
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
@@ -117,11 +242,14 @@ EOF
 }
 
 if [ "$DRY" -eq 1 ]; then
+  _dry_validate
   echo "[1/4] remove app: $APPID"
   printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
     "$APPID" "$APPID" "$APPID"
   if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
     echo "[2/4] remove IRIS configuration"
+  elif [ "$MANAGEMENT_TYPE" = "router-routed" ] || [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+    echo "[2/4] remove IRIS configuration and VirtualPortGroup $VPG_NUMBER"
   else
     echo "[2/4] remove IRIS configuration and VLAN $VLAN"
   fi
@@ -136,116 +264,108 @@ if [ "$DRY" -eq 1 ]; then
     echo "delete /force /recursive $SHARE_IOS_PATH/iris"
   fi
   echo "delete /force /recursive $IRIS_STAGE_DIR"
-  echo "[4/4] verify cleanup and save"
-  echo "copy running-config startup-config"
+  if [ "$FORCE_AGENT_ONLY" = 1 ]; then
+    echo "[4/4] verify cleanup"
+  else
+    echo "[4/4] verify cleanup and save"
+    echo "copy running-config startup-config"
+  fi
   exit 0
 fi
 
-: "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
-: "${DEVICE_PASS:?set DEVICE_PASS}"
-if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "FORCE: no deployment record; remove IRIS app, files, applets, IRISQ and IRIS PKI; preserve operator VLAN/SVI"
-else
-  # Only a record-driven teardown removes Vlan$VLAN, so only it needs the number.
-  # Demanding one in force mode re-strands the record-less device this mode
-  # exists to rescue -- a bare fleet row carries no vlan at all.
-  [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the device's fleet row is" \
-    "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
-fi
-RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }
-app_state() { printf 'show app-hosting list\n' | RUN 2>/dev/null | awk -v a="$APPID" '$1==a{print $2}'; }
+# Import the one strict framed-protocol implementation from the companion
+# recipe.  Library mode is honored only while sourced; executing install.sh
+# with a forged environment cannot bypass its controller handoff.
+IRIS_IOX_RECIPE_LIBRARY=1
+IRIS_IOX_RECIPE_ACTION=uninstall
+# shellcheck source=device/iox/install.sh
+. "$HERE/install.sh"
+unset IRIS_IOX_RECIPE_LIBRARY
 
-# A deployment record binds this teardown to one physical device. Verify the
-# live processor board ID against the record BEFORE the first destructive
-# command (mirrors device/router-uninstall.sh and the installer's own guard):
-# whatever answers at DEVICE_IP is not necessarily the box the record was
-# written for -- overwhelmingly because it was rebuilt or replaced, which
-# keeps the address and the device id but gets a fresh board ID. Force mode
-# is the record-less rescue path and has no identity to compare against.
-EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
-if [ "$FORCE_AGENT_ONLY" != "1" ] && [ -n "$EXPECTED_DEVICE_IDENTITY" ]; then
-  VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)" || VERSION_OUT=""
-  LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
-    | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
-  if [ -z "$LIVE_IDENTITY" ]; then
-    echo "ERROR: could not read the processor board ID from $DEVICE_IP (show version returned no identity); refusing to modify it" >&2
-    echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY'; check reachability and device credentials, then retry" >&2
-    exit 1
+on_signal() {
+  if [ "$PENDING_SIGNAL_RC" -eq 0 ]; then
+    PENDING_SIGNAL_REASON="$1"
+    PENDING_SIGNAL_RC="$2"
   fi
-  if [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
-    echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
-    echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '$LIVE_IDENTITY'" >&2
-    echo "  If replaced, use Force to remove IRIS artifacts while preserving operator VLAN/SVI, or re-add the device." >&2
-    exit 1
+  if [ "$REQUEST_IN_FLIGHT" -eq 1 ]; then
+    return 0
   fi
-fi
+  SIGNAL_REASON="$PENDING_SIGNAL_REASON"
+  exit "$PENDING_SIGNAL_RC"
+}
+on_exit() {
+  local primary=$? reason final
+  trap '' TERM INT HUP
+  trap - EXIT
+  reason="${SIGNAL_REASON:-$([ "$primary" -eq 0 ] && echo success || echo error)}"
+  if recipe_finalize "$reason" "$primary"; then final=0; else final=$?; fi
+  if [ "$final" -eq 0 ]; then
+    echo "undeploy complete: ${DEVICE_IP:-device}"
+  fi
+  exit "$final"
+}
+trap on_exit EXIT
+trap 'on_signal term 143' TERM
+trap 'on_signal int 130' INT
+trap 'on_signal hup 129' HUP
 
-echo "[1/4] remove app: $APPID"
-# Idempotent + order-tolerant: each step is a no-op (harmless error, swallowed)
-# if the app is already past that state. uninstall frees the app's persist-disk.
-printf 'app-hosting stop appid %s\n' "$APPID" | RUN >/dev/null 2>&1 || true
-sleep 4
-printf 'app-hosting deactivate appid %s\n' "$APPID" | RUN >/dev/null 2>&1 || true
-sleep 4
-printf 'app-hosting uninstall appid %s\n' "$APPID" | RUN >/dev/null 2>&1 || true
-# Poll until the app-hosting entry is gone (uninstall is async).
-for _ in $(seq 1 24); do
-  [ -z "$(app_state)" ] && break
-  sleep 5
-done
-st="$(app_state)"
-[ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
+uninstall_recipe() {
+  local out state rc i mode
+  echo "[1/4] remove app: $APPID"
+  if request_capture out command app_stop; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
+  mode="$IPC_MODE"
+  case "$mode" in recorded|force_agent_only) ;; *)
+    echo "ERROR: invalid private IOx controller protocol" >&2; PROTOCOL_BROKEN=1; return 4 ;;
+  esac
+  request_plain command app_deactivate || return $?
+  request_plain command app_uninstall || return $?
 
-if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  for i in $(seq 1 24); do
+    if request_capture out command app_list; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
+    state="$(printf '%s\n' "$out" | awk '$1=="iris"{print $2; exit}')"
+    [ -z "$state" ] && { echo "app removed (poll $i/24)"; break; }
+    [ "$i" -lt 24 ] || { echo "ERROR: IRIS application remains after uninstall" >&2; return 4; }
+  done
+
   echo "[2/4] remove IRIS configuration"
-else
-  echo "[2/4] remove IRIS configuration and VLAN $VLAN"
-fi
-{ echo "configure terminal"; config_cleanup; echo "end"; } | RUN >/dev/null
+  request_plain command cleanup_config || return $?
+  echo "[3/4] remove IRIS files"
+  request_plain command cleanup_files || return $?
+  echo "[4/4] verify cleanup and save"
+  if request_capture out command cleanup_config_probe; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
+  # The closed controller probe includes a VLAN line only when that session is
+  # authorized to remove its bound routed VLAN. The real recipe deliberately
+  # receives no target values in its environment, so treat any VLAN returned
+  # by that filtered probe as residue instead of consulting dry-run defaults.
+  if printf '%s\n' "$out" | grep -Eq '^[[:space:]]*(iris[[:space:]]+[A-Za-z0-9_-]+|app-hosting appid iris|event manager applet IRIS-|logging ((buffered|console|monitor)[[:space:]]+)?discriminator IRISQ|ip http client secure-trustpoint IRIS|crypto pki trustpoint IRIS|interface Vlan[0-9]+|vlan[[:space:]]+[0-9]+|interface VirtualPortGroup[0-9]+|ip access-list standard IRIS-NAT-[0-9]+|ip nat inside source (list IRIS-NAT-[0-9]+|static tcp))([[:space:]]|$)'; then
+    echo "ERROR: IRIS configuration remains after cleanup" >&2
+    return 4
+  fi
+  if request_capture out command cleanup_stage_probe; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
+  # The controller filters package rows to its bound PKG and certificate
+  # names. Match every validated 1..128-character basename in those IOS rows,
+  # including custom names; never infer the real package from this environment.
+  local file_row='^[[:space:]]*[0-9]{1,20}[[:space:]]+[-d][rwx-]{1,9}[[:space:]]+[[:print:][:blank:]]{1,256}[[:space:]]+[A-Za-z0-9][A-Za-z0-9._-]{0,127}[[:space:]]*$'
+  if printf '%s\n' "$out" | grep -Eq "$file_row|(^|[[:space:]/:])(iris-arm64\.tar|iris-ca\.pem|iris-catalog\.pem|iris-[0-9a-f]{32}\.tar)([[:space:]]|$)|Directory of [^[:space:]]*/iris[[:space:]]*$|^[[:space:]]*[0-9]+[[:space:]]+[-d][rwx-]+[[:space:]].*[[:space:]]iris[[:space:]]*$|iris-staged\.bin(\.part)?|iris-probe\.txt"; then
+    echo "ERROR: IRIS temporary files remain after cleanup" >&2
+    return 4
+  fi
 
-echo "[3/4] remove IRIS files"
-printf 'delete /force %s%s\ndelete /force %siris-catalog.pem\n' \
-  "$PKG_FS" "$PKG" "$PKG_FS" | RUN >/dev/null 2>&1 || true
-if [ -n "$SHARE_IOS_PATH" ]; then
-  # our transient staging files at the share ROOT (name-prefix isolation),
-  # plus the legacy iris/ subdir from earlier builds. Never the share itself.
-  printf 'delete /force %s/iris-staged.bin\ndelete /force %s/iris-staged.bin.part\ndelete /force %s/iris-probe.txt\ndelete /force /recursive %s/iris\n\n' \
-    "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" | RUN >/dev/null 2>&1 || true
-fi
-# the scp-push staging dir (IE-3400 path, and the C9300 share-mount fallback).
-# Recursive so a mid-transfer scratch file cannot keep the directory alive;
-# guest-share itself is never touched.
-printf 'delete /force /recursive %s\n\n' "$IRIS_STAGE_DIR" | RUN >/dev/null 2>&1 || true
+  # The controller rejects save for force_agent_only and permits it for a
+  # record-bound teardown.  The ready binding, not IRIS_FORCE_AGENT_ONLY or
+  # any other environment claim, is authoritative.  Ask the controller which
+  # path is permitted by attempting save only when its current ready frame is
+  # recorded; the protocol helper exposes no mutable binding to this shell.
+  # The controller-side closed operation policy makes a forged choice fail.
+  if [ "$mode" = recorded ]; then
+    request_plain command save || return $?
+  else
+    echo "startup-config not saved: force agent-only teardown"
+  fi
+  return 0
+}
 
-echo "[4/4] verify cleanup and save"
-if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  # VLAN/SVI preserved (operator network); IRIS-named artifacts removed, so
-  # they are verified here too.
-  inc="app-hosting appid $APPID|applet IRIS-|crypto pki trustpoint IRIS|discriminator IRISQ"
-  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^crypto pki trustpoint IRIS *\$|IRISQ"
-else
-  inc="app-hosting appid $APPID|applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS"
-  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$"
-fi
-out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include %s\n' \
-        "$inc" | RUN | grep -v "#" || true)"
-left="$(printf '%s\n' "$out" | grep -E "$artifact_re" || true)"
-# the staging dir is checked separately: `dir` on a removed path errors, which
-# is the success case, so only a real listing counts as residue.
-stage_out="$(printf 'dir %s\n' "$IRIS_STAGE_DIR" | RUN 2>/dev/null | grep -v "#" || true)"
-case "$stage_out" in
-  *"Directory of "*) left="$left
-$IRIS_STAGE_DIR still present" ;;
-esac
-if [ -n "$left" ]; then
-  echo "ERROR: artifacts still present after undeploy:" >&2
-  printf '%s\n' "$left" >&2
-  exit 1
-fi
-save_out="$(printf 'copy running-config startup-config\n' | RUN 2>&1 || true)"
-case "$save_out" in
-  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP" ;;
-  *) echo "ERROR: cleanup succeeded but saving startup-config failed:" >&2
-     printf '%s\n' "$save_out" >&2
-     exit 1 ;;
-esac
+set +e
+uninstall_recipe
+_recipe_rc=$?
+exit "$_recipe_rc"

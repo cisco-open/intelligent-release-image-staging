@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import time
+import pytest
 
 import auth
 import keyed_state
@@ -152,6 +153,32 @@ def test_quarantined_device_endpoint_is_blocked(tmp_path):
     assert peer_enforcement.read_status(p["enforcement"])["desired_ip_count"] == 1
 
 
+def test_canonical_and_legacy_quarantine_share_reconciler_enforcement(
+        tmp_path):
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    document = peer_policy.base_document()
+    document["quarantined_devices"] = {
+        "canonical": True, "seeder": True}
+    document["assignments"]["legacy"] = peer_policy.RESERVED_QUARANTINE
+    peer_policy.validate_document(document)
+    peer_policy._atomic_write_json(p["policy"], document)
+    peer_policy._atomic_write_json(p["lkg"], document)
+    peer_endpoints.record_endpoint(
+        p["endpoints"], _dev("canonical"), "10.0.0.7", 6881, 1000.0)
+    peer_endpoints.record_endpoint(
+        p["endpoints"], _dev("legacy"), "10.0.0.8", 6881, 1000.0)
+    peer_endpoints.record_endpoint(
+        p["endpoints"], auth.Principal("service", "seeder"),
+        "10.0.0.9", 6881, 1000.0)
+
+    status = rec.run_once()
+
+    assert aria.calls[-1] == ["10.0.0.7", "10.0.0.8"]
+    assert status["state"] == "enforced"
+    assert status["desired_ip_count"] == 2
+
+
 def test_corrupt_endpoints_retain_blocklist_and_report_fail_closed(tmp_path):
     aria = FakeAria()
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
@@ -164,7 +191,7 @@ def test_corrupt_endpoints_retain_blocklist_and_report_fail_closed(tmp_path):
     status = rec.run_once()
     assert aria.calls == [["10.0.0.9"]]
     assert status["state"] == "fail_closed"
-    assert status["last_error"] == "EndpointStoreError"
+    assert status["last_error"] == "endpoint_store_unavailable"
     assert status["desired_ip_count"] == 1
 
 
@@ -323,6 +350,152 @@ def test_pending_degrades_until_durable(tmp_path):
 # Outbox export, revision order, ack watermark, restart replay
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("failure", [None, "audit", "emit", "emit_raises", "no_audit"])
+def test_final_repair_future_ack_export_and_restart(tmp_path, failure):
+    rec, p, audit_calls = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    committed = _quarantine(p["policy"], p["lkg"], "a", 1000)
+    future = committed["revision"] + 3
+    status = peer_enforcement.build_status("enforced", "s", "h", None, 0, 1000,
+                                           last_operation_exported_revision=future)
+    peer_enforcement.write_status(p["enforcement"], status)
+    if failure == "audit":
+        rec._audit_export = lambda entries: (_ for _ in ()).throw(RuntimeError("audit"))
+    if failure == "emit":
+        rec._emit_policy_event = lambda *args: False
+    if failure == "emit_raises":
+        rec._emit_policy_event = lambda *args: (_ for _ in ()).throw(RuntimeError("emit"))
+    if failure == "no_audit":
+        rec._audit_export = None
+    result = rec.run_once()
+    assert result["last_operation_exported_revision"] == (0 if failure else committed["revision"])
+    # A newly constructed reconciler must replay failed work and retain earned ack.
+    restarted = tracker.TrackerReconciler(
+        (p["policy"], p["lkg"]), p["endpoints"], p["enforcement"], FakeAria(),
+        peer_endpoints.PendingEndpointQueue(), lambda: [], lambda: set(),
+        audit_export=lambda entries: audit_calls.append(entries), now=lambda: 1001)
+    assert restarted.run_once()["last_operation_exported_revision"] == committed["revision"]
+
+
+@pytest.mark.parametrize("existing_epoch", [None, "a" * 32])
+@pytest.mark.parametrize("supply_status", [False, True])
+def test_final_repair_future_ack_consecutive_mutations_rotate_epoch(tmp_path, existing_epoch, supply_status):
+    from pathlib import Path
+    rec, p, audit_calls = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    committed = _quarantine(p["policy"], p["lkg"], "a", 1000)
+    if existing_epoch:
+        committed["operation_ack_epoch"] = existing_epoch
+    else:
+        committed.pop("operation_ack_epoch", None)
+    Path(p["policy"]).write_text(json.dumps(committed))
+    future = committed["revision"] + 2
+    status = peer_enforcement.build_status("enforced", "s", "h", None, 0, 1000,
+                                           last_operation_exported_revision=future)
+    if existing_epoch:
+        status["operation_ack_epoch"] = existing_epoch
+    peer_enforcement.write_status(p["enforcement"], status)
+    options = dict(actor="test", now=1000, acked_revision=status if supply_status else 0)
+    before = Path(p["policy"]).read_bytes()
+    previews = [peer_policy.define_role(p["policy"], p["lkg"], "boat", {},
+                                       dry_run=True, **options) for _ in range(2)]
+    assert previews[0].get("operation_ack_epoch") not in (None, existing_epoch)
+    # Bookkeeping IDs may vary; the operator preview and confirmation stay stable.
+    blasts = [peer_policy.blast_radius(committed, preview, 0) for preview in previews]
+    assert blasts[0] == blasts[1]
+    assert Path(p["policy"]).read_bytes() == before
+    for name in ("boat", "fiber", "copper"):
+        current = peer_policy.define_role(p["policy"], p["lkg"], name, {}, **options)
+        assert peer_policy.effective_acked(current, status) == 0
+    assert len(current["operation_outbox"]) == 4
+    exported = rec.run_once()
+    assert exported["last_operation_exported_revision"] == current["revision"]
+    assert exported["operation_ack_epoch"] == current["operation_ack_epoch"]
+    assert [e["revision"] for e in audit_calls[-1]] == [e["revision"] for e in current["operation_outbox"]]
+    after = peer_policy.define_role(p["policy"], p["lkg"], "last", {}, "test", 1001,
+                                   acked_revision=peer_enforcement.read_status(p["enforcement"]))
+    assert len(after["operation_outbox"]) == 1
+
+
+def test_final_repair_exact_predecessor_restore_cannot_recreate_epoch(tmp_path):
+    from pathlib import Path
+    rec, p, _ = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    _quarantine(p["policy"], p["lkg"], "a", 1000)
+    prior = Path(p["policy"]).read_bytes()
+    first = peer_policy.define_role(p["policy"], p["lkg"], "boat", {}, "test", 1001)
+    old_status = rec.run_once()
+    Path(p["policy"]).write_bytes(prior)
+    repeated = peer_policy.define_role(p["policy"], p["lkg"], "boat", {}, "test", 1001)
+    assert repeated["revision"] == first["revision"]
+    assert repeated["operation_ack_epoch"] != first["operation_ack_epoch"]
+    assert peer_policy.effective_acked(repeated, old_status) == 0
+    assert len(peer_policy.pending_exports(repeated, old_status)) == 2
+
+
+def test_final_repair_epoch_bookkeeping_keeps_confirmed_previews_stable(tmp_path):
+    from pathlib import Path
+    _, p, _ = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    prior = _quarantine(p["policy"], p["lkg"], "a", 1000)
+    before = {str(path): path.read_bytes() for path in tmp_path.rglob("*")
+              if path.is_file() and not path.name.endswith(".lock")}
+    previews = [peer_policy.set_qos(p["policy"], p["lkg"], {"numwant": 20},
+                                    "test", 1001, dry_run=True) for _ in range(2)]
+    blasts = [peer_policy.blast_radius(prior, candidate, 0) for candidate in previews]
+    assert blasts[0].requires_confirmation and blasts[0].confirm_token
+    assert blasts[0] == blasts[1]
+    assert previews[0]["operation_ack_epoch"] != previews[1]["operation_ack_epoch"]
+    assert {str(path): path.read_bytes() for path in tmp_path.rglob("*")
+            if path.is_file() and not path.name.endswith(".lock")} == before
+    def confirm(old, candidate):
+        assert peer_policy.confirm_blast_radius(old, candidate, 0, blasts[0].confirm_token)
+    committed = peer_policy.set_qos(p["policy"], p["lkg"], {"numwant": 20},
+                                    "test", 1001, precommit=confirm)
+    assert committed["operation_ack_epoch"] not in [p["operation_ack_epoch"] for p in previews]
+
+
+@pytest.mark.parametrize("failure_path", ["guarded", "endpoint"])
+def test_final_repair_failure_carry_forward_normalizes_future_ack(tmp_path, monkeypatch, failure_path):
+    rec, p, _ = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    doc = _quarantine(p["policy"], p["lkg"], "a", 1000)
+    peer_enforcement.write_status(p["enforcement"], peer_enforcement.build_status(
+        "enforced", "s", "h", None, 0, 1000, last_operation_exported_revision=10,
+        operation_ack_epoch=doc["operation_ack_epoch"]))
+    if failure_path == "guarded":
+        rec._note_pass_failure(RuntimeError("secret"))
+    else:
+        def corrupt(*args, **kwargs):
+            raise peer_endpoints.EndpointStoreError("corrupt")
+        monkeypatch.setattr(peer_endpoints, "fresh_endpoints", corrupt)
+        rec.run_once()
+    status = peer_enforcement.read_status(p["enforcement"])
+    assert status["last_operation_exported_revision"] == 0
+    assert status["operation_ack_epoch"] == doc["operation_ack_epoch"]
+
+
+def test_final_repair_full_outbox_refusal_then_export_and_prune(tmp_path):
+    from pathlib import Path
+    rec, p, _ = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    doc = _quarantine(p["policy"], p["lkg"], "a", 1000)
+    doc["revision"] = peer_policy.OUTBOX_CAP
+    doc["operation_outbox"] = [dict(doc["operation_outbox"][0], revision=i + 1,
+        event_id="%016x" % i) for i in range(peer_policy.OUTBOX_CAP)]
+    Path(p["policy"]).write_text(json.dumps(doc))
+    old = peer_enforcement.build_status("enforced", "s", "h", None, 0, 1000,
+        last_operation_exported_revision=doc["revision"] + 1,
+        operation_ack_epoch=doc["operation_ack_epoch"])
+    peer_enforcement.write_status(p["enforcement"], old)
+    before = {path: Path(path).read_bytes() for path in (p["policy"], p["lkg"], p["enforcement"])}
+    for dry_run in (False, True):
+        with pytest.raises(peer_policy.OperationBacklogFull):
+            peer_policy.define_role(p["policy"], p["lkg"], "boat", {}, "test", 1001,
+                                   dry_run=dry_run, acked_revision=old)
+        assert {path: Path(path).read_bytes() for path in before} == before
+    status = rec.run_once()
+    assert status["last_operation_exported_revision"] == doc["revision"]
+    committed = peer_policy.define_role(p["policy"], p["lkg"], "boat", {}, "test", 1001,
+                                        acked_revision=status)
+    assert len(committed["operation_outbox"]) == 1
+    assert committed["operation_ack_epoch"] != doc["operation_ack_epoch"]
+
+
 def test_outbox_exports_in_revision_order_and_advances_ack(tmp_path):
     aria = FakeAria()
     rec, p, audit_calls = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
@@ -335,6 +508,18 @@ def test_outbox_exports_in_revision_order_and_advances_ack(tmp_path):
     assert revs[-1] >= 3
     st = peer_enforcement.read_status(p["enforcement"])
     assert st["last_operation_exported_revision"] == revs[-1]
+
+
+def test_malformed_status_watermark_cannot_suppress_export(tmp_path):
+    rec, p, audit_calls = _make_reconciler(tmp_path, FakeAria(), clock=Clock(1000))
+    committed = _quarantine(p["policy"], p["lkg"], "a", 1000)
+    revision = committed["revision"]
+    with open(p["enforcement"], "w") as stream:
+        json.dump({"last_operation_exported_revision": revision}, stream)
+    assert rec._read_acked_revision() == 0
+    rec.run_once()
+    assert [e["revision"] for e in audit_calls[-1]] == [revision]
+    assert peer_enforcement.read_status(p["enforcement"])["last_operation_exported_revision"] == revision
 
 
 def test_multiple_operations_before_poll_all_exported(tmp_path):
@@ -761,7 +946,7 @@ def test_session_probe_exception_never_leaks_secret(tmp_path):
                   "desired_hash"):
         assert SECRET_SENTINEL not in json.dumps(st.get(field))
     # The recorded error, if any, is the exception TYPE name only.
-    assert st.get("last_error") in (None, "_Boom")
+    assert st.get("last_error") in (None, "peer_blocklist_apply_failed")
 
 
 # ---------------------------------------------------------------------------
@@ -835,10 +1020,10 @@ def test_loop_survives_write_status_failure_and_recovers(tmp_path, monkeypatch):
     assert aria.calls[-1] == ["10.0.0.9"]
 
 
-def test_failed_pass_is_recorded_as_degraded_with_error_type(tmp_path,
+def test_failed_pass_is_recorded_as_degraded_with_error_code(tmp_path,
                                                             monkeypatch):
     """When the failure is not in the status writer itself the degraded
-    status (last_error = exception TYPE, never its text) reaches the file, so
+    status (last_error = source-owned operation code) reaches the file, so
     the console does not keep showing a frozen `enforced`."""
     aria = FakeAria()
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
@@ -850,7 +1035,7 @@ def test_failed_pass_is_recorded_as_degraded_with_error_type(tmp_path,
     rec._safe_run()
     status = peer_enforcement.read_status(p["enforcement"])
     assert status["state"] == "degraded"
-    assert status["last_error"] == "RuntimeError"
+    assert status["last_error"] == "peer_reconcile_failed"
     with open(p["enforcement"]) as f:
         assert "secret-bearing" not in f.read()
     monkeypatch.undo()
@@ -902,7 +1087,7 @@ def test_entry_level_corrupt_endpoint_file_is_fail_closed_not_a_crash(tmp_path):
                           "updated_at": 0.0, "endpoints": [row]}}))
         status = rec.run_once()
         assert status["state"] == "fail_closed"
-        assert status["last_error"] == "EndpointStoreError"
+        assert status["last_error"] == "endpoint_store_unavailable"
         assert aria.calls == [["10.0.0.9"]]      # never cleared
 
 
@@ -953,7 +1138,10 @@ def test_unquarantined_device_row_then_ages_out(tmp_path):
     assert rec.run_once()["desired_ip_count"] == 1
 
     def unassign(doc):
-        doc["assignments"].pop("bad", None)
+        membership = doc.get("quarantined_devices", {})
+        membership.pop("bad", None)
+        if not membership:
+            doc.pop("quarantined_devices", None)
     peer_policy.commit_mutation(p["policy"], p["lkg"], "unassign", "bad",
                                 "op", clock.t, unassign)
     status = rec.run_once()

@@ -72,6 +72,35 @@ class MultiCatalog:
         return self.hb_response
 
 
+@pytest.mark.parametrize("sibling_unavailable", [False, True])
+def test_legacy_root_cleanup_protects_assigned_sibling(sibling_unavailable):
+    catalog = MultiCatalog([_img("a"), _img("b")])
+    if sibling_unavailable:
+        catalog.raises.add("b")
+    deps, rec = make_deps(catalog, {"/stage/a.bin": 5, "/stage/b.bin": 5})
+    state = {
+        "schema_version": iris_agent._STATE_SCHEMA,
+        "stage_fs": "flash:",
+        "pending_root_deletes": ["b.bin", "obsolete.bin"],
+        "b": {"root_file": "b.bin", "origin": "downloaded",
+              "done": True, "copied": True, "sha": "b-sha"},
+    }
+    deps = deps._replace(
+        root_present=lambda name, prefix="flash:", expected_size=None:
+            name != "obsolete.bin")
+    iris_agent.run_once(CFG, deps, state)
+    if sibling_unavailable:
+        assert rec["bundle_reclaimed"] == []
+        assert state["pending_root_deletes"] == ["b.bin", "obsolete.bin"]
+        assert any(m == "CLEANUP-PENDING" and "assigned image unavailable" in text
+                   for m, text in rec["emitted"])
+    else:
+        assert rec["bundle_reclaimed"] == [("flash:", ["obsolete.bin"])]
+        assert "pending_root_deletes" not in state
+        assert any(m == "ROOTCOPY-KEPT" and "b.bin is an assigned image" in text
+                   for m, text in rec["emitted"])
+
+
 def make_deps(catalog, sizes, free=9_000_000_000, root_ok=True,
               verify_ok=True, mode="bundle", reclaimables=()):
     """Fake Deps + a `rec` dict of everything the agent did to the device."""
@@ -166,10 +195,11 @@ def test_two_images_both_stage_and_heartbeat_lists_them():
 
 
 def test_single_image_set_behaves_exactly_as_before():
-    # A one-image set must be byte-identical to the pre-multi-image agent:
-    # same return string, same single heartbeat with the same keys (no
-    # staged_image_ids — the server falls back to current_image_id/stage_state
-    # for one-image agents and rollouts), same top-level state bookkeeping.
+    # A one-image set keeps the pre-multi-image staging shape plus the additive
+    # instruction-capability marker: same return string, same single heartbeat
+    # with no staged_image_ids (the server falls back to
+    # current_image_id/stage_state for one-image agents and rollouts), and the
+    # same top-level state bookkeeping.
     cat = MultiCatalog([_img("img1")], ids=["img1"])
     deps, rec = make_deps(cat, {"/stage/img1.bin": 5})
     state = {}
@@ -181,7 +211,9 @@ def test_single_image_set_behaves_exactly_as_before():
     assert set(hb) == {"current_image_id", "free_flash_bytes", "version",
                        "model", "stage_state", "stage_error", "target_fs",
                        "telemetry_enabled", "telemetry_stream_enabled",
-                       "telemetry_observation"}
+                       "telemetry_observation", "instr_protocol"}
+    assert type(hb["instr_protocol"]) is int
+    assert hb["instr_protocol"] == 1
     assert hb["current_image_id"] == "img1"
     assert hb["stage_state"] == "ready"
     # top-level bookkeeping the old agent wrote, still written
@@ -358,6 +390,39 @@ def test_park_still_deletes_a_downloaded_root_copy_when_stage_is_root():
     assert state["img-a"]["parked"] is True
 
 
+@pytest.mark.parametrize("origin", ["adopted", None])
+@pytest.mark.parametrize("protected_first", [False, True])
+@pytest.mark.parametrize("already_parked", [False, True])
+@pytest.mark.parametrize("placed", [False, True])
+def test_park_preserves_shared_root_with_conflicting_provenance(
+        origin, protected_first, already_parked, placed):
+    # Historical ids can claim the same root file. A downloaded record (or
+    # unfinished acquisition) cannot override another record's adoption,
+    # even after that record has already been parked.
+    cat = MultiCatalog([dict(_img("old"), filename="shared.iso")], ids=[])
+    sizes = {"/stage/shared.iso": 5}
+    deps, rec = make_deps(cat, sizes)
+    deps = deps._replace(copy_in_place=True)
+    downloaded = {"download_started": True, "done": placed, "copied": placed}
+    if placed:
+        downloaded.update(root_file="shared.iso", origin="downloaded")
+    protected = {"root_file": "shared.iso", "done": True, "copied": True,
+                 "parked": already_parked}
+    if origin is not None:
+        protected["origin"] = origin
+    entries = [("old", downloaded), ("protected", protected)]
+    if protected_first:
+        entries.reverse()
+    state = {"schema_version": iris_agent._STATE_SCHEMA, **dict(entries)}
+
+    assert iris_agent.run_once(CFG, deps, state) == "no-assignment"
+
+    assert rec["removed"] == []
+    assert sizes["/stage/shared.iso"] == 5
+    assert state["old"]["parked"] is True
+    assert any("shared.iso" in msg for msg in _emits(rec, "ROOTCOPY-KEPT"))
+
+
 def test_park_deletes_an_uncopied_partial_regardless_of_origin_when_stage_is_root():
     # An in-progress (never successfully attested) download has no placement
     # to have provenance about — park's ordinary cleanup of an abandoned
@@ -463,7 +528,11 @@ def test_park_then_unpark_reuses_the_surviving_root_copy():
     deps, rec = make_deps(cat, sizes)
     deps = deps._replace(
         root_present=lambda fname, prefix="flash:", expected_size=None:
-        root_ok.get(fname, True))
+        root_ok.get(fname, True),
+        # aria2 holds every completed download here, so the board #248 re-seed
+        # arm has nothing to repair: what this test counts is re-DOWNLOADS.
+        aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                              if sizes.get(p) else None))
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
     assert rec["copied"] == ["img-a.bin", "img-b.bin"]
@@ -709,7 +778,13 @@ def test_missing_catalog_image_keeps_its_failure_identity():
 ])
 def test_rpc_rejection_reports_error_preserves_siblings_and_retries(image_ids, reply):
     cat = MultiCatalog([_img(iid) for iid in image_ids])
-    deps, rec = make_deps(cat, {"/stage/img-b.bin": 5})
+    sizes = {"/stage/img-b.bin": 5}
+    deps, rec = make_deps(cat, sizes)
+    # The staged sibling is seeding, as aria2 confirms: only the REJECTED add
+    # and its retry belong in rec["aria_added"] (board #248's re-seed arm asks
+    # aria2 first and stays out of the way when it answers).
+    deps = deps._replace(aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                                               if sizes.get(p) else None))
     reject = True
 
     def add(torrent, directory):
@@ -841,7 +916,12 @@ def test_one_image_torrent_fetch_failure_does_not_abort_the_set_tick():
     re-copying ~1.2 GB every tick."""
     cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a", "img-b"])
     cat.torrent_raises = {"img-b"}
-    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    sizes = {"/stage/img-a.bin": 5}
+    deps, rec = make_deps(cat, sizes)
+    # The sibling that completed is seeding, as aria2 confirms, so the board
+    # #248 re-seed arm leaves it alone and this test still counts only img-b.
+    deps = deps._replace(aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                                               if sizes.get(p) else None))
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == \
         "multi:complete,torrent-unavailable"

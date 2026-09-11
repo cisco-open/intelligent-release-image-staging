@@ -75,6 +75,34 @@ setup() {
   [ "$conf_cap" = "$rpc_cap" ]
 }
 
+@test "a supplied router capability binds the exact fail-closed copy order" {
+  cap=0123456789abcdef0123456789abcdef
+  run env IRIS_STAGING_CAPABILITY="$cap" bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  mapfile -t copies < <(printf '%s\n' "$output" | grep '^copy https://')
+  [ "${#copies[@]}" -eq 8 ] || return 1
+  [[ "${copies[0]}" == *"/bootstrap.sh bootflash:guest-share/bootstrap.sh" ]] || return 1
+  [[ "${copies[1]}" == *"/staging/iris-agent-router-1-$cap.conf bootflash:guest-share/iris-agent.conf" ]] || return 1
+  [[ "${copies[2]}" == *"/staging/rpc-secret-$cap bootflash:guest-share/rpc-secret" ]] || return 1
+  [[ "${copies[3]}" == *"/iris-catalog.pem bootflash:guest-share/iris-catalog.pem" ]] || return 1
+  [[ "${copies[4]}" == *"/iris-signers.pem bootflash:guest-share/iris-signers.allowed_signers" ]] || return 1
+  [[ "${copies[5]}" == *"/staging/iris-instructions-router-1-$cap.envelope bootflash:guest-share/iris-instructions.bootstrap" ]] || return 1
+  [[ "${copies[6]}" == *"/staging/bundle-sha256-$cap bootflash:guest-share/bundle.tgz.sha256" ]] || return 1
+  [[ "${copies[7]}" == *"/iris-agent.tgz bootflash:guest-share/bundle.tgz" ]]
+}
+
+@test "router rejects an invalid supplied staging capability before rendering credentials" {
+  run env IRIS_STAGING_CAPABILITY=0123456789abcdef0123456789abcdeG \
+    bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"ERROR: IRIS_STAGING_CAPABILITY must be 32 lowercase hexadecimal characters"* ]] || return 1
+  [[ "$output" != *"catalog_token = deadbeef"* ]]
+}
+
+@test "router installer never recursively removes the live Guest Shell stage" {
+  ! grep -Eq 'delete /force /recursive .*IOS_STAGE|rm -rf .*STAGE' "$INSTALL"
+}
+
 @test "router installer refuses a non-Catalyst-8000 model" {
   MODEL=ISR4451 run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
@@ -194,6 +222,11 @@ apphost_reply() {
 }
 
 case "$cmds" in
+  *"__IRIS_STAGE_WRITABLE__"*)
+    printf '%s\n' "$cmds"
+    [ "${FAKE_STAGE_WRITABLE:-yes}" != yes ] \
+      || echo "__IRIS_STAGE_WRITABLE__"
+    ;;
   *"__IRIS_VERIFY_RUNNING__"*)
     echo "terminal width 512"
     if [ "${FAKE_VERIFY_OMIT_RUNNING:-no}" != "yes" ]; then
@@ -224,6 +257,9 @@ case "$cmds" in
     echo "cisco ${FAKE_MODEL:-C8000V} (x86) processor"
     echo "Processor board ID ${FAKE_DEVICE_IDENTITY:-FOC1234TEST}"
     ;;
+  *"more "*"guest-share/iris/iris-agent.conf"*)
+    [ -n "${FAKE_LKG_KEY:-}" ] && echo "lkg_key = $FAKE_LKG_KEY"
+    ;;
   *"show app-hosting list"*)
     apphost_reply
     ;;
@@ -250,15 +286,51 @@ STUB
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh"
 
   ARTDIR="$BATS_TEST_TMPDIR/artifacts"
-  mkdir -p "$ARTDIR"
+  mkdir -p "$ARTDIR/staging"
   CRTFILE="$BATS_TEST_TMPDIR/crt.pem"
   echo "-----BEGIN CERTIFICATE-----fake-----END CERTIFICATE-----" > "$CRTFILE"
+  TEST_CAP=0123456789abcdef0123456789abcdef
+  export IRIS_STAGING_CAPABILITY="$TEST_CAP"
+  printf 'bundle fixture\n' > "$ARTDIR/iris-agent.tgz"
+  sha256sum "$ARTDIR/iris-agent.tgz" | awk '{print $1}' \
+    > "$ARTDIR/iris-agent.tgz.sha256"
+  printf 'iris-server cert-authority ssh-ed25519 fixture\n' \
+    > "$ARTDIR/iris-signers.pem"
+  printf 'sealed instruction fixture\n' \
+    > "$ARTDIR/staging/iris-instructions-router-1-$TEST_CAP.envelope"
 }
 
 _router_install_run_live() {
   env PATH="$STUBDIR/bin:$PATH" IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
     IRIS_CRT_FILE="$CRTFILE" EXPECTED_DEVICE_IDENTITY=FOC1234TEST \
     bash "$STUBDIR/device/router-install.sh"
+}
+
+@test "router local staging refuses a missing bundle sidecar before device mutation" {
+  _router_install_stub_setup
+  rm -f "$ARTDIR/iris-agent.tgz.sha256"
+  run _router_install_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"ERROR: bundle digest evidence is missing or invalid"* ]] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" 'configure terminal')" -eq 0 ]
+}
+
+@test "router re-onboarding preserves a valid device lkg_key" {
+  _router_install_stub_setup
+  key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FAKE_LKG_KEY="$key" run _router_install_run_live
+  [ "$status" -eq 0 ] || return 1
+  grep -qx "lkg_key = $key" \
+    "$ARTDIR/staging/iris-agent-router-1-$TEST_CAP.conf"
+}
+
+@test "router rejects an echoed writable-stage command without a success line" {
+  _router_install_stub_setup
+  FAKE_EXISTING_GUESTSHELL=yes FAKE_DESTROY_POLLS=1 \
+    FAKE_STAGE_WRITABLE=no run _router_install_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"guest-share/iris is not writable by Guest Shell"* ]]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" 'configure terminal')" -eq 0 ]
 }
 
 # Counts call blocks in a FAKE_COMMAND_LOG whose body contains every given

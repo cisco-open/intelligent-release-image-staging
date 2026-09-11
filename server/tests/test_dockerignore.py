@@ -177,6 +177,40 @@ def test_material_the_image_needs_is_included(rel, patterns):
     assert not excluded(rel, patterns), "%s is needed by server/Dockerfile" % rel
 
 
+SWAGGER_FILES = (
+    "index.html", "swagger-initializer.js", "swagger-ui-bundle.js",
+    "swagger-ui.css", "iris-swagger.css", "iris-openapi32.js",
+    "LICENSE", "NOTICE", "SOURCE.md", "package.json",
+    "swagger-ui-bundle.js.LICENSE.txt",
+)
+
+
+@pytest.mark.parametrize("rel", ["docs/zensical/openapi.yaml"] + [
+    "docs/zensical/swagger/" + name for name in SWAGGER_FILES
+])
+def test_console_canonical_api_docs_are_included(rel, patterns):
+    assert os.path.isfile(os.path.join(ROOT, rel)), rel
+    assert not excluded(rel, patterns), "%s is needed by Dockerfile.console" % rel
+
+
+@pytest.mark.parametrize("rel", [
+    "docs/index.html", "docs/app.js", "docs/zensical/index.md",
+    "docs/zensical/operator-notes.yaml", "docs/zensical/swagger/unreviewed.js",
+    "docs/zensical/swagger/nested/index.html",
+] + [
+    prefix + name
+    for prefix in ("docs/", "docs/zensical/", "docs/zensical/swagger/",
+                   "docs/zensical/swagger/nested/")
+    for name in (".env", "local.env", "private.key", "identity.pem",
+                 "server.crt", "identity.p12", "rpc-secret", "tokens.txt",
+                 "id_rsa", "image.bin", "image.torrent", "package.tar")
+])
+def test_console_api_docs_exceptions_do_not_reinclude_other_material(rel, patterns):
+    # An EOF !docs/ or !swagger/** silently overrides recursive secret rules.
+    # Use planted paths, never real credentials, to exercise last-match wins.
+    assert excluded(rel, patterns), "%s would leak through the docs exceptions" % rel
+
+
 def test_secret_patterns_are_recursive():
     """Root-anchored secret patterns silently miss nested files."""
     with open(os.path.join(ROOT, ".dockerignore"), encoding="utf-8") as f:

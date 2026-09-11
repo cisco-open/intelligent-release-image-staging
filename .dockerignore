@@ -77,7 +77,7 @@ device/iox/out/
 device/xr/out/
 HANDOFF*.md
 
-# Tests and generated documentation are not needed by either runtime role.
+# Tests and documentation other than the Console's API reference stay out.
 server/tests/
 device/tests/
 device/agent/tests/
@@ -85,3 +85,18 @@ device/iox/tests/
 device/xr/tests/
 lab/tests/
 docs/
+
+# Only these public, checked-in API reference files enter the Console image.
+# Keep exceptions exact: re-including a directory can also re-include secrets.
+!docs/zensical/openapi.yaml
+!docs/zensical/swagger/index.html
+!docs/zensical/swagger/swagger-initializer.js
+!docs/zensical/swagger/swagger-ui-bundle.js
+!docs/zensical/swagger/swagger-ui.css
+!docs/zensical/swagger/iris-swagger.css
+!docs/zensical/swagger/iris-openapi32.js
+!docs/zensical/swagger/LICENSE
+!docs/zensical/swagger/NOTICE
+!docs/zensical/swagger/SOURCE.md
+!docs/zensical/swagger/package.json
+!docs/zensical/swagger/swagger-ui-bundle.js.LICENSE.txt

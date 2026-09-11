@@ -38,7 +38,8 @@ Gather these non-secret decisions:
 | Image source | A server-host path or upload source for a Cisco `.bin`, `.iso`, `.tar`, or `.rpm` file. |
 | Device inventory | Management IP, management type, network fields, and optional model for every device. See [Management type](management-type.md). |
 | Device agent | Guest Shell, IOx, or XR appmgr. A Catalyst 9300 can use Guest Shell or IOx with supported app-hosting storage. |
-| Package inputs | Both architecture binaries and required build tools for IOx/XR; the server must serve the packages before onboarding. |
+| Package inputs | Both architecture `aria2c` binaries, `ioxclient`, and the XR build tooling; the server must serve the packages before onboarding. `tools/start-compose-server.sh` lists every missing one before building anything. |
+| Instruction trust roots | A reviewed directory holding exactly two public root keys (`.pub`) from the custody ceremony. The private halves stay with their custodians; no installer or assistant may generate them. Every device package embeds these roots and the build fails closed without them. |
 
 Check out the same IRIS version on every deployment host. For a server already
 in use, identify its Compose project, container names, state volumes, age
@@ -93,6 +94,9 @@ command. Preserve existing server state and device assignments.
 Keep credentials and secrets out of chat, command output, logs, and source
 control. Read local credentials only when a step needs them. Do not copy
 server state, the age identity, or the management private key to the Console.
+Never generate instruction trust roots: ask the operator for the reviewed
+directory holding the two public root keys, and point
+IRIS_INSTRUCTION_ROOTS_DIR at it.
 
 Continue work within the authorized scope. Ask for a missing value only when
 it prevents a safe next step. Obtain approval for a destructive action unless
@@ -118,15 +122,21 @@ set -a
 . server/.env
 set +a
 tools/get-aria2c.sh amd64
-tools/start-compose-server.sh
+IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 docker compose -f server/docker-compose.yml ps
 ```
 
-The helper builds both server images, bootstraps a fresh encrypted store,
-starts both services, and stages both IOx packages. An existing complete
-store is preserved. If an IOx build prerequisite fails, the stack may be
-running even though the helper exits nonzero; correct the prerequisite and
-rerun `tools/provision-iox-packages.sh` before onboarding IOx devices.
+The helper first reports, in one list, every handed-in input the clone is
+missing (`bin/aria2c`, `ioxclient`, per-architecture `aria2c` deliverables,
+the two root public keys) and stops before building if any is absent. It then
+grants uid 10001 the `artifacts/` directory, builds both server images,
+bootstraps a fresh encrypted store, installs the two public roots into the
+config volume, starts both services, and stages the Guest Shell bundle and
+catalog certificate (server-side), both IOx packages, and the XR RPM. An
+existing complete store is preserved. If a package build fails after the
+stack is up, the helper exits nonzero while the stack keeps running; correct
+the reported problem and rerun `tools/provision-iox-packages.sh` or
+`tools/build-xr-package.sh --out artifacts/` before onboarding those devices.
 
 Open `https://<server-ip>:8080/`, or the host port set by
 `IRIS_GUI_PUBLISH`. A Guest Shell deployment can use the manual Compose

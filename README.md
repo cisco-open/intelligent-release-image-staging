@@ -44,14 +44,16 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 
 - [Web console](docs/zensical/console.md) — the admin browser workflow end to end
 - [Network workflows](docs/zensical/fleet-workflows.md) — CSV inventory, assignments, batch operations
-- [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
+- [Operations](docs/zensical/operations.md) — recovery, troubleshooting, backups, and day-two commands
+- [Troubleshooting](docs/zensical/troubleshooting.md) — symptom-based recovery paths for service, rollout, device, telemetry, and API failures
 - [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
 - [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer transfer records, and the limits of each figure
 - [Splunk setup](docs/zensical/splunk.md) — collector configuration, HTTPS event ingestion, dashboards, and troubleshooting
 
 **Reference and development**
 
-- [Reference](docs/zensical/reference.md) — environment variables, file layouts, APIs
+- [Reference](docs/zensical/reference.md) — environment variables, file layouts, and API behavior
+- [Browsable API reference](https://cisco-open.github.io/intelligent-release-image-staging/docs/swagger/) — read-only Swagger UI that the Console also serves locally at `https://<console-host>:<console-port>/swagger/` ([source](docs/zensical/swagger/index.html))
 - [Problem type registry](docs/zensical/problems.md) — stable API error identifiers
 - [Validation](docs/zensical/validation.md) — test suites and the lab checklist
 - [Development](docs/zensical/development.md) — working on IRIS itself

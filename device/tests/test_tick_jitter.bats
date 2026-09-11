@@ -86,6 +86,23 @@ _extract_jitter_funcs() {   # $1 = entrypoint
   done
 }
 
+@test "a catalog-unavailable tick exits non-zero so the backoff above engages (#232)" {
+  # The loop only ever sees an exit status. run_once contains a catalog
+  # outage (unreachable, timed out, non-2xx) into the string
+  # "catalog-unavailable"; main() must turn exactly that into a non-zero exit
+  # -- bootstrap.sh keys its BACKOFF_FILE on the same status -- while the
+  # other contained results keep the ordinary cadence.
+  run env PYTHONPATH="$REPO/device/agent:$REPO/device" python3 - <<'PY'
+import iris_agent
+assert iris_agent._tick_exit_code("catalog-unavailable") == 1
+for r in ("no-assignment", "catalog-not-due", "downloading", "stage-error", None):
+    assert iris_agent._tick_exit_code(r) == 0, r
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -qF 'return _tick_exit_code(result)' "$REPO/device/agent/iris_agent.py"
+  grep -qF 'sys.exit(main())' "$REPO/device/agent/iris_agent.py"
+}
+
 @test "startup jitter is skipped when IRIS_STARTUP_JITTER=0" {
   for ep in $ENTRYPOINTS; do
     grep -qF 'IRIS_STARTUP_JITTER' "$ep" || { echo "$ep: no startup jitter guard"; return 1; }

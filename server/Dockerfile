@@ -34,6 +34,7 @@ FROM python:3.12-slim-trixie
 
 
 ARG TARGETARCH
+ARG TZDATA_VERSION=2026b-0+deb13u1
 RUN case "${TARGETARCH:-amd64}" in \
       amd64) ;; \
       *) echo "IRIS seed server alpha supports linux/amd64 only (got ${TARGETARCH})" >&2; exit 1 ;; \
@@ -45,7 +46,7 @@ LABEL org.opencontainers.image.title="IRIS seed server" \
       org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends mktorrent openssl curl ca-certificates unzip age openssh-client sshpass iproute2 \
+    && apt-get install -y --no-install-recommends mktorrent openssl curl ca-certificates unzip age openssh-client sshpass iproute2 "tzdata=${TZDATA_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Static (musl) aria2c — the BitTorrent seeder.
@@ -99,7 +100,10 @@ ENV IRIS_VERSION=${IRIS_VERSION}
 RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-publish \
     /opt/iris/server/iris-assign \
+    /opt/iris/server/iris-schedule \
     /opt/iris/server/iris-bootstrap \
+    /opt/iris/server/iris-instructions \
+    /opt/iris/server/iris-instr-key \
     /opt/iris/server/iris-management-token \
     /opt/iris/server/rotate_seeder_announce.py \
     /opt/iris/server/pack-agent-bundle.sh \

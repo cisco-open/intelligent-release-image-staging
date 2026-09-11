@@ -38,14 +38,18 @@ spec:
         # single path every server-side device session takes) writes there.
         # Enabling it without /tmp breaks ALL device access, silently, at the
         # first onboard.
-        # Match the unprivileged uid/gid baked into the server image. fsGroup
-        # makes the kubelet group-own the mounted volumes: without it the
-        # PVC-backed /data arrives root-owned and the 0400 age-key secret is
-        # unreadable at uid 10001 (fsGroup adds group read to secret files).
+        # Match the image uid/gid. fsGroup keeps the projected 0400 age-key
+        # Secret readable by the non-root process.
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        # Pre-provision the local PVC root as 10001:10001, mode 2770, and its
+        # state child as 10001:10001, mode 0700 with setgid cleared. Otherwise
+        # new private authority directories inherit setgid and fail validation.
+        # OnRootMismatch skips recursive rewrites that would widen private
+        # 0600 authority files.
+        fsGroupChangePolicy: OnRootMismatch
       initContainers:
         - name: bootstrap
           # Kustomize replaces this fail-closed placeholder with the operator's

@@ -34,22 +34,10 @@
   [ "$status" -ne 0 ]
 }
 
-@test "release archive carries linked docs and every current device package builder" {
-  repo="$BATS_TEST_DIRNAME/../.."
-  # The assembler ships TRACKED files only and refuses when an allowlisted
-  # input is missing from the index, so a brand-new shipped file must be
-  # `git add`ed before this live-checkout case can pass.
-  for new_input in \
-    lab/iris-ssh-policy.sh \
-    requirements-dev.txt \
-    device/container/Dockerfile \
-    device/container/entrypoint.sh \
-    device/container/reconcile.sh \
-    tools/build-device-image.sh; do
-    git -C "$repo" ls-files --error-unmatch "$new_input" >/dev/null 2>&1 \
-      || skip "$new_input is not tracked yet (git add it): the release ships tracked files only"
-  done
-  run env SCRUB_PASS= SCRUB_USER= bash "$repo/tools/make-release.sh"
+@test "release archive carries linked docs, fleet templates and every current device package builder" {
+  # Exercise the real assembler without replacing the owner's prepared release.
+  _make_release_fixture
+  run env SCRUB_PASS= SCRUB_USER= bash "$FIX/tools/make-release.sh"
   [ "$status" -eq 0 ]
 
   for path in \
@@ -61,8 +49,11 @@
     iris/DEVELOPMENT.md \
     iris/CONTRIBUTING.md \
     iris/TESTING.md \
+    iris/fleet/roles.csv.example \
+    iris/fleet/schedules.csv.example \
     iris/lab/device-run.sh \
     iris/lab/xr-run.sh \
+    iris/lab/xr-dialogue.pl \
     iris/lab/iris-ssh-policy.sh \
     iris/device/container/Dockerfile \
     iris/device/container/entrypoint.sh \
@@ -70,8 +61,13 @@
     iris/tools/build-device-image.sh \
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
-    iris/tools/check-package-freshness.sh; do
-    tar tzf "$repo/release/iris.tgz" | grep -qx "$path" || return 1
+    iris/tools/check-package-freshness.sh \
+    iris/tools/vendor-swagger-ui.sh; do
+    tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
+  done
+  for template in roles.csv.example schedules.csv.example; do
+    tar xOzf "$FIX/release/iris.tgz" "iris/fleet/$template" \
+      | cmp "$FIX/fleet/$template" - || return 1
   done
 }
 
@@ -94,7 +90,8 @@ _make_release_fixture() {
   git -C "$FIX" config user.email t@example.com
   git -C "$FIX" config user.name t
   mkdir -p "$FIX/docs/zensical" "$FIX/server/certs" "$FIX/server/webroot/fonts" \
-           "$FIX/device/xr/out" "$FIX/tools/aria2c-patches" "$FIX/lab" \
+           "$FIX/device/xr/out" "$FIX/device/container" \
+           "$FIX/tools/aria2c-patches" "$FIX/tools/aria2c-build" "$FIX/lab" \
            "$FIX/kubernetes" "$FIX/fleet"
   for f in README.md CHANGELOG.md DEVELOPMENT.md CONTRIBUTING.md TESTING.md \
            LICENSE NOTICE SECURITY.md CODE_OF_CONDUCT.md zensical.toml \
@@ -105,21 +102,31 @@ _make_release_fixture() {
   echo "# server" > "$FIX/server/tracker.py"
   echo "PUBLIC CERT" > "$FIX/server/certs/cisco_bulkhash_verify.pem"
   echo "# device" > "$FIX/device/bootstrap.sh"
+  for f in Dockerfile entrypoint.sh reconcile.sh; do
+    cp "$repo/device/container/$f" "$FIX/device/container/$f"
+  done
   for f in get-aria2c.sh aria2c.sha256 make-torrent.sh make-agent-bundle.sh \
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
-           start-compose-server.sh; do
+           agent-source-freshness.sh start-compose-server.sh vendor-swagger-ui.sh; do
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"
+  cp "$repo/tools/ioxclient.sha256" "$FIX/tools/ioxclient.sha256"
   echo "patch" > "$FIX/tools/aria2c-patches/0001.patch"
+  echo "FROM scratch" > "$FIX/tools/aria2c-build/Dockerfile"
+  echo "# build" > "$FIX/tools/aria2c-build/build.sh"
   echo "# run" > "$FIX/lab/device-run.sh"; echo "# run" > "$FIX/lab/xr-run.sh"
+  cp "$repo/lab/xr-dialogue.pl" "$FIX/lab/xr-dialogue.pl"
   echo "# policy" > "$FIX/lab/iris-ssh-policy.sh"
   echo "kind: Namespace" > "$FIX/kubernetes/namespace.yaml"
   echo "# fleet" > "$FIX/fleet/README.md"
   for f in devices.csv.example assignments.csv.example; do
     echo "example" > "$FIX/fleet/$f"
+  done
+  for f in roles.csv.example schedules.csv.example; do
+    cp "$repo/fleet/$f" "$FIX/fleet/$f"
   done
   git -C "$FIX" add -A
   git -C "$FIX" commit -q -m fixture
@@ -192,6 +199,32 @@ _make_release_fixture() {
   [ "$(cat "$FIX/release/iris.tgz.sha256")" = "$before" ]
   run ls -A "$FIX/release"
   [[ "$output" != *".iris.tmp"* ]]
+}
+
+@test "release aborts when a required path is absent from the index and preserves prior outputs" {
+  _make_release_fixture
+  run env SCRUB_PASS= SCRUB_USER= bash "$FIX/tools/make-release.sh"
+  [ "$status" -eq 0 ]
+  before="$(cat "$FIX/release/iris.tgz.sha256")"
+  echo "marker" > "$FIX/release/iris/PREVIOUS"
+  # The file still exists on disk; only git's pathspec failure can catch this.
+  git -C "$FIX" rm --cached -q LICENSE
+  [ -f "$FIX/LICENSE" ]
+  run env SCRUB_PASS= SCRUB_USER= bash "$FIX/tools/make-release.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"LICENSE"* ]]
+  [ -f "$FIX/release/iris/PREVIOUS" ]
+  [ "$(cat "$FIX/release/iris.tgz.sha256")" = "$before" ]
+  run ls -A "$FIX/release"
+  [[ "$output" != *".iris.tmp"* ]]
+}
+
+@test "release carries the IOx client checksum manifest used by its download helper" {
+  _make_release_fixture
+  run env SCRUB_PASS= SCRUB_USER= bash "$FIX/tools/make-release.sh"
+  [ "$status" -eq 0 ]
+  tar tzf "$FIX/release/iris.tgz" | grep -qx 'iris/tools/ioxclient.sha256'
+  cmp "$FIX/tools/ioxclient.sha256" "$FIX/release/iris/tools/ioxclient.sha256"
 }
 
 @test "release is reproducible: two runs of the same tree produce identical tarballs" {

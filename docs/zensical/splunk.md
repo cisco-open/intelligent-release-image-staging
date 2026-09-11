@@ -356,18 +356,105 @@ index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
   "otel.log.name"="iris.device.peer_transfer_record"
 | dedup "event.id"
 | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| eval image=coalesce('iris.image.name', 'iris.image.id')
+| eval source=coalesce('iris.peer.device_id', "unknown")
 | stats max(received_bytes) AS received_bytes
     values("iris.transfer_record.capture_complete") AS capture_complete
-    BY "device.id", "iris.image.id", "iris.transfer.id",
-       "network.peer.address", "iris.peer.attribution"
+    BY "device.id", image, "iris.transfer.id", "network.peer.address", source, "iris.peer.attribution"
 ```
 
-The query keeps the largest cumulative capture per transfer and peer.
-Attribution is `origin`, `device`, or `unknown`. Each row is measured by the
-receiving device, but a peer that disconnected before capture can be absent;
-`capture_complete=false` marks that incomplete capture. Missing rows do not
-mean zero bytes. `iris.swarm.peer_bytes` is the origin-side sampled view of
-traffic; summing it with device peer records would count the same traffic twice.
+The query keeps the largest cumulative capture per transfer and peer address.
+The address keeps separate unnamed peers from collapsing into one `unknown` row.
+`source` is the sender: `origin` for the seeder, the sending device's id for
+a `device` row (`iris.peer.device_id` carries both), and `unknown` for a row
+the server could not name. That attribute is absent on unknown rows, and a
+`BY` on an absent field silently drops the event, so the `eval` fills it in.
+`image` is the catalog filename (`iris.image.name`, looked up when the report
+is exported); it falls back to `iris.image.id` for an image that has since
+left the catalog. Each row is measured by the receiving device, but a peer
+that disconnected before capture can be absent; `capture_complete=false`
+marks that incomplete capture. Missing rows do not mean zero bytes. A report
+is re-exported under the same `event.id` after a server restart; its sender
+classification is pinned on first export, so the copies are identical and
+`dedup` collapses them. `iris.swarm.peer_bytes` is the origin-side sampled
+view of traffic; summing it with device peer records would count the same
+traffic twice.
+
+### Peer-to-peer evidence
+
+These three searches back the *Peer-to-peer evidence* row of the shipped view.
+They read the same device-measured record as the search above, split by who
+sent the bytes, so a peer-to-peer claim rests on an observation rather than on
+a subtraction of two origin-side totals.
+
+A fresh report pull can repeat an existing capture under a new `event.id`.
+After removing retries by event ID, each search keeps the largest cumulative
+byte count for each receiver, image, transfer and peer address. Separate
+transfers and separate unknown peers remain distinct. The selected row keeps
+its capture time and completeness flag; a pull adds no received bytes.
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| eval source=case('iris.peer.attribution'=="origin","origin",
+    'iris.peer.attribution'=="device","peer device",1==1,"unknown")
+| eval MiB=received_bytes/1048576
+| timechart span=1h sum(MiB) BY source
+```
+
+Read the stacked columns as cumulative bytes grouped by the selected capture's
+hour. They do not measure traffic rate within that hour. A visible *peer device*
+band is traffic devices served each other, *origin* is the seeder's share of
+those captures, and *unknown* is a peer the server could not name.
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| stats sum(eval(if('iris.peer.attribution'=="device",received_bytes,null()))) AS peer_bytes,
+    sum(received_bytes) AS all_bytes
+| eval pct=if(isnull(all_bytes) OR all_bytes<=0,null(),
+    round(100*coalesce(peer_bytes,0)/all_bytes,1))
+| fields pct
+```
+
+Read the single number as the share of received bytes that came from a peer
+device over the window, measured on the receiving devices; the denominator
+carries origin and unknown rows too, so an unnamed peer never inflates it.
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| where 'iris.peer.attribution'=="device"
+| eval "MiB from this peer"=round(received_bytes/1048576,1)
+| eval Image=coalesce('iris.image.name','iris.image.id')
+| rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver,
+    "iris.transfer_record.capture_complete" AS "Capture complete"
+| table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete"
+| sort - _time
+```
+
+Read each row as one device-to-device transfer leg: *Sender* served those bytes
+to *Receiver*, `_time` is when the receiver read its counters, and
+`Capture complete` false marks a snapshot that missed peers rather than a wrong
+byte count.
+
+The caveat from the search above applies to all three: a peer that disconnected
+before the completion snapshot leaves no row at all, so a missing row is a
+capture gap, not zero traffic, and every total here is a floor. Do not add
+`iris.swarm.peer_bytes` to these sums — it is the origin-side sampled view of
+the same bytes, and the two together count one transfer twice.
 
 ### Assignment to confirmed seeding
 
@@ -396,10 +483,26 @@ Download [splunk-iris-swarm.xml](dashboards/splunk-iris-swarm.xml) and follow
 Its default searches use `iris_logs` and `iris_metrics`; edit them if you
 chose different index names.
 
+For the tracker and transfer-health dashboard, use
+[splunk-iris-rollout.xml](dashboards/splunk-iris-rollout.xml) and the
+[existing-view update procedure](dashboards/README.md#updating-the-rollout-view).
+Its `dev` filter selects receivers in the measured peer row; it preserves
+the `tr` time picker and the rollout panels. The table includes exact bytes
+and the selected capture's completeness. Both views deduplicate cumulative
+captures before aggregation, keeping origin and unknown bytes in the peer-share
+denominator. No captures mean unavailable; origin-only captures mean 0%.
+
+In the swarm view, ledger tiles read the latest cumulative metric sample
+within the selected bounds, not bytes transferred during that window. A
+window without a sample can be blank. *Seeder RPC* alone uses a fixed
+15-minute window ending now. Incomplete peer captures limit observed traffic
+totals; the resulting percentage has unknown bias.
+
 Both the OTLP log pipeline and the Prometheus scrape pipeline are required.
-The view's peer-share panels use the origin's sampled records. The device
-peer search above exposes the separate device measurements. Read
-[Telemetry Export](telemetry-export.md#known-limits) before interpreting
+The view's peer-share panels use the origin's sampled records, while its
+*Peer-to-peer evidence* row uses the device-measured peer transfer records.
+The device peer searches above expose those same separate device measurements.
+Read [Telemetry Export](telemetry-export.md#known-limits) before interpreting
 missing records, untraced bytes, or peer-share estimates.
 
 ## Troubleshooting
@@ -419,6 +522,10 @@ missing records, untraced bytes, or peer-share estimates.
 | Log searches work, metric panels are empty | Check the `/metrics` scrape and `metrics/iris9101` pipeline; OTLP metrics alone do not supply all dashboard families. |
 | Metrics work, peer tables are empty | Check OTLP logs and the selected time range; an idle fleet need not emit peer records. |
 | Byte totals look wrong | Select one record family, coerce byte values to numbers, and keep device/image/transfer identity in the grouping. |
+| Imported Simple XML panels are empty but pasted SPL returns rows | Inspect the resolved job in the browser search manager. `search search index=...` means the standalone `<query>` included an extra generating `search` command; re-import the corrected shipped XML and do not add that prefix. |
+| Received data by source is below the captured total | Include `iris.transfer.bytes_unattributed_omitted` as a separate **Untraced capped rows** bucket. Do not redistribute capped bytes into origin, peer device, or unknown. |
+| Peer share shows **No data** or **0%** | No capture rows means unavailable. Origin-only or unknown-only captured rows are a measured 0%. With `capture_complete=false`, displayed row bytes remain exact while capture totals are a floor and the peer ratio is partial with unknown bias. |
+| A ledger tile changes or disappears with a historical window | Ledger tiles show the latest cumulative sample inside the selected window, not a delta. No sample means unavailable. **Seeder RPC** intentionally uses a fixed 15-minute window. |
 
 The anonymous IRIS `https://iris.example.com:9101/healthz` probe reports only
 listener health. Check the Console's telemetry export status and collector

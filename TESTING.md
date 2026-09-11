@@ -9,8 +9,11 @@ The project has a Python test suite (pytest) and a shell test suite (bats). Run
 both before submitting a change.
 
 Use Python 3.12 with the dependencies in `requirements-dev.txt`: `pytest`,
-`PyYAML`, and the OpenAPI 3.2 validator. CI installs the same file. `bats`
-comes from your package manager.
+`PyYAML`, and the OpenAPI 3.2 validator. CI installs the same file. `bats`,
+`mktorrent` and the `age` CLI (which carries `age-keygen`) come from your
+package manager. A handful of tests drive those two binaries for real instead
+of stubbing them and skip themselves when the binary is absent, so install
+both to get the result CI reports. OpenSSH's `ssh-keygen` is assumed present.
 
 ```
 python3 -m pip install -r requirements-dev.txt

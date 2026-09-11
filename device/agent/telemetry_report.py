@@ -59,9 +59,8 @@ JITTER_MAX = 10.0           # max pre-POST sleep, seconds (desync report bursts)
 RTT_CONSTRAINED_MS = 250    # median RTT above this -> 'constrained'
 SLOW_BPS = 1048576          # last download avg under 1 MiB/s -> 'constrained'
 FAIL_STREAK_BAD = 3         # consecutive catalog failures -> 'bad'
-BACKOFF_CAP_TICKS = 16      # defer backoff cap: 1->2->4->8->16 ticks (~16 min)
+BACKOFF_CAP_TICKS = 16      # defer backoff cap: 1->2->4->8->16 ticks
 MAX_ATTEMPTS = 60           # mark report_failed after this many deferred sends
-TICK_SECONDS = 60           # the EEM agent tick period
 
 # v2 telemetry (spec section 10). The v2 observation envelope + terminal report
 # schema. sampling_class replaces the ambiguous v1 'tier'; obs_state replaces
@@ -1117,11 +1116,11 @@ def pull_requested(resp):
     return isinstance(resp, dict) and resp.get("report_requested") is True
 
 
-def next_backoff_ts(attempts, now):
+def next_backoff_ts(attempts, now, tick_seconds=60):
     """Next allowed send time for the 'bad' tier: exponential backoff in agent
-    ticks (1 -> 2 -> 4 -> 8 -> 16, capped at ~16 min). `attempts` is the count
+    ticks (1 -> 2 -> 4 -> 8 -> 16). `attempts` is the count
     of sends already tried (0 -> one tick out)."""
-    return now + TICK_SECONDS * min(2 ** attempts, BACKOFF_CAP_TICKS)
+    return now + tick_seconds * min(2 ** attempts, BACKOFF_CAP_TICKS)
 
 
 # --- live streaming samples (device transfer telemetry spec, section 5) ----
@@ -1172,7 +1171,7 @@ def store_directives(state, resp, now):
                                   "received_ts": float(now)}
 
 
-def active_directives(state, now):
+def active_directives(state, now, tick_seconds=60):
     """Directives currently in force: the stored entry while fresh. Every
     successful heartbeat renews it (the catalog echoes unconditionally), so
     freshness lapses only when heartbeats stop or an old server stops
@@ -1184,7 +1183,7 @@ def active_directives(state, now):
             age = now - float(d.get("received_ts", 0))
         except (TypeError, ValueError):
             age = -1.0
-        if 0 <= age <= STREAM_DIRECTIVE_FRESH_TICKS * TICK_SECONDS:
+        if 0 <= age <= STREAM_DIRECTIVE_FRESH_TICKS * tick_seconds:
             every = d.get("every")
             if not (isinstance(every, int) and not isinstance(every, bool)
                     and STREAM_EVERY_MIN <= every <= STREAM_EVERY_MAX):
@@ -1193,15 +1192,17 @@ def active_directives(state, now):
     return 1, False
 
 
-def should_sample(state, tele, tier, now):
+def should_sample(state, tele, tier, now, tick_seconds=60):
     """Cadence gate: one sample per effective interval (spec section 5.3),
     hard-capped at one per tick by the caller's tick cycle. Half-a-tick slop
     absorbs EEM timer drift (a 59.5 s gap still counts as the next tick)."""
     if tier not in STREAM_TIER_TICKS:
         return False
-    every, pause = active_directives(state, now)
+    every, pause = active_directives(
+        state, now, tick_seconds=tick_seconds)
     if pause:
         return False
     interval_ticks = max(STREAM_TIER_TICKS[tier], every)
     last = float(tele.get("stream_last_ts", 0) or 0)
-    return (now - last) >= (interval_ticks - 0.5) * TICK_SECONDS
+    age = now - last
+    return 0 <= age and age >= (interval_ticks - 0.5) * tick_seconds

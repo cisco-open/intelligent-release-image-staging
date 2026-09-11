@@ -119,6 +119,68 @@ def test_choose_target_fs_never_crashinfo_or_ro():
     assert ft.choose_target_fs(fss, None) is None
 
 
+# A Catalyst 8000V publishes ONE writable disk under three names, crashinfo:
+# among them. Filtering the whole row out left the box with no writable disk,
+# so every agent tick died before its heartbeat (issue #236).
+_C8000V_FS = """File Systems:
+
+       Size(b)       Free(b)      Type  Flags  Prefixes
+             -             -    opaque     rw   system:
+             -             -    opaque     rw   tmpsys:
+*   5173313536     473923584      disk     rw   bootflash: flash: crashinfo:
+    4110950400    3975962624      disk     ro   webui:
+             -             -   network     rw   tftp:
+             -             -    opaque     rw   null:
+      33554432      33534101     nvram     rw   nvram:
+"""
+
+
+def test_c8000v_aliases_crashinfo_onto_its_only_writable_disk():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    disk = [f for f in fss if f["type"] == "disk" and "rw" in f["flags"]]
+    assert len(disk) == 1
+    assert disk[0]["prefixes"] == ["bootflash:", "flash:", "crashinfo:"]
+    assert ft.selectable_prefixes(disk[0]) == ["bootflash:", "flash:"]
+
+
+def test_choose_target_fs_uses_a_disk_that_merely_aliases_crashinfo():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    assert ft.choose_target_fs(fss, None) == "bootflash:"
+    assert ft.choose_target_fs(
+        fss, "bootflash:packages.conf") == "bootflash:"
+    # The boot path may name any selectable alias of that same disk.
+    assert ft.choose_target_fs(fss, "flash:packages.conf") == "flash:"
+
+
+def test_choose_stage_fs_honours_preferred_bootflash_on_c8000v():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs=None,
+        preferred_fs="bootflash:") == "bootflash:"
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs="bootflash:",
+        preferred_fs="") == "bootflash:"
+
+
+def test_crashinfo_is_never_selected_even_when_asked_for():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs=None,
+        preferred_fs="crashinfo:") is None
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs="crashinfo:",
+        preferred_fs="") is None
+    assert ft.choose_target_fs(fss, "crashinfo:x.bin") == "bootflash:"
+
+
+def test_a_disk_offering_only_crashinfo_is_still_refused():
+    only_crash = [{"prefixes": ["crashinfo:"], "size": 1, "free": 1,
+                   "type": "disk", "flags": "rw", "is_default": True}]
+    assert ft.choose_target_fs(only_crash, None) is None
+    assert ft.choose_stage_fs(only_crash, model="C9300",
+                              preferred_fs="crashinfo:") is None
+
+
 def test_choose_target_fs_empty():
     assert ft.choose_target_fs([], "flash:x.bin") is None
 
@@ -194,6 +256,148 @@ def test_reclaimable_temp_name_still_honours_protect_set():
                "11353194496 bytes total (2627305472 bytes free)\n")
     protect = {"cat9k_iosxe.26.01.01.SPA.bin.iris-tmp"}
     assert ft.reclaimable_artifacts(dir_out, protect) == []
+
+
+# --- Catalyst 8000V (#237) ---
+# Real captures from Iris-c8kv-101 (C8000V, IOS-XE 17.15.05), 2026-09-10,
+# read-only. The box was deployed from the ISO: it runs in INSTALL mode from
+# cdrom0:packages.conf, has no BOOT variable at all, and bootflash: root holds
+# the committed 17.15.05 package set (`show install summary`: one IMG,
+# Activated & Committed) beside the IRIS-staged 26.01.01 bundle.
+_C8000V_VER = (
+    "Cisco IOS XE Software, Version 17.15.05\n"
+    "System returned to ROM by reload\n"
+    'System image file is "cdrom0:packages.conf"\n'
+    "cisco C8000V (VXE) processor (revision VXE) with 1890892K/3075K bytes "
+    "of memory.\n")
+_C8000V_BOOT = (
+    "BOOT variable does not exist\n"
+    "CONFIG_FILE variable does not exist\n"
+    "BOOTLDR variable does not exist\n"
+    "Configuration register is 0x2102\n")
+_C8000V_DIR = """Directory of bootflash:/
+
+131103  drwx             4096  Sep 10 2026 13:13:09 +00:00  guest-share
+13      drwx             4096  Sep 10 2026 12:54:07 +00:00  .installer
+46      -rw-        973065200  Sep 10 2026 12:52:31 +00:00  c8000v-universalk9.26.01.01.SPA.bin
+131077  drwx            20480  Sep 10 2026 12:47:28 +00:00  tracelogs
+131076  drwx             4096  Sep 10 2026 11:59:30 +00:00  core
+44      -rw-              257  Sep 10 2026 10:00:48 +00:00  .iox_dir_list
+43      -rw-              412  Sep 10 2026 10:00:41 +00:00  cvac.log
+131102  drwx             4096  Sep 10 2026 10:00:41 +00:00  license_evlog
+45      -rw-              157  Sep 10 2026 10:00:38 +00:00  csrlxc-cfg.log
+131073  drwx             4096  Sep 10 2026 10:00:37 +00:00  SHARED-IOX
+42      -rw-               30  Sep 10 2026 10:00:26 +00:00  throughput_monitor_params
+12      -rwx             1368  Sep 10 2026 09:59:04 +00:00  mode_event_log
+48      -rw-             1484  Sep 10 2026 09:55:17 +00:00  collated_log_20260910-095516
+131090  drwx             4096  Jul 25 2026 03:43:13 +00:00  .dbpersist
+131152  drwx             4096  Jul 25 2026 03:36:13 +00:00  pnp-tech
+131106  drwx             4096  Jul 25 2026 03:34:39 +00:00  iox_host_data_share
+131100  drwx             4096  Jul 25 2026 03:34:37 +00:00  onep
+131099  drwx             4096  Jul 25 2026 03:34:36 +00:00  pnp-info
+131092  drwx             4096  Jul 25 2026 03:33:55 +00:00  virtual-instance
+29      -rw-            34967  Jul 25 2026 03:33:50 +00:00  ios_core.p7b
+30      -rw-             1939  Jul 25 2026 03:33:50 +00:00  trustidrootx3_ca_062035.ca
+131080  drwx             4096  Jul 25 2026 03:33:40 +00:00  bootlog_history
+25      -rw-        825640024  Jul 25 2026 03:32:13 +00:00  c8000v-mono-universalk9.17.15.05.SPA.pkg
+27      -rw-             5759  Jul 25 2026 03:32:13 +00:00  packages.conf
+26      -rw-         57288817  Jul 25 2026 03:32:13 +00:00  c8000v-rpboot.17.15.05.SPA.pkg
+18      -rw-            54348  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_dreamliner.17.15.05.SPA.pkg
+22      -rw-          2937928  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_nim_ge.17.15.05.SPA.pkg
+24      -rw-          5575752  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_nim_xdsl.17.15.05.SPA.pkg
+23      -rw-         11568204  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_nim_shdsl.17.15.05.SPA.pkg
+19      -rw-         11310156  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_ngwic_t1e1.17.15.05.SPA.pkg
+21      -rw-         17675336  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_nim_cwan.17.15.05.SPA.pkg
+20      -rw-         12928076  Jul 25 2026 03:32:11 +00:00  c8000v-firmware_nim_async.17.15.05.SPA.pkg
+17      drwx             4096  Jul 25 2026 03:31:56 +00:00  appqoe-service
+14      drwx             4096  Jul 25 2026 03:31:55 +00:00  .rollback_timer
+131075  drwx             4096  Jul 25 2026 03:31:41 +00:00  pcap
+131074  drwx             4096  Jul 25 2026 03:31:40 +00:00  .prst_sync
+11      drwx            16384  Jul 25 2026 03:31:32 +00:00  lost+found
+
+5173313536 bytes total (2880884736 bytes free)
+"""
+_C8000V_INSTALL_SET = {
+    "c8000v-mono-universalk9.17.15.05.SPA.pkg",
+    "packages.conf",
+    "c8000v-rpboot.17.15.05.SPA.pkg",
+    "c8000v-firmware_dreamliner.17.15.05.SPA.pkg",
+    "c8000v-firmware_nim_ge.17.15.05.SPA.pkg",
+    "c8000v-firmware_nim_xdsl.17.15.05.SPA.pkg",
+    "c8000v-firmware_nim_shdsl.17.15.05.SPA.pkg",
+    "c8000v-firmware_ngwic_t1e1.17.15.05.SPA.pkg",
+    "c8000v-firmware_nim_cwan.17.15.05.SPA.pkg",
+    "c8000v-firmware_nim_async.17.15.05.SPA.pkg",
+}
+_C8000V_NON_IMAGE_FILES = {
+    ".iox_dir_list", "cvac.log", "csrlxc-cfg.log", "throughput_monitor_params",
+    "mode_event_log", "collated_log_20260910-095516", "ios_core.p7b",
+    "trustidrootx3_ca_062035.ca",
+}
+
+
+def test_c8000v_install_mode_never_reaches_the_bundle_sweep():
+    # The lab box's committed .pkg set at bootflash: root is NOT protected by
+    # name -- running_image() is the bare "packages.conf", which says nothing
+    # about c8000v-mono/rpboot/firmware. It is protected by ROUTING: this
+    # capture resolves to install mode, and iris_agent._reclaim_for_mode
+    # consults reclaimable_artifacts() only in bundle mode. Pin the facts
+    # that routing rests on, straight from the device.
+    assert ft.detect_mode(_C8000V_VER, _C8000V_BOOT) == "install"
+    assert ft.running_image(_C8000V_VER) == "packages.conf"
+    # No BOOT variable: boot_path() is None, and iris_agent's boot_image()
+    # turns that into "" (known to be absent), not an unreadable None.
+    assert ft.boot_path(_C8000V_BOOT) is None
+    assert ft.detect_mode("", _C8000V_BOOT) is None
+
+
+def test_reclaimable_c8000v_bundle_mode_pins_the_leftover_install_set():
+    # A C8000V that has since booted the staged 26.01.01 bundle: the running
+    # image is protected by the caller, and exactly the 17.15.05 install set
+    # it no longer runs is reclaimable -- the same contract the C9300 test
+    # above pins for cat9k. Nothing else at bootflash: root is ever named.
+    protect = {"c8000v-universalk9.26.01.01.SPA.bin"}   # running image
+    got = set(ft.reclaimable_artifacts(_C8000V_DIR, protect))
+    assert got == _C8000V_INSTALL_SET
+    assert "c8000v-universalk9.26.01.01.SPA.bin" not in got
+    assert not (got & _C8000V_NON_IMAGE_FILES)
+    for d in ("guest-share", ".installer", "tracelogs", "core", "SHARED-IOX",
+              "virtual-instance", "lost+found"):
+        assert d not in got
+
+
+def test_reclaimable_c8000v_names_iris_own_stale_bundle_when_unprotected():
+    # The case #237 is about: IRIS's own staged c8000v .bin that has left the
+    # assigned set (parked/replaced, so no longer in the protect set) must be
+    # something the low-space sweep may free. Before the fix the allowlist
+    # could not name a c8000v-* file at all.
+    got = set(ft.reclaimable_artifacts(_C8000V_DIR, set()))
+    assert got == _C8000V_INSTALL_SET | {"c8000v-universalk9.26.01.01.SPA.bin"}
+
+
+def test_reclaimable_c8000v_temp_name_leftover():
+    dir_out = (
+        "47  -rw-  973065200  Sep 10 2026 12:52:31 +00:00  "
+        "c8000v-universalk9.26.01.01.SPA.bin.iris-tmp\n"
+        "5173313536 bytes total (2880884736 bytes free)\n")
+    assert ft.reclaimable_artifacts(dir_out, set()) == [
+        "c8000v-universalk9.26.01.01.SPA.bin.iris-tmp"]
+    protect = {"c8000v-universalk9.26.01.01.SPA.bin.iris-tmp"}
+    assert ft.reclaimable_artifacts(dir_out, protect) == []
+
+
+def test_reclaimable_allowlist_stays_anchored_on_the_platform_prefix():
+    # Widening to c8000v must not loosen the anchor: an unrelated file that
+    # merely ends in .bin/.pkg, or a family the agent has no evidence for, is
+    # still never a candidate.
+    dir_out = (
+        "50  -rw-  100  Sep 10 2026 12:52:31 +00:00  vc8000v-universalk9.17.15.05.SPA.bin\n"
+        "51  -rw-  100  Sep 10 2026 12:52:31 +00:00  c8000be-universalk9.17.15.05.SPA.bin\n"
+        "52  -rw-  100  Sep 10 2026 12:52:31 +00:00  isr4300-universalk9.16.03.01.SPA.bin\n"
+        "53  -rw-  100  Sep 10 2026 12:52:31 +00:00  backup.pkg\n"
+        "54  -rw-  100  Sep 10 2026 12:52:31 +00:00  c8000v-universalk9.17.15.05.SPA.bin.bak\n"
+        "5173313536 bytes total (2880884736 bytes free)\n")
+    assert ft.reclaimable_artifacts(dir_out, set()) == []
 
 
 # --- device_model: hardware model from `show version`, for the swarm map ---

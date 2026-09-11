@@ -33,6 +33,7 @@ STATUS_DEFAULTS = {
     415: ("unsupported-media-type", "Unsupported media type"),
     416: ("range-not-satisfiable", "Range not satisfiable"),
     422: ("unprocessable-content", "Unprocessable content"),
+    428: ("precondition_required", "Precondition required"),
     429: ("rate-limit-exceeded", "Rate limit exceeded"),
     500: ("internal-error", "Internal server error"),
     502: ("upstream-operation-failed", "Upstream operation failed"),

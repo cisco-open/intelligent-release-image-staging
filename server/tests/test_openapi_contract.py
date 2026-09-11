@@ -6,14 +6,33 @@
 
 import json
 from pathlib import Path
+import re
 
 import api_problem
 import api_routes
 import openapi_contract
+import schedules
 
 
 SPEC = Path(__file__).resolve().parents[2] / "docs" / "zensical" / "openapi.yaml"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+
+INSTRUCTION_RESOURCES = (
+    "/v1/devices/{device_id}/instructions",
+    "/v1/devices/{device_id}/instruction-keylist",
+)
+
+
+def _media_examples(media):
+    if "example" in media:
+        return [media["example"]]
+    return [entry["value"] for entry in media["examples"].values()]
+
+
+def _assert_i63_schema(schema, minimum=0):
+    assert schema["type"] == "integer"
+    assert schema["minimum"] == minimum
+    assert schema["maximum"] == (1 << 63) - 1
 
 
 def _load():
@@ -43,6 +62,54 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     assert doc == openapi_contract.build_document()
 
 
+def test_devices_target_expression_and_projection_are_public_contracts():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        operation = document["paths"][prefix + "/devices"]["get"]
+        parameters = {item["name"]: item for item in operation["parameters"]}
+        assert {"role", "model_family", "os_family"} <= set(parameters)
+        assert parameters["model_family"]["schema"]["enum"] == [
+            "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
+            "XR8000", "unknown"]
+        assert parameters["os_family"]["schema"]["enum"] == ["xe", "xr"]
+        response = operation["responses"]["200"]["content"][
+            "application/json"]["schema"]
+        assert {"target_facts", "target_warnings"} <= set(
+            response["properties"])
+        row = response["properties"]["devices"]["items"]
+        assert {"model_family", "os_family", "platform_resolved"} <= set(
+            row["properties"])
+
+
+def test_instruction_resources_are_exact_registered_device_routes():
+    routes = [route for route in api_routes.ROUTES
+              if "instruction" in route.path]
+    assert {(route.service, route.method, route.path, route.security)
+            for route in routes} == {
+        ("catalog", "GET", path, "deviceBearer")
+        for path in INSTRUCTION_RESOURCES
+    }
+    assert all(api_routes.match("catalog", "GET", path.replace(
+        "{device_id}", "edge-01")) is not None
+        for path in INSTRUCTION_RESOURCES)
+    for alias in ("/v1/instructions", "/v1/instruction-keylist",
+                  "/v1/keylist", "/v1/krl", "/krl",
+                  "/v1/devices/edge-01/krl",
+                  "/v1/devices/edge-01/role",
+                  "/v1/devices/edge-01/instruction-keylist/extra"):
+        assert api_routes.match("catalog", "GET", alias) is None
+
+    document = _load()
+    documented = {path for path in document["paths"]
+                  if "instruction" in path}
+    assert documented == set(INSTRUCTION_RESOURCES)
+    for path in INSTRUCTION_RESOURCES:
+        operation = document["paths"][path]["get"]
+        assert operation["x-iris-service"] == "catalog"
+        assert operation["x-iris-security"] == "deviceBearer"
+        assert operation["security"] == [{"deviceBearer": []}]
+
+
 def test_anonymous_routes_are_probes_or_exact_guest_shell_static_compatibility():
     anonymous = {(r.service, r.method, r.path) for r in api_routes.ROUTES
                  if openapi_contract._security(r) == []}
@@ -56,7 +123,8 @@ def test_anonymous_routes_are_probes_or_exact_guest_shell_static_compatibility()
         ("artifact", method, path)
         for method in ("GET", "HEAD")
         for path in ("/bootstrap.sh", "/iris-agent.tgz",
-                     "/iris-agent-arm.tgz", "/iris-catalog.pem")}
+                     "/iris-agent-arm.tgz", "/iris-catalog.pem",
+                     "/iris-signers.pem")}
     guest_shell_capabilities = {
         ("artifact", method, "/staging/{legacy_artifact}")
         for method in ("GET", "HEAD")}
@@ -74,6 +142,16 @@ def test_anonymous_routes_are_probes_or_exact_guest_shell_static_compatibility()
                 if r.path == "/api/v1/login").security == "consolePassword"
     assert next(r for r in api_routes.ROUTES
                 if r.path == "/api/v1/setup").security == "setupGrant"
+
+    capability = _load()["paths"]["/staging/{legacy_artifact}"]["get"]
+    patterns = [item["pattern"] for item in capability["parameters"][0][
+        "schema"]["oneOf"]]
+    assert patterns == [
+        r"^iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf$",
+        r"^rpc-secret-[0-9A-Fa-f]{32}$",
+        r"^iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope$",
+        r"^bundle-sha256-[0-9a-f]{32}$",
+    ]
 
 
 def test_every_operation_has_auth_schemas_statuses_and_examples():
@@ -126,6 +204,530 @@ def test_catalog_torrent_media_and_cache_vary_are_explicit():
         "private, no-store"
     assert response["headers"]["Vary"]["schema"]["const"] == \
         "Authorization, X-IRIS-Tracker-Auth"
+
+
+def test_instruction_binary_success_and_conditional_contracts_are_exact():
+    document = _load()
+    expected_headers = {
+        "Cache-Control", "Vary", "ETag", "Date",
+        "X-Content-Type-Options",
+    }
+    for path in INSTRUCTION_RESOURCES:
+        operation = document["paths"][path]["get"]
+        parameters = {(item["name"], item["in"]): item
+                      for item in operation["parameters"]}
+        conditional = parameters[("If-None-Match", "header")]
+        assert conditional["required"] is False
+        assert conditional["schema"]["type"] == "string"
+        description = conditional["description"].lower()
+        assert all(term in description for term in
+                   ("weak", "list", "wildcard"))
+
+        success = operation["responses"]["200"]
+        assert set(success["content"]) == {"application/octet-stream"}
+        media = success["content"]["application/octet-stream"]
+        assert all(key not in media["schema"]
+                   for key in ("type", "format", "contentEncoding"))
+        assert set(success["headers"]) == expected_headers
+        assert success["headers"]["Cache-Control"]["schema"]["const"] == \
+            "private, no-store"
+        assert success["headers"]["Vary"]["schema"]["const"] == \
+            "Authorization"
+        assert success["headers"]["X-Content-Type-Options"]["schema"][
+            "const"] == "nosniff"
+        etag = success["headers"]["ETag"]
+        assert re.fullmatch(r'"sha256-[0-9a-f]{64}"', etag["example"])
+        assert success["headers"]["Date"]["schema"]["type"] == "string"
+
+        unchanged = operation["responses"]["304"]
+        assert "content" not in unchanged
+        assert set(unchanged["headers"]) == expected_headers
+        assert all(name not in unchanged["headers"]
+                   for name in ("Content-Type", "Content-Length"))
+        assert unchanged["headers"]["Cache-Control"]["schema"]["const"] == \
+            "private, no-store"
+        assert unchanged["headers"]["Vary"]["schema"]["const"] == \
+            "Authorization"
+        assert unchanged["headers"]["X-Content-Type-Options"]["schema"][
+            "const"] == "nosniff"
+
+
+def test_instruction_problem_matrix_titles_and_headers_are_exact():
+    document = _load()
+    expected = {
+        INSTRUCTION_RESOURCES[0]: {
+            "401": [("catalog-authentication-required",
+                     "Catalog authentication required")],
+            "403": [("instruction-device-forbidden",
+                     "Instruction access forbidden")],
+            "404": [("instruction-stamp-missing",
+                     "Instruction stamp missing")],
+            "409": [("stale_pointer", "Stale instruction pointer")],
+            "429": [("instruction-rate-limit-exceeded",
+                     "Instruction request rate limit exceeded")],
+            "503": [("credential-store-unavailable",
+                     "Credential store unavailable"),
+                    ("instruction-state-unavailable",
+                     "Instruction state unavailable")],
+        },
+        INSTRUCTION_RESOURCES[1]: {
+            "401": [("catalog-authentication-required",
+                     "Catalog authentication required")],
+            "403": [("instruction-device-forbidden",
+                     "Instruction access forbidden")],
+            "404": [("instruction-keylist-missing",
+                     "Instruction keylist missing")],
+            "429": [("instruction-rate-limit-exceeded",
+                     "Instruction request rate limit exceeded")],
+            "503": [("credential-store-unavailable",
+                     "Credential store unavailable"),
+                    ("instruction-keylist-unavailable",
+                     "Instruction keylist unavailable")],
+        },
+    }
+    common_headers = {
+        "Cache-Control", "Vary", "Date", "X-Content-Type-Options"}
+    observed = set()
+    for path, statuses in expected.items():
+        responses = document["paths"][path]["get"]["responses"]
+        assert set(responses) == {"200", "304", *statuses}
+        for status, variants in statuses.items():
+            response = responses[status]
+            assert len(response["x-iris-problem-codes"]) == len(variants)
+            assert set(response["x-iris-problem-codes"]) == {
+                code for code, _title in variants}
+            media = response["content"]["application/problem+json"]
+            examples = _media_examples(media)
+            assert len(examples) == len(variants)
+            assert {(item["code"], item["title"])
+                    for item in examples} == set(variants)
+            for item in examples:
+                assert set(item) == {"type", "title", "status", "code"}
+                assert item["status"] == int(status)
+                assert item["type"] == api_problem.TYPE_BASE + item["code"]
+                observed.add((int(status), item["code"], item["title"]))
+
+            header_names = set(response["headers"])
+            expected_names = set(common_headers)
+            if status == "401":
+                expected_names.add("WWW-Authenticate")
+            if status in ("409", "429", "503"):
+                expected_names.add("Retry-After")
+            assert header_names == expected_names
+            assert response["headers"]["Cache-Control"]["schema"][
+                "const"] == "no-store"
+            assert response["headers"]["Vary"]["schema"]["const"] == \
+                "Authorization"
+            assert response["headers"]["X-Content-Type-Options"]["schema"][
+                "const"] == "nosniff"
+            if status == "401":
+                assert response["headers"]["WWW-Authenticate"][
+                    "example"] == "Bearer"
+            if status in ("409", "503"):
+                assert response["headers"]["Retry-After"]["example"] == 10
+            elif status == "429":
+                assert response["headers"]["Retry-After"]["schema"][
+                    "minimum"] == 1
+
+    assert observed == {
+        (503, "credential-store-unavailable", "Credential store unavailable"),
+        (401, "catalog-authentication-required",
+         "Catalog authentication required"),
+        (403, "instruction-device-forbidden", "Instruction access forbidden"),
+        (404, "instruction-stamp-missing", "Instruction stamp missing"),
+        (404, "instruction-keylist-missing", "Instruction keylist missing"),
+        (409, "stale_pointer", "Stale instruction pointer"),
+        (429, "instruction-rate-limit-exceeded",
+         "Instruction request rate limit exceeded"),
+        (503, "instruction-state-unavailable",
+         "Instruction state unavailable"),
+        (503, "instruction-keylist-unavailable",
+         "Instruction keylist unavailable"),
+    }
+
+
+def test_instruction_policy_and_heartbeat_response_contracts_are_bounded():
+    document = _load()
+    paths = (
+        "/v1/devices/{device_id}/policy",
+        "/v1/devices/{device_id}/heartbeat",
+    )
+    for path in paths:
+        method = "get" if path.endswith("/policy") else "post"
+        media = document["paths"][path][method]["responses"]["200"][
+            "content"]["application/json"]
+        properties = media["schema"]["properties"]
+        pointer = properties["instr_rev"]
+        assert len(pointer["required"]) == 2
+        assert set(pointer["required"]) == {"epoch", "instr_serial"}
+        assert pointer["additionalProperties"] is False
+        for name in pointer["required"]:
+            _assert_i63_schema(pointer["properties"][name])
+        _assert_i63_schema(properties["keylist_seq"], minimum=1)
+        examples = _media_examples(media)
+        assert any(set(example.get("instr_rev", {})) == {
+            "epoch", "instr_serial"} and "keylist_seq" in example
+            for example in examples)
+
+    heartbeat = document["paths"][paths[1]]["post"]["responses"]["200"][
+        "content"]["application/json"]
+    cadence = heartbeat["schema"]["properties"]
+    assert cadence["stream_every"]["type"] == "integer"
+    assert cadence["stream_every"]["minimum"] == 1
+    assert cadence["stream_every"]["maximum"] == 60
+    assert cadence["stream_pause"]["type"] == "boolean"
+    assert any("instr_rev" not in example and
+               {"stream_every", "stream_pause"} <= set(example)
+               for example in _media_examples(heartbeat))
+
+
+def test_instruction_heartbeat_attestation_schema_and_examples_are_complete():
+    document = _load()
+    media = document["paths"]["/v1/devices/{device_id}/heartbeat"]["post"][
+        "requestBody"]["content"]["application/json"]
+    schema = media["schema"]
+    properties = schema["properties"]
+    applied_names = [
+        "bt_max_peers", "max_upload_limit", "max_download_limit",
+        "overall_up", "overall_down", "request_peer_speed_limit",
+        "max_concurrent",
+    ]
+    applied = properties["applied"]
+    assert len(applied["required"]) == len(applied_names)
+    assert set(applied["required"]) == set(applied_names)
+    assert applied["additionalProperties"] is False
+    for name in applied_names:
+        _assert_i63_schema(applied["properties"][name])
+
+    expected_states = {
+        "none", "applied", "lkg", "stale_expired", "allowlist_expired",
+        "rollback_rejected", "floor_reset", "audience_mismatch",
+        "key_rejected", "tamper_rejected", "verifier_missing",
+        "lkg_rejected", "lkg_unreadable", "oversize", "reasserted",
+        "instr_unavailable", "instr_pending", "instr_forbidden",
+        "tracker-only",
+    }
+    assert len(properties["instr_state"]["enum"]) == len(expected_states)
+    assert set(properties["instr_state"]["enum"]) == expected_states
+    assert len(properties["instr_reason"]["enum"]) == 2
+    assert set(properties["instr_reason"]["enum"]) == {
+        "unknown_key", "bad_mac"}
+    _assert_i63_schema(properties["instr_serial"])
+    assert len(properties["verify_level"]["enum"]) == 2
+    assert set(properties["verify_level"]["enum"]) == {"sig", "none"}
+    for name in ("blocklist_rules", "blocklist_revision"):
+        _assert_i63_schema(properties[name])
+
+    drift = properties["qos_drift"]
+    assert len(drift["required"]) == 1
+    assert set(drift["required"]) == {"options"}
+    assert drift["additionalProperties"] is False
+    options = drift["properties"]["options"]
+    assert options["maxItems"] == 47
+    assert len(options["items"]["required"]) == 3
+    assert set(options["items"]["required"]) == {
+        "option", "expected", "observed"}
+    assert options["items"]["additionalProperties"] is False
+    option_names = options["items"]["properties"]["option"]["enum"]
+    assert len(option_names) == len(applied_names)
+    assert set(option_names) == set(applied_names)
+    _assert_i63_schema(options["items"]["properties"]["expected"])
+    _assert_i63_schema(options["items"]["properties"]["observed"])
+    for name in ("blocklist_rules", "blocklist_revision"):
+        pair = drift["properties"][name]
+        assert len(pair["required"]) == 2
+        assert set(pair["required"]) == {"expected", "observed"}
+        assert pair["additionalProperties"] is False
+        _assert_i63_schema(pair["properties"]["expected"])
+        _assert_i63_schema(pair["properties"]["observed"])
+
+    examples = _media_examples(media)
+    assert any("applied" in example for example in examples)
+    assert any(example.get("instr_state") == "key_rejected" and
+               example.get("instr_reason") in ("unknown_key", "bad_mac")
+               for example in examples)
+    instruction_fields = {
+        "applied", "instr_state", "instr_reason", "instr_serial",
+        "verify_level", "blocklist_rules", "blocklist_revision", "qos_drift",
+    }
+    assert any(not instruction_fields.intersection(example)
+               for example in examples)
+
+
+def test_task19_heartbeat_capability_identity_and_pointer_contract_is_bounded():
+    from jsonschema import Draft202012Validator
+
+    document = _load()
+    media = document["paths"]["/v1/devices/{device_id}/heartbeat"]["post"][
+        "requestBody"]["content"]["application/json"]
+    schema = media["schema"]
+    properties = schema["properties"]
+
+    assert properties["instr_protocol"]["type"] == ["integer", "null"]
+    assert properties["instr_protocol"]["enum"] == [1, None]
+    for name in ("instr_epoch", "instr_serial", "instr_policy_revision"):
+        _assert_i63_schema(properties[name])
+    assert properties["pointer_skew"] == {"type": ["boolean", "null"]}
+    assert schema["dependentRequired"]["instr_epoch"] == [
+        "instr_serial", "instr_policy_revision"]
+    assert schema["dependentRequired"]["instr_policy_revision"] == [
+        "instr_epoch", "instr_serial"]
+    assert "instr_serial" not in schema["dependentRequired"]
+
+    current = media["examples"]["applied"]["value"]
+    assert {name: current[name] for name in (
+        "instr_epoch", "instr_serial", "instr_policy_revision")} == {
+            "instr_epoch": 11, "instr_serial": 7,
+            "instr_policy_revision": 3}
+    assert current["pointer_skew"] is False
+    rejected = media["examples"]["keyRejected"]["value"]
+    assert rejected["instr_protocol"] == 1
+    assert rejected["pointer_skew"] is False
+    assert media["examples"]["unknownCapability"]["value"][
+        "instr_protocol"] is None
+    legacy = media["examples"]["legacy"]["value"]
+    assert not {"instr_epoch", "instr_policy_revision", "pointer_skew"}.intersection(
+        legacy)
+    validator = Draft202012Validator(schema)
+    for example in _media_examples(media):
+        assert not list(validator.iter_errors(example)), example
+    for valid in (
+            {"instr_serial": 7},
+            {"instr_protocol": None},
+            {"instr_protocol": 1, "instr_epoch": 11, "instr_serial": 7,
+             "instr_policy_revision": 3, "pointer_skew": False}):
+        assert not list(validator.iter_errors(valid)), valid
+    for invalid in (
+            {"instr_protocol": 2}, {"instr_protocol": True},
+            {"pointer_skew": 1},
+            {"instr_epoch": 11, "instr_serial": 7},
+            {"instr_policy_revision": 3, "instr_serial": 7}):
+        assert list(validator.iter_errors(invalid)), invalid
+
+
+def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
+    from jsonschema import Draft202012Validator
+
+    document = _load()
+    states = {
+        "applied", "lkg", "stale", "rejected", "tracker-only",
+        "pre-instructions", "unknown", "unavailable", "pending",
+        "forbidden", "floor_reset", "none", "revoked",
+    }
+    fields = {
+        "display_state", "label", "evidence", "underlying_state",
+        "underlying_label", "underlying_evidence", "reason",
+        "reported_instr_serial", "accepted_identity", "verify_level",
+        "pointer_skew", "qos_drift_count", "report_age_seconds",
+        "report_stale", "revoked", "revocation_evidence",
+    }
+    raw_states = set(openapi_contract.instructions.INSTR_STATES)
+
+    for prefix in ("/api/v1", "/internal/v1"):
+        media = document["paths"][prefix + "/devices"]["get"]["responses"][
+            "200"]["content"]["application/json"]
+        row = media["schema"]["properties"]["devices"]["items"]
+        assert "instruction" in row["required"]
+        instruction = row["properties"]["instruction"]
+        assert instruction["additionalProperties"] is False
+        assert set(instruction["required"]) == fields
+        assert set(instruction["properties"]) == fields
+        props = instruction["properties"]
+        assert set(props["display_state"]["enum"]) == states
+        for name in ("label", "underlying_label"):
+            assert props[name]["type"] == "string"
+            assert props[name]["minLength"] == 1
+            assert props[name]["maxLength"] == 96
+        assert props["evidence"]["type"] == "string"
+        assert set(props["evidence"]["enum"]) == {
+            "agent-asserted", "server-observed"}
+        assert props["underlying_evidence"] == {
+            "type": "string", "const": "agent-asserted"}
+        assert props["revocation_evidence"] == {
+            "type": "string", "const": "server-observed"}
+        assert set(props["underlying_state"]["enum"]) == raw_states | {None}
+        assert set(props["reason"]["enum"]) == {
+            "unknown_key", "bad_mac", None}
+        for name in ("reported_instr_serial", "report_age_seconds"):
+            assert props[name]["type"] == ["integer", "null"]
+            assert props[name]["minimum"] == 0
+            assert props[name]["maximum"] == (1 << 63) - 1
+        assert props["qos_drift_count"] == {
+            "type": ["integer", "null"], "minimum": 0, "maximum": 49}
+        for name in ("pointer_skew", "report_stale", "revoked"):
+            assert props[name] == {"type": ["boolean", "null"]}
+        assert set(props["verify_level"]["enum"]) == {"sig", "none", None}
+
+        identity = props["accepted_identity"]
+        assert identity["oneOf"][1] == {"type": "null"}
+        accepted = identity["oneOf"][0]
+        assert accepted["additionalProperties"] is False
+        assert set(accepted["required"]) == {
+            "epoch", "instr_serial", "policy_revision"}
+        for value in accepted["properties"].values():
+            _assert_i63_schema(value)
+
+        example = media["example"]["devices"][0]["instruction"]
+        assert set(example) == fields
+        assert example["label"] == "applied r9223372036854775807"
+        assert example["accepted_identity"]["instr_serial"] == (1 << 63) - 1
+        validator = Draft202012Validator(instruction)
+        assert not list(validator.iter_errors(example))
+        assert not list(Draft202012Validator(media["schema"]).iter_errors(
+            media["example"]))
+        invalid = dict(example, private="must-not-cross-projection")
+        assert list(validator.iter_errors(invalid))
+        invalid = dict(example, accepted_identity={
+            "epoch": 11, "instr_serial": 7})
+        assert list(validator.iter_errors(invalid))
+        for field, value in (
+                ("evidence", None),
+                ("evidence", "device-authored"),
+                ("underlying_evidence", "server-observed"),
+                ("revocation_evidence", "agent-asserted")):
+            assert list(validator.iter_errors(dict(example, **{field: value})))
+
+
+def test_task19_effective_qos_deprecates_legacy_delivery_state_and_requires_instruction():
+    from jsonschema import Draft202012Validator
+
+    document = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        device_media = document["paths"][prefix + "/devices"]["get"][
+            "responses"]["200"]["content"]["application/json"]
+        canonical = device_media["schema"]["properties"]["devices"][
+            "items"]["properties"]["instruction"]
+        media = document["paths"][
+            prefix + "/devices/{device_id}/effective-qos"]["get"][
+                "responses"]["200"]["content"]["application/json"]
+        schema = media["schema"]
+        assert "instruction" in schema["required"]
+        assert schema["properties"]["instruction"] == canonical
+        legacy = schema["properties"]["delivery_state"]
+        assert legacy["type"] == "string"
+        assert legacy["const"] == "pre-instructions"
+        assert legacy["deprecated"] is True
+        assert "legacy" in legacy["description"].lower()
+        assert "instruction" in legacy["description"].lower()
+        example = media["example"]
+        assert example["delivery_state"] == "pre-instructions"
+        assert example["instruction"] == device_media["example"][
+            "devices"][0]["instruction"]
+        assert not list(Draft202012Validator(schema).iter_errors(example))
+
+
+def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
+    from jsonschema import Draft202012Validator
+
+    document = _load()
+    states = {
+        "applied", "lkg", "stale", "rejected", "tracker-only",
+        "pre-instructions", "unknown", "unavailable", "pending",
+        "forbidden", "floor_reset", "none", "revoked",
+    }
+    custody_fields = {
+        "schema", "enabled", "state", "certificate_days_to_expiry",
+        "certificate_renewal_due", "signing_refused", "keylist_seq",
+        "keylist_age_days", "keylist_resign_due", "roots_configured",
+        "roots_attested_180d", "root_ceremony_overdue",
+        "root_quorum_degraded", "updated_at",
+    }
+    for prefix in ("/api/v1", "/internal/v1"):
+        media = document["paths"][prefix + "/peer-policy"]["get"][
+            "responses"]["200"]["content"]["application/json"]
+        schema = media["schema"]
+        assert {"fleet_rollup", "instruction_status", "instruction_keys"} <= set(
+            schema["required"])
+
+        rollup = schema["properties"]["fleet_rollup"]
+        assert rollup["additionalProperties"] is False
+        assert set(rollup["required"]) == {
+            "issued_revision", "applied", "states"}
+        issued = rollup["properties"]["issued_revision"]
+        assert issued == {"type": ["integer", "null"], "minimum": 0,
+                          "maximum": (1 << 63) - 1}
+        applied = rollup["properties"]["applied"]
+        assert applied["propertyNames"]["pattern"] == \
+            openapi_contract._DECIMAL_I63_PATTERN
+        _assert_i63_schema(applied["additionalProperties"])
+        decimal_pattern = re.compile(applied["propertyNames"]["pattern"])
+        assert decimal_pattern.fullmatch(str((1 << 63) - 1))
+        assert decimal_pattern.fullmatch(str(1 << 63)) is None
+        applied_validator = Draft202012Validator(applied)
+        assert not list(applied_validator.iter_errors({
+            str((1 << 63) - 1): 1}))
+        assert list(applied_validator.iter_errors({str(1 << 63): 1}))
+        for newline_key in ("7\n", str((1 << 63) - 1) + "\n"):
+            assert list(applied_validator.iter_errors({newline_key: 1}))
+        state_map = rollup["properties"]["states"]
+        assert state_map["additionalProperties"] is False
+        assert set(state_map["properties"]) == states
+        assert not state_map.get("required")
+        for count in state_map["properties"].values():
+            _assert_i63_schema(count)
+
+        status = schema["properties"]["instruction_status"]
+        assert status["additionalProperties"] is False
+        assert set(status["required"]) == {
+            "observed_at", "instr_stamp_missing", "pointer_skew",
+            "issued_revision_label"}
+        assert status["properties"]["observed_at"] == {
+            "type": "number", "minimum": 0, "maximum": (1 << 63) - 1}
+        for name in ("instr_stamp_missing", "pointer_skew"):
+            count = status["properties"][name]
+            assert count["type"] == ["integer", "null"]
+            assert count["minimum"] == 0
+            assert count["maximum"] == (1 << 63) - 1
+        label_schema = status["properties"]["issued_revision_label"]
+        assert label_schema == {
+            "type": ["string", "null"], "maxLength": 20,
+            "pattern": "^r" + openapi_contract._DECIMAL_I63_PATTERN[1:]}
+        label_pattern = re.compile(label_schema["pattern"])
+        assert label_pattern.fullmatch("r%d" % ((1 << 63) - 1))
+        assert label_pattern.fullmatch("r%d" % (1 << 63)) is None
+        label_validator = Draft202012Validator(label_schema)
+        assert not list(label_validator.iter_errors(
+            "r%d" % ((1 << 63) - 1)))
+        assert list(label_validator.iter_errors("r%d" % (1 << 63)))
+        for newline_label in ("r7\n", "r%d\n" % ((1 << 63) - 1)):
+            assert list(label_validator.iter_errors(newline_label))
+
+        custody = schema["properties"]["instruction_keys"]
+        assert custody["oneOf"][1] == {"type": "null"}
+        custody = custody["oneOf"][0]
+        assert custody["additionalProperties"] is False
+        assert set(custody["required"]) == custody_fields
+        assert set(custody["properties"]) == custody_fields
+        assert set(custody["properties"]["state"]["enum"]) == {
+            "phase0", "ready", "renewal_due", "signing_refused",
+            "keylist_missing", "invalid", "error"}
+        assert set(custody["properties"]["root_ceremony_overdue"]["enum"]) == {
+            "unknown", "ok", "warn", "critical"}
+        assert custody["properties"]["certificate_days_to_expiry"]["minimum"] == \
+            -((1 << 63) - 1)
+
+        example = media["example"]
+        assert example["instruction_status"]["issued_revision_label"] == "r12"
+        assert example["fleet_rollup"] == {
+            "issued_revision": 12, "applied": {"7": 1},
+            "states": {"applied": 1}}
+        assert set(example["instruction_keys"]) == custody_fields
+        assert example["instruction_keys"]["updated_at"] <= \
+            example["instruction_status"]["observed_at"]
+        assert not list(Draft202012Validator(schema).iter_errors(example))
+        assert not list(Draft202012Validator(rollup).iter_errors(
+            example["fleet_rollup"]))
+        assert not list(Draft202012Validator(status).iter_errors(
+            example["instruction_status"]))
+        custody_validator = Draft202012Validator(
+            schema["properties"]["instruction_keys"])
+        assert not list(custody_validator.iter_errors(example["instruction_keys"]))
+        expired = dict(example["instruction_keys"],
+                       certificate_days_to_expiry=-2)
+        assert not list(custody_validator.iter_errors(expired))
+        assert not list(custody_validator.iter_errors(None))
+        assert list(custody_validator.iter_errors(
+            dict(example["instruction_keys"], private="must-not-cross")))
 
 
 def test_problem_types_use_stable_anchors_on_the_documented_page():
@@ -204,7 +806,8 @@ def test_console_read_query_contract_matches_runtime_filters_and_limits():
                    if p["in"] == "query"}
         assert set(devices) == {
             "limit", "offset", "q", "management_type", "platform", "cred",
-            "telemetry", "peer", "status"}
+            "telemetry", "peer", "role", "model_family", "os_family",
+            "status"}
         assert devices["limit"]["schema"]["maximum"] == 1000
         assert "__none" in devices["platform"]["schema"]["enum"]
         expected = {
@@ -336,11 +939,40 @@ def test_settings_and_optional_success_shapes_match_runtime():
 
 
 def test_swarm_contract_uses_real_source_grouped_snapshot_shapes():
+    import telemetry
+    import management_api
+    import auth
+    import peer_policy
+    from peer_registry import PeerRegistry
+    from openapi_schema_validator import OAS32Validator
+    registry = PeerRegistry()
+    for index, kind in enumerate(("device", "service", "legacy")):
+        registry.announce("abc", "peer" + str(index), "192.0.2." + str(index + 1),
+                          6881, left=10,
+                          principal=auth.Principal(kind, "d1" if kind == "device" else "seeder"))
+    policy_doc = peer_policy.base_document()
+    policy_doc["assignments"]["d1"] = "quarantine"
+    policy = peer_policy.PolicyResult(policy_doc, True, True, peer_policy.compile_roles(policy_doc))
+    snapshot = telemetry.Telemetry(registry, policy_info=lambda: policy).swarm_snapshot()
+    device = next(row for row in snapshot["images"][0]["peers"] if row["device_id"] == "d1")
+    assert device["peer_policy"]["decision"] == "deny"
+    assert device["peer_policy"]["assignment"] is None
+    assert device["peer_policy"]["quarantined"] is True
+    service = next(row for row in registry.snapshot()["abc"] if row["principal_type"] == "service")
+    service_row = telemetry._peer_row(service, None, {}, {}, {}, {}, None, None, set(), set(), 10)
+    OAS32Validator(openapi_contract._swarm_peer_schema()).validate(service_row)
     doc = _load()
     for path in ("/api/v1/swarm", "/internal/v1/swarm", "/swarm"):
         media = doc["paths"][path]["get"]["responses"]["200"][
             "content"]["application/json"]
         whole = media["examples"]["whole"]["value"]
+        OAS32Validator(media["schema"]).validate(snapshot)
+        assert whole["images"][0]["peers"][0]["tracker"]["principal_type"] == "device"
+        if path != "/swarm":
+            page = management_api._swarm_page(json.dumps(snapshot), 1, 0)
+            assert page["peers_total"] == 2 and page["peers_limit"] == 1
+            assert len(page["images"][0]["peers"]) == 1
+            OAS32Validator(media["schema"]).validate(page)
         assert set(whole) == {"now", "server", "images"}
         assert set(whole["server"]) == {"host", "server_observation"}
         assert set(whole["images"][0]) == {
@@ -375,7 +1007,9 @@ def test_collection_and_catalog_success_examples_match_live_wire_shapes():
 
     policy = doc["paths"]["/v1/devices/{device_id}/policy"]["get"][
         "responses"]["200"]["content"]["application/json"]
-    assert set(policy["example"]) == {
+    legacy_policy = next(example for example in _media_examples(policy)
+                         if not {"instr_rev", "keylist_seq"}.intersection(example))
+    assert set(legacy_policy) == {
         "approved_image_id", "approved_image_ids", "plans"}
     refresh = doc["paths"]["/v1/devices/{device_id}/token-refresh"]["post"][
         "responses"]["200"]["content"]["application/json"]
@@ -412,6 +1046,22 @@ def test_compatibility_request_and_response_shapes_are_operation_specific():
             assignment["schema"]["properties"])
         assert set(assignment["examples"]) == {
             "orderedSet", "singularCompatibility", "unassign"}
+        assignment_operation = doc["paths"][
+            prefix + "/devices/{device_id}/assign"]["post"]
+        assert "422" in assignment_operation["responses"]
+        assignment_result = assignment_operation["responses"]["200"][
+            "content"]["application/json"]
+        assert set(assignment_result["schema"]["required"]) == {
+            "ok", "assigned_image_ids", "removed_image_ids"}
+        fleet_operation = doc["paths"][prefix + "/devices"]["post"]
+        fleet_schema = fleet_operation["requestBody"]["content"][
+            "application/json"]["schema"]
+        assert fleet_schema["additionalProperties"] is False
+        assert "os_family" not in fleet_schema["properties"]
+        assert "registered_at" not in fleet_schema["properties"]
+        assert {"iris_vlan", "app_ip", "role", "credential_profile_id"}.issubset(
+            fleet_schema["properties"])
+        assert "422" in fleet_operation["responses"]
         release = doc["paths"][
             prefix + "/images/{image_id}/release-quarantine"]["post"]
         assert release["requestBody"]["content"]["application/json"][
@@ -506,3 +1156,200 @@ def test_image_publish_job_contract_covers_every_runtime_phase_shape():
         assert set(failed["required"]) == {
             "outcome", "image_state", "detail"}
         assert "matched" not in failed["properties"]
+
+
+def test_openapi_role_qos_mutations_require_cas_and_preview():
+    spec = openapi_contract.build_document()
+    for suffix, method in (("/peer-policy/roles/{name}", "put"),
+                           ("/peer-policy/roles/{name}", "delete"),
+                           ("/peer-policy/qos", "put"),
+                           ("/devices/{device_id}/role", "post"),
+                           ("/devices/bulk-role", "post")):
+        for prefix in ("/api/v1", "/internal/v1"):
+            operation = spec["paths"][prefix + suffix][method]
+            assert {"409", "412", "422", "428"} <= set(operation["responses"])
+            parameters = {p["name"]: p for p in operation["parameters"]}
+            assert parameters["If-Match"]["required"] is True
+            assert "dry_run" in parameters
+    assert "/api/v1/devices/{device_id}/qos" not in spec["paths"]
+
+
+def test_policy_contract_exact_business_unions_compose_tier_failures():
+    spec = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        def codes(suffix, method, status):
+            return set(spec["paths"][prefix + suffix][method]["responses"][str(status)]["x-iris-problem-codes"])
+        operations = set(openapi_contract.POLICY_MUTATIONS) | {
+            ("GET", "/peer-policy"), ("GET", "/peer-policy/roles"),
+            ("GET", "/peer-policy/explain"), ("GET", "/devices/{device_id}/effective-qos")}
+        for method, suffix in operations:
+            assert codes(suffix, method.lower(), 401) == {"console-session-required", "management-authentication-required"}
+        assert codes("/peer-policy/roles/{name}", "put", 422) == {"invalid_policy", "invalid_policy_request"}
+        assert codes("/peer-policy/roles/{name}", "put", 409) == {"role_isolated", "role_reserved_name", "revision_conflict", "operation_backlog_full"}
+        assert codes("/peer-policy/qos", "put", 404) == {"route-not-found", "role_not_found"}
+        assert codes("/devices/{device_id}/effective-qos", "get", 404) == {"route-not-found", "device_not_found"}
+        assert codes("/peer-policy/explain", "get", 422) == {"principal_unresolvable"}
+        assert codes("/peer-policy/qos", "put", 409) == {"revision_conflict", "operation_backlog_full", "role_reserved_name"}
+        assert "fleet_write_failed" not in codes("/peer-policy/explain", "get", 503)
+        if prefix == "/api/v1":
+            assert "management-api-unavailable" in codes("/peer-policy/qos", "put", 503)
+        schema = spec["paths"][prefix + "/peer-policy"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema["properties"]["roles_supported"] == {"type": "boolean", "const": True}
+
+
+def test_tracker_state_openapi_contract_is_closed_reusable_and_exactly_generated():
+    document = _load()
+    generated = openapi_contract.build_document()
+    assert document["openapi"] == "3.2.0"
+    assert SPEC.read_bytes() == (json.dumps(generated, indent=2,
+                                           sort_keys=False) + "\n").encode("utf-8")
+    assert _specified_keys(document) == api_routes.keys()
+
+    def resolve(schema):
+        while "$ref" in schema:
+            reference = schema["$ref"]
+            assert reference.startswith("#/components/schemas/")
+            schema = document["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+        return schema
+
+    def state_map(schema):
+        map_ref = schema.get("$ref")
+        assert map_ref, "one reusable tracker-state map"
+        schema = resolve(schema)
+        assert schema["type"] == "object" and schema["additionalProperties"] is False
+        assert set(schema["properties"]) == {"seeder", "leecher"}
+        assert not schema.get("required")
+        refs = [schema["properties"][state].get("$ref") for state in ("seeder", "leecher")]
+        assert refs[0] and refs[0] == refs[1], "one reusable tracker-state object"
+        row = resolve(schema["properties"]["seeder"])
+        assert row["type"] == "object" and row["additionalProperties"] is False
+        assert set(row["properties"]) == {"announce_min_interval_s", "numwant"}
+        assert not row.get("required")
+        for key, lower, upper in (("announce_min_interval_s", 10, 300), ("numwant", 4, 200)):
+            value = resolve(row["properties"][key])
+            assert (value["type"], value["minimum"], value["maximum"]) == ("integer", lower, upper)
+        return map_ref, refs[0]
+
+    state_refs = []
+    for prefix in ("/api/v1", "/internal/v1"):
+        put = document["paths"][prefix + "/peer-policy/qos"]["put"]
+        body = resolve(put["requestBody"]["content"]["application/json"]["schema"])
+        assert body["additionalProperties"] is False
+        assert set(body["properties"]) == {"qos", "qos_state", "role", "confirm_token"}
+        state_refs.append(state_map(body["properties"]["qos_state"]))
+        assert set(put["responses"]["422"]["x-iris-problem-codes"]) == {
+            "invalid_policy", "invalid_policy_request"}
+        definition = resolve(document["paths"][prefix + "/peer-policy/roles/{name}"]["put"][
+            "requestBody"]["content"]["application/json"]["schema"])
+        state_refs.append(state_map(definition["properties"]["qos_state"]))
+        roles = resolve(document["paths"][prefix + "/peer-policy/roles"]["get"][
+            "responses"]["200"]["content"]["application/json"]["schema"])
+        assert "qos_state_default" not in roles["required"]
+        state_refs.append(state_map(roles["properties"]["qos_state_default"]))
+        stored_role = resolve(roles["properties"]["roles"]["additionalProperties"])
+        state_refs.append(state_map(stored_role["properties"]["qos_state"]))
+        effective = document["paths"][prefix + "/devices/{device_id}/effective-qos"]["get"]
+        query = [parameter for parameter in effective["parameters"] if parameter["in"] == "query"]
+        assert len(query) == 1 and query[0]["name"] == "tracker_state"
+        assert query[0].get("required", False) is False
+        assert resolve(query[0]["schema"])["type"] == "string"
+        assert set(resolve(query[0]["schema"])["enum"]) == {"seeder", "leecher"}
+        assert set(effective["responses"]["422"]["x-iris-problem-codes"]) == {"invalid_policy_request"}
+        assert set(effective["responses"]["404"]["x-iris-problem-codes"]) == {
+            "route-not-found", "device_not_found"}
+        response = resolve(effective["responses"]["200"]["content"]["application/json"]["schema"])
+        assert {"tracker_state", "tracker_qos"} <= set(response["properties"])
+    assert len(set(state_refs)) == 1
+
+
+_SCHEDULE_OPERATIONS = (
+    ("GET", "/schedules", "200"), ("POST", "/schedules", "201"),
+    ("GET", "/schedules/{id}", "200"), ("PUT", "/schedules/{id}", "200"),
+    ("PATCH", "/schedules/{id}", "200"), ("DELETE", "/schedules/{id}", "204"),
+    ("GET", "/schedules/{id}/occurrences", "200"),
+    ("GET", "/schedules/{id}/receipts", "200"),
+    ("POST", "/schedules/{id}/reaffirm", "200"),
+)
+
+
+def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
+    document = _load()
+    occurrence = document["components"]["schemas"]["ScheduleOccurrence"]
+    annotations = occurrence["properties"]["annotations"]
+    assert "annotations" not in occurrence["required"]
+    assert annotations["additionalProperties"] is False
+    assert annotations["required"] == []
+    assert annotations["properties"]["all_targets_quarantined"] == {
+        "type": "integer", "minimum": 1,
+        "maximum": schedules.MAX_TARGETS}
+    for prefix, service, security in (
+            ("/api/v1", "console", "consoleSession"),
+            ("/internal/v1", "management", "managementBearer+consoleSession")):
+        for method, suffix, success in _SCHEDULE_OPERATIONS:
+            operation = document["paths"][prefix + suffix][method.lower()]
+            assert operation["x-iris-service"] == service
+            assert operation["x-iris-security"] == security
+            assert success in operation["responses"]
+            assert "default" not in operation["responses"]
+            assert "only assign images or onboard staging agents" in operation["description"]
+            expected_errors = {401, 404, 422, 503}
+            if method != "GET":
+                expected_errors.update((400, 403, 413))
+            if service == "console":
+                expected_errors.update((400, 411, 413))
+            if method in ("PUT", "PATCH", "DELETE") or suffix.endswith("/reaffirm"):
+                expected_errors.update((412, 428))
+            if method == "POST" and suffix == "/schedules":
+                expected_errors.add(409)
+            assert set(operation["responses"]) == {success, *map(str, expected_errors)}
+            params = {p["name"]: p for p in operation["parameters"]}
+            assert "Idempotency-Key" not in params
+            conditional = method in ("PUT", "PATCH", "DELETE") or suffix.endswith("/reaffirm")
+            if conditional:
+                assert params["If-Match"]["required"] is True
+                description = params["If-Match"]["description"].lower()
+                for phrase in ("singleton", "strong", "duplicate", "weak", "comma", "428", "412", "race", "current etag"):
+                    assert phrase in description
+                assert operation["responses"]["412"]["x-iris-problem-codes"] == ["precondition_failed"]
+                assert operation["responses"]["428"]["x-iris-problem-codes"] == ["precondition_required"]
+                for status in ("412", "428"):
+                    assert "ETag" in operation["responses"][status]["headers"]
+                assert "409" not in operation["responses"]
+            else:
+                assert "If-Match" not in params
+                assert "412" not in operation["responses"]
+                assert "428" not in operation["responses"]
+            response = operation["responses"][success]
+            if (suffix == "/schedules" and method == "GET" or
+                    suffix.endswith(("/occurrences", "/receipts"))):
+                assert "ETag" not in response.get("headers", {})
+            else:
+                assert "ETag" in response["headers"]
+            if method == "POST" and suffix == "/schedules":
+                assert "Location" in response["headers"]
+                assert response["headers"]["Location"]["example"] == prefix + "/schedules/s-boat"
+                assert operation["responses"]["409"]["x-iris-problem-codes"] == ["schedule_conflict"]
+            if method in ("PUT", "PATCH") or method == "POST" and suffix == "/schedules":
+                assert "role_not_found" in operation["responses"]["422"]["x-iris-problem-codes"]
+                assert "role_not_found" not in operation["responses"]["404"]["x-iris-problem-codes"]
+                assert {"policy_fail_closed", "policy_error", "schedule_target_unavailable",
+                        "schedule_target_status_unavailable", "schedule_target_heartbeat_unavailable",
+                        "schedule_target_policy_unavailable"} <= set(
+                            operation["responses"]["503"]["x-iris-problem-codes"])
+            if method == "DELETE":
+                assert "content" not in response
+                assert "predecessor" in response["headers"]["ETag"]["description"]
+            assert "schedule_state_unavailable" in operation["responses"]["503"]["x-iris-problem-codes"]
+            if suffix != "/schedules":
+                assert "schedule_not_found" in operation["responses"]["404"]["x-iris-problem-codes"]
+
+
+def test_schedule_container_installs_timezone_data_and_executable_cli():
+    dockerfile = (SPEC.parents[2] / "server" / "Dockerfile").read_text()
+    logical = dockerfile.replace("\\\n", " ")
+    apt = re.search(r"apt-get install[^\n]+", logical).group()
+    assert '"tzdata=${TZDATA_VERSION}"' in apt.split()
+    assert re.search(r"^ARG TZDATA_VERSION=[^\s]+$", dockerfile,
+                     re.MULTILINE)
+    chmod = re.search(r"RUN chmod \+x [^\n]+", logical).group()
+    assert "/opt/iris/server/iris-schedule" in chmod.split()

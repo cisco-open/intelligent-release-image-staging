@@ -8,9 +8,11 @@
 peer lifecycle via peer_registry, bencoded responses, optional compact peers.
 Stdlib only. Run as a service: python3 tracker.py (reads IRIS_* env)."""
 import binascii
+import collections
 import ipaddress
 import json
 import os
+import random
 import socket
 import ssl
 import sys
@@ -26,13 +28,68 @@ import blocklist_reconciler as _reconciler
 import bounded_pool
 import credential_cache
 import peer_endpoints as _peer_endpoints
+import peer_handouts as _peer_handouts
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
+import origin_qos as _origin_qos
+import reconciler_status as _status_codes
 import secrets_store
 import telemetry
-from peer_registry import PeerRegistry, INTERVAL
+from peer_registry import PeerRegistry, INTERVAL, NUMWANT_CAP
 
 MIN_INTERVAL = 10
+MAX_INTERVAL = 300
+
+LegacyAttributions = collections.namedtuple(
+    "LegacyAttributions", ["by_ip", "unreadable", "revoked"])
+
+
+def _stat_key(path):
+    """Return a replacement-sensitive identity for one durable file."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
+class PolicySnapshot:
+    """Thread-safe cache of one complete peer-policy load result.
+
+    Both authoritative and LKG identities participate in the key. A restat
+    after loading prevents publishing a result assembled while either path
+    was replaced.
+    """
+
+    def __init__(self, authoritative_path, lkg_path, loader=None):
+        self._paths = (authoritative_path, lkg_path)
+        self._loader = loader or _peer_policy.load_policy
+        self._key = None
+        self._result = None
+        self._lock = threading.Lock()
+
+    def _keys(self):
+        return tuple(_stat_key(path) for path in self._paths)
+
+    def load(self):
+        with self._lock:
+            while True:
+                before = self._keys()
+                if self._result is not None and before == self._key:
+                    return self._result
+                result = self._loader(*self._paths)
+                after = self._keys()
+                if before == after:
+                    self._key = after
+                    self._result = result
+                    return result
+
+
+def jittered_interval(interval, factor=None):
+    """Apply per-announce ±10 percent jitter and schema-bound the result."""
+    if factor is None:
+        factor = random.uniform(0.9, 1.1)
+    return max(MIN_INTERVAL, min(MAX_INTERVAL, int(round(interval * factor))))
 
 # Per-connection socket inactivity timeout (seconds), same posture as the
 # catalog handler: a client that opens a connection and never completes its
@@ -153,6 +210,10 @@ def parse_announce(query):
             return int(raw.get(name, default))
         except (TypeError, ValueError):
             return default
+
+    def as_nonnegative(name):
+        value = as_int(name, None)
+        return value if value is not None and value >= 0 else None
     # Port must be in 1-65535; clamp to default on bad input.
     raw_port = as_int("port", 6881)
     port = raw_port if 1 <= raw_port <= 65535 else None
@@ -177,6 +238,8 @@ def parse_announce(query):
         "numwant": as_int("numwant", 50),
         "compact": raw.get("compact") == "1",
         "ip": ip,
+        "uploaded": as_nonnegative("uploaded"),
+        "downloaded": as_nonnegative("downloaded"),
     }
 
 
@@ -199,15 +262,18 @@ def compact_peers(peers):
     return bytes(out)
 
 
-def build_announce_response(peers, compact=False, interval=INTERVAL):
+def build_announce_response(peers, compact=False, interval=INTERVAL,
+                            min_interval=None):
     if compact:
         peers_value = compact_peers(peers)
     else:
         peers_value = [{"ip": p["ip"], "peer id": "", "port": p["port"]}
                        for p in peers]
+    if min_interval is None:
+        min_interval = interval
     return bencode.encode({
         "interval": interval,
-        "min interval": MIN_INTERVAL,
+        "min interval": min_interval,
         "peers": peers_value,
     })
 
@@ -254,11 +320,78 @@ def _catalog_scrape_authorizer(state_dir):
     return allowed
 
 
+def _bounded_legacy_retention(policy, revoked, now, role_until):
+    """Retain deny evidence indefinitely and role-only evidence temporarily."""
+    compiled = policy.roles
+
+    def keep(principal_type, principal_id, ipv4):
+        principal_key = "%s:%s" % (principal_type, principal_id)
+        if principal_key in revoked:
+            return True
+        if policy.fail_closed or principal_type != "device":
+            return False
+        principal = auth.Principal(principal_type, principal_id)
+        if _peer_policy.evaluate(
+                policy.document, principal, ipv4,
+                compiled=compiled)[0] == "deny":
+            return True
+        role = compiled.role_of.get(principal_id)
+        role_active = now < role_until
+        return role_active and role in compiled.restricted
+
+    return keep
+
+
+def _legacy_token_deadline(store, grace=0):
+    """Last instant at which any previous seeder token can authenticate."""
+    deadlines = []
+    previous = store.get("seeder", {}).get("announce_token_previous", [])
+    for record in previous if isinstance(previous, list) else ():
+        if not isinstance(record, dict) or record.get("revoked"):
+            continue
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, (int, float)) and not isinstance(
+                expires_at, bool) and expires_at > 0:
+            deadlines.append(expires_at + grace)
+    return max(deadlines) if deadlines else 0
+
+
+def legacy_attributions(policy, endpoints_path, store, now, grace=0):
+    """Return all durable device principals attributable to each IPv4.
+
+    Shared addresses retain every principal so callers can apply universal,
+    deny-wins policy evaluation. A corrupt or unreadable store is represented
+    explicitly and makes legacy discovery fail closed.
+    """
+    if endpoints_path is None:
+        return LegacyAttributions({}, False, frozenset())
+    revoked = set(secrets_store.revoked_device_principals(store))
+    role_until = _legacy_token_deadline(store, grace)
+    try:
+        durable = _peer_endpoints.fresh_endpoints(
+            endpoints_path, now, keep=_bounded_legacy_retention(
+                policy, revoked, now=now, role_until=role_until))
+    except (OSError, _peer_endpoints.EndpointStoreError):
+        return LegacyAttributions({}, True, frozenset(revoked))
+    by_ip = {}
+    for entry in durable.values():
+        if entry.get("principal_type") != "device":
+            continue
+        principal = auth.Principal("device", entry.get("principal_id", ""))
+        for endpoint in entry.get("endpoints", ()):
+            by_ip.setdefault(endpoint.get("ipv4"), set()).add(principal)
+    return LegacyAttributions({
+        ip: tuple(sorted(principals)) for ip, principals in by_ip.items()
+        if ip is not None
+    }, False, frozenset(revoked))
+
+
 def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
                 record_endpoint=None, on_endpoint_failure=None,
                 on_endpoint_change=None, on_announce_refused=None,
-                scrape_authorizer=None, certfile=None):
+                scrape_authorizer=None, certfile=None, handout_path=None,
+                record_handout=None, on_handout_failure=None):
     """Build the tracker server (TLS when *certfile* is supplied).
 
     Typed identity/policy integration (spec §6/§7):
@@ -299,11 +432,14 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
     _credentials = credential_cache.CredentialResolver(secrets_path)
     _grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
     _record_endpoint = record_endpoint or _peer_endpoints.record_endpoint
+    _record_handout = record_handout or _peer_handouts.record_handout
+    _policy_snapshot = (PolicySnapshot(*policy_paths)
+                        if policy_paths is not None else None)
 
     def _load_policy():
-        if policy_paths is None:
+        if _policy_snapshot is None:
             return None
-        return _peer_policy.load_policy(policy_paths[0], policy_paths[1])
+        return _policy_snapshot.load()
 
     class Handler(BaseHTTPRequestHandler):
         # Socket inactivity timeout (see HANDLER_TIMEOUT): a stalled read
@@ -432,6 +568,7 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
 
         def _handle_announce(self, query, store, index, now, ctx):
             a = parse_announce(query)
+            state = "seeder" if a["left"] == 0 else "leecher"
             socket_ip = self.client_address[0]
             # The legacy id is derived from the SOCKET endpoint: a legacy
             # credential never earns the ip= override (below), so this is
@@ -461,27 +598,83 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 peer_ip = a["ip"]
             else:
                 peer_ip = socket_ip
+            policy = _load_policy()
+            attribution_cache = []
+
+            def get_attributions():
+                if not attribution_cache:
+                    attribution_cache.append(legacy_attributions(
+                        policy, endpoints_path, store, now, grace=_grace))
+                return attribution_cache[0]
+
+            qos = self._announce_qos(
+                policy, principal, peer_ip, get_attributions, state)
+            issued_interval = jittered_interval(
+                qos.get("announce_min_interval_s", INTERVAL))
+            effective_numwant = min(
+                max(a["numwant"], 0), qos.get("numwant", 50))
+            legacy_restricted = self._legacy_restricted(
+                policy, principal, peer_ip, get_attributions)
             # port=None means the client sent an out-of-range value. Registering
             # a substitute port would advertise a wrong endpoint; skip
             # registration AND any durable endpoint write, but still 200.
             if a["port"] is None:
-                peers = self._select(a, principal, peer_ip, store, now)
+                peers = self._select(
+                    a, principal, peer_ip, policy, get_attributions,
+                    effective_numwant)
+                peers = self._record_selected(
+                    principal, peers, a["info_hash"], now)
                 self._send(200, build_announce_response(
-                    peers, compact=a["compact"]))
+                    peers, compact=a["compact"], interval=issued_interval,
+                    min_interval=issued_interval))
                 return
             peer_port = a["port"]
             # Register the typed peer BEFORE candidate filtering so a valid
             # (even quarantined) announce is 200 and visible in the swarm.
             registry.announce(a["info_hash"], a["peer_id"], peer_ip, peer_port,
                               event=a["event"], left=a["left"],
-                              principal=principal)
+                              principal=principal, now=now,
+                              interval=issued_interval,
+                              uploaded=a["uploaded"],
+                              downloaded=a["downloaded"],
+                              legacy_restricted=legacy_restricted)
             # Durable endpoint write for attributable principals only. Failure
             # never changes the HTTP 200 or the policy filtering: enqueue the
             # latest pending tuple and signal a degrade / local wake.
             self._persist_endpoint(principal, peer_ip, peer_port, now)
-            peers = self._select(a, principal, peer_ip, store, now)
+            peers = self._select(
+                a, principal, peer_ip, policy, get_attributions,
+                effective_numwant)
+            peers = self._record_selected(
+                principal, peers, a["info_hash"], now)
             self._send(200, build_announce_response(
-                peers, compact=a["compact"]))
+                peers, compact=a["compact"], interval=issued_interval,
+                min_interval=issued_interval))
+
+        @staticmethod
+        def _record_selected(principal, peers, info_hash, now):
+            """Persist device disclosure evidence before response encoding.
+
+            Service and compatibility principals are outside this ledger.
+            With no ledger path the constructor retains its legacy/test
+            behavior; production always supplies one.
+            """
+            if principal.type != "device" or not peers or handout_path is None:
+                return peers
+            try:
+                covered = _record_handout(
+                    handout_path, principal, peers, info_hash, now)
+                if covered is False:
+                    raise _peer_handouts.HandoutStoreError(
+                        "handout persistence refused")
+            except Exception:
+                if on_handout_failure is not None:
+                    try:
+                        on_handout_failure()
+                    except Exception:
+                        pass
+                return []
+            return peers
 
         def _persist_endpoint(self, principal, peer_ip, peer_port, now):
             if endpoints_path is None:
@@ -507,64 +700,130 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             if on_endpoint_change is not None:
                 on_endpoint_change()
 
-        def _denied_legacy_addresses(self, policy, store, now):
-            """Addresses a durable endpoint row attributes to a device the
-            policy denies or whose credentials are revoked, or None when the
-            endpoint store cannot be read (the caller fails closed)."""
-            if endpoints_path is None:
-                return set()
-            revoked = secrets_store.revoked_device_principals(store)
-            keep = _reconciler.denied_retention(policy, revoked)
-            try:
-                durable = _peer_endpoints.fresh_endpoints(
-                    endpoints_path, now, keep=keep)
-            except _peer_endpoints.EndpointStoreError:
-                return None
-            return _reconciler.denied_endpoint_ips(policy, durable, revoked)
+        @staticmethod
+        def _attributed_principals(principal, peer_ip, attributions):
+            if principal is None or principal.type != "legacy":
+                return (principal,)
+            if attributions is None:
+                return (principal,)
+            if attributions.unreadable:
+                return ()
+            return attributions.by_ip.get(peer_ip, (principal,))
 
-        def _select(self, a, principal, peer_ip, store, now):
-            policy = _load_policy()
+        @staticmethod
+        def _announce_qos(policy, principal, peer_ip, get_attributions,
+                          state):
+            if policy is None:
+                return {"announce_min_interval_s": INTERVAL,
+                        "numwant": NUMWANT_CAP}
+            if principal.type == "device":
+                return _peer_policy.compile_tracker_qos(
+                    policy.document, principal.id, state)
+            if principal.type == "legacy":
+                attributions = get_attributions()
+            else:
+                attributions = None
+            if attributions is not None and not attributions.unreadable:
+                attributed = attributions.by_ip.get(peer_ip, ())
+                if attributed:
+                    values = [_peer_policy.compile_tracker_qos(
+                        policy.document, item.id, state)
+                              for item in attributed]
+                    # A shared NAT address receives the slowest cadence and
+                    # smallest handout ceiling of every possible owner.
+                    result = dict(values[0])
+                    result["announce_min_interval_s"] = max(
+                        item["announce_min_interval_s"] for item in values)
+                    result["numwant"] = min(item["numwant"] for item in values)
+                    return result
+            return _peer_policy.compile_tracker_qos(
+                policy.document, None, state)
+
+        @staticmethod
+        def _legacy_restricted(policy, principal, peer_ip, get_attributions):
+            if policy is None or principal.type != "legacy":
+                return False
+            attributions = get_attributions()
+            if policy.fail_closed or attributions.unreadable:
+                return True
+            for attributed in attributions.by_ip.get(peer_ip, ()):
+                key = "%s:%s" % (attributed.type, attributed.id)
+                if key in attributions.revoked:
+                    return True
+                role = policy.roles.role_of.get(attributed.id)
+                if role in policy.roles.restricted:
+                    return True
+                if _peer_policy.evaluate(
+                        policy.document, attributed, peer_ip,
+                        compiled=policy.roles)[0] == "deny":
+                    return True
+            return False
+
+        @staticmethod
+        def _restricted_candidates(policy, principal):
+            """Return sparse registry indexes for a virtual-role requester."""
+            if principal.type != "device":
+                return None
+            if principal.id in policy.document.get("assignments", {}) or \
+                    _peer_policy.is_quarantined(policy.document, principal.id):
+                return None
+            compiled = policy.roles
+            role = compiled.role_of.get(principal.id)
+            if role not in compiled.restricted:
+                return None
+            definitions = policy.document.get("roles", {}).get("defs", {})
+            definition = definitions.get(role, {})
+            allowed_roles = set(definition.get("peers", [role]))
+            allowed_roles.add(role)
+            principals = set()
+            if _peer_policy.role_origin_enabled(policy.document, role):
+                principals.add(("service", "seeder"))
+            return frozenset(allowed_roles), frozenset(principals)
+
+        def _select(self, a, principal, peer_ip, policy, get_attributions,
+                    numwant):
             if policy is None:
                 return registry.peers(a["info_hash"], a["peer_id"],
-                                      numwant=a["numwant"])
+                                      numwant=numwant)
             if policy.fail_closed:
                 return []
             doc = policy.document
-            # A legacy credential (a previous seeder announce token, which
-            # every device that ever received a torrent carrying it still
-            # holds) has no ACL slot, so a quarantined device could otherwise
-            # reclassify itself out of quarantine by announcing with it. A
-            # previous token now expires on its own (secrets_store's
-            # SEEDER_PREV_TTL, enforced by the same `valid` check as any other
-            # credential), which is the real boundary; this address rule is the
-            # hint that holds inside the overlap window. The
-            # credential stays the identity; the address is only a DENY
-            # hint: a legacy requester or candidate at an address a durable
-            # endpoint attributes to a denied/revoked device is treated as
-            # that device -- no peers for it, and it is handed to nobody.
-            cache = {}
-
-            def legacy_denied(p, ip):
-                if p is None or p.type != "legacy":
-                    return False
-                if "ips" not in cache:
-                    cache["ips"] = self._denied_legacy_addresses(
-                        policy, store, now)
-                denied = cache["ips"]
-                return denied is None or ip in denied
-
-            if legacy_denied(principal, peer_ip):
+            if self._legacy_restricted(
+                    policy, principal, peer_ip, get_attributions):
                 return []
 
             def predicate(req_p, req_ip, cand_p, cand_ip):
-                if legacy_denied(cand_p, cand_ip):
+                if ((req_p is not None and req_p.type == "legacy") or
+                        cand_p.type == "legacy"):
+                    attributions = get_attributions()
+                else:
+                    attributions = None
+                requesters = self._attributed_principals(
+                    req_p, req_ip, attributions)
+                candidates = self._attributed_principals(
+                    cand_p, cand_ip, attributions)
+                if not requesters or not candidates:
                     return False
-                return _peer_policy.mutual_permit(
-                    doc, req_p, req_ip, cand_p, cand_ip)
+                if attributions is not None and any(
+                        "%s:%s" % (item.type, item.id) in attributions.revoked
+                        for item in requesters + candidates):
+                    return False
+                return all(
+                    _peer_policy.mutual_permit(
+                        doc, requester, req_ip, candidate, cand_ip,
+                        compiled=policy.roles)
+                    for requester in requesters for candidate in candidates)
 
+            sparse = self._restricted_candidates(policy, principal)
+            kwargs = {}
+            if sparse is not None:
+                kwargs["candidate_roles"] = sparse[0]
+                kwargs["candidate_principals"] = sparse[1]
+                kwargs["candidate_types"] = frozenset({"legacy"})
+                kwargs["compiled_roles"] = policy.roles
             return registry.select_peers(
                 a["info_hash"], a["peer_id"], principal, peer_ip,
-                predicate=predicate, numwant=a["numwant"])
+                predicate=predicate, numwant=numwant, **kwargs)
 
         def _handle_scrape(self, query, ctx):
             # Parse the RAW query like parse_announce: a real info_hash is 20
@@ -637,20 +896,23 @@ RECONCILE_POLL = 2.0   # max seconds before durable cross-process changes apply
 # Upper bound on how long the loop may go without a full recompute even when
 # nothing on disk changed and no wake arrived. A bare ≤2s poll with unchanged
 # stat keys, an empty pending queue, a healthy known RPC/session and no dirty
-# flag is a no-op (the dead-poll gate suppresses the redundant per-2s RPC), but
-# endpoint TTL expiry and periodic RPC/session recovery are time-driven and have
+# flag performs only the lightweight QoS target-set probe; it suppresses the
+# full snapshot, session probe, and apply RPCs. Endpoint TTL expiry and periodic
+# RPC/session recovery are time-driven and have
 # no file-change signal — so we still force a maintenance pass at least this
 # often. A pass that runs because this deadline passed also prunes expired
 # rows from the durable endpoint map (peer_endpoints.prune); a wake- or
 # change-driven pass only reads it. Bounded to one endpoint-TTL horizon
 # (capped) so pruning is timely without blindly never running.
 MAINTENANCE_INTERVAL_CAP = 60.0   # seconds
+_NO_QOS_TARGETS = object()
 
 
 class Aria2BlocklistAdapter:
     """Thin adapter exposing the reconciler's ``aria`` contract over the local
     aria2 JSON-RPC. It calls ``aria2.getSessionInfo`` for the counter epoch and
-    ``aria2.setBtPeerBlocklist`` for the sole full-replace apply (spec §0). The
+    ``aria2.setBtPeerBlocklist`` for the sole full-replace apply (spec §0), plus
+    the narrowly-scoped origin QoS target and option calls. The
     RPC secret rides through the injected caller; no token is ever surfaced in
     an error (the reconciler records only the exception TYPE name)."""
 
@@ -664,15 +926,35 @@ class Aria2BlocklistAdapter:
     def set_blocklist(self, ips):
         return self._rpc("aria2.setBtPeerBlocklist", [list(ips)]) or {}
 
+    def get_active_download_gids(self):
+        active = self._rpc("aria2.tellActive", [["gid"]])
+        if not isinstance(active, list):
+            raise ValueError("bad tellActive result")
+        gids = []
+        for row in active:
+            if not isinstance(row, dict) or "gid" not in row:
+                raise ValueError("bad tellActive row")
+            gids.append(row["gid"])
+        try:
+            return _origin_qos.validate_target_gids(gids)
+        except _origin_qos.OriginQosError as exc:
+            raise ValueError("bad active gid set") from exc
 
-def _stat_key(path):
-    """Cheap change-detection key (mtime + size) for a durable file; missing
-    file -> a sentinel. Same discipline as the console's StreamSettings poll."""
-    try:
-        st = os.stat(path)
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
+    def set_global_options(self, options):
+        if not isinstance(options, dict) \
+                or set(options) != _origin_qos.GLOBAL_OPTION_KEYS \
+                or any(not isinstance(value, str) for value in options.values()):
+            raise ValueError("bad origin global options")
+        return self._rpc("aria2.changeGlobalOption", [dict(options)])
+
+    def set_download_options(self, gid, options):
+        if not isinstance(gid, str) or not gid:
+            raise ValueError("bad origin download gid")
+        if not isinstance(options, dict) \
+                or set(options) != _origin_qos.DOWNLOAD_OPTION_KEYS \
+                or any(not isinstance(value, str) for value in options.values()):
+            raise ValueError("bad origin download options")
+        return self._rpc("aria2.changeOption", [gid, dict(options)])
 
 
 class TrackerReconciler:
@@ -687,6 +969,8 @@ class TrackerReconciler:
     exact count-only enforcement status; and export the policy operation outbox
     in revision order above the ack, advancing
     ``last_operation_exported_revision`` only after the audit contract succeeds.
+    The same serialized pass reconciles origin QoS with separate success memory
+    and a separately persisted, identifier-free status.
 
     Startup and every aria RPC transition to reachable / session change force a
     full valid desired apply (including a valid-empty list). ``fail_closed``
@@ -697,14 +981,18 @@ class TrackerReconciler:
     def __init__(self, policy_paths, endpoints_path, enforcement_path, aria,
                   pending_queue, active_participants, revoked_principals,
                   protected_seeder_ip=None, audit_export=None,
-                  emit_policy_event=None, now=None):
+                  emit_policy_event=None, now=None,
+                  legacy_retention_until=None, origin_qos_path=None):
         self._policy_paths = policy_paths
         self._endpoints_path = endpoints_path
         self._enforcement_path = enforcement_path
+        self._origin_qos_path = origin_qos_path or os.path.join(
+            os.path.dirname(enforcement_path), "origin-qos.json")
         self._aria = aria
         self._pending = pending_queue
         self._active_participants = active_participants
         self._revoked_principals = revoked_principals
+        self._legacy_retention_until = legacy_retention_until or (lambda: 0)
         self._protected_seeder_ip = protected_seeder_ip
         self._audit_export = audit_export
         # The telemetry hub injects this to avoid a tracker -> OTLP import
@@ -718,6 +1006,14 @@ class TrackerReconciler:
         self._last_session = None
         self._last_hash = None
         self._rpc_ok = None            # None=unknown, then True/False
+        self._qos_last_session = None
+        self._qos_last_hash = None
+        self._qos_last_targets = None
+        self._qos_rpc_ok = None
+        self._prefetched_qos_targets = _NO_QOS_TARGETS
+        self._qos_enabled = all(hasattr(aria, name) for name in (
+            "get_active_download_gids", "set_global_options",
+            "set_download_options"))
 
         # Serialization: exactly one reconcile at a time; a change during a run
         # schedules exactly one rerun (dirty flag).
@@ -803,11 +1099,11 @@ class TrackerReconciler:
     def _note_pass_failure(self, exc):
         # Force the next bare poll to run (the deadline is the cheapest lever
         # that does not pretend to know the RPC state), then try to say so in
-        # the status file. Only the exception TYPE is recorded: an RPC error's
-        # text can embed the secret.
+        # the status file. Source-owned codes never include exception data.
         self._next_maintenance = None
         try:
             prior = _peer_enforcement.read_status(self._enforcement_path) or {}
+            policy = _peer_policy.load_policy(*self._policy_paths)
             count = prior.get("desired_ip_count", 0)
             status = _peer_enforcement.build_status(
                 state="degraded",
@@ -817,14 +1113,65 @@ class TrackerReconciler:
                 desired_ip_count=count if isinstance(count, int)
                 and not isinstance(count, bool) else 0,
                 now=self._now(),
-                last_operation_exported_revision=prior.get(
-                    "last_operation_exported_revision", 0),
+                last_operation_exported_revision=_peer_policy.effective_acked(
+                    policy.document, prior),
+                operation_ack_epoch=policy.document.get("operation_ack_epoch"),
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
-                last_error=type(exc).__name__)
+                last_error=_status_codes.PEER_RECONCILE_FAILED,
+                mutual_origin=self._prior_mutual_origin(prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
         except Exception:
             pass
+        if self._qos_enabled:
+            self._write_origin_qos_failure(_status_codes.ORIGIN_RECONCILE_FAILED)
+
+    def _write_origin_qos_failure(self, error):
+        """Best-effort degraded QoS status preserving only validated scalars."""
+        try:
+            prior = _origin_qos.read_status(self._origin_qos_path) or {}
+
+            def count(name):
+                value = prior.get(name, 0)
+                return value if isinstance(value, int) \
+                    and not isinstance(value, bool) and value >= 0 else 0
+
+            session = prior.get("aria_session_id")
+            session = session if isinstance(session, str) and session else None
+            desired_hash = prior.get("desired_hash")
+            desired_hash = (desired_hash if isinstance(desired_hash, str)
+                            and desired_hash else None)
+            global_count = min(
+                count("global_option_count"),
+                len(_origin_qos.GLOBAL_OPTION_KEYS))
+            target_count = count("target_download_count")
+            applied_count = min(count("applied_download_count"), target_count)
+            status = _origin_qos.build_status(
+                state="degraded" if session and desired_hash
+                else "rpc_unavailable",
+                aria_session_id=session, desired_hash=desired_hash,
+                global_option_count=global_count,
+                target_download_count=target_count,
+                applied_download_count=applied_count,
+                now=self._now(), last_error=error)
+            _origin_qos.write_status(self._origin_qos_path, status)
+        except Exception:
+            pass
+
+    def _persist_origin_qos_status(self, status):
+        """Write QoS status without changing a truthful blocklist result.
+
+        The files and their success memories are independent. If only the QoS
+        status write fails, leave the peer-enforcement status intact, mark QoS
+        unhealthy, and force a complete QoS retry on the next poll.
+        """
+        try:
+            _origin_qos.write_status(self._origin_qos_path, status)
+        except Exception:
+            self._qos_rpc_ok = False
+            self._next_maintenance = None
+            return False
+        return True
 
     def _current_poll_keys(self):
         return (_stat_key(self._policy_paths[0]),
@@ -841,7 +1188,8 @@ class TrackerReconciler:
         change), or the bounded maintenance deadline has passed (endpoint TTL
         prune / periodic reconciliation). Otherwise the poll is a no-op — no
         run_once, no getSessionInfo, no apply — so a steady idle loop performs
-        no per-2s RPC."""
+        no full reconcile RPC. A healthy idle pass performs only the required
+        ``tellActive`` GID-set probe for origin QoS churn."""
         keys = self._current_poll_keys()
         changed = keys != self._poll_keys
         self._poll_keys = keys
@@ -853,9 +1201,24 @@ class TrackerReconciler:
             return True
         if self._rpc_ok is not True:
             return True
+        if self._qos_enabled and self._qos_rpc_ok is not True:
+            return True
         if self._next_maintenance is None:
             return True
-        return self._now() >= self._next_maintenance
+        if self._now() >= self._next_maintenance:
+            return True
+
+        # QoS target membership can change without touching policy/endpoints
+        # (for example, seeder credential rotation removes and re-adds GIDs).
+        # One light tellActive(gid) probe on an otherwise-idle poll keeps that
+        # change within RECONCILE_POLL without rebuilding the full snapshot.
+        if not self._qos_enabled:
+            return False
+        targets = self._probe_qos_targets()
+        if targets is None or targets != self._qos_last_targets:
+            self._prefetched_qos_targets = targets
+            return True
+        return False
 
     def _schedule_maintenance(self):
         """Arm the bounded next-maintenance deadline after a reconcile pass. The
@@ -898,7 +1261,9 @@ class TrackerReconciler:
         # that address outlive ENDPOINT_TTL (spec 7 retirement): the seeder
         # block for a device that stopped announcing must not lapse while it
         # is still quarantined or revoked.
-        keep = _reconciler.denied_retention(policy, revoked)
+        keep = _bounded_legacy_retention(
+            policy, revoked, now=now,
+            role_until=self._legacy_retention_until())
         if self._next_maintenance is None or now >= self._next_maintenance:
             # Maintenance-driven pass: TTL prune of the durable map. A wake
             # or change-driven pass only reads it (no per-announce rewrite).
@@ -910,6 +1275,16 @@ class TrackerReconciler:
             durable = _peer_endpoints.fresh_endpoints(
                 self._endpoints_path, now, keep=keep)
         except _peer_endpoints.EndpointStoreError:
+            qos_status = None
+            if self._qos_enabled:
+                session = self._probe_session()
+                desired_qos, qos_outcome, qos_error = \
+                    self._prepare_origin_qos(policy, session)
+                session_stable = bool(session) and \
+                    self._probe_session() == session
+                qos_status = self._finish_origin_qos(
+                    now, session, session_stable, desired_qos, qos_outcome,
+                    qos_error)
             prior = _peer_enforcement.read_status(self._enforcement_path) or {}
             status = _peer_enforcement.build_status(
                 state="fail_closed",
@@ -917,13 +1292,19 @@ class TrackerReconciler:
                 desired_hash=prior.get("desired_hash"),
                 applied_revision=prior.get("applied_revision"),
                 desired_ip_count=prior.get("desired_ip_count", 0), now=now,
-                last_operation_exported_revision=prior.get(
-                    "last_operation_exported_revision", 0),
+                last_operation_exported_revision=_peer_policy.effective_acked(
+                    policy.document, prior),
+                operation_ack_epoch=policy.document.get("operation_ack_epoch"),
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
-                last_error="EndpointStoreError")
+                last_error=_status_codes.ENDPOINT_STORE_UNAVAILABLE,
+                mutual_origin=self._prior_mutual_origin(prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
-            self._schedule_maintenance()
+            qos_status_written = True
+            if qos_status is not None:
+                qos_status_written = self._persist_origin_qos_status(qos_status)
+            if qos_status_written:
+                self._schedule_maintenance()
             return status
         active = list(self._active_participants() or [])
         derived = _reconciler.derive_denied_set(
@@ -934,6 +1315,11 @@ class TrackerReconciler:
         #    RPC recovery) — otherwise skip a redundant identical apply.
         desired_hash = _reconciler.canonical_hash(derived.denied_ips)
         session = self._probe_session()
+        desired_qos = qos_outcome = None
+        qos_error = None
+        if self._qos_enabled:
+            desired_qos, qos_outcome, qos_error = \
+                self._prepare_origin_qos(policy, session)
         force = (self._last_hash is None
                  or session != self._last_session
                  or self._rpc_ok is not True
@@ -942,7 +1328,24 @@ class TrackerReconciler:
         outcome = None
         if force:
             outcome = _reconciler.apply_blocklist(
-                self._aria, derived.denied_ips, derived.apply_empty)
+                self._aria, derived.denied_ips, derived.apply_empty,
+                session_id=session) if self._qos_enabled else \
+                _reconciler.apply_blocklist(
+                    self._aria, derived.denied_ips, derived.apply_empty)
+
+        qos_status = None
+        if self._qos_enabled:
+            session_stable = bool(session) and self._probe_session() == session
+            if not session_stable:
+                self._rpc_ok = False
+                if outcome is not None:
+                    outcome = outcome._replace(
+                        success=False,
+                        last_error=(_status_codes.ARIA_SESSION_CHANGED if session
+                                    else _status_codes.ARIA_SESSION_UNAVAILABLE))
+            qos_status = self._finish_origin_qos(
+                now, session, session_stable, desired_qos, qos_outcome,
+                qos_error)
 
         # 4) Persist the exact count-only enforcement status.
         status = self._build_status(
@@ -951,15 +1354,23 @@ class TrackerReconciler:
         # 5) Export the policy operation outbox (revision order, ack-gated).
         #    Read the prior ack watermark once (centralized) and carry it
         #    forward so a status-only / non-operation pass can never reset it.
-        acked = self._read_acked_revision()
+        acked = {"last_operation_exported_revision": self._read_acked_revision(policy),
+                 "operation_ack_epoch": policy.document.get("operation_ack_epoch")}
         exported_rev = self._export_outbox(policy, acked, status)
         status["last_operation_exported_revision"] = exported_rev
+        epoch = policy.document.get("operation_ack_epoch")
+        if epoch is not None:
+            status["operation_ack_epoch"] = epoch
 
         _peer_enforcement.write_status(self._enforcement_path, status)
+        qos_status_written = True
+        if qos_status is not None:
+            qos_status_written = self._persist_origin_qos_status(qos_status)
         # Arm the bounded next-maintenance deadline so a subsequent idle bare
         # poll stays a no-op until either something changes or the deadline
         # passes (TTL prune / periodic recovery).
-        self._schedule_maintenance()
+        if qos_status_written:
+            self._schedule_maintenance()
         return status
 
     def _retry_pending(self, now):
@@ -973,9 +1384,104 @@ class TrackerReconciler:
 
     def _probe_session(self):
         try:
-            return self._aria.get_session_id()
+            return self._aria.get_session_id() or None
         except Exception:
             return None
+
+    def _probe_qos_targets(self):
+        try:
+            return _origin_qos.validate_target_gids(
+                self._aria.get_active_download_gids())
+        except Exception:
+            return None
+
+    def _take_qos_targets(self):
+        targets = self._prefetched_qos_targets
+        self._prefetched_qos_targets = _NO_QOS_TARGETS
+        if targets is _NO_QOS_TARGETS:
+            return self._probe_qos_targets()
+        return targets
+
+    def _prepare_origin_qos(self, policy, session):
+        targets = self._take_qos_targets()
+        if targets is None:
+            self._qos_rpc_ok = False
+            return None, None, _status_codes.TARGET_DISCOVERY_UNAVAILABLE
+        try:
+            desired = _origin_qos.build_desired(policy.document, targets)
+        except Exception:
+            self._qos_rpc_ok = False
+            return None, None, _status_codes.ORIGIN_DESIRED_STATE_FAILED
+        if policy.fail_closed:
+            self._qos_rpc_ok = False
+            return desired, None, _status_codes.POLICY_FAIL_CLOSED
+        force = (self._qos_last_hash is None
+                 or session != self._qos_last_session
+                 or self._qos_rpc_ok is not True
+                 or desired.desired_hash != self._qos_last_hash
+                 or desired.target_gids != self._qos_last_targets)
+        outcome = (_origin_qos.apply_desired(self._aria, desired, session)
+                   if force else None)
+        return desired, outcome, None
+
+    def _finish_origin_qos(self, now, session, session_stable, desired,
+                           outcome, preparation_error=None):
+        desired_hash = desired.desired_hash if desired is not None else None
+        target_count = len(desired.target_gids) if desired is not None else 0
+        global_count = 0
+        applied_count = 0
+        last_error = preparation_error
+
+        if outcome is not None:
+            global_count = 1 if outcome.global_applied else 0
+            applied_count = outcome.applied_download_count
+            last_error = outcome.last_error
+
+        if not session_stable:
+            last_error = (_status_codes.ARIA_SESSION_CHANGED if session
+                          else _status_codes.ARIA_SESSION_UNAVAILABLE)
+            state = "degraded" if session else "rpc_unavailable"
+            self._qos_rpc_ok = False
+        elif preparation_error is not None:
+            state = ("rpc_unavailable"
+                     if preparation_error == _status_codes.TARGET_DISCOVERY_UNAVAILABLE
+                     or not session else "degraded")
+            self._qos_rpc_ok = False
+        elif outcome is not None and outcome.success:
+            self._qos_last_session = session
+            self._qos_last_hash = desired_hash
+            self._qos_last_targets = desired.target_gids
+            self._qos_rpc_ok = True
+            state = "enforced"
+        elif outcome is not None:
+            self._qos_rpc_ok = False
+            state = "degraded" if session else "rpc_unavailable"
+        elif self._qos_rpc_ok is True and session \
+                and desired_hash == self._qos_last_hash \
+                and desired.target_gids == self._qos_last_targets:
+            state = "enforced"
+            global_count = len(_origin_qos.GLOBAL_OPTION_KEYS)
+            applied_count = target_count
+            last_error = None
+        else:
+            self._qos_rpc_ok = False
+            state = "degraded" if session else "rpc_unavailable"
+
+        return _origin_qos.build_status(
+            state=state,
+            aria_session_id=session,
+            desired_hash=desired_hash,
+            global_option_count=global_count,
+            target_download_count=target_count,
+            applied_download_count=applied_count,
+            now=now,
+            last_error=last_error)
+
+    def _prior_mutual_origin(self, prior):
+        """Preserve a validated observation only while its required IP is known."""
+        if not _reconciler.valid_protected_seeder_ipv4(self._protected_seeder_ip):
+            prior = {}
+        return _peer_enforcement.mutual_origin_from_status(prior)
 
     def _build_status(self, now, policy, derived, desired_hash, outcome,
                       pending_outstanding):
@@ -1031,21 +1537,34 @@ class TrackerReconciler:
         eff_hash = desired_hash if session else None
         if state == "enforced" and (not session or not eff_hash):
             state = "degraded"
+        if policy.fail_closed:
+            mutual_origin = self._prior_mutual_origin(
+                _peer_enforcement.read_status(self._enforcement_path) or {})
+        else:
+            ids = derived.newly_denied_device_ids
+            mutual_origin = {
+                "mode": _peer_enforcement.MUTUAL_ORIGIN_MODE,
+                "newly_denied_device_count": None if ids is None else len(ids),
+                "newly_denied_device_ids": None if ids is None else list(ids),
+            }
         return _peer_enforcement.build_status(
             state=state, aria_session_id=session, desired_hash=eff_hash,
             applied_revision=applied_revision,
             desired_ip_count=len(derived.denied_ips), now=now,
-            conflicts=conflicts, last_effect=last_effect, last_error=last_error)
+            conflicts=conflicts, last_effect=last_effect, last_error=last_error,
+            mutual_origin=mutual_origin)
 
-    def _read_acked_revision(self):
-        """The single, centralized source of the persisted outbox ack watermark
-        (``last_operation_exported_revision``). Every status write must carry a
-        value ``>=`` this so a later non-operation pass can never reset the
-        watermark downward (spec §7/§13). Missing/corrupt status => 0."""
+    def _read_acked_revision(self, policy=None):
+        """Reduce validated status against the exact policy snapshot for a pass.
+
+        A history/epoch mismatch or future revision contributes zero, including
+        when a failure or no-work pass subsequently persists this watermark.
+        """
         prior = _peer_enforcement.read_status(self._enforcement_path)
         if not prior:
             return 0
-        return prior.get("last_operation_exported_revision", 0) or 0
+        policy = policy or _peer_policy.load_policy(*self._policy_paths)
+        return _peer_policy.effective_acked(policy.document, prior)
 
     def _export_outbox(self, policy, acked, status):
         """Export outbox entries with revision > the acked revision, in revision
@@ -1053,6 +1572,7 @@ class TrackerReconciler:
         queue acceptance. On either failure the prior ``acked`` watermark is
         retained and the persisted event ids replay next pass / restart."""
         entries = _peer_policy.pending_exports(policy.document, acked)
+        acked = _peer_policy.effective_acked(policy.document, acked)
         if not entries:
             return acked
         if self._audit_export is None:
@@ -1080,8 +1600,13 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
     lkg_path = os.path.join(state_dir, "peer-policy.lkg.json")
     endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
     enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
+    origin_qos_path = os.path.join(state_dir, "origin-qos.json")
     audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
     secrets_path = env.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    try:
+        token_grace = int(env.get("IRIS_TOKEN_SKEW_GRACE", "300"))
+    except (TypeError, ValueError):
+        token_grace = 300
 
     rpc = telemetry.make_jsonrpc_caller(
         env.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL),
@@ -1099,6 +1624,7 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
     return TrackerReconciler(
         policy_paths=(policy_path, lkg_path),
         endpoints_path=endpoints_path, enforcement_path=enforcement_path,
+        origin_qos_path=origin_qos_path,
         aria=aria, pending_queue=_peer_endpoints.PendingEndpointQueue(),
         active_participants=lambda: _active_participants(registry),
         # Revocation view (spec §7 retirement): a device principal whose every
@@ -1107,6 +1633,8 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
         # a corrupt/unreadable store must never silently permit a known-revoked
         # device, so it fails safe by retaining the last-known revoked set.
         revoked_principals=_make_revoked_view(secrets_path),
+        legacy_retention_until=_make_legacy_retention_view(
+            secrets_path, token_grace),
         protected_seeder_ip=env.get("IRIS_HOST_IP") or None,
         audit_export=audit_export, emit_policy_event=emit_policy_event)
 
@@ -1142,6 +1670,22 @@ def _make_revoked_view(secrets_path):
         # credentials) correctly drops out of the deny set.
         last_known["keys"] = keys
         return set(keys)
+
+    return view
+
+
+def _make_legacy_retention_view(secrets_path, grace):
+    """Cache the previous-token deadline and fail safe across read errors."""
+    resolver = credential_cache.CredentialResolver(secrets_path)
+    last_known = {"deadline": float("inf")}
+
+    def view():
+        try:
+            deadline = _legacy_token_deadline(resolver.store(), grace)
+        except (OSError, ValueError, secrets_store.StoreCorruptError):
+            return last_known["deadline"]
+        last_known["deadline"] = deadline
+        return deadline
 
     return view
 
@@ -1253,6 +1797,7 @@ def main():
     policy_paths = (os.path.join(state_dir, "peer-policy.json"),
                     os.path.join(state_dir, "peer-policy.lkg.json"))
     endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
+    handout_path = os.path.join(state_dir, "peer-handouts.json")
 
     try:
         srv = make_server(
@@ -1264,6 +1809,7 @@ def main():
             on_endpoint_change=reconciler.wake,
             on_announce_refused=hub.note_announce_refused,
             scrape_authorizer=_catalog_scrape_authorizer(state_dir),
+            handout_path=handout_path,
             certfile=certfile)
     except (OSError, ssl.SSLError, ValueError):
         print("iris-tracker: TLS certificate unusable; refusing plaintext "

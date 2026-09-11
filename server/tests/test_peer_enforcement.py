@@ -12,6 +12,7 @@ import os
 
 import pytest
 
+import peer_endpoints
 import peer_enforcement
 
 
@@ -142,9 +143,9 @@ class TestNonsecretError:
         status = peer_enforcement.build_status(
             state="degraded", aria_session_id="s", desired_hash="h",
             applied_revision=1, desired_ip_count=1, now=1.0,
-            last_error="rpc_timeout")
+            last_error="peer_blocklist_apply_failed")
         peer_enforcement.write_status(path, status)
-        assert _read(path)["last_error"] == "rpc_timeout"
+        assert _read(path)["last_error"] == "peer_blocklist_apply_failed"
 
     def test_conflicts_default_empty(self):
         status = peer_enforcement.build_status(
@@ -155,6 +156,46 @@ class TestNonsecretError:
 
 
 class TestGuiReader:
+    def test_final_repair_ack_epoch_validation(self, path):
+        valid = peer_enforcement.build_status("enforced", "s", "h", None, 0, 10,
+            operation_ack_epoch="a" * 32, last_operation_exported_revision=2)
+        peer_enforcement.write_status(path, valid)
+        assert peer_enforcement.read_status(path) == valid
+        for invalid in ([], {}, True, "", "old", "a" * 31):
+            peer_enforcement.write_status(path, dict(valid, operation_ack_epoch=invalid))
+            assert peer_enforcement.read_status(path) is None
+
+    def test_status_all_source_codes_roundtrip(self, path):
+        import reconciler_status
+        for code in reconciler_status.PEER_ERROR_CODES:
+            status = peer_enforcement.build_status("degraded", "s", "h", None, 0, 10, last_error=code)
+            peer_enforcement.write_status(path, status)
+            assert peer_enforcement.read_status(path) == status
+
+    @pytest.mark.parametrize("bad", [
+        {"schema": 2}, {"last_error": "PermissionError"},
+        {"last_error": "abc123deadbeef"}, {"desired_ip_count": -1},
+        {"conflicts": [{"reason": []}]}, {"updated_at": float("nan")},
+        {"last_effect": {"removed_peers": -1}},
+    ])
+    def test_status_semantic_unit_rejects_malformed_watermark(self, path, bad):
+        status = peer_enforcement.build_status(
+            "enforced", "session", "hash", None, 0, 10,
+            last_operation_exported_revision=2)
+        status.update(bad)
+        peer_enforcement.write_status(path, status)
+        assert peer_enforcement.read_status(path) is None
+
+    def test_status_enforced_null_revision_and_future_fields(self, path):
+        status = peer_enforcement.build_status("enforced", "s", "h", None, 0, 10)
+        peer_enforcement.write_status(path, dict(status, future="secret"))
+        assert peer_enforcement.read_status(path) == status
+
+    def test_status_rejects_exception_class_at_constructor(self):
+        with pytest.raises(ValueError):
+            peer_enforcement.build_status("degraded", "s", "h", None, 0, 10,
+                                          last_error="PermissionError")
+
     def test_read_status_roundtrip(self, path):
         status = peer_enforcement.build_status(
             state="enforced", aria_session_id="s", desired_hash="h",
@@ -172,3 +213,146 @@ class TestGuiReader:
         with open(path, "w") as f:
             f.write("{ not json")
         assert peer_enforcement.read_status(path) is None
+
+
+class TestMutualOriginPreflightStatus:
+    @staticmethod
+    def _unknown():
+        return {"mode": "preflight", "newly_denied_device_count": None,
+                "newly_denied_device_ids": None}
+
+    @staticmethod
+    def _summary(ids=("boat-1", "boat-2")):
+        return {
+            "mode": "preflight",
+            "newly_denied_device_count": len(ids),
+            "newly_denied_device_ids": list(ids),
+        }
+
+    def test_exact_valid_summary_round_trips(self, path):
+        status = peer_enforcement.build_status(
+            state="enforced", aria_session_id="s", desired_hash="h",
+            applied_revision=1, desired_ip_count=0, now=1.0,
+            mutual_origin=self._summary())
+        peer_enforcement.write_status(path, status)
+        assert _read(path)["mutual_origin"] == self._summary()
+        assert peer_enforcement.mutual_origin_from_status(
+            peer_enforcement.read_status(path)) == self._summary()
+
+    def test_omitted_summary_defaults_to_unknown_preflight(self):
+        status = peer_enforcement.build_status(
+            state="pending", aria_session_id=None, desired_hash=None,
+            applied_revision=None, desired_ip_count=0, now=1.0)
+        assert status["mutual_origin"] == self._unknown()
+
+    @pytest.mark.parametrize("summary", [
+        {"mode": "preflight", "newly_denied_device_count": None,
+         "newly_denied_device_ids": None},
+        {"mode": "preflight", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": []},
+    ])
+    def test_unknown_and_verified_zero_roundtrip_distinctly(self, path, summary):
+        status = peer_enforcement.build_status(
+            state="enforced", aria_session_id="s", desired_hash="h",
+            applied_revision=1, desired_ip_count=0, now=1.0,
+            mutual_origin=summary)
+        peer_enforcement.write_status(path, status)
+        assert peer_enforcement.read_status(path)["mutual_origin"] == summary
+        assert peer_enforcement.mutual_origin_from_status(status) == summary
+
+    @pytest.mark.parametrize("summary", [
+        {"mode": "preflight", "newly_denied_device_count": None,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": None},
+        {"mode": "preflight", "newly_denied_device_count": "0",
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 0.0,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": [True]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": "d1"},
+    ])
+    def test_mixed_null_and_invalid_preflight_is_rejected_but_projects_unknown(
+            self, summary):
+        with pytest.raises(peer_enforcement.EnforcementError):
+            peer_enforcement.validate_mutual_origin(summary)
+        assert peer_enforcement.mutual_origin_from_status(
+            {"mutual_origin": summary}) == self._unknown()
+        status = peer_enforcement.build_status("enforced", "s", "h", 1, 0, 1)
+        status["mutual_origin"] = summary
+        # Malformed status cannot authorize an operation acknowledgement.
+        assert peer_enforcement.parse_status(status) is None
+
+    @pytest.mark.parametrize("prior", [None, {}, [], {"mutual_origin": None}])
+    def test_absent_prior_preflight_projects_unknown(self, prior):
+        assert peer_enforcement.mutual_origin_from_status(prior) == self._unknown()
+
+    def test_old_status_without_preflight_preserves_ack_and_marks_unknown(self):
+        status = peer_enforcement.build_status(
+            "enforced", "s", "h", 7, 2, 10,
+            last_operation_exported_revision=4,
+            operation_ack_epoch="a" * 32)
+        del status["mutual_origin"]
+        parsed = peer_enforcement.parse_status(status)
+        assert parsed["mutual_origin"] == self._unknown()
+        assert parsed["applied_revision"] == 7
+        assert parsed["last_operation_exported_revision"] == 4
+        assert parsed["operation_ack_epoch"] == "a" * 32
+
+    @pytest.mark.parametrize("summary", [
+        {"mode": "enforced", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": True,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 2,
+         "newly_denied_device_ids": ["boat-1"]},
+        {"mode": "preflight", "newly_denied_device_count": 2,
+         "newly_denied_device_ids": ["boat-2", "boat-1"]},
+        {"mode": "preflight", "newly_denied_device_count": 2,
+         "newly_denied_device_ids": ["boat-1", "boat-1"]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": [""]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": ["bad device"]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": ["x" * 65]},
+        {"mode": "preflight", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": [], "denied_ips": ["10.0.0.1"]},
+    ])
+    def test_rejects_invalid_or_address_carrying_summary(self, summary):
+        with pytest.raises(peer_enforcement.EnforcementError):
+            peer_enforcement.build_status(
+                state="pending", aria_session_id=None, desired_hash=None,
+                applied_revision=None, desired_ip_count=0, now=1.0,
+                mutual_origin=summary)
+
+    def test_rejects_more_than_supported_fleet(self):
+        ids = ["d%05d" % index
+               for index in range(peer_endpoints.SUPPORTED_DEVICES + 1)]
+        with pytest.raises(peer_enforcement.EnforcementError):
+            peer_enforcement.validate_mutual_origin({
+                "mode": "preflight",
+                "newly_denied_device_count": len(ids),
+                "newly_denied_device_ids": ids,
+            })
+
+    def test_malformed_prior_status_is_not_propagated(self):
+        malformed = {"mutual_origin": {
+            "mode": "preflight", "newly_denied_device_count": 2,
+            "newly_denied_device_ids": ["same", "same"],
+        }}
+        assert peer_enforcement.mutual_origin_from_status(malformed) \
+            == self._unknown()
+
+    def test_status_never_serializes_raw_address_carrier(self, path):
+        status = peer_enforcement.build_status(
+            state="enforced", aria_session_id="s", desired_hash="h",
+            applied_revision=1, desired_ip_count=0, now=1.0,
+            mutual_origin=self._summary(("boat-1",)))
+        peer_enforcement.write_status(path, status)
+        blob = open(path).read()
+        assert "denied_ips" not in blob
+        assert "addresses" not in blob
+        assert "endpoints" not in blob

@@ -57,21 +57,28 @@ _runtime_catalog_ca() {
   [ "$status" -eq 1 ]            # the branch that skips the sweep
 }
 
-@test "guestshell-start builds an RPC aria2c daemon with private-swarm flags" {
+@test "guestshell-start builds a secret-free RPC daemon with private-swarm flags" {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/stage" "$tmp/home"
   _stage_catalog_ca "$tmp/stage"
   echo "rpcsecret" > "$tmp/stage/rpc-secret"
-  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/launched.txt"\nenv > "%s/env.txt"\n' \
+    "$tmp" "$tmp" > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
   # RPC probe skipped so the launcher proceeds to launch the stub
   run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
-      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh" \
+      --bt-tracker-interval=1 --conf-path=/tmp/hostile.conf \
+      http://hostile.example/session
   [ "$status" -eq 0 ]
   out="$(cat "$tmp/launched.txt")"
   [[ "$out" == *"--enable-rpc=true"* ]]
-  [[ "$out" == *"--rpc-secret=rpcsecret"* ]]
+  [[ "$out" == *"--conf-path="* ]]
+  [[ "$out" != *"--rpc-secret"* ]]
+  [[ "$out" != *"rpcsecret"* ]]
+  [[ "$out" != *"--bt-tracker-interval"* ]]
+  [[ "$out" != *"hostile.example"* ]]
   [[ "$out" == *"--enable-dht=false"* ]]
   [[ "$out" == *"--bt-seed-unverified=true"* ]]
   [[ "$out" == *"--bt-max-peers=10"* ]]
@@ -81,6 +88,30 @@ _runtime_catalog_ca() {
   [ -r "$runtime_ca" ]
   [[ "$out" == *"--check-certificate=true"* ]]
   [[ "$out" != *"--listen-port="* ]]
+  conf_path="$(sed -n 's/^--conf-path=//p' "$tmp/launched.txt")"
+  [ -n "$conf_path" ]
+  [ "$conf_path" = "$tmp/home/aria2.conf" ]
+  [ "$(stat -c %a "$conf_path")" = 600 ]
+  [ "$(cat "$conf_path")" = 'rpc-secret=rpcsecret' ]
+  [ "$(wc -l < "$conf_path")" -eq 1 ]
+  [[ "$output" != *"rpcsecret"* ]]
+  [[ "$(cat "$tmp/env.txt")" == *"IRIS_RPC_SECRET=rpcsecret"* ]]
+
+  # Rotation replaces the complete owner-only file and leaves no temporary
+  # sibling behind. The second launch must continue to keep the new secret out
+  # of argv and diagnostics.
+  printf 'rotated-secret\n' > "$tmp/stage/rpc-secret"
+  rm -f "$tmp/launched.txt" "$tmp/env.txt"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  [ "$(sed -n 's/^--conf-path=//p' "$tmp/launched.txt")" = "$conf_path" ]
+  [ "$(cat "$conf_path")" = 'rpc-secret=rotated-secret' ]
+  [ "$(stat -c %a "$conf_path")" = 600 ]
+  [ -z "$(find "$tmp/home" -maxdepth 1 -type f -name 'aria2.conf.new*' -print -quit)" ]
+  [[ "$(cat "$tmp/launched.txt")" != *"rotated-secret"* ]]
+  [[ "$output" != *"rotated-secret"* ]]
 }
 
 @test "guestshell-start refuses a missing or malformed tracker certificate" {
@@ -161,14 +192,20 @@ _runtime_catalog_ca() {
   mkdir -p "$tmp/stage" "$tmp/home"
   _stage_catalog_ca "$tmp/stage"
   printf '\n' > "$tmp/stage/rpc-secret"   # baked empty (installer default)
-  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
   run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
   out="$(cat "$tmp/launched.txt")"
-  [[ "$out" == *"--rpc-secret=iris "* ]]
+  conf_path="$(sed -n 's/^--conf-path=//p' "$tmp/launched.txt")"
+  [ -n "$conf_path" ]
+  [ "$(cat "$conf_path")" = 'rpc-secret=iris' ]
+  [ "$(stat -c %a "$conf_path")" = 600 ]
+  [[ "$out" != *"--rpc-secret"* ]]
+  [[ "$out" != *"--rpc-secret=iris"* ]]
+  [[ "$output" != *"--rpc-secret=iris"* ]]
 }
 
 @test "guestshell-start pins the BitTorrent port only when requested" {
@@ -398,10 +435,12 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   mkdir -p "$tmp/bin"
   runtime_ca="$(_runtime_catalog_ca "$tmp/stage" "$tmp/home")"
   cp "$tmp/stage/iris-catalog.pem" "$runtime_ca"
+  printf 'rpc-secret=rpcsecret\n' > "$tmp/home/aria2.conf"
+  chmod 600 "$tmp/home/aria2.conf"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"     # RPC answers: already up
   printf '#!/usr/bin/env bash\necho 4242\n' > "$tmp/bin/pgrep"
-  printf '#!/usr/bin/env bash\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --ca-certificate=%s --check-certificate=true"\n' \
-    "$runtime_ca" > "$tmp/bin/ps"
+  printf '#!/usr/bin/env bash\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --conf-path=%s --ca-certificate=%s --check-certificate=true"\n' \
+    "$tmp/home/aria2.conf" "$runtime_ca" > "$tmp/bin/ps"
   chmod +x "$tmp/bin/curl" "$tmp/bin/pgrep" "$tmp/bin/ps"
   run env PATH="$tmp/bin:$PATH" STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
       ARIA2_SRC="$tmp/aria2c-stub" RPC_SECRET_FILE="$tmp/stage/rpc-secret" \
@@ -515,9 +554,10 @@ PYTHON
   [ ! -f "$tmp/launched.txt" ]
 }
 
-@test "an answering pre-TLS daemon is replaced once" {
+@test "an answering old-shape daemon without conf-path is replaced once" {
   tmp="$(mktemp -d)"; _gs_fixture "$tmp"
   mkdir -p "$tmp/bin"
+  runtime_ca="$(_runtime_catalog_ca "$tmp/stage" "$tmp/home")"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"
   cat > "$tmp/bin/pgrep" <<'PGREP'
 #!/usr/bin/env bash
@@ -526,7 +566,8 @@ n=$((n + 1)); echo "$n" > "$PGREP_STATE"
 if [ "$n" -le 2 ]; then echo 4242; exit 0; fi
 exit 1
 PGREP
-  printf '#!/usr/bin/env bash\n[ -f "$GONE" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800"\n' > "$tmp/bin/ps"
+  printf '#!/usr/bin/env bash\n[ -f "$GONE" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --rpc-secret=legacy-secret --ca-certificate=%s --check-certificate=true"\n' \
+    "$runtime_ca" > "$tmp/bin/ps"
   printf '#!/usr/bin/env bash\necho "$@" >> "$KILL_LOG"\ntouch "$GONE"\n' > "$tmp/bin/kill"
   chmod +x "$tmp/bin/curl" "$tmp/bin/pgrep" "$tmp/bin/ps" "$tmp/bin/kill"
 
@@ -536,10 +577,35 @@ PGREP
       IRIS_ARIA2="$tmp/home/aria2c" GONE="$tmp/gone" KILL_LOG="$tmp/kill.log" \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"does not match the current tracker TLS generation"* ]]
   [ "$(cat "$tmp/kill.log")" = "-TERM 4242" ]
   [ -f "$tmp/launched.txt" ]
   [[ "$(cat "$tmp/launched.txt")" == *"--check-certificate=true"* ]]
+}
+
+@test "an answering daemon with a legacy argv secret fails the new ready predicate" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp"
+  mkdir -p "$tmp/bin"
+  runtime_ca="$(_runtime_catalog_ca "$tmp/stage" "$tmp/home")"
+  cp "$tmp/stage/iris-catalog.pem" "$runtime_ca"
+  printf 'rpc-secret=rpcsecret\n' > "$tmp/home/aria2.conf"
+  chmod 600 "$tmp/home/aria2.conf"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"
+  printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho 4242\n' \
+    "$tmp" > "$tmp/bin/pgrep"
+  printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --conf-path=%s --rpc-secret=legacy-secret --ca-certificate=%s --check-certificate=true"\n' \
+    "$tmp" "$tmp/home/aria2.conf" "$runtime_ca" > "$tmp/bin/ps"
+  printf '#!/usr/bin/env bash\necho "$@" >> "%s/kill.log"\ntouch "%s/gone"\n' \
+    "$tmp" "$tmp" > "$tmp/bin/kill"
+  chmod +x "$tmp/bin/curl" "$tmp/bin/pgrep" "$tmp/bin/ps" "$tmp/bin/kill"
+
+  run env PATH="$tmp/bin:$PATH" STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
+      ARIA2_SRC="$tmp/aria2c-stub" RPC_SECRET_FILE="$tmp/stage/rpc-secret" \
+      IRIS_ARIA2="$tmp/home/aria2c" GONE="$tmp/gone" KILL_LOG="$tmp/kill.log" \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$tmp/kill.log")" = "-TERM 4242" ]
+  [ -f "$tmp/launched.txt" ]
+  [[ "$(cat "$tmp/launched.txt")" != *"--rpc-secret"* ]]
 }
 
 @test "the hook inherits the secret the daemon is actually launched with" {
@@ -553,7 +619,8 @@ PGREP
   [ "$status" -eq 0 ]
   grep -qx "IRIS_RPC_SECRET=rpcsecret" "$tmp/env.txt"
   grep -qx "IRIS_RPC_PORT=6899" "$tmp/env.txt"
-  [[ "$(cat "$tmp/launched.txt")" == *"--rpc-secret=rpcsecret"* ]]
+  [[ "$(cat "$tmp/launched.txt")" != *"--rpc-secret"* ]]
+  [[ "$(cat "$tmp/launched.txt")" != *"rpcsecret"* ]]
 }
 
 @test "an empty baked secret exports the same placeholder aria2c is launched with" {
@@ -566,6 +633,66 @@ PGREP
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
   grep -qx "IRIS_RPC_SECRET=iris" "$tmp/env.txt"
+  [[ "$(cat "$tmp/launched.txt")" != *"--rpc-secret"* ]]
+  ! grep -qx -- '--rpc-secret=iris' "$tmp/launched.txt"
+}
+
+@test "unsafe multiline rpc-secret is rejected without exposing it or replacing config" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp" nohook
+  printf 'safe-before\n' > "$tmp/home/aria2.conf"
+  chmod 600 "$tmp/home/aria2.conf"
+  printf 'unsafe secret\nwith-newline\n' > "$tmp/stage/rpc-secret"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid"* ]] || return 1
+  [[ "$output" != *"unsafe secret"* ]] || return 1
+  [ "$(cat "$tmp/home/aria2.conf")" = 'safe-before' ]
+  [ "$(stat -c %a "$tmp/home/aria2.conf")" = 600 ]
+  [ -z "$(find "$tmp/home" -maxdepth 1 -type f -name 'aria2.conf.new*' -print -quit)" ]
+
+  printf 'unsafe;secret\n' > "$tmp/stage/rpc-secret"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid"* ]] || return 1
+  [[ "$output" != *"unsafe;secret"* ]] || return 1
+  [ "$(cat "$tmp/home/aria2.conf")" = 'safe-before' ]
+
+  mkdir "$tmp/stage/secret-dir"
+  printf 'marker\n' > "$tmp/stage/secret-dir/marker"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/secret-dir" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid"* ]] || return 1
+  [[ "$output" != *"marker"* ]] || return 1
+  [ "$(cat "$tmp/home/aria2.conf")" = 'safe-before' ]
+}
+
+@test "a failed rpc config replacement preserves the old file and cleans its temporary" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp" nohook
+  printf 'rpc-secret=old-secret\n' > "$tmp/home/aria2.conf"
+  chmod 600 "$tmp/home/aria2.conf"
+  mkdir -p "$tmp/bin"
+  cat > "$tmp/bin/mv" <<'MV'
+#!/usr/bin/env bash
+if [ "${!#}" = "$FAIL_DEST" ]; then exit 1; fi
+exec /bin/mv "$@"
+MV
+  chmod +x "$tmp/bin/mv"
+  run env PATH="$tmp/bin:$PATH" FAIL_DEST="$tmp/home/aria2.conf" \
+      STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$tmp/home/aria2.conf")" = 'rpc-secret=old-secret' ]
+  [ "$(stat -c %a "$tmp/home/aria2.conf")" = 600 ]
+  [ -z "$(find "$tmp/home" -maxdepth 1 -type f -name 'aria2.conf.new*' -print -quit)" ]
+  [[ "$output" != *"old-secret"* ]] || return 1
+  [[ "$output" != *"rpcsecret"* ]] || return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -633,10 +760,12 @@ CURL
   # spend ten seconds waiting on a deliberately static stub.
   runtime_ca="$(_runtime_catalog_ca "$tmp/stage" "$tmp/home")"
   cp "$tmp/stage/iris-catalog.pem" "$runtime_ca"
+  printf 'rpc-secret=rpcsecret\n' > "$tmp/home/aria2.conf"
+  chmod 600 "$tmp/home/aria2.conf"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho 4242\n' \
     "$tmp" > "$tmp/bin/pgrep"
-  printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --ca-certificate=%s --check-certificate=true"\n' \
-    "$tmp" "$runtime_ca" > "$tmp/bin/ps"
+  printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --conf-path=%s --ca-certificate=%s --check-certificate=true"\n' \
+    "$tmp" "$tmp/home/aria2.conf" "$runtime_ca" > "$tmp/bin/ps"
   printf '#!/usr/bin/env bash\necho "$@" >> "%s/kill.log"\ntouch "%s/gone"\n' \
     "$tmp" "$tmp" > "$tmp/bin/kill"
   chmod +x "$tmp/bin/curl" "$tmp/bin/pgrep" "$tmp/bin/ps" "$tmp/bin/kill"
@@ -655,6 +784,8 @@ CURL
   [ ! -f "$tmp/kill.log" ] || { echo "killed a healthy daemon"; return 1; }
   [ ! -f "$tmp/launched.txt" ] || { echo "relaunched over a healthy daemon"; return 1; }
   [ "$(wc -l < "$tmp/curl.log")" -eq 2 ]
+  ! grep -q 'rpcsecret' "$tmp/curl.log"
+  grep -q -- '--data-binary @-' "$tmp/curl.log"
 }
 
 @test "a refused RPC port still replaces the stale daemon at once" {
@@ -673,6 +804,8 @@ CURL
     || { echo "stale daemon not cleared by exact PID"; return 1; }
   [ -f "$tmp/launched.txt" ] || { echo "not relaunched"; return 1; }
   [ "$(wc -l < "$tmp/curl.log")" -eq 1 ]
+  ! grep -q 'rpcsecret' "$tmp/curl.log"
+  grep -q -- '--data-binary @-' "$tmp/curl.log"
 }
 
 @test "the probe is bounded, and waits longer than the worst measured resolver stall" {

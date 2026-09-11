@@ -55,6 +55,21 @@
       <code>6800</code> stays on server loopback.</li>
     </ul>
 
+    <h2>Local API reference</h2>
+    <p>Open <a href="/swagger/">the local Swagger API reference</a> from
+    Help → Local API reference, on this Console's HTTPS address and port.
+    Its assets and <a href="/openapi.yaml">canonical OpenAPI contract</a>
+    are bundled with the Console and load without Internet access. Browsing
+    the public contract does not require a session; sending API requests still
+    requires the documented authentication. The reference is read-only.</p>
+    <p>If <code>/swagger/</code> returns 404, confirm that you are using the
+    Console's published port and an updated Console image. The server's
+    management and device-facing ports do not serve this page. Preserve the
+    trailing slash, or use <code>/swagger/index.html</code>, so asset links
+    resolve correctly. The page identifies limitations in Swagger's schema
+    renderer; its canonical explorer and raw contract contain the exact
+    schemas and streaming examples.</p>
+
     <h2>Recovery checklist</h2>
     <p>Run these commands from the repository root to check both services:</p>
     <pre class="log">docker compose -f server/docker-compose.yml ps

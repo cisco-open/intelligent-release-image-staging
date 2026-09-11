@@ -6,6 +6,7 @@
 (spec 7 / 10.4). Principals are accepted structurally (``.type``/``.id``); a
 local namedtuple fake stands in for the identity lane's ``auth.Principal``."""
 import collections
+import copy
 import glob
 import json
 import os
@@ -49,6 +50,8 @@ class TestBaseDocument:
         assert doc["seeder_assignment"] is None
         assert doc["operation_outbox"] == []
         assert doc["schema"] == 1
+        assert "roles" not in doc
+        assert "roles_present" not in doc
 
     def test_validate_accepts_base(self):
         peer_policy.validate_document(_base())  # no raise
@@ -359,9 +362,10 @@ class TestCommitTransaction:
             authoritative = json.load(f)
         with open(lkg) as g:
             lkg_doc = json.load(g)
-        # authoritative is the candidate (rev 2, has assignment)
+        # Authoritative is the candidate (rev 2) in canonical membership form.
         assert authoritative["revision"] == 2
-        assert authoritative["assignments"] == {"iris8kv-1": "quarantine"}
+        assert authoritative["assignments"] == {}
+        assert authoritative["quarantined_devices"] == {"iris8kv-1": True}
         # LKG is the PRIOR committed authoritative (rev 1, no assignment)
         assert lkg_doc["revision"] == 1
         assert lkg_doc["assignments"] == {}
@@ -419,3 +423,389 @@ class TestCommitTransaction:
                                                           "quarantine"))
         d = os.path.dirname(auth)
         assert glob.glob(os.path.join(d, ".peer-policy*.tmp")) == []
+
+
+# --------------------------------------------------------------------------
+# Workstream D: independent quarantine membership and candidate migration
+# --------------------------------------------------------------------------
+
+def test_independent_quarantine_container_is_closed_bounded_and_non_materializing():
+    base = _base()
+    base_bytes = json.dumps(base, sort_keys=True, separators=(",", ":"))
+    assert "quarantined_devices" not in base
+    assert peer_policy.validate_document(base) is base
+    assert json.dumps(base, sort_keys=True, separators=(",", ":")) == base_bytes
+
+    valid = _base()
+    valid["quarantined_devices"] = {
+        "": True, " Mixed ID/kept exactly ": True}
+    valid["roles"] = {
+        "defs": {}, "role_of": {}, "qos_default": {"numwant": 7},
+        "qos_state_default": {"seeder": {"numwant": 4}},
+        "qos_device": {}}
+    before = copy.deepcopy(valid)
+    assert peer_policy.validate_document(valid) is valid
+    assert valid == before
+
+    at_cap = _base()
+    at_cap["quarantined_devices"] = {
+        "device-%05d" % index: True for index in range(10000)}
+    peer_policy.validate_document(at_cap)
+    too_many = copy.deepcopy(at_cap)
+    too_many["quarantined_devices"]["device-over-cap"] = True
+    with pytest.raises(peer_policy.PolicyError):
+        peer_policy.validate_document(too_many)
+
+    for malformed in (None, [], "d1", True, 1):
+        document = _base()
+        document["quarantined_devices"] = malformed
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.validate_document(document)
+    for malformed in (False, None, 1, 1.0, "true", [], {}):
+        document = _base()
+        document["quarantined_devices"] = {"d1": malformed}
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.validate_document(document)
+    document = _base()
+    document["quarantined_devices"] = {1: True}
+    with pytest.raises(peer_policy.PolicyError):
+        peer_policy.validate_document(document)
+
+
+def test_quarantine_precedes_ordinary_assignment_role_and_is_device_only():
+    document = _base()
+    document["acls"].update({
+        "manual-a": {"rules": [{"seq": 21, "action": "permit",
+                                  "match": {"type": "any"}}]},
+        "manual-b": {"rules": [{"seq": 31, "action": "permit",
+                                  "match": {"type": "any"}}]},
+    })
+    document["roles"] = {
+        "defs": {"boat": {"restricted": True, "peers": ["boat"]}},
+        "role_of": {DEV1.id: "boat"}, "qos_default": {},
+        "qos_device": {}}
+    document["assignments"][DEV1.id] = "manual-a"
+    document["quarantined_devices"] = {DEV1.id: True}
+    document["seeder_assignment"] = "manual-b"
+    compiled = peer_policy.compile_roles(document)
+    frozen = copy.deepcopy(document)
+
+    assert peer_policy.effective_acl_name(document, DEV1, compiled) == \
+        "quarantine"
+    assert peer_policy.acl_source(document, DEV1, compiled) == \
+        "assignment:quarantine"
+    assert peer_policy.evaluate(document, DEV1, "10.0.0.1", compiled) == \
+        ("deny", 10)
+    assert peer_policy.effective_acl_name(document, SVC, compiled) == \
+        "manual-b"
+    assert peer_policy.evaluate(document, LEGACY, "10.0.0.1", compiled) == \
+        ("permit", None)
+    assert document == frozen
+
+    document["assignments"][DEV1.id] = "manual-b"
+    assert peer_policy.effective_acl_name(document, DEV1) == "quarantine"
+    del document["quarantined_devices"]
+    assert peer_policy.effective_acl_name(document, DEV1) == "manual-b"
+    del document["assignments"][DEV1.id]
+    assert peer_policy.effective_acl_name(document, DEV1) == "role:boat"
+    document["roles"]["role_of"].clear()
+    assert peer_policy.effective_acl_name(document, DEV1) is None
+
+    legacy = copy.deepcopy(frozen)
+    legacy.pop("quarantined_devices")
+    legacy["assignments"][DEV1.id] = "quarantine"
+    canonical = copy.deepcopy(legacy)
+    canonical["assignments"][DEV1.id] = "manual-a"
+    canonical["quarantined_devices"] = {DEV1.id: True}
+    for candidate in (legacy, canonical):
+        assert peer_policy.effective_acl_name(candidate, DEV1) == "quarantine"
+        assert peer_policy.evaluate(candidate, DEV1, "10.0.0.1") == \
+            ("deny", 10)
+
+
+def test_commit_migrates_legacy_rows_around_callback_and_keeps_raw_prior(
+        paths):
+    auth, lkg = paths
+    prior = _base()
+    prior["acls"].update({
+        "manual-a": {"rules": []}, "manual-b": {"rules": []}})
+    prior["assignments"] = {DEV1.id: "quarantine", DEV2.id: "manual-a"}
+    prior["quarantined_devices"] = {
+        DEV1.id: True, "canonical-only": True}
+    prior["roles"] = {
+        "defs": {}, "role_of": {}, "qos_default": {"numwant": 9},
+        "qos_state_default": {"leecher": {"numwant": 4}},
+        "qos_device": {}}
+    peer_policy._atomic_write_json(auth, prior)
+    peer_policy._atomic_write_json(lkg, _base())
+    auth_before = open(auth, "rb").read()
+    loaded = peer_policy.load_policy(auth, lkg)
+    assert loaded.document == prior
+    assert open(auth, "rb").read() == auth_before
+    observed = []
+    caller_members = {
+        DEV1.id: True, "canonical-only": True, "callback-owned": True}
+
+    def mutate(candidate):
+        observed.append(copy.deepcopy(candidate))
+        assert candidate["assignments"] == {DEV2.id: "manual-a"}
+        assert candidate["quarantined_devices"] == {
+            DEV1.id: True, "canonical-only": True}
+        candidate["assignments"][DEV1.id] = "manual-b"
+        candidate["quarantined_devices"] = caller_members
+        candidate["assignments"]["legacy-added"] = "quarantine"
+
+    committed = peer_policy.commit_mutation(
+        auth, lkg, "assign", DEV1.id, "test", 10.0, mutate)
+    assert len(observed) == 1
+    assert committed["assignments"] == {
+        DEV1.id: "manual-b", DEV2.id: "manual-a"}
+    assert committed["quarantined_devices"] == {
+        DEV1.id: True, "canonical-only": True, "callback-owned": True,
+        "legacy-added": True}
+    assert caller_members == {
+        DEV1.id: True, "canonical-only": True, "callback-owned": True}
+    assert committed["roles"] == prior["roles"]
+    assert json.load(open(lkg)) == prior
+    assert peer_policy.read_lkg_revision(lkg, 1) == prior
+    assert peer_policy.load_policy(auth, lkg).document == committed
+
+    explicit_empty = copy.deepcopy(committed)
+    explicit_empty["quarantined_devices"] = {}
+    explicit_empty["assignments"].clear()
+    peer_policy._atomic_write_json(auth, explicit_empty)
+    preserved = peer_policy.commit_mutation(
+        auth, lkg, "assign", "ordinary", "test", 11.0,
+        lambda candidate: candidate["assignments"].__setitem__(
+            "ordinary", "manual-a"))
+    assert preserved["quarantined_devices"] == {}
+
+
+def test_restore_normalizes_legacy_overlay_without_copying_historical_outbox(
+        paths):
+    auth, lkg = paths
+    legacy = _base()
+    legacy["assignments"][DEV1.id] = "quarantine"
+    peer_policy._atomic_write_json(auth, legacy)
+    peer_policy._atomic_write_json(lkg, _base())
+    live = peer_policy.commit_mutation(
+        auth, lkg, "assign", DEV2.id, "test", 2.0,
+        lambda candidate: candidate["assignments"].__setitem__(
+            DEV2.id, "quarantine"))
+    live_outbox = copy.deepcopy(live["operation_outbox"])
+    restored = peer_policy.restore_lkg_revision(
+        auth, lkg, 1, actor="test", now=3.0,
+        expected_revision=live["revision"])
+    assert restored["revision"] == live["revision"] + 1
+    assert restored["assignments"] == {}
+    assert restored["quarantined_devices"] == {DEV1.id: True}
+    assert restored["operation_outbox"][:-1] == live_outbox
+    assert restored["operation_outbox"][-1]["action"] == "restore"
+    assert restored["operation_ack_epoch"] != live["operation_ack_epoch"]
+
+
+def test_legacy_migration_dry_run_and_precommit_refusal_write_nothing(paths):
+    auth, lkg = paths
+    legacy = _base()
+    legacy["assignments"][DEV1.id] = "quarantine"
+    peer_policy._atomic_write_json(auth, legacy)
+    peer_policy._atomic_write_json(lkg, _base())
+    retained = copy.deepcopy(legacy)
+    retained["revision"] = 9
+    peer_policy._write_lkg_ring(lkg, retained)
+    assert peer_policy.read_lkg_revision(lkg, 9) == retained
+
+    def store_tree():
+        root = os.path.dirname(auth)
+        lock_path = os.path.abspath(auth + ".lock")
+        snapshot = {}
+        for directory, names, files in os.walk(root):
+            names.sort()
+            files.sort()
+            for name in names:
+                path = os.path.join(directory, name)
+                relative = os.path.relpath(path, root)
+                snapshot[relative] = (
+                    "symlink", os.readlink(path)) if os.path.islink(path) \
+                    else ("directory", None)
+            for name in files:
+                path = os.path.join(directory, name)
+                if os.path.abspath(path) == lock_path:
+                    continue
+                relative = os.path.relpath(path, root)
+                if os.path.islink(path):
+                    snapshot[relative] = ("symlink", os.readlink(path))
+                else:
+                    snapshot[relative] = ("file", open(path, "rb").read())
+        return snapshot
+
+    before = store_tree()
+    preview = peer_policy.commit_mutation(
+        auth, lkg, "assign", DEV1.id, "test", 2.0,
+        lambda _candidate: None, dry_run=True)
+    assert preview["assignments"] == {}
+    assert preview["quarantined_devices"] == {DEV1.id: True}
+    assert store_tree() == before
+
+    def reject(prior, candidate):
+        assert prior == legacy
+        assert candidate["assignments"] == {}
+        assert candidate["quarantined_devices"] == {DEV1.id: True}
+        raise peer_policy.PolicyError("confirmation refused")
+
+    with pytest.raises(peer_policy.PolicyError, match="confirmation refused"):
+        peer_policy.commit_mutation(
+            auth, lkg, "assign", DEV1.id, "test", 2.0,
+            lambda _candidate: None, precommit=reject)
+    assert store_tree() == before
+
+    caller_owned_invalid = {DEV2.id: False}
+
+    def attach_invalid_mixed(candidate):
+        candidate["quarantined_devices"] = caller_owned_invalid
+        candidate["assignments"][DEV2.id] = "quarantine"
+
+    with pytest.raises(peer_policy.PolicyError):
+        peer_policy.commit_mutation(
+            auth, lkg, "assign", DEV2.id, "test", 2.0,
+            attach_invalid_mixed)
+    assert caller_owned_invalid == {DEV2.id: False}
+    assert store_tree() == before
+
+
+def test_late_candidate_failure_keeps_legacy_authority_and_raw_recovery(
+        paths, monkeypatch):
+    auth, lkg = paths
+    legacy = _base()
+    legacy["assignments"][DEV1.id] = "quarantine"
+    peer_policy._atomic_write_json(auth, legacy)
+    peer_policy._atomic_write_json(lkg, _base())
+    authority_before = open(auth, "rb").read()
+    real_write = peer_policy._atomic_write_json
+
+    def fail_authority(path, document):
+        if path == auth:
+            raise OSError("candidate replace failed")
+        return real_write(path, document)
+
+    monkeypatch.setattr(peer_policy, "_atomic_write_json", fail_authority)
+    with pytest.raises(OSError, match="candidate replace failed"):
+        peer_policy.commit_mutation(
+            auth, lkg, "assign", DEV1.id, "test", 2.0,
+            lambda _candidate: None)
+    monkeypatch.setattr(peer_policy, "_atomic_write_json", real_write)
+    assert open(auth, "rb").read() == authority_before
+    assert json.load(open(lkg)) == legacy
+    assert peer_policy.read_lkg_revision(lkg, legacy["revision"]) == legacy
+    assert peer_policy.load_policy(auth, lkg).document == legacy
+
+
+def test_oversize_legacy_quarantine_loads_but_mutation_refuses_without_loss(
+        paths):
+    auth, lkg = paths
+    legacy = _base()
+    legacy["assignments"] = {
+        "legacy-%05d" % index: "quarantine" for index in range(10001)}
+    peer_policy._atomic_write_json(auth, legacy)
+    peer_policy._atomic_write_json(lkg, _base())
+    before = open(auth, "rb").read(), open(lkg, "rb").read()
+    loaded = peer_policy.load_policy(auth, lkg)
+    assert loaded.document == legacy
+    assert loaded.degraded is False and loaded.fail_closed is False
+    with pytest.raises(peer_policy.PolicyError):
+        peer_policy.commit_mutation(
+            auth, lkg, "assign", "ordinary", "test", 2.0,
+            lambda candidate: candidate["assignments"].__setitem__(
+                "ordinary", "quarantine"))
+    assert (open(auth, "rb").read(), open(lkg, "rb").read()) == before
+
+    def reduce_to_supported_boundary(candidate):
+        assert candidate["assignments"] == {}
+        assert len(candidate["quarantined_devices"]) == 10001
+        candidate["quarantined_devices"].pop("legacy-10000")
+
+    reduced = peer_policy.commit_mutation(
+        auth, lkg, "unassign", "legacy-10000", "test", 3.0,
+        reduce_to_supported_boundary)
+    assert reduced["assignments"] == {}
+    assert set(reduced["quarantined_devices"]) == {
+        "legacy-%05d" % index for index in range(10000)}
+    assert all(value is True
+               for value in reduced["quarantined_devices"].values())
+    assert json.load(open(lkg)) == legacy
+
+
+def test_authoritative_and_lkg_quarantine_memberships_never_union(paths):
+    auth, lkg = paths
+    authoritative = _base()
+    authoritative["revision"] = 5
+    authoritative["quarantined_devices"] = {DEV1.id: True}
+    fallback = _base()
+    fallback["revision"] = 9
+    fallback["assignments"][DEV2.id] = "quarantine"
+    peer_policy._atomic_write_json(auth, authoritative)
+    peer_policy._atomic_write_json(lkg, fallback)
+
+    loaded = peer_policy.load_policy(auth, lkg)
+    assert loaded.document == authoritative
+    assert loaded.degraded is False
+    assert peer_policy.evaluate(loaded.document, DEV1, "10.0.0.1") == \
+        ("deny", 10)
+    assert peer_policy.evaluate(loaded.document, DEV2, "10.0.0.2") == \
+        ("permit", None)
+
+    with open(auth, "w") as stream:
+        stream.write("{broken")
+    loaded = peer_policy.load_policy(auth, lkg)
+    assert loaded.document == fallback
+    assert loaded.degraded is True and loaded.fail_closed is False
+    assert peer_policy.evaluate(loaded.document, DEV1, "10.0.0.1") == \
+        ("permit", None)
+    assert peer_policy.evaluate(loaded.document, DEV2, "10.0.0.2") == \
+        ("deny", 10)
+
+    malformed_mixed = _base()
+    malformed_mixed["assignments"][DEV1.id] = "quarantine"
+    malformed_mixed["quarantined_devices"] = {DEV1.id: False}
+    peer_policy._atomic_write_json(auth, malformed_mixed)
+    loaded = peer_policy.load_policy(auth, lkg)
+    assert loaded.document == fallback
+    assert loaded.degraded is True and loaded.fail_closed is False
+
+
+def test_quarantine_membership_participates_in_blast_counts_and_token():
+    prior = _base()
+    candidate = copy.deepcopy(prior)
+    candidate["quarantined_devices"] = {DEV1.id: True}
+    preview = peer_policy.blast_radius(prior, candidate, threshold=0)
+    assert preview.member_delta == 0
+    assert preview.origin_access_lost == 1
+    assert preview.empty_permitted_sets == 1
+    assert preview.role_pairs_stopped == 0
+    assert preview.qos_changed is False
+    assert preview.requires_confirmation is True
+    assert peer_policy.confirm_blast_radius(
+        prior, candidate, 0, preview.confirm_token) is True
+
+    repeated = peer_policy.blast_radius(candidate, copy.deepcopy(candidate), 0)
+    assert repeated.member_delta == 0
+    assert repeated.origin_access_lost == 0
+    assert repeated.empty_permitted_sets == 0
+    assert repeated.role_pairs_stopped == 0
+    assert repeated.qos_changed is False
+    assert repeated.requires_confirmation is False
+    assert repeated.confirm_token is None
+
+    released = peer_policy.blast_radius(candidate, prior, 0)
+    assert released.member_delta == 0
+    assert released.origin_access_lost == 0
+    assert released.empty_permitted_sets == 0
+    assert released.role_pairs_stopped == 0
+    assert released.qos_changed is False
+    assert released.requires_confirmation is False
+    assert released.confirm_token is None
+
+    different = copy.deepcopy(candidate)
+    different["quarantined_devices"] = {DEV2.id: True}
+    assert peer_policy.confirm_blast_radius(
+        prior, different, 0, preview.confirm_token) is False

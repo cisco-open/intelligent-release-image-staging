@@ -223,7 +223,9 @@ def test_iris_revoke_cleanup_failure_keeps_revoke_applied(tmp_path, monkeypatch)
 
     def _boom(*a, **k):
         raise RuntimeError("policy store unavailable")
-    monkeypatch.setattr(mod.peer_policy, "unassign_device", _boom)
+    monkeypatch.setattr(
+        mod.role_management.RoleCoordinator,
+        "clear_assignment_for_revoke", _boom)
 
     rc = mod.main(["dev-1"])
     assert rc == 1  # degraded (nonzero) …
@@ -235,12 +237,29 @@ def test_iris_revoke_cleanup_failure_keeps_revoke_applied(tmp_path, monkeypatch)
 
 def test_iris_revoke_success_unassigns_policy(tmp_path, monkeypatch):
     sp = _seed_secrets(tmp_path)
-    # Pre-assign the device to the reserved quarantine ACL.
+    # Quarantine is orthogonal to the ordinary ACL and, like role/QoS intent,
+    # survives a pure credential revoke and a later credential remint.
     ap = str(tmp_path / "peer-policy.json")
     lk = str(tmp_path / "peer-policy.lkg.json")
+    gui_fleet = __import__("gui_fleet")
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "dev-1", "device_ip": "10.0.0.5",
+                  "role": "boat"})
+
+    def seed(candidate):
+        candidate["acls"]["manual"] = {"rules": []}
+        roles = candidate.setdefault("roles", {})
+        roles.setdefault("defs", {})["boat"] = {
+            "restricted": True, "peers": ["boat"]}
+        roles.setdefault("role_of", {})["dev-1"] = "boat"
+        roles.setdefault("qos_default", {})
+        roles.setdefault("qos_device", {})["dev-1"] = {"max_peers": 4}
+        candidate["roles_present"] = True
+        candidate["assignments"]["dev-1"] = "manual"
+        candidate["quarantined_devices"] = {"dev-1": True}
     peer_policy.commit_mutation(
         ap, lk, "assign", "dev-1", "op", 1.0,
-        lambda c: c["assignments"].__setitem__("dev-1", "quarantine"))
+        seed)
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
     monkeypatch.setenv("IRIS_STATE", str(tmp_path))
@@ -248,6 +267,18 @@ def test_iris_revoke_success_unassigns_policy(tmp_path, monkeypatch):
     assert mod.main(["dev-1"]) == 0
     doc = peer_policy.load_policy(ap, lk).document
     assert "dev-1" not in doc["assignments"]
+    assert doc["quarantined_devices"] == {"dev-1": True}
+    assert doc["roles"]["role_of"]["dev-1"] == "boat"
+    assert doc["roles"]["qos_device"]["dev-1"] == {"max_peers": 4}
+    assert peer_policy.evaluate(
+        doc, auth.Principal("device", "dev-1"), "10.0.0.5") == \
+        ("deny", 10)
+    # A later remint does not need to reconstruct the original role intent.
+    store = secrets_store.load(sp)
+    secrets_store.mint(store, "dev-1", "catalog_token", time.time() + 1)
+    secrets_store.save(store, sp)
+    assert mod.role_management.drift_report(
+        fleet, peer_policy.load_policy(ap, lk))["count"] == 0
 
 
 # ---------------------------------------------------------------------------

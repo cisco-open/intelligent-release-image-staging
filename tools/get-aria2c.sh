@@ -46,9 +46,20 @@ case "${1:-}" in
   *) echo "usage: $0 [amd64|arm64]" >&2; exit 2 ;;
 esac
 
-# Where the deliverable is collected from. Override when the producing project
-# lives elsewhere, or point it at a release artifact once one is published.
-DELIVERABLE="${ARIA2C_DELIVERABLE:-$REPO_ROOT/../aria2-next-static/out/$ARCH/aria2c}"
+# Where the deliverable is collected from, in order: an explicit
+# ARIA2C_DELIVERABLE; the repository's own handed-in copy under
+# deliverables/aria2c-<cpu> (the same place tools/build-device-image.sh and
+# tools/start-compose-server.sh resolve the per-architecture binaries from,
+# so one drop serves the server image AND every device package); else the
+# producer checkout beside the repository. Every candidate is verified
+# against tools/aria2c.sha256 below, so a stale copy fails closed either way.
+if [ -n "${ARIA2C_DELIVERABLE:-}" ]; then
+  DELIVERABLE="$ARIA2C_DELIVERABLE"
+elif [ -f "$REPO_ROOT/deliverables/aria2c-$ARCH" ]; then
+  DELIVERABLE="$REPO_ROOT/deliverables/aria2c-$ARCH"
+else
+  DELIVERABLE="$REPO_ROOT/../aria2-next-static/out/$ARCH/aria2c"
+fi
 
 [ -f "$SUMS" ] || { echo "missing $SUMS - cannot verify the deliverable" >&2; exit 1; }
 
@@ -60,8 +71,8 @@ if [ ! -f "$DELIVERABLE" ]; then
 No aria2c deliverable for $ARCH at:
   $DELIVERABLE
 
-This repository does not build aria2c. Either set ARIA2C_DELIVERABLE to a
-handed-in binary matching tools/aria2c.sha256, or build one from source:
+This repository does not build aria2c. Either drop the handed-in binary at
+deliverables/aria2c-$ARCH, set ARIA2C_DELIVERABLE to it, or build one from source:
 the upstream fork pinned in tools/aria2c.sha256 plus the patches in
 tools/aria2c-patches/ (see the README there for the recipe). Maintainers
 with the producer checkout can instead run:
@@ -77,11 +88,28 @@ if [ "$actual" != "$expected" ]; then
 CHECKSUM MISMATCH for $ARCH — refusing to install.
   expected: $expected   (tools/aria2c.sha256)
   actual:   $actual     ($DELIVERABLE)
-
-This usually means the deliverable is stale, or a newer client was produced and
-tools/aria2c.sha256 has not been updated to adopt it. Do not "fix" this by
-editing the checksum unless you intend to adopt that exact binary.
 EOF
+  # A deliverable that hashes to ANOTHER entry in the manifest is not stale at
+  # all, it is the wrong architecture -- the usual result of collecting from the
+  # producer's other out/ directory. Say which, rather than leaving the operator
+  # to compare two hashes by eye.
+  wrong_arch="$(awk -v h="$actual" '$1 == h { print $2 }' "$SUMS")"
+  if [ -n "$wrong_arch" ]; then
+    cat >&2 <<EOF
+
+That is the $wrong_arch entry in tools/aria2c.sha256: this deliverable is the
+wrong architecture, not a stale build. Point ARIA2C_DELIVERABLE at the $ARCH
+binary instead.
+EOF
+  else
+    cat >&2 <<EOF
+
+The deliverable is stale (produced before the currently pinned build), or a
+newer client was produced and tools/aria2c.sha256 has not been updated to adopt
+it. Do not "fix" this by editing the checksum unless you intend to adopt that
+exact binary.
+EOF
+  fi
   exit 1
 fi
 

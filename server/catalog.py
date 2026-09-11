@@ -12,6 +12,9 @@ install (spec §6). main() refuses to start over plain HTTP unless
 IRIS_CATALOG_ALLOW_PLAINTEXT=1 opts in explicitly -- every route answers
 device bearer tokens. Stdlib only."""
 import gzip
+from collections import OrderedDict
+from dataclasses import dataclass
+import copy
 import hashlib
 import io
 import json
@@ -33,6 +36,8 @@ import auth
 import bounded_pool
 import bulkhash
 import credential_cache
+import instruction_keys
+import instructions
 import keyed_state
 import live_samples
 import secretfs
@@ -56,6 +61,144 @@ MAX_ASSIGNED_IMAGES = 10
 # masquerade as a real provenance in the audit trail.
 HASH_VERIFICATION_SOURCES = ("scheduled", "manual", "offline")
 
+INSTR_CACHE_MAX_ENTRIES = 256
+INSTR_CACHE_MAX_BYTES = 16 * 1024 * 1024
+INSTR_REQUEST_BURST = 2
+INSTR_REQUEST_REFILL_SECONDS = 10
+INSTR_LIMITER_MAX_DEVICES = 20_000
+INSTR_LIMITER_IDLE_SECONDS = 20
+
+_INSTRUCTION_COUNTERS = (
+    "instr_stamp_missing", "instr_hint_failures",
+    "keylist_hint_failures", "instr_cadence_failures",
+)
+
+
+def _validate_policy_state_row(_device_id, row):
+    if not isinstance(row, dict):
+        raise ValueError("policy row is not an object")
+    if "instr" in row:
+        try:
+            instructions.validate_stamp(row["instr"])
+        except instructions.InstructionError as exc:
+            raise ValueError("invalid instruction stamp") from exc
+
+
+def _validate_json_value(value):
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite policy value")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_json_value(item)
+        return
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("policy object key is not a string")
+        for item in value.values():
+            _validate_json_value(item)
+        return
+    raise ValueError("policy value is not JSON")
+
+
+def _validate_raw_policy_state_row(_device_id, row):
+    if not isinstance(row, dict):
+        raise ValueError("policy row is not an object")
+    _validate_json_value(row)
+
+
+class _InstructionCache:
+    """Bounded process-local LRU containing ciphertext only."""
+
+    def __init__(self, max_entries, max_bytes):
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self._entries = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def get(self, identity, stamp_digest, role_digest):
+        with self._lock:
+            entry = self._entries.get(identity)
+            if entry is None or entry[0] != stamp_digest \
+                    or entry[1] != role_digest:
+                return None
+            self._entries.move_to_end(identity)
+            return entry[2], entry[3]
+
+    def put(self, identity, stamp_digest, role_digest, body, etag):
+        body = bytes(body)
+        with self._lock:
+            old = self._entries.pop(identity, None)
+            if old is not None:
+                self._bytes -= len(old[2])
+            if len(body) > self.max_bytes or self.max_entries <= 0:
+                return
+            self._entries[identity] = (stamp_digest, role_digest, body, etag)
+            self._bytes += len(body)
+            while self._entries and (len(self._entries) > self.max_entries
+                                     or self._bytes > self.max_bytes):
+                _key, evicted = self._entries.popitem(last=False)
+                self._bytes -= len(evicted[2])
+
+
+class _InstructionLimiter:
+    """Shared per-device fractional token bucket for both delivery routes."""
+
+    def __init__(self, burst, refill_seconds, max_devices, idle_seconds):
+        self.burst = float(burst)
+        self.refill_seconds = float(refill_seconds)
+        self.max_devices = max_devices
+        self.idle_seconds = float(idle_seconds)
+        self._rows = OrderedDict()
+        self._lock = threading.Lock()
+
+    def charge(self, device_id):
+        with self._lock:
+            now = time.monotonic()
+            while self._rows:
+                oldest, row = next(iter(self._rows.items()))
+                if now - row[1] < self.idle_seconds:
+                    break
+                self._rows.pop(oldest)
+            row = self._rows.pop(device_id, None)
+            if row is None:
+                tokens = self.burst
+            else:
+                tokens = min(self.burst, row[0] +
+                             max(0.0, now - row[1]) / self.refill_seconds)
+            if tokens >= 1.0:
+                retry = None
+                tokens -= 1.0
+            else:
+                retry = max(1, int(math.ceil(
+                    (1.0 - tokens) * self.refill_seconds)))
+            self._rows[device_id] = (tokens, now)
+            while len(self._rows) > self.max_devices:
+                self._rows.popitem(last=False)
+            return retry
+
+
+class _InstructionResult:
+    def __init__(self, status, *, body=None, etag=None, code=None, title=None,
+                 retry=None):
+        self.status = status
+        self.body = body
+        self.etag = etag
+        self.code = code
+        self.title = title
+        self.retry = retry
+
+
+class InstructionBootstrapUnavailable(RuntimeError):
+    """A fire-time instruction envelope could not be produced safely."""
+
+    def __init__(self):
+        super().__init__("instruction bootstrap unavailable")
+
 
 def _audit_id(value):
     """Derive a short, non-secret correlation id from a token value.
@@ -67,6 +210,128 @@ def _audit_id(value):
     if not value:
         return ""
     return hashlib.sha256(value.encode()).hexdigest()[:8]
+
+
+# ---------------------------------------------------------------------------
+# Refused-bearer server log (#233)
+# ---------------------------------------------------------------------------
+
+# The handler suppresses per-request logging (Handler.log_message), so a 401
+# on a device-bound or image route used to leave no trace at all: an operator
+# could not tell a device that never called home from one calling home with a
+# stale token.  One bounded stderr line per distinct refusal per window fixes
+# that without letting a misbehaving or hostile client flood the log.
+_REFUSAL_LOG_WINDOW = 60        # s: one line per (src, device, route, reason)
+_REFUSAL_LOG_MAX_KEYS = 1024    # distinct keys remembered at once
+_REFUSAL_LOG_MAX_LINES = 100    # lines per window across all keys
+_REFUSAL_LOG_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD",
+                        "OPTIONS")
+# The shape gui_fleet accepts for a device id.  The path segment of a refused
+# request is unauthenticated attacker input: anything else is logged as a
+# placeholder, never echoed (mirrors the "unresolved" audit rule above).
+_REFUSAL_LOG_DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _refusal_reason(index, token, now, grace, ctx=None, device_id=None):
+    """Classify a refused catalog bearer for the server log.
+
+    Classification only, in the mould of auth._known_expired: it re-derives
+    the lookup the resolver already made and never influences the auth
+    decision.  *ctx* is the resolved context when the token WAS valid but not
+    for this route/device.  Returns a word from a fixed vocabulary -- never
+    the token, a prefix of it, or anything from the record.
+    """
+    try:
+        if ctx is not None:
+            if ctx.principal.type != "device" or (
+                    device_id is not None and ctx.principal.id != device_id):
+                return "wrong_principal"
+            # Valid, same device, but a rolled-old token on a route that
+            # only takes the current one: the device missed its refresh.
+            return "previous_token"
+        entry = secrets_store.credential_for(index, token)
+        if entry is None:
+            return "unknown_token"
+        _principal, secret_name, record = entry
+        if record.get("revoked"):
+            return "revoked"
+        expires_at = record.get("expires_at", 0)
+        if expires_at != 0 and now >= expires_at + grace:
+            return "expired"
+        if secret_name == "catalog_token_prev":
+            return "previous_token"
+        return "refused"
+    except Exception:
+        return "unclassified"
+
+
+class _RefusalLog:
+    """De-duplicated, capped stderr reporting for refused catalog bearers.
+
+    Each distinct (src_ip, device, route, reason) key gets one line per
+    window; repeats inside the window are counted and reported as
+    ``repeats=N`` on that key's next line.  A per-window line budget across
+    ALL keys bounds the total output under a scan that varies the key, with
+    the shortfall reported as ``dropped=N`` on the next line that does get
+    written.  The key table itself is capped (stale, then oldest, evicted).
+    ``token_id`` is the same truncated sha256 the audit log carries -- the
+    line never holds a token value or any prefix of one.
+    """
+
+    def __init__(self, window=_REFUSAL_LOG_WINDOW,
+                 max_keys=_REFUSAL_LOG_MAX_KEYS,
+                 max_lines=_REFUSAL_LOG_MAX_LINES, now_fn=time.monotonic):
+        self.window = window
+        self.max_keys = max_keys
+        self.max_lines = max_lines
+        self._now = now_fn
+        self._lock = threading.Lock()
+        self._seen = {}                 # key -> [last_line_at, repeats]
+        self._window_start = now_fn()
+        self._lines = 0                 # lines written this window
+        self._dropped = 0               # refusals unlogged since the last line
+
+    def refused(self, src_ip, device, route, reason, method="-",
+                token_id=""):
+        """Log (or count) one refusal; return True iff a line was written."""
+        key = (src_ip, device, route, reason)
+        now = self._now()
+        with self._lock:
+            if now - self._window_start >= self.window:
+                self._window_start = now
+                self._lines = 0
+            state = self._seen.get(key)
+            if state is not None and now - state[0] < self.window:
+                state[1] += 1
+                return False
+            if self._lines >= self.max_lines:
+                self._dropped += 1
+                return False
+            if state is None and len(self._seen) >= self.max_keys:
+                self._evict(now)
+            repeats = state[1] if state is not None else 0
+            dropped, self._dropped = self._dropped, 0
+            self._seen[key] = [now, 0]
+            self._lines += 1
+        line = ("iris-catalog: refused bearer method=%s route=%s device=%s "
+                "src=%s reason=%s" % (method, route, device, src_ip, reason))
+        if token_id:
+            line += " token_id=%s" % token_id
+        if repeats:
+            line += " repeats=%d" % repeats
+        if dropped:
+            line += " dropped=%d" % dropped
+        print(line, file=sys.stderr, flush=True)
+        return True
+
+    def _evict(self, now):
+        # Called under the lock, only when the table is full: drop every
+        # quiet key, then the single oldest if that was not enough.
+        for key in [k for k, s in self._seen.items()
+                    if now - s[0] >= self.window]:
+            del self._seen[key]
+        if len(self._seen) >= self.max_keys:
+            del self._seen[min(self._seen, key=lambda k: self._seen[k][0])]
 
 
 def _resolve_refresh_auth(store, index, token, now, grace):
@@ -729,6 +994,15 @@ def _normalize_policy(rec):
             "approved_image_ids": ids}
 
 
+@dataclass(frozen=True)
+class AssignmentResult:
+    """Ordered assignment IDs captured inside the successful policy update."""
+
+    before_ids: list
+    after_ids: list
+    removed_ids: list
+
+
 class PolicyConflict(Exception):
     """A conditional set_policy() whose expectation no longer held.
 
@@ -855,17 +1129,22 @@ class CatalogStore:
         # but unreadable shard raises StateFileError rather than reading as
         # empty or being overwritten by the next writer.
         self._devices = self._keyed(self.devices_path)
-        self._policies = self._keyed(self.policy_path)
+        self._raw_policies = self._keyed(
+            self.policy_path, validate=_validate_raw_policy_state_row,
+            durable=True)
+        self._policies = self._keyed(
+            self.policy_path, validate=_validate_policy_state_row,
+            durable=True)
         self._pulls = self._keyed(self.pull_path)
         self._reports = self._keyed(self.telemetry_path)
         self._report_ids = self._keyed(self.report_ledger_path)
         self._attestations = self._keyed(self.attestations_path)
 
     @staticmethod
-    def _keyed(path):
+    def _keyed(path, **kwargs):
         """A keyed store for the per-device state at *path*, carrying this
         class's own fail-closed error type."""
-        return keyed_state.KeyedState(path, error=StateFileError)
+        return keyed_state.KeyedState(path, error=StateFileError, **kwargs)
 
     def _read(self, path):
         """One state file as a dict. A MISSING file is the empty store (first
@@ -946,13 +1225,19 @@ class CatalogStore:
         come back unassigned, or a stale assignment would silently restage the
         old image. Contrast forget_device(), which drops only the heartbeat
         record on undeploy and deliberately keeps the assignment. Returns
-        True iff any state existed."""
-        existed = self.forget_device(device_id)
-        for state in (self._policies, self._reports, self._pulls,
-                      self._report_ids, self._attestations):
-            if state.delete(device_id):
-                existed = True
-        return existed
+        True iff any state existed.
+
+        Serialize with low-level policy writers as well as fleet-aware
+        AssignmentService callers. Retirement holds the fleet membership
+        guard outside this lock; set_policy acquires only this lock, preserving
+        membership -> image-policy -> shard lock order."""
+        with self.image_policy_lock():
+            existed = self.forget_device(device_id)
+            for state in (self._policies, self._reports, self._pulls,
+                          self._report_ids, self._attestations):
+                if state.delete(device_id):
+                    existed = True
+            return existed
 
     # --- policy (per-device staging approval) ---
     def image_policy_lock(self):
@@ -969,7 +1254,8 @@ class CatalogStore:
         return secrets_store.store_lock(self.catalog_path + ".assign")
 
     def set_policy(self, device_id, approved_image_id=None,
-                   approved_image_ids=None, expect_image_ids=None):
+                   approved_image_ids=None, expect_image_ids=None,
+                   skip_unchanged=False):
         """Approve an ordered set of images (max MAX_ASSIGNED_IMAGES) for a
         device. Approval is the whole policy: IRIS stages and verifies, and
         never installs, activates or reloads, so there is nothing further to
@@ -1007,7 +1293,12 @@ class CatalogStore:
         was already assigned. This is the sole mint site for both ids; see
         the comment at the write below for why the merge is load-bearing.
         A refused write -- PolicyConflict or QuarantinedImage -- mints
-        nothing, because both checks run before any plan is computed."""
+        nothing, because both checks run before any plan is computed.
+
+        Returns AssignmentResult from the successful shard transaction.
+        Application callers may set skip_unchanged=True to leave an identical
+        row untouched, including legacy rows without plans. The default keeps
+        the established low-level bootstrap/plan-repair behavior."""
         if approved_image_id is not None and approved_image_ids is not None:
             raise ValueError(
                 "pass approved_image_id or approved_image_ids, not both")
@@ -1041,11 +1332,18 @@ class CatalogStore:
             # image_policy_lock's job (held above), so narrowing this lock from
             # the whole fleet's policy document to one device's shard loses
             # nothing.
+            outcome = None
+
             def write_row(prev):
+                nonlocal outcome
+                current = _normalize_policy(prev)["approved_image_ids"]
                 if expect_image_ids is not None:
-                    current = _normalize_policy(prev)["approved_image_ids"]
                     if [str(i) for i in expect_image_ids] != current:
                         raise PolicyConflict(current)
+                outcome = AssignmentResult(list(current), list(ids),
+                                           [iid for iid in current if iid not in ids])
+                if skip_unchanged and current == ids:
+                    return None
                 # --- transfer plans: minted here, and ONLY here ---
                 # A plan is the server's durable name for one intended
                 # transfer of one image to one device: a plan_id, the
@@ -1111,11 +1409,20 @@ class CatalogStore:
                 # aggregation both read list_policies() directly, not through
                 # get_policy()'s normalisation) must keep seeing an assignment
                 # without themselves knowing about the plural key.
-                return {"approved_image_id": ids[0] if ids else None,
-                        "approved_image_ids": ids,
-                        "plans": plans}
+                result = {"approved_image_id": ids[0] if ids else None,
+                          "approved_image_ids": ids,
+                          "plans": plans}
+                if "instr" in prev_row:
+                    # _policies validates this established authority before
+                    # the callback. Carry it in the same atomic row merge as
+                    # plans so Apply and quarantine rewrites cannot reset the
+                    # instruction serial lineage.
+                    instructions.validate_stamp(prev_row["instr"])
+                    result["instr"] = prev_row["instr"]
+                return result
 
             self._policies.update(device_id, write_row)
+            return outcome
 
     def get_policy(self, device_id):
         """The device's approvals, normalised: every historical row shape
@@ -1131,6 +1438,44 @@ class CatalogStore:
         element and never trusted from disk, so a raw edit or a stale write
         that leaves the two keys disagreeing can't desync what callers see."""
         return _normalize_policy(self._policies.get(device_id))
+
+    def read_policy_row_snapshot(self, device_id):
+        """Return one copied, structurally checked raw policy row."""
+        try:
+            row = self._raw_policies.get(device_id)
+            return copy.deepcopy(row) if isinstance(row, dict) else None
+        except (RecursionError, OverflowError) as exc:
+            raise StateFileError("policy state is structurally invalid") from exc
+
+    def device_policy_view_from_row(self, device_id, rec):
+        """Project an already-read row without another keyed-state read."""
+        del device_id
+        try:
+            rec = copy.deepcopy(rec) if isinstance(rec, dict) else {}
+        except (RecursionError, OverflowError) as exc:
+            raise StateFileError("policy state is structurally invalid") from exc
+        view = _normalize_policy(rec)
+        rows = rec.get("plans") if isinstance(rec, dict) else None
+        rows = rows if isinstance(rows, dict) else {}
+        plans = {}
+        for image_id in view["approved_image_ids"]:
+            row = rows.get(image_id)
+            if not isinstance(row, dict):
+                continue
+            plan_id = str(row.get("plan_id", ""))
+            transfer_id = str(row.get("transfer_id", ""))
+            if _HEX32.fullmatch(plan_id) and _HEX32.fullmatch(transfer_id):
+                plans[image_id] = {"plan_id": plan_id,
+                                   "transfer_id": transfer_id}
+        view["plans"] = plans
+        if "instr" in rec:
+            try:
+                stamp = instructions.validate_stamp(rec["instr"])
+            except instructions.InstructionError as exc:
+                raise StateFileError("invalid instruction stamp") from exc
+            view["instr_rev"] = {"epoch": stamp["epoch"],
+                                 "instr_serial": stamp["instr_serial"]}
+        return view
 
     def device_policy_view(self, device_id):
         """The WIRE projection of a device's policy: what GET
@@ -1156,23 +1501,18 @@ class CatalogStore:
         # ONE keyed read for both the normalised view and the plans map (it
         # used to be two whole-fleet parses of policy.json per device poll).
         rec = self._policies.get(device_id)
-        view = _normalize_policy(rec)
-        rows = rec.get("plans") if isinstance(rec, dict) else None
-        rows = rows if isinstance(rows, dict) else {}
-        plans = {}
-        for image_id in view["approved_image_ids"]:
-            row = rows.get(image_id)
-            if not isinstance(row, dict):
-                continue
-            plan_id = str(row.get("plan_id", ""))
-            transfer_id = str(row.get("transfer_id", ""))
-            if not _HEX32.fullmatch(plan_id) \
-                    or not _HEX32.fullmatch(transfer_id):
-                continue
-            plans[image_id] = {"plan_id": plan_id,
-                               "transfer_id": transfer_id}
-        view["plans"] = plans
-        return view
+        return self.device_policy_view_from_row(device_id, rec)
+
+    def list_raw_policies(self):
+        """One copied, structurally checked policy snapshot for bulk readers.
+
+        Present instruction stamps remain unmodified for canonical validation
+        by the caller. Invalid storage never becomes an empty snapshot.
+        """
+        try:
+            return self._raw_policies.snapshot()
+        except (RecursionError, OverflowError) as exc:
+            raise StateFileError("policy state is structurally invalid") from exc
 
     def list_policies(self):
         """Every device's raw policy row. O(fleet) by nature — console tables
@@ -1882,7 +2222,7 @@ def _hb_bool(value):
 
 def sanitize_heartbeat(data, src_ip):
     """The stored heartbeat record for one device POST body (a dict)."""
-    return {
+    result = {
         "current_image_id": _hb_str(data.get("current_image_id"),
                                     _HEARTBEAT_STR_CAPS["current_image_id"]),
         "free_flash_bytes": _hb_bytes(data.get("free_flash_bytes")),
@@ -1910,6 +2250,8 @@ def sanitize_heartbeat(data, src_ip):
         # join this device's model onto its swarm peer by IP.
         "swarm_ip": src_ip,
     }
+    result.update(instructions.sanitize_instruction_attestation(data))
+    return result
 
 
 def _device_image_view(entry):
@@ -1942,6 +2284,19 @@ class Catalog:
         # (they all os.replace the file), in this process or in a CLI beside
         # it. See credential_cache.
         self.credentials = credential_cache.CredentialResolver(secrets_path)
+        state_dir = getattr(
+            store, "state_dir", os.environ.get("IRIS_STATE", "/var/lib/iris"))
+        self.instruction_paths = instruction_keys.InstructionPaths(
+            state_dir=state_dir,
+            config_dir=os.environ.get("IRIS_CONFIG", "/etc/iris"),
+            run_dir=os.environ.get("IRIS_RUN", "/run/iris"))
+        self._instruction_cache = _InstructionCache(
+            INSTR_CACHE_MAX_ENTRIES, INSTR_CACHE_MAX_BYTES)
+        self._instruction_limiter = _InstructionLimiter(
+            INSTR_REQUEST_BURST, INSTR_REQUEST_REFILL_SECONDS,
+            INSTR_LIMITER_MAX_DEVICES, INSTR_LIMITER_IDLE_SECONDS)
+        self._instruction_counter_lock = threading.Lock()
+        self._instruction_counters = {name: 0 for name in _INSTRUCTION_COUNTERS}
         self.live_table = live_table
         self.stream_settings = stream_settings
         self.audit_path = (audit_path
@@ -1958,6 +2313,17 @@ class Catalog:
         self.deployment_open = deployment_open
         self.deployment_checkpoint = deployment_checkpoint
         self.personalized_served_count = 0
+
+    def instruction_counters(self):
+        with self._instruction_counter_lock:
+            return dict(self._instruction_counters)
+
+    def _increment_instruction_counter(self, name):
+        if name not in _INSTRUCTION_COUNTERS:
+            return
+        with self._instruction_counter_lock:
+            self._instruction_counters[name] = min(
+                instructions.MAX_I63, self._instruction_counters[name] + 1)
 
     def open_deployment(self):
         """Reach the deployment checkpoint: personalized torrents may now be
@@ -1978,6 +2344,225 @@ class Catalog:
         with its own ``secrets_store.load`` — see ``_handle_token_refresh``."""
         return self.credentials.view(
             "catalog", secrets_store.build_catalog_auth_index)
+
+    def _stamper_paths(self):
+        # Local import is required: instruction_stamper imports catalog for
+        # its producer, while this consumer needs only its public snapshot.
+        import instruction_stamper
+        return instruction_stamper, instruction_stamper.StamperPaths(
+            self.instruction_paths.state_dir, self.instruction_paths.config_dir,
+            self.instruction_paths.run_dir, self.secrets_path)
+
+    def materialize_bootstrap_instruction(self, device_id):
+        """Stamp and seal one bounded onboarding envelope at execution time.
+
+        The ordinary authenticated instruction resource remains the sole
+        envelope implementation.  Retrying one key-lineage race is enough:
+        either the stamper reports that its key was superseded or the resource
+        observes a stale pointer after stamping.  Every other failure is
+        reduced to one fixed message so ciphertext and custody detail cannot
+        escape into an onboarding log.
+        """
+        try:
+            stamper, paths = self._stamper_paths()
+            producer = stamper.InstructionStamper(
+                paths=paths, catalog_store=self.store)
+        except Exception as exc:
+            raise InstructionBootstrapUnavailable() from exc
+
+        for attempt in range(2):
+            try:
+                producer.stamp_device(device_id)
+            except stamper.StamperError as exc:
+                if exc.code == "key_superseded" and attempt == 0:
+                    continue
+                raise InstructionBootstrapUnavailable() from exc
+            except Exception as exc:
+                raise InstructionBootstrapUnavailable() from exc
+
+            try:
+                result = self._instruction_resource(device_id, "instructions")
+            except Exception as exc:
+                raise InstructionBootstrapUnavailable() from exc
+            try:
+                status, body = result.status, result.body
+            except Exception as exc:
+                raise InstructionBootstrapUnavailable() from exc
+            if status == 409 and attempt == 0:
+                continue
+            if status != 200 or type(body) is not bytes \
+                    or not body or len(body) > instructions.INSTR_RESPONSE_MAX:
+                raise InstructionBootstrapUnavailable()
+            return body
+        raise InstructionBootstrapUnavailable()
+
+    @staticmethod
+    def _etag(body):
+        return '"sha256-%s"' % hashlib.sha256(body).hexdigest()
+
+    def _keylist_hint(self):
+        try:
+            snapshot = instruction_keys.read_keylist_snapshot(
+                self.instruction_paths)
+        except (instruction_keys.InstructionKeyError, OSError, ValueError,
+                TypeError):
+            self._increment_instruction_counter("keylist_hint_failures")
+            return None
+        return None if snapshot is None else snapshot["keylist_seq"]
+
+    def _heartbeat_delivery_context(self, row):
+        """Resolve pointer, keylist hint, and one cadence pair."""
+        pointer = None
+        cadence = None
+        cadence_failed = False
+        stamp_present = isinstance(row, dict) and "instr" in row
+        stamp = row["instr"] if stamp_present else None
+        if stamp_present:
+            try:
+                stamp = instructions.validate_stamp(copy.deepcopy(stamp))
+            except instructions.InstructionError:
+                self._increment_instruction_counter("instr_hint_failures")
+                stamp = None
+            if stamp is not None:
+                pointer = {"epoch": stamp["epoch"],
+                           "instr_serial": stamp["instr_serial"]}
+                try:
+                    stamper, paths = self._stamper_paths()
+                    snapshot = stamper.read_role_artifact_snapshot(paths, stamp)
+                    control = dict(snapshot["role"]["control"])
+                    control.update(stamp["part"]["control_override"])
+                    instructions.validate_control(control)
+                    cadence = (control["telemetry_every_ticks"],
+                               control["telemetry_pause"])
+                except (ImportError, OSError, KeyError, TypeError, ValueError):
+                    cadence_failed = True
+                except stamper.StamperError:
+                    cadence_failed = True
+        if cadence is None:
+            try:
+                cadence = ((1, False) if self.stream_settings is None
+                           else self.stream_settings.read())
+                every, pause = cadence
+                if isinstance(every, bool) or not isinstance(every, int) \
+                        or not 1 <= every <= 60 \
+                        or not isinstance(pause, bool):
+                    raise ValueError("invalid stream cadence")
+            except Exception:
+                cadence_failed = True
+                cadence = (1, False)
+        if cadence_failed:
+            self._increment_instruction_counter("instr_cadence_failures")
+        return pointer, self._keylist_hint(), cadence
+
+    def _instruction_resource(self, device_id, kind):
+        if kind == "keylist":
+            try:
+                snapshot = instruction_keys.read_keylist_snapshot(
+                    self.instruction_paths)
+            except (instruction_keys.InstructionKeyError, OSError, ValueError,
+                    TypeError):
+                return _InstructionResult(
+                    503, code="instruction-keylist-unavailable",
+                    title="Instruction keylist unavailable", retry=10)
+            if snapshot is None:
+                return _InstructionResult(
+                    404, code="instruction-keylist-missing",
+                    title="Instruction keylist missing")
+            body = snapshot["bytes"]
+            return _InstructionResult(200, body=body, etag=self._etag(body))
+
+        try:
+            row = self.store.read_policy_row_snapshot(device_id)
+        except StateFileError:
+            return _InstructionResult(
+                503, code="instruction-state-unavailable",
+                title="Instruction state unavailable", retry=10)
+        row = row if isinstance(row, dict) else {}
+        if "instr" not in row:
+            self._increment_instruction_counter("instr_stamp_missing")
+            return _InstructionResult(
+                404, code="instruction-stamp-missing",
+                title="Instruction stamp missing")
+        try:
+            stamp = instructions.validate_stamp(copy.deepcopy(row["instr"]))
+            header = instructions.stamp_header(device_id, stamp)
+        except (instructions.InstructionError, TypeError, KeyError, ValueError):
+            return _InstructionResult(
+                503, code="instruction-state-unavailable",
+                title="Instruction state unavailable", retry=10)
+        try:
+            stamper, paths = self._stamper_paths()
+        except ImportError:
+            return _InstructionResult(
+                503, code="instruction-state-unavailable",
+                title="Instruction state unavailable", retry=10)
+        try:
+            role_snapshot = stamper.read_role_artifact_snapshot(paths, stamp)
+        except stamper.RoleArtifactMissing:
+            self._increment_instruction_counter("instr_stamp_missing")
+            return _InstructionResult(
+                404, code="instruction-stamp-missing",
+                title="Instruction stamp missing")
+        except (stamper.StamperError, OSError, ValueError, TypeError, KeyError):
+            return _InstructionResult(
+                503, code="instruction-state-unavailable",
+                title="Instruction state unavailable", retry=10)
+
+        stamp_digest = hashlib.sha256(
+            instructions.canonical_json(stamp)).hexdigest()
+        identity = (device_id, stamp["key_id"], stamp["epoch"],
+                    stamp["instr_serial"], stamp["role_body_sha256"])
+        try:
+            with secrets_store.store_lock(self.secrets_path):
+                secret_doc = secrets_store.load(self.secrets_path)
+                device = secret_doc.get("devices", {}).get(device_id)
+                if not isinstance(device, dict) or "instr_key" not in device:
+                    raise secrets_store.InstructionKeyError(
+                        "instruction key unavailable")
+                if "instr_key_prev" in device:
+                    current, previous = secrets_store.validate_instruction_key_pair(
+                        device["instr_key"], device["instr_key_prev"])
+                else:
+                    current, previous = secrets_store.validate_instruction_key_pair(
+                        device["instr_key"])
+                selected = None
+                if current["key_id"] == stamp["key_id"] \
+                        and not current["revoked"]:
+                    selected = current
+                elif previous is not None \
+                        and previous["key_id"] == stamp["key_id"] \
+                        and not previous["revoked"] \
+                        and time.time() < previous["expires_at"]:
+                    selected = previous
+                if selected is None:
+                    return _InstructionResult(
+                        409, code="stale_pointer",
+                        title="Stale instruction pointer", retry=10)
+                cached = self._instruction_cache.get(
+                    identity, stamp_digest,
+                    role_snapshot["artifact_sha256"])
+                if cached is not None:
+                    return _InstructionResult(
+                        200, body=cached[0], etag=cached[1])
+                body = instructions.seal_parts(
+                    header, stamp["part"], role_snapshot["body_bytes"],
+                    role_snapshot["signature_bytes"],
+                    bytes.fromhex(selected["value"]))
+                if len(body) > instructions.INSTR_RESPONSE_MAX:
+                    raise instructions.InstructionError(
+                        "instruction response too large")
+                etag = self._etag(body)
+                self._instruction_cache.put(
+                    identity, stamp_digest,
+                    role_snapshot["artifact_sha256"], body, etag)
+                return _InstructionResult(200, body=body, etag=etag)
+        except (secrets_store.StoreCorruptError,
+                secrets_store.InstructionKeyError,
+                instructions.InstructionError, OSError, ValueError, TypeError,
+                AttributeError, KeyError, OverflowError):
+            return _InstructionResult(
+                503, code="instruction-state-unavailable",
+                title="Instruction state unavailable", retry=10)
 
     def _announce_base_url(self):
         """Return the validated HTTPS tracker announce base URL (no query).
@@ -2037,6 +2622,14 @@ class Catalog:
     def _route_get(self, path, auth_ctx=None, store_dict=None,
                    tracker_auth="legacy-query"):
         parts = urlsplit(path).path.strip("/").split("/")
+        if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
+                and parts[3] == "policy":
+            row = self.store.read_policy_row_snapshot(parts[2])
+            view = self.store.device_policy_view_from_row(parts[2], row)
+            keylist_seq = self._keylist_hint()
+            if keylist_seq is not None:
+                view["keylist_seq"] = keylist_seq
+            return self._json(200, view)
         principal = getattr(auth_ctx, "principal", None)
         device_id = (principal.id if getattr(principal, "type", None) == "device"
                      else None)
@@ -2065,14 +2658,6 @@ class Catalog:
                 return self._json(404, {"error": "no such torrent"})
             return self._route_torrent(image_id, auth_ctx, store_dict,
                                        tracker_auth=tracker_auth)
-        if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
-                and parts[3] == "policy":
-            # device_policy_view, not get_policy: the agent adopts the
-            # server-minted transfer_id from the ``plans`` map, and this poll
-            # is the earliest point of the agent's tick -- ahead of the
-            # download and of every telemetry touch -- so the id is in hand
-            # before anything can mint one of its own.
-            return self._json(200, self.store.device_policy_view(parts[2]))
         return self._json(404, {"error": "not found"})
 
     # Extra response headers the handler must emit for a personalized torrent
@@ -2144,6 +2729,20 @@ class Catalog:
                 return self._json(400, {"error": "bad json"})
             if not isinstance(data, dict):
                 return self._json(400, {"error": "bad json"})
+            has_snapshot = hasattr(self.store, "read_policy_row_snapshot")
+            if has_snapshot:
+                policy_row = self.store.read_policy_row_snapshot(parts[2])
+            else:  # narrow compatibility for existing injected test stores
+                policy_row = self.store.get_policy(parts[2])
+            approved = _normalize_policy(policy_row)["approved_image_ids"]
+            if has_snapshot:
+                pointer, keylist_seq, cadence = \
+                    self._heartbeat_delivery_context(policy_row)
+            else:
+                pointer = keylist_seq = None
+                cadence = ((1, False) if self.stream_settings is None
+                           else self.stream_settings.read())
+            every, paused = cadence
             self.store.record_heartbeat(
                 parts[2], sanitize_heartbeat(data, src_ip))
             # Live telemetry (spec §3/§10.1): a v2 `telemetry_observation`
@@ -2154,15 +2753,6 @@ class Catalog:
             # paused / unassigned / errored -> WITHDRAW the live value even if
             # an `observed` envelope arrived, without inventing transfer fields.
             if self.live_table is not None:
-                # Membership against the WHOLE assigned set, not just the
-                # first (singular) member -- a live sample for a device's
-                # 2nd+ assigned image must sanitize clean, matching the v2
-                # telemetry-report ingest check above.
-                approved = self.store.get_policy(parts[2]).get(
-                    "approved_image_ids") or []
-                every, paused = 1, False
-                if self.stream_settings is not None:
-                    every, paused = self.stream_settings.read()
                 tele_off = (data.get("telemetry_enabled") is False
                             or data.get("telemetry_stream_enabled") is False
                             or paused or not approved)
@@ -2208,10 +2798,13 @@ class Catalog:
                     except ValueError:
                         self.live_table.reject()
             resp = {"ok": True}
-            if self.stream_settings is not None:
-                every, pause = self.stream_settings.read()
+            if pointer is not None:
+                resp["instr_rev"] = pointer
+            if keylist_seq is not None:
+                resp["keylist_seq"] = keylist_seq
+            if pointer is not None or self.stream_settings is not None:
                 resp["stream_every"] = every
-                resp["stream_pause"] = pause
+                resp["stream_pause"] = paused
             directive = self.store.pending_report(parts[2], time.time())
             if directive is not None:
                 resp["report_requested"] = True
@@ -2275,7 +2868,8 @@ class Catalog:
             # rotate_catalog/mint always write revoked=False, so rotating now
             # would silently un-revoke the device (hand it a fresh live token).
             # Abort instead — this closes the TOCTOU the lock made deterministic.
-            if current_record is not None and current_record.get("revoked"):
+            if isinstance(current_record, dict) \
+                    and current_record.get("revoked"):
                 try:
                     audit.append_event(
                         self.audit_path, "refresh_fail", device_id,
@@ -2305,11 +2899,51 @@ class Catalog:
                 return self._json(401, {"error": "unauthorized"})
 
             recovering = ctx.secret_name == "catalog_token_prev"
+
+            # Validate the complete instruction lineage against this same
+            # under-lock snapshot before rotating either credential. Missing
+            # legacy material is provisioned once; present malformed or
+            # revoked state is never treated as a fresh device.
+            instruction_minted = False
+            has_instruction = "instr_key" in device_secrets
+            has_previous_instruction = "instr_key_prev" in device_secrets
+            if not has_instruction and has_previous_instruction:
+                return self._json(
+                    503, {"error": "instruction key unavailable"})
+            try:
+                if has_instruction:
+                    if has_previous_instruction:
+                        instruction, previous_instruction = (
+                            secrets_store.validate_instruction_key_pair(
+                                device_secrets["instr_key"],
+                                device_secrets["instr_key_prev"]))
+                    else:
+                        instruction, previous_instruction = (
+                            secrets_store.validate_instruction_key_pair(
+                                device_secrets["instr_key"]))
+                else:
+                    instruction = None
+                    previous_instruction = None
+            except secrets_store.InstructionKeyError:
+                return self._json(
+                    503, {"error": "instruction key unavailable"})
+            if instruction is not None and instruction["revoked"]:
+                return self._json(409, {"error": "device revoked"})
+            if instruction is None:
+                try:
+                    secrets_store.mint(store, device_id, "instr_key", now)
+                except secrets_store.CredentialMintError:
+                    return self._json(
+                        503, {"error": "instruction key unavailable"})
+                instruction = device_secrets["instr_key"]
+                instruction_minted = True
+
             if recovering:
                 # The server already committed this successor. Reissue the
                 # current bag unchanged so a lost 200 or failed device conf
                 # rewrite can converge on the next tick.
                 new_val = current_val
+                catalog_rotated = False
             else:
                 old_record = current_record
                 old_val = current_val
@@ -2333,13 +2967,12 @@ class Catalog:
 
                 new_val = secrets_store.rotate_catalog(
                     store, device_id, now, overlap)
+                catalog_rotated = True
 
-                # Persist durable-FIRST: the at-rest .age ciphertext is the only
-                # copy that survives a restart, so it must be written (and confirmed)
-                # before the live tmpfs plaintext is swapped in.  If the durable
-                # write fails, persist_store leaves the tmpfs store untouched and
-                # raises; we then report failure rather than a phantom rotation that
-                # a restart would silently roll back.
+            if catalog_rotated or instruction_minted:
+                # Persist durable-FIRST. Recovery can reach this path solely to
+                # commit a missing legacy instruction key, so it cannot rely on
+                # rotation-only locals such as ``old_val``.
                 recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
                 enc_path = os.environ.get(
                     "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
@@ -2347,15 +2980,15 @@ class Catalog:
                     secretfs.persist_store(
                         store, secrets_path,
                         recipients_csv=recipients, enc_path=enc_path)
-                except Exception as exc:
-                    # Durable write failed: nothing was committed to the live store,
-                    # so there is no rotation to roll back and no divergence.  Audit
-                    # the failed persist and refuse to report success.
+                except Exception:
+                    # The persistence helper reported failure and may have
+                    # attempted its documented old-live rollback after a
+                    # durable rename. Never claim success or echo tool output.
                     try:
                         audit.append_event(
                             self.audit_path, "refresh_fail", device_id,
                             secret_name="catalog_token",
-                            old_id=_audit_id(old_val),
+                            old_id=_audit_id(token),
                             src_ip=src_ip,
                             detail="durable persist failed",
                             result="fail",
@@ -2363,9 +2996,10 @@ class Catalog:
                     except Exception:
                         pass
                     return self._json(
-                        500, {"error": "durable persist failed: %s" % exc})
+                        500, {"error": "durable persist failed"})
 
-                # Audit the refresh (only after the rotation is durably committed)
+            if catalog_rotated:
+                # Audit only after the catalog rotation is durably committed.
                 audit.append_event(
                     self.audit_path, "refresh", device_id,
                     secret_name="catalog_token",
@@ -2374,27 +3008,33 @@ class Catalog:
                     src_ip=src_ip,
                 )
 
-        # Build the response bag: catalog_token + expires_at, plus
-        # announce_token / rpc_secret ONLY when the device actually has them.
-        # The agent persists a returned secret when `bag.get(name) is not None`
-        # (iris_agent._refresh_impl), so it can keep its current working value
-        # for a field the server omits.  Sending "" for an absent record would
-        # be `not None` and make the agent overwrite its live announce_token /
-        # rpc_secret with "", stranding it off the swarm and the aria2 RPC.
-        device_secrets = store.get("devices", {}).get(device_id, {})
-        # After rotate, the NEW record is in the store under catalog_token
-        new_cat_rec = device_secrets.get("catalog_token", {})
-        bag = {
-            "catalog_token": new_val,
-            "expires_at": new_cat_rec.get("expires_at", 0),
-        }
-        ann_val = device_secrets.get("announce_token", {}).get("value")
-        if ann_val:
-            bag["announce_token"] = ann_val
-        rpc_val = device_secrets.get("rpc_secret", {}).get("value")
-        if rpc_val:
-            bag["rpc_secret"] = rpc_val
-        return self._json(200, bag)
+            # Build one coherent response from the validated in-lock snapshot.
+            # Existing optional values retain their omit-when-absent contract;
+            # each instruction object is all-or-omitted and carries no custody
+            # metadata beyond its nonsecret key ID.
+            new_cat_rec = device_secrets.get("catalog_token", {})
+            bag = {
+                "catalog_token": new_val,
+                "expires_at": new_cat_rec.get("expires_at", 0),
+                "instr_key": secrets_store.instruction_key_projection(
+                    instruction),
+            }
+            previous_projection = None
+            if previous_instruction is not None:
+                previous_projection = secrets_store.instruction_key_projection(
+                    previous_instruction, now=now, previous=True)
+            if previous_projection is not None:
+                bag["instr_key_prev"] = previous_projection
+            ann = device_secrets.get("announce_token")
+            ann_val = ann.get("value") if isinstance(ann, dict) else None
+            if ann_val:
+                bag["announce_token"] = ann_val
+            rpc = device_secrets.get("rpc_secret")
+            rpc_val = rpc.get("value") if isinstance(rpc, dict) else None
+            if rpc_val:
+                bag["rpc_secret"] = rpc_val
+            response = self._json(200, bag)
+        return response
 
     @staticmethod
     def _json(status, obj):
@@ -2413,6 +3053,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
                    deployment_checkpoint=deployment_checkpoint)
 
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
+    refusals = _RefusalLog()
 
     class Handler(BaseHTTPRequestHandler):
         # Socket inactivity timeout: StreamRequestHandler.setup applies it
@@ -2460,7 +3101,8 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 len(parts) == 4
                 and parts[:2] == ["v1", "devices"]
                 and parts[3] in ("heartbeat", "token-refresh", "telemetry",
-                                 "policy")
+                                 "policy", "instructions",
+                                 "instruction-keylist")
             )
 
             if is_device_bound:
@@ -2477,6 +3119,8 @@ def make_server(host, port, store, secrets_path, certfile=None,
                            or (is_refresh and ctx.secret_name
                                == "catalog_token_prev")))
                 if not ok:
+                    self._log_refusal(_refusal_reason(
+                        strict, token, now, grace, ctx, device_id), token)
                     # Audit auth failure for token-refresh routes
                     if parts[3] == "token-refresh":
                         try:
@@ -2501,8 +3145,34 @@ def make_server(host, port, store, secrets_path, certfile=None,
             ctx = auth.resolve_catalog_auth(
                 store_dict, strict, token, now, grace)
             if ctx is None:
+                self._log_refusal(
+                    _refusal_reason(strict, token, now, grace), token)
                 return None, None, None
             return store_dict, index, ctx
+
+        def _log_refusal(self, reason, token=None):
+            """One bounded stderr line per refused bearer (#233).
+
+            Best-effort like the audit emit: a logging failure never breaks
+            the refusal itself.  The device id comes from the path only when
+            it has the shape of a real id; the route is the registered
+            template, so neither field can carry attacker-shaped text.
+            """
+            try:
+                parts = urlsplit(self.path).path.strip("/").split("/")
+                device = "-"
+                if len(parts) >= 3 and parts[:2] == ["v1", "devices"]:
+                    device = parts[2] if _REFUSAL_LOG_DEVICE_RE.match(
+                        parts[2]) else "invalid"
+                method = self.command if self.command \
+                    in _REFUSAL_LOG_METHODS else "other"
+                route = api_routes.match("catalog", method, self.path)
+                refusals.refused(
+                    self.client_address[0], device,
+                    route.path if route is not None else "unmatched",
+                    reason, method=method, token_id=_audit_id(token))
+            except Exception:
+                pass
 
         def _extract_token(self):
             value = self.headers.get("Authorization", "")
@@ -2513,6 +3183,151 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
         def _problem(self, status, code, title, headers=()):
             api_problem.send(self, status, code, title, headers=headers)
+
+        @staticmethod
+        def _instruction_kind(parts):
+            if len(parts) != 4 or parts[:2] != ["v1", "devices"]:
+                return None
+            if parts[3] == "instructions":
+                return "instruction"
+            if parts[3] == "instruction-keylist":
+                return "keylist"
+            return None
+
+        def _instruction_problem(self, status, code, title, retry=None,
+                                 authenticate=False):
+            headers = [("Vary", "Authorization")]
+            if retry is not None:
+                headers.append(("Retry-After", str(retry)))
+            if authenticate:
+                headers.append(("WWW-Authenticate", "Bearer"))
+            self._problem(status, code, title, tuple(headers))
+
+        @staticmethod
+        def _if_none_match(values, etag):
+            field = ",".join(values)
+            length = len(field)
+            cursor = 0
+
+            def ows(index):
+                while index < length and field[index] in " \t":
+                    index += 1
+                return index
+
+            cursor = ows(cursor)
+            if cursor < length and field[cursor] == "*":
+                return ows(cursor + 1) == length
+            selected = etag[1:-1]
+            matched = False
+            empty_members = 0
+            after_separator = False
+            while True:
+                cursor = ows(cursor)
+                if cursor == length:
+                    if after_separator:
+                        empty_members += 1
+                    return empty_members <= 64 and matched
+                if field[cursor] == ",":
+                    empty_members += 1
+                    if empty_members > 64:
+                        return False
+                    after_separator = True
+                    cursor += 1
+                    continue
+                if field.startswith("W/", cursor):
+                    cursor += 2
+                if cursor >= length or field[cursor] != '"':
+                    return False
+                cursor += 1
+                start = cursor
+                while cursor < length and field[cursor] != '"':
+                    codepoint = ord(field[cursor])
+                    if not (codepoint == 0x21
+                            or 0x23 <= codepoint <= 0x7e
+                            or 0x80 <= codepoint <= 0xff):
+                        return False
+                    cursor += 1
+                if cursor >= length:
+                    return False
+                matched = matched or field[start:cursor] == selected
+                after_separator = False
+                cursor = ows(cursor + 1)
+                if cursor == length:
+                    return matched
+                if field[cursor] != ",":
+                    return False
+                after_separator = True
+                cursor += 1
+
+        def _send_instruction_result(self, result):
+            if result.status != 200:
+                self._instruction_problem(
+                    result.status, result.code, result.title,
+                    retry=result.retry)
+                return
+            headers = self.headers.get_all("If-None-Match", [])
+            if self._if_none_match(headers, result.etag):
+                self.send_response(304)
+                self.send_header("ETag", result.etag)
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("Vary", "Authorization")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(result.body)))
+            self.send_header("Cache-Control", "private, no-store")
+            self.send_header("Vary", "Authorization")
+            self.send_header("ETag", result.etag)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(result.body)
+
+        def _handle_instruction_get(self, parts, kind, token):
+            if not token:
+                self._log_refusal("missing_bearer")
+                self._instruction_problem(
+                    401, "catalog-authentication-required",
+                    "Catalog authentication required", authenticate=True)
+                return
+            try:
+                store_dict, strict = cat._load_store()
+                ctx = auth.resolve_catalog_auth(
+                    store_dict, strict, token, time.time(), grace)
+            except (secrets_store.StoreCorruptError,
+                    secrets_store.DuplicateCredentialError, OSError,
+                    ValueError, TypeError, AttributeError, KeyError):
+                self._instruction_problem(
+                    503, "credential-store-unavailable",
+                    "Credential store unavailable", retry=10)
+                return
+            if ctx is None or ctx.principal.type != "device" \
+                    or ctx.secret_name != "catalog_token":
+                self._log_refusal(_refusal_reason(
+                    strict, token, time.time(), grace, ctx, parts[2]), token)
+                self._instruction_problem(
+                    401, "catalog-authentication-required",
+                    "Catalog authentication required", authenticate=True)
+                return
+            if ctx.principal.id != parts[2]:
+                self._log_refusal("wrong_principal", token)
+                self._instruction_problem(
+                    403, "instruction-device-forbidden",
+                    "Instruction access forbidden")
+                return
+            if api_routes.match("catalog", "GET", self.path) is None:
+                self._problem(404, "route-not-found", "Route not found",
+                              (("Vary", "Authorization"),))
+                return
+            retry = cat._instruction_limiter.charge(ctx.principal.id)
+            if retry is not None:
+                self._instruction_problem(
+                    429, "instruction-rate-limit-exceeded",
+                    "Instruction request rate limit exceeded", retry=retry)
+                return
+            self._send_instruction_result(
+                cat._instruction_resource(parts[2], kind))
 
         def _send(self, triple):
             # triple is (status, ctype, body) or
@@ -2545,12 +3360,17 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
         def do_GET(self):
             token = self._extract_token()
+            parts = urlsplit(self.path).path.strip("/").split("/")
+            kind = self._instruction_kind(parts)
+            if kind is not None:
+                self._handle_instruction_get(parts, kind, token)
+                return
             if not token:
+                self._log_refusal("missing_bearer")
                 self._problem(401, "catalog-authentication-required",
                               "Catalog authentication required",
                               (("WWW-Authenticate", "Bearer"),))
                 return
-            parts = urlsplit(self.path).path.strip("/").split("/")
             try:
                 store_dict, index, auth_ctx = self._guard(parts, token)
             except (secrets_store.StoreCorruptError,
@@ -2582,6 +3402,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def do_POST(self):
             token = self._extract_token()
             if not token:
+                self._log_refusal("missing_bearer")
                 self._problem(401, "catalog-authentication-required",
                               "Catalog authentication required",
                               (("WWW-Authenticate", "Bearer"),))
@@ -2650,6 +3471,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
             """Authenticate before disclosing unsupported method handling."""
             token = self._extract_token()
             if not token:
+                self._log_refusal("missing_bearer")
                 self._problem(401, "catalog-authentication-required",
                               "Catalog authentication required",
                               (("WWW-Authenticate", "Bearer"),))

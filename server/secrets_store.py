@@ -39,18 +39,46 @@ SECRET_TYPES = {
         "scope": "catalog",
         "ttl":   _DEFAULT_TTL,   # 7 days by default
         "auth":  "bearer",
+        "bits":  128,
     },
     "announce_token": {
         "scope": "announce",
         "ttl":   0,              # never expires
         "auth":  "announce_key",
+        "bits":  128,
     },
     "rpc_secret": {
         "scope": "local",
         "ttl":   0,              # never expires
         "auth":  None,
+        "bits":  128,
+    },
+    "instr_key": {
+        "scope": "instructions",
+        "ttl": 2592000,
+        "auth": None,
+        "bits": 256,
     },
 }
+
+# Credential widths are deliberately a closed registry rather than a default
+# on SECRET_TYPES.  A newly registered credential must choose and be reviewed
+# for an explicit width before minting can use it; key material cannot silently
+# inherit the bearer-token width.
+_SECRET_BITS = {
+    "catalog_token": 128,
+    "announce_token": 128,
+    "rpc_secret": 128,
+    "instr_key": 256,
+}
+
+INSTR_KEY_TTL = 2592000
+INSTR_KEY_PREV_TTL = 604800
+_SUPPORTED_SECRET_BITS = frozenset((128, 256))
+_INSTRUCTION_RECORD_FIELDS = frozenset((
+    "value", "key_id", "created_at", "expires_at", "revoked", "_scope",
+))
+_INSTRUCTION_KEY_ABSENT = object()
 
 # Maximum number of rotated-out seeder announce records kept valid at once
 # (spec §6). rotate_announce refuses any rotation that would evict a still-valid
@@ -79,10 +107,11 @@ SEEDER_PREV_TTL = int(os.environ.get("IRIS_SEEDER_PREV_TTL") or 2592000)
 # ---------------------------------------------------------------------------
 
 class StoreCorruptError(ValueError):
-    """The store file at *path* exists but could not be read or parsed.
+    """The store at *path* could not be read as required authority.
 
-    Raised by load() instead of returning the empty skeleton. An empty store
-    and an unreadable one must never look alike: every writer does
+    Raised by load() instead of returning the empty skeleton for an unreadable
+    file or a required authority that is absent. An empty store and an
+    unavailable one must never look alike: every writer does
     load -> mutate -> persist_store, and persist_store encrypts durable-first,
     so a skeleton returned for a truncated/unreadable tmpfs copy would be
     re-encrypted over the only durable copy of every device and seeder
@@ -90,10 +119,12 @@ class StoreCorruptError(ValueError):
     never file content."""
 
 
-def load(path):
+def load(path, *, require_existing=False):
     """Load the store from *path*.
 
-    A MISSING file is the empty store (first run) and returns the skeleton.
+    A MISSING file is the empty store (first run) and returns the skeleton,
+    unless ``require_existing`` is true for an authority read that must not
+    reinterpret lost state as a fresh install.
     A present-but-unreadable or unparsable file raises StoreCorruptError so
     that no caller can mistake it for a fresh install: readers fail closed
     and writers never persist the emptiness over the durable ciphertext."""
@@ -103,12 +134,19 @@ def load(path):
         # Minimal shape guard
         if not isinstance(data, dict):
             raise ValueError("not a dict")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if require_existing:
+            raise StoreCorruptError(
+                "secrets store %s is unavailable (FileNotFoundError)" % path
+            ) from exc
         return {"devices": {}, "seeder": {}}
     except (OSError, ValueError) as exc:
         raise StoreCorruptError(
             "secrets store %s is unreadable (%s)"
             % (path, exc.__class__.__name__)) from exc
+    if require_existing and "devices" not in data:
+        raise StoreCorruptError(
+            "secrets store %s has no devices authority" % path)
     data.setdefault("devices", {})
     data.setdefault("seeder", {})
     _prune_previous_on_load(data)
@@ -243,13 +281,33 @@ def build_index(store):
     The seeder pseudo-device is included with device_id == "seeder".
     """
     index = {}
-    for device_id, secrets_dict in store.get("devices", {}).items():
+    devices = store.get("devices", {})
+    if not isinstance(devices, dict):
+        devices = {}
+    for device_id, secrets_dict in devices.items():
+        if not isinstance(secrets_dict, dict):
+            continue
         for secret_name, record in secrets_dict.items():
-            if "value" in record:
-                index[record["value"]] = (device_id, secret_name)
-    for secret_name, record in store.get("seeder", {}).items():
-        if "value" in record:
+            if not isinstance(record, dict) or "value" not in record:
+                continue
+            value = record["value"]
+            try:
+                index[value] = (device_id, secret_name)
+            except TypeError:
+                # This broad inventory is used for mint collision avoidance,
+                # never authorization. A malformed unhashable value must not
+                # prevent an unrelated credential from being minted.
+                continue
+    seeder = store.get("seeder", {})
+    if not isinstance(seeder, dict):
+        seeder = {}
+    for secret_name, record in seeder.items():
+        if not isinstance(record, dict) or "value" not in record:
+            continue
+        try:
             index[record["value"]] = ("seeder", secret_name)
+        except TypeError:
+            continue
     return index
 
 
@@ -272,6 +330,10 @@ class DuplicateCredentialError(Exception):
 
 class CredentialMintError(Exception):
     """A unique credential could not be generated."""
+
+
+class InstructionKeyError(ValueError):
+    """Instruction-key state is unavailable, invalid, or unsafe to mutate."""
 
 
 def validate_device_id(device_id):
@@ -405,27 +467,139 @@ def device_announce_value(store, device_id, now, grace):
     return rec.get("value")
 
 
+def _canonical_hex(value, length):
+    return (isinstance(value, str) and len(value) == length
+            and value == value.lower()
+            and all(char in "0123456789abcdef" for char in value))
+
+
+def validate_instruction_key_record(record, previous=False):
+    """Return a valid closed instruction record or raise a fixed error.
+
+    Current records retain the exact 30-day mint lifetime. Archived previous
+    records keep their original creation time but receive a seven-day deadline
+    from rotation, so they require only strictly ordered timestamps.
+    """
+    error = InstructionKeyError("invalid instruction key record")
+    if not isinstance(record, dict) or set(record) != _INSTRUCTION_RECORD_FIELDS:
+        raise error
+    value = record.get("value")
+    key_id = record.get("key_id")
+    created_at = record.get("created_at")
+    expires_at = record.get("expires_at")
+    if not _canonical_hex(value, 64) or not _canonical_hex(key_id, 64):
+        raise error
+    try:
+        expected_id = hashlib.sha256(bytes.fromhex(value)).hexdigest()
+    except ValueError:
+        raise error
+    if not hmac.compare_digest(key_id, expected_id):
+        raise error
+    if type(created_at) is not int or created_at < 0:
+        raise error
+    if type(expires_at) is not int or expires_at <= created_at:
+        raise error
+    if not previous and expires_at != created_at + INSTR_KEY_TTL:
+        raise error
+    if type(record.get("revoked")) is not bool:
+        raise error
+    if record.get("_scope") != "instructions":
+        raise error
+    return record
+
+
+def validate_instruction_key_pair(current, previous=_INSTRUCTION_KEY_ABSENT):
+    """Return one valid current and its distinct, optional previous record."""
+    current = validate_instruction_key_record(current)
+    if previous is _INSTRUCTION_KEY_ABSENT:
+        return current, None
+    previous = validate_instruction_key_record(previous, previous=True)
+    if (hmac.compare_digest(current["key_id"], previous["key_id"])
+            or hmac.compare_digest(current["value"], previous["value"])):
+        raise InstructionKeyError("invalid instruction key relationship")
+    return current, previous
+
+
+def instruction_key_projection(record, now=None, previous=False):
+    """Return the closed wire object for an eligible instruction record.
+
+    Current expiry is deliberately ignored: it schedules rotation but never
+    makes the current decryption key disappear. Previous expiry is a strict
+    server-side overlap bound and equality is expired.
+    """
+    record = validate_instruction_key_record(record, previous=previous)
+    if record["revoked"]:
+        return None
+    if previous and (type(now) not in (int, float)
+                     or now >= record["expires_at"]):
+        return None
+    return {"value": record["value"], "key_id": record["key_id"]}
+
+
 # ---------------------------------------------------------------------------
 # Mint
 # ---------------------------------------------------------------------------
 
 def mint(store, device_id, secret_name, now):
     """Mint a new secret for *device_id*/*secret_name* and write it into
-    *store* in-place.  Returns the new token value (32 hex chars).
+    *store* in-place. Returns its hexadecimal value.
 
     device_id == "seeder" writes under store["seeder"].
     """
-    stype = SECRET_TYPES[secret_name]
+    try:
+        stype = SECRET_TYPES[secret_name]
+    except (KeyError, TypeError) as exc:
+        raise CredentialMintError("unsupported secret type") from exc
+    try:
+        bits = _SECRET_BITS[secret_name]
+    except (KeyError, TypeError) as exc:
+        raise CredentialMintError("unsupported secret bit count") from exc
+    try:
+        declared_bits = stype["bits"]
+    except (KeyError, TypeError):
+        raise CredentialMintError("unsupported secret bit count")
+    if type(declared_bits) is not int:
+        raise CredentialMintError("unsupported secret bit count")
+    if declared_bits != bits:
+        raise CredentialMintError("unsupported secret bit count")
+    if type(bits) is not int or bits not in _SUPPORTED_SECRET_BITS \
+            or bits % 8:
+        raise CredentialMintError("unsupported secret bit count")
     ttl = stype["ttl"]
     existing = set(build_index(store))
+    existing_ids = set()
+    devices = store.get("devices", {})
+    if isinstance(devices, dict):
+        for records in devices.values():
+            if not isinstance(records, dict):
+                continue
+            for record in records.values():
+                if isinstance(record, dict) \
+                        and isinstance(record.get("key_id"), str):
+                    existing_ids.add(record["key_id"])
     for rec in store.get("seeder", {}).get(
             "announce_token_previous", []) or []:
         if isinstance(rec, dict) and rec.get("value"):
-            existing.add(rec["value"])
+            try:
+                existing.add(rec["value"])
+            except TypeError:
+                pass
     for _attempt in range(128):
-        value = secrets.token_hex(16)
-        if value not in existing:
-            break
+        value = secrets.token_hex(bits // 8)
+        try:
+            unique_value = value not in existing
+        except TypeError:
+            unique_value = False
+        if not unique_value:
+            continue
+        key_id = None
+        if secret_name == "instr_key":
+            if not _canonical_hex(value, 64):
+                raise CredentialMintError("credential generator returned invalid data")
+            key_id = hashlib.sha256(bytes.fromhex(value)).hexdigest()
+            if key_id in existing_ids:
+                continue
+        break
     else:
         raise CredentialMintError("unable to mint unique credential")
     inow = int(now)  # coerce: callers may pass time.time() (float); store only holds int epochs
@@ -435,6 +609,9 @@ def mint(store, device_id, secret_name, now):
         "expires_at": (inow + ttl) if ttl else 0,
         "revoked":    False,
     }
+    if secret_name == "instr_key":
+        record["key_id"] = key_id
+        record["_scope"] = "instructions"
     if device_id == "seeder":
         store["seeder"][secret_name] = record
     else:
@@ -478,6 +655,61 @@ def valid(record, now, grace):
 
 
 # ---------------------------------------------------------------------------
+# Instruction-key rotation
+# ---------------------------------------------------------------------------
+
+def rotate_instruction_key(store, device_id, now, no_overlap=False):
+    """Rotate one existing device instruction key in-place.
+
+    The caller owns persistence and must hold ``store_lock`` around a fresh
+    load, this mutation, and ``secretfs.persist_store``. The returned key ID is
+    nonsecret and is the only material passed to the later stamper handoff.
+    """
+    devices = store.get("devices")
+    if not isinstance(device_id, str) or not device_id or device_id == "seeder":
+        raise InstructionKeyError("invalid instruction key device")
+    if not isinstance(devices, dict) or device_id not in devices:
+        raise InstructionKeyError("instruction key device not found")
+    records = devices[device_id]
+    if not isinstance(records, dict):
+        raise InstructionKeyError("invalid instruction key state")
+    if any(isinstance(record, dict) and record.get("revoked")
+           for record in records.values()):
+        raise InstructionKeyError("instruction key rotation refused: device revoked")
+    if "instr_key" not in records:
+        raise InstructionKeyError("instruction key is missing")
+    if "instr_key_prev" in records:
+        current, previous = validate_instruction_key_pair(
+            records["instr_key"], records["instr_key_prev"])
+        if previous["revoked"]:
+            raise InstructionKeyError(
+                "instruction key rotation refused: device revoked")
+    else:
+        current, previous = validate_instruction_key_pair(
+            records["instr_key"])
+
+    try:
+        inow = int(now)
+    except (TypeError, ValueError, OverflowError):
+        raise InstructionKeyError("invalid instruction key rotation time")
+    if inow < 0:
+        raise InstructionKeyError("invalid instruction key rotation time")
+    if not no_overlap and previous is not None \
+            and inow < previous["expires_at"]:
+        raise InstructionKeyError("previous instruction key overlap is active")
+    if not no_overlap and inow + INSTR_KEY_PREV_TTL <= current["created_at"]:
+        raise InstructionKeyError("invalid instruction key rotation time")
+
+    archived = dict(current)
+    archived["expires_at"] = inow + INSTR_KEY_PREV_TTL
+    records.pop("instr_key_prev", None)
+    mint(store, device_id, "instr_key", inow)
+    if not no_overlap:
+        records["instr_key_prev"] = archived
+    return records["instr_key"]["key_id"]
+
+
+# ---------------------------------------------------------------------------
 # rotate_catalog
 # ---------------------------------------------------------------------------
 
@@ -512,7 +744,8 @@ def revoke(store, device_id):
     if device_secrets is None:
         return
     for record in device_secrets.values():
-        record["revoked"] = True
+        if isinstance(record, dict):
+            record["revoked"] = True
 
 
 # ---------------------------------------------------------------------------
@@ -535,10 +768,14 @@ def revoked_device_principals(store):
     regardless of policy assignment.
     """
     keys = set()
-    for device_id, records in store.get("devices", {}).items():
-        if not records:
+    devices = store.get("devices", {})
+    if not isinstance(devices, dict):
+        return keys
+    for device_id, records in devices.items():
+        if not isinstance(records, dict) or not records:
             continue
-        if all(rec.get("revoked") for rec in records.values()):
+        if all(isinstance(rec, dict) and rec.get("revoked")
+               for rec in records.values()):
             keys.add("device:%s" % device_id)
     return keys
 

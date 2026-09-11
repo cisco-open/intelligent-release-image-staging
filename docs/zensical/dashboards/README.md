@@ -1,15 +1,14 @@
 # Dashboards
 
-Importable dashboard definitions for the peer-to-peer distribution telemetry.
-They answer one question — does peer-to-peer distribution actually happen, how
-much load does it carry, and among whom — and nothing else.
+Importable dashboards for rollout health and peer-to-peer distribution telemetry.
 
 | File | Backend | Board title / UID |
 | --- | --- | --- |
 | `splunk-iris-swarm.xml` | Splunk (Simple XML view) | *IRIS — Peer-to-Peer Distribution (measured peer tracing)* |
+| `splunk-iris-rollout.xml` | Splunk (Simple XML view) | *IRIS — Tracker & Transfer Health*, view `iris_rollout` |
 | `grafana-iris-swarm.json` | Grafana (Prometheus + Loki) | *IRIS — Peer-to-Peer Distribution*, uid `iris-swarm-p2p` |
 
-Both are optional. IRIS does not install, require, or talk to either backend;
+These dashboards are optional. IRIS does not install, require, or talk to either backend;
 it emits OpenTelemetry and serves a Prometheus text endpoint, and the operator
 chooses what consumes them. Import the board that matches the stack you already
 run, or neither.
@@ -170,6 +169,33 @@ the `IN()` lists can be halved:
 | mcatalog values(metric_name) WHERE index=iris_metrics metric_name="iris_*bytes*"
 ```
 
+### Updating the rollout view
+
+Use [splunk-iris-rollout.xml](splunk-iris-rollout.xml) for `iris_rollout`.
+It preserves the ten tracker/transfer-health panels and adds three measured
+peer-capture panels. Its URL contract uses `form.tr.earliest`,
+`form.tr.latest`, and `form.dev` (default `*`). The device filter selects the
+receiving device in transfer panels and the named peer in tracker panels;
+wildcards are supported. Telemetry last seen covers the full index.
+All searches use the selected window, while the active tiles also require
+an observation within the last 15 minutes from now. An absolute historical
+window therefore does not turn these tiles into historical active counts.
+
+Before updating an existing view, save its exact `eai:data` and ACL as private
+rollback files. Compare the existing panels and filters, and preserve any
+local additions. Re-read the definition immediately before writing to detect
+concurrent edits. POST only `eai:data` to that view's returned `edit` endpoint,
+using URL encoding; preserve its name, app, owner and sharing permissions.
+Do not use the creation example above for an existing `iris_rollout`.
+See Splunk's [view endpoint reference](https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.4/knowledge-endpoints/knowledge-endpoint-descriptions).
+
+Read back the XML and ACL, then open the saved view and verify its searches
+with all devices, a single receiver, a receiver without captures, a short
+window and an absolute historical window. Compare the exact table bytes and
+completeness with the searches. Missing captures mean unavailable; captured
+origin-only bytes produce a measured zero peer share. If the view breaks,
+restore the saved XML to the same endpoint and verify the restored view.
+
 ## Importing the Grafana board
 
 **No UID rewriting is needed.** The board uses datasource *template variables*
@@ -270,12 +296,25 @@ names on purpose — `iris.device.peer_transfer_record` (exact, device-reported)
 `iris.swarm.peer_bytes` (sampled, origin-side estimate) — so a backend `sum`
 cannot silently mix them. Do not merge the two record names in a custom panel.
 
+On the Splunk view the exact side has its own row, *Peer-to-peer evidence*:
+*Bytes received, by source* stacks received bytes per hour as origin / peer
+device / unknown, *Share of bytes from peer devices* is that peer-device share
+of the window as a percentage, and *Peer-to-peer transfers* lists the
+individual device-to-device legs. It is the only place on either board where
+peer-to-peer traffic is observed rather than derived — and, being device-side
+capture, a missing row there is a capture gap, not zero traffic.
+
 The origin seeder is an ordinary BitTorrent peer of every device, so its bytes
 must never be counted as peer-to-peer bytes. The device cannot tell which peer
 is the origin; the server can, and classifies each edge origin / device /
 unknown before the ledger banks it. That classification is why "delivered peer
 to peer" is a meaningful number rather than a restatement of total traffic.
 
-Finally, an idle board is not a broken board. The byte panels are counters and
-keep their last value. On the Splunk view, if *Seeder RPC* reads 0 the board is
-blind and every other panel on it is stale.
+Finally, an idle board can retain counter history. Splunk ledger tiles select
+the latest cumulative sample within the chosen window; no sample means
+unavailable, and changing the window can select an older value. The swarm
+view's *Seeder RPC* uses the fixed last 15 minutes ending now. A zero there
+means current origin sampling is unavailable; historical samples and separate
+device captures can still be valid. Capture totals are grouped by capture
+hour, not hourly throughput. Incomplete captures make traffic totals a floor
+and their peer share partial, with unknown bias.

@@ -181,13 +181,30 @@ def test_svi_igp_rejected_outside_routed_management_type(tmp_path):
         fs.upsert(dict(_XRHOST, svi_igp="isis"))
 
 
+@pytest.mark.parametrize("igp", ["none", "isis"])
+@pytest.mark.parametrize("target", ["inband", "router-routed", "xr-host"])
+def test_management_type_change_drops_prior_svi_igp(tmp_path, igp, target):
+    fs = _fs(tmp_path)
+    before = fs.upsert(dict(_ROUTED, svi_igp=igp))
+    if target == "inband":
+        patch = {"device_id": "d1", "management_type": target,
+                 "inband_vlan": "120"}
+    else:
+        patch = dict(_ROUTER if target == "router-routed" else _XRHOST,
+                     device_id="d1")
+    after = fs.upsert(patch)
+    assert after["management_type"] == target
+    assert not after.get("svi_igp")
+    assert after["registration_id"] == before["registration_id"]
+
+
 def test_svi_igp_csv_roundtrip(tmp_path):
     """The new column sits between nat_interface and platform; an isis row
     imports, exports with the value intact, and re-imports identically."""
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
     row = ("isis-edge,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,"
-           "255.255.255.252,10.0.0.2,,,C9300,,,isis,guestshell")
+           "255.255.255.252,10.0.0.2,,,C9300,,,isis,,guestshell")
     assert fs.import_csv(header + "\n" + row + "\n")["imported"] == 1
     assert fs.get_device("isis-edge")["svi_igp"] == "isis"
     out = fs.export_csv()
@@ -317,8 +334,10 @@ def test_validate_record_accepts_the_xr_platform_on_xr_hardware(tmp_path):
                            platform="xr-appmgr"))
     assert saved["platform"] == "xr-appmgr"
     # and with no model recorded yet, where only the classified family knows
+    fs.upsert({"device_id": "xr-nomodel", "device_ip": "10.0.0.9"})
+    fs.update_observation("xr-nomodel", os_family="xr")
     saved = fs.upsert(dict(_XRHOST, device_id="xr-nomodel", model="",
-                           platform="xr-appmgr", os_family="xr"))
+                           platform="xr-appmgr"))
     assert saved["platform"] == "xr-appmgr"
 
 
@@ -340,9 +359,10 @@ def test_validate_record_refuses_the_xr_platform_on_a_non_8000_xr_family_device(
     appmgr recipe until the model shape is one this v1 agent actually
     supports."""
     fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, device_id="asr9k", model="ASR-9906", platform=""))
+    fs.update_observation("asr9k", os_family="xr")
     with pytest.raises(ValueError, match="IOS-XR"):
-        fs.upsert(dict(_ROUTED, device_id="asr9k", model="ASR-9906",
-                       platform="xr-appmgr", os_family="xr"))
+        fs.upsert({"device_id": "asr9k", "platform": "xr-appmgr"})
 
 
 def test_validate_record_xr_os_family_refuses_explicit_platform():
@@ -568,9 +588,9 @@ def test_import_export_csv_roundtrip(tmp_path):
     header = ",".join(gui_fleet.CSV_V2_COLS)
     csv_in = (header + "\n"
               "# a comment line\n"
-              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell\n"
-              "edge,10.0.0.5,inband,,,,10.0.0.6,255.255.255.0,10.0.0.1,120,,C9300,,,,guestshell\n"
-              "r1,192.0.2.10,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,router\n")
+              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"
+              "edge,10.0.0.5,inband,,,,10.0.0.6,255.255.255.0,10.0.0.1,120,,C9300,,,,,guestshell\n"
+              "r1,192.0.2.10,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router\n")
     stats = fs.import_csv(csv_in)
     assert stats["imported"] == 3 and stats["new"] == 3 and stats["updated"] == 0
     assert stats["skipped"] == 2                       # header + comment line
@@ -594,10 +614,11 @@ def test_import_csv_stats_new_updated_skipped(tmp_path):
     csv_in = (header + "\n"
               "# comment\n"
               "\n"
-              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell\n"
-              "d2,10.0.0.5,routed,777,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,guestshell\n")
+              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"
+              "d2,10.0.0.5,routed,777,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,,guestshell\n")
     stats = fs.import_csv(csv_in)
-    assert stats == {"imported": 2, "new": 1, "updated": 1, "skipped": 3}
+    assert stats == {"imported": 2, "new": 1, "updated": 1, "skipped": 3,
+                     "roles_cleared": 0}
     assert fs.get_device("d1")["device_ip"] == "10.0.0.1"     # overwrite applied
 
 
@@ -605,7 +626,7 @@ def test_import_csv_rejects_bad_rows_atomically(tmp_path):
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
     # a populated but invalid row (bad IP) must abort the whole import
-    bad = "d1,not-an-ip,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell"
+    bad = "d1,not-an-ip,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell"
     try:
         fs.import_csv(header + "\n" + bad + "\n")
         assert False, "expected ValueError"
@@ -802,8 +823,8 @@ def test_import_csv_rejects_xr_host_row_with_app_ip_atomically(tmp_path):
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
     good = ("d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,"
-            "255.255.255.252,10.0.0.2,,,C9300,,,,guestshell")
-    bad = "xr1,10.0.0.9,xr-host,,,,192.0.2.99,,,,,8201,,,,xr-appmgr"
+            "255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell")
+    bad = "xr1,10.0.0.9,xr-host,,,,192.0.2.99,,,,,8201,,,,,xr-appmgr"
     with pytest.raises(ValueError, match="app_ip"):
         fs.import_csv(header + "\n" + good + "\n" + bad + "\n")
     assert fs.list_devices() == []   # atomic: the good row is rejected too
@@ -891,10 +912,12 @@ def test_registered_at_is_stamped_once_at_creation(tmp_path):
     fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
     created = fs.upsert(dict(_ROUTED))
     assert created["registered_at"] == 1000
+    registration_id = created["registration_id"]
 
     clock[0] = 2000
     edited = fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
     assert edited["registered_at"] == 1000, "an edit re-registered the device"
+    assert edited["registration_id"] == registration_id
     assert fs.get_device("d1")["registered_at"] == 1000
 
 
@@ -904,12 +927,13 @@ def test_readding_a_deleted_device_registers_it_afresh(tmp_path):
     counting as its own history, and the new stamp is what draws that line."""
     clock = [1000]
     fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
-    fs.upsert(dict(_ROUTED))
+    original = fs.upsert(dict(_ROUTED))
     assert fs.delete("d1") is True
 
     clock[0] = 5000
     readded = fs.upsert(dict(_ROUTED))
     assert readded["registered_at"] == 5000
+    assert readded["registration_id"] != original["registration_id"]
 
 
 def test_csv_reimport_keeps_the_registration_stamp(tmp_path):
@@ -941,8 +965,9 @@ def test_csv_reimport_keeps_a_cached_os_family(tmp_path):
     os_family field surviving the round trip, not about resolving
     guestshell/iox/router."""
     fs = _fs(tmp_path)
-    seed = dict(_ROUTED, os_family="xr", platform="")
+    seed = dict(_ROUTED, platform="")
     fs.upsert(seed)
+    fs.update_observation("d1", os_family="xr")
     header = ",".join(gui_fleet.CSV_V2_COLS)
     row = ",".join(str(seed.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
 
@@ -976,17 +1001,39 @@ def test_legacy_unstamped_device_stays_unstamped_on_update(tmp_path):
     with open(shard) as stream:
         data = json.load(stream)
     data["d1"].pop("registered_at")
+    data["d1"].pop("registration_id")
     with open(shard, "w") as stream:
         json.dump(data, stream)
 
     clock[0] = 9000
-    assert fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})[
-        "registered_at"] is None
+    updated = fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+    assert updated["registered_at"] is None
+    assert len(updated["registration_id"]) == 32
 
     header = ",".join(gui_fleet.CSV_V2_COLS)
     row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
     fs.import_csv(header + "\n" + row + "\n")
     assert fs.get_device("d1")["registered_at"] is None
+    assert fs.get_device("d1")["registration_id"] == updated[
+        "registration_id"]
+
+
+def test_legacy_device_can_gain_a_durable_registration_id(tmp_path):
+    fs = _fs(tmp_path)
+    created = fs.upsert(dict(_ROUTED))
+    shard = _shard_path(fs, "d1")
+    with open(shard) as stream:
+        data = json.load(stream)
+    data["d1"].pop("registration_id")
+    with open(shard, "w") as stream:
+        json.dump(data, stream)
+
+    identified = fs.ensure_registration_id("d1")
+
+    assert identified["registered_at"] == created["registered_at"]
+    assert len(identified["registration_id"]) == 32
+    assert fs.ensure_registration_id("d1")["registration_id"] == identified[
+        "registration_id"]
 
 
 def test_invalid_registration_stamp_is_rejected(tmp_path):
@@ -1044,11 +1091,314 @@ def test_import_csv_rejects_duplicate_device_rows_atomically(tmp_path):
     duplicate in the sheet was never surfaced."""
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
-    row_a = "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell"
-    row_b = "d1,10.0.0.9,routed,667,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,guestshell"
+    row_a = "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell"
+    row_b = "d1,10.0.0.9,routed,667,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,,guestshell"
     with pytest.raises(ValueError, match=r"data row 2 repeats device_id d1 from data row 1"):
         fs.import_csv("\n".join([header, row_a, row_b]) + "\n")
     assert fs.list_devices() == []                 # all-or-nothing
+
+
+# ---------------------------------------------------------------------------
+# Device role declaration and CSV-v2 lineage (role/ACL/QoS Phase 0)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("record", [
+    dict(_ROUTED, role="Boat"),
+    dict(_ROUTED, role=123),
+    dict(_ROUTED, role=" boat"),
+    {"device_id": "legacy-1", "device_ip": "10.0.0.8", "role": "bad role"},
+    {"device_id": "legacy-1", "device_ip": "10.0.0.8", "role": 123},
+    {"device_id": "legacy-1", "device_ip": "10.0.0.8", "role": "boat\t"},
+    dict(_ROUTED, role="x" * 33),
+])
+def test_role_is_validated_on_classified_and_legacy_paths(tmp_path, record):
+    with pytest.raises(ValueError, match="role"):
+        _fs(tmp_path).upsert(record)
+
+
+def test_role_blank_is_canonical_unassigned_and_partial_merge_carries_role(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, role="boat"))
+    fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+    assert fs.get_device("d1")["role"] == "boat"
+    fs.upsert({"device_id": "d1", "role": "", "model": None})
+    cleared = fs.get_device("d1")
+    assert "role" not in cleared
+    assert cleared["model"] == "C9300-48UXM"
+
+
+def test_csv_role_lineage_accepts_all_four_named_headers(tmp_path):
+    headers = [
+        gui_fleet._CSV_V2_OLD_COLS,
+        gui_fleet._CSV_V2_PRE_SVI_IGP_COLS,
+        gui_fleet._CSV_V2_PRE_ROLE_COLS,
+        gui_fleet.CSV_V2_COLS,
+    ]
+    for index, cols in enumerate(headers):
+        fs = gui_fleet.FleetStore(str(tmp_path / str(index)))
+        row = dict(_ROUTED, device_id="d%d" % index)
+        text = ",".join(cols) + "\n" + \
+            ",".join(str(row.get(col, "")) for col in cols) + "\n"
+        assert fs.import_csv(text)["imported"] == 1
+
+
+def test_csv_pre_role_and_current_blank_preserve_existing_role(tmp_path):
+    for index, cols in enumerate((gui_fleet._CSV_V2_PRE_ROLE_COLS,
+                                  gui_fleet.CSV_V2_COLS)):
+        fs = gui_fleet.FleetStore(str(tmp_path / str(index)))
+        fs.upsert(dict(_ROUTED, role="boat"))
+        row = dict(_ROUTED, model="C9300-48UXM")
+        row["role"] = ""
+        text = ",".join(cols) + "\n" + \
+            ",".join(str(row.get(col, "")) for col in cols) + "\n"
+        stats = fs.import_csv(text)
+        assert fs.get_device("d1")["role"] == "boat"
+        assert stats["roles_cleared"] == 0
+
+
+def test_csv_current_header_adds_and_changes_role(tmp_path):
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    first = dict(_ROUTED, role="boat")
+    second = dict(_ROUTED, role="fiber")
+    for row, expected in ((first, "boat"), (second, "fiber")):
+        text = header + "\n" + \
+            ",".join(str(row.get(col, "")) for col in gui_fleet.CSV_V2_COLS) + "\n"
+        stats = fs.import_csv(text)
+        assert fs.get_device("d1")["role"] == expected
+        assert stats["roles_cleared"] == 0
+
+
+def test_csv_parse_preview_is_pure(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, role="boat"))
+    before = fs.snapshot()
+    parsed = fs.parse_csv(fs.export_csv())
+    assert parsed["records"][0]["role"] == "boat"
+    assert fs.snapshot() == before
+    assert [row["device_id"] for row in fs.list_devices()] == ["d1"]
+
+
+# ---------------------------------------------------------------------------
+# Closed fleet fields and trusted observations (issue #171)
+# ---------------------------------------------------------------------------
+
+def test_fleet_field_sets_are_explicit_and_legacy_aliases_are_not_public():
+    assert gui_fleet.OPERATOR_WRITABLE_FIELDS == frozenset({
+        "device_id", "device_ip", "management_type", "iris_vlan", "svi_ip",
+        "svi_mask", "app_ip", "app_mask", "app_gateway", "inband_vlan",
+        "ios_ssh_host", "model", "vpg_number", "nat_interface", "svi_igp",
+        "role", "platform", "credential_profile_id",
+    })
+    assert gui_fleet.SERVER_OWNED_FIELDS == frozenset({
+        "schema_version", "registered_at", "registration_id", "os_family",
+    })
+    assert gui_fleet.INTERNAL_OBSERVATION_FIELDS == frozenset({
+        "model", "os_family",
+    })
+    assert gui_fleet.STORED_FIELDS == (
+        gui_fleet.OPERATOR_WRITABLE_FIELDS
+        | gui_fleet.SERVER_OWNED_FIELDS
+        | frozenset({"vlan", "guest_ip"})
+    )
+    assert not {"vlan", "guest_ip"} & gui_fleet.OPERATOR_WRITABLE_FIELDS
+
+
+@pytest.mark.parametrize("ingress", ["full", "partial", "legacy"])
+def test_operator_ingress_rejects_unknown_future_fields_without_writing(
+        tmp_path, ingress):
+    fs = _fs(tmp_path)
+    if ingress == "partial":
+        fs.upsert(dict(_ROUTED))
+        record = {"device_id": "d1", "future_policy": "allow"}
+    elif ingress == "legacy":
+        record = {"device_id": "legacy1", "device_ip": "192.0.2.20",
+                  "future_policy": "allow"}
+    else:
+        record = dict(_ROUTED, future_policy="allow")
+    before = fs.snapshot()
+
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match=r"unknown fleet field.*future_policy"):
+        fs.upsert(record)
+
+    assert fs.snapshot() == before
+
+
+@pytest.mark.parametrize("value", [{"name": "lab"}, ["lab"], True])
+@pytest.mark.parametrize("ingress", ["full", "partial", "legacy"])
+def test_operator_ingress_rejects_nested_and_boolean_values(
+        tmp_path, ingress, value):
+    fs = _fs(tmp_path)
+    if ingress == "partial":
+        fs.upsert(dict(_ROUTED))
+        record = {"device_id": "d1", "credential_profile_id": value}
+    elif ingress == "legacy":
+        record = {"device_id": "legacy1", "device_ip": "192.0.2.20",
+                  "credential_profile_id": value}
+    else:
+        record = dict(_ROUTED, credential_profile_id=value)
+    before = fs.snapshot()
+
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match="credential_profile_id must be a scalar string"):
+        fs.upsert(record)
+
+    assert fs.snapshot() == before
+
+
+def test_operator_ingress_bounds_unstructured_scalar_fields(tmp_path):
+    fs = _fs(tmp_path)
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match="credential_profile_id.*128"):
+        fs.upsert(dict(_ROUTED, credential_profile_id="p" * 129))
+    assert fs.list_devices() == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", 2),
+    ("registered_at", 1),
+    ("registration_id", "0" * 32),
+    ("os_family", "xr"),
+])
+def test_public_upsert_rejects_server_owned_fields(tmp_path, field, value):
+    fs = _fs(tmp_path)
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match=r"server-owned fleet field.*%s" % field):
+        fs.upsert(dict(_ROUTED, **{field: value}))
+    assert fs.list_devices() == []
+
+
+def test_validate_operator_upsert_is_pure_and_preserves_role_clear(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, role="boat"))
+    before = fs.snapshot()
+
+    preview = fs.validate_operator_upsert({"device_id": "d1", "role": ""})
+
+    assert "role" not in preview
+    assert fs.snapshot() == before
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match="unknown fleet field.*future_policy"):
+        fs.validate_operator_upsert(
+            {"device_id": "d1", "role": "", "future_policy": "allow"})
+    assert fs.snapshot() == before
+
+
+def test_trusted_observation_write_is_named_bounded_and_existing_only(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_XRHOST))
+
+    saved = fs.update_observation("xr1", model="8201-SYS", os_family="xr")
+
+    assert saved["model"] == "8201"
+    assert saved["os_family"] == "xr"
+    with pytest.raises(ValueError, match="os_family"):
+        fs.update_observation("xr1", os_family=True)
+    with pytest.raises(ValueError, match="no such device"):
+        fs.update_observation("missing", os_family="xe")
+
+
+@pytest.mark.parametrize("tamper", [
+    {"future_policy": "allow"},
+    {"credential_profile_id": {"name": "lab"}},
+])
+def test_import_parsed_csv_revalidates_all_rows_before_grouped_writes(
+        tmp_path, tamper):
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    rows = []
+    for device_id, device_ip in (("d1", "10.0.0.1"),
+                                 ("other", "10.0.0.5")):
+        row = dict(_ROUTED, device_id=device_id, device_ip=device_ip)
+        rows.append(",".join(str(row.get(col, ""))
+                             for col in gui_fleet.CSV_V2_COLS))
+    parsed = fs.parse_csv(header + "\n" + "\n".join(rows) + "\n")
+    parsed["records"][1].update(tamper)
+
+    with pytest.raises(ValueError):
+        fs.import_parsed_csv(parsed)
+
+    assert fs.list_devices() == []
+
+
+def test_legacy_alias_csv_and_current_projection_roundtrip_portably(tmp_path):
+    fs = _fs(tmp_path)
+    legacy = ("device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model\n"
+              "old,192.0.2.20,666,192.0.2.21,255.255.255.252,"
+              "192.0.2.22,C9300-48UXM\n")
+    fs.import_csv(legacy)
+    stored = fs.get_device("old")
+    assert stored["vlan"] == "666" and stored["guest_ip"] == "192.0.2.22"
+
+    fresh = gui_fleet.FleetStore(str(tmp_path / "fresh"))
+    fresh.import_csv(fs.export_csv())
+    portable = fresh.get_device("old")
+    assert portable["management_type"] == "legacy_routed"
+    assert portable["iris_vlan"] == "666"
+    assert portable["app_ip"] == "192.0.2.22"
+
+
+def test_imported_legacy_row_can_be_classified_by_operator_upsert(tmp_path):
+    fs = _fs(tmp_path)
+    fs.import_csv(
+        "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model\n"
+        "old,192.0.2.20,666,192.0.2.21,255.255.255.252,"
+        "192.0.2.22,C9300\n")
+
+    saved = fs.upsert(dict(_ROUTED, device_id="old",
+                           device_ip="192.0.2.20"))
+
+    assert saved["management_type"] == "routed"
+    assert saved["iris_vlan"] == "666"
+    assert saved["app_ip"] == _ROUTED["app_ip"]
+    assert "vlan" not in saved and "guest_ip" not in saved
+
+
+def test_current_csv_boundary_is_portable_and_retains_local_only_fields(tmp_path):
+    source = gui_fleet.FleetStore(str(tmp_path / "source"), now_fn=lambda: 1000)
+    source.upsert(dict(_ROUTED, role="boat", credential_profile_id="lab"))
+    source.update_observation("d1", os_family="xe")
+    before = source.get_device("d1")
+    exported = source.export_csv()
+
+    fresh = gui_fleet.FleetStore(str(tmp_path / "fresh"), now_fn=lambda: 9000)
+    fresh.import_csv(exported)
+    portable = fresh.get_device("d1")
+    assert {field: portable.get(field, "") for field in gui_fleet.CSV_V2_COLS} == {
+        field: before.get(field, "") for field in gui_fleet.CSV_V2_COLS}
+    assert portable["registered_at"] == 9000
+    assert "credential_profile_id" not in portable
+    assert "os_family" not in portable
+
+    source.import_csv(exported)
+    retained = source.get_device("d1")
+    assert retained["registered_at"] == 1000
+    assert retained["credential_profile_id"] == "lab"
+    assert retained["os_family"] == "xe"
+
+
+def test_existing_unknown_stored_fields_refuse_edits_without_erasure(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED))
+    shard = _shard_path(fs, "d1")
+    with open(shard) as stream:
+        data = json.load(stream)
+    data["d1"]["future_policy"] = "repair-me"
+    with open(shard, "w") as stream:
+        json.dump(data, stream, sort_keys=True)
+    with open(shard) as stream:
+        before = stream.read()
+
+    with pytest.raises(ValueError, match=r"unknown stored fleet field.*future_policy"):
+        fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+
+    with open(shard) as stream:
+        assert stream.read() == before
+    with pytest.raises(ValueError, match=r"unknown stored fleet field.*future_policy"):
+        fs.import_csv(fs.export_csv())
+    with open(shard) as stream:
+        assert stream.read() == before
 
 
 def test_corrupt_device_shard_fails_closed_and_is_left_intact(tmp_path):
@@ -1078,7 +1428,7 @@ def test_corrupt_device_shard_fails_closed_and_is_left_intact(tmp_path):
     for write in (lambda: fs.upsert({"device_id": "d1", "device_ip": "10.0.0.5"}),
                   lambda: fs.delete("d1"),
                   lambda: fs.import_csv(",".join(gui_fleet.CSV_V2_COLS) + "\n"
-                                        + "d1,10.0.0.7,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell\n"),
+                                        + "d1,10.0.0.7,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"),
                   lambda: fs.get_device("d1"),
                   lambda: fs.list_devices(),
                   lambda: fs.snapshot()):
@@ -1121,3 +1471,57 @@ def test_malformed_fleet_revision_counter_fails_closed_before_mutating(tmp_path)
     # the mutation never touched storage, and an unrelated device is unaffected
     assert fs.get_device("new1") is None
     assert fs.get_device("d1")["device_id"] == "d1"
+
+
+@pytest.mark.parametrize("record, expected", [
+    # A Catalyst 8000V on a router management type offers the router recipe
+    # (Guest Shell) and the IOx app. Picking IOx used to snap back because the
+    # fleet store refused it; that was the bug this pins.
+    ({"management_type": "router-routed", "model": "C8000V"}, ["router", "iox"]),
+    ({"management_type": "router-nat", "model": ""}, ["router", "iox"]),
+    ({"management_type": "xr-host", "model": "8201"}, ["xr-appmgr"]),
+    ({"management_type": "inband", "model": "C9300-48UXM"}, ["guestshell", "iox"]),
+    ({"management_type": "inband", "model": "IE-3400-8T2S"}, ["iox"]),
+    ({"management_type": "routed", "model": ""}, ["guestshell", "iox"]),
+    # inventory-only rows carry any platform as intent, exactly as the
+    # allow_legacy path accepts them; the coupling rules run once a type is set
+    ({"management_type": "legacy_routed", "model": ""},
+     ["guestshell", "iox", "router", "xr-appmgr"]),
+    ({"management_type": "legacy_routed", "model": "C8000V"},
+     ["guestshell", "iox", "router", "xr-appmgr"]),
+])
+def test_install_options_for_record_offers_only_what_validate_record_accepts(record, expected):
+    assert gui_fleet.install_options_for_record(record) == expected
+
+
+def test_install_options_for_record_agrees_with_validate_record(tmp_path):
+    """Every offered option validates; every refused one is refused."""
+    for base in (dict(_ROUTER, model="C8000V"),
+                 dict(_ROUTED, model="C9300-48UXM"),
+                 dict(_ROUTED, model="IE-3400")):
+        offered = gui_fleet.install_options_for_record(base)
+        for platform in ("guestshell", "iox", "router", "xr-appmgr"):
+            try:
+                gui_fleet.validate_record(dict(base, platform=platform))
+                accepted = True
+            except ValueError:
+                accepted = False
+            assert accepted == (platform in offered), (base["model"], platform)
+    # and the inventory-only row agrees with the allow_legacy path
+    legacy = {"device_id": "inv1", "device_ip": "192.0.2.9", "management_type": "legacy_routed",
+              "model": "C8000V"}
+    for platform in gui_fleet.install_options_for_record(legacy):
+        gui_fleet.validate_record(dict(legacy, platform=platform), allow_legacy=True)
+
+
+
+def test_router_types_accept_the_iox_app_on_a_catalyst_8000(tmp_path):
+    """A Catalyst 8000V runs either the Guest Shell router recipe or the IOx
+    app, both through the IRIS VirtualPortGroup. Anything else is refused,
+    and a blank platform still auto-resolves to the router recipe."""
+    fs = _fs(tmp_path)
+    saved = fs.upsert(dict(_ROUTER, model="C8000V", platform="iox"))
+    assert saved["platform"] == "iox"
+    with pytest.raises(ValueError, match="router or iox"):
+        fs.upsert(dict(_ROUTER, device_id="r2", model="C8000V", platform="guestshell"))
+    assert fs.upsert(dict(_ROUTER, device_id="r3", model="C8000V", platform=""))["platform"] == ""

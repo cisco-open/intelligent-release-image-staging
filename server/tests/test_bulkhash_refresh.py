@@ -1157,35 +1157,42 @@ def test_loop_mode_flipped_off_during_countdown_skips_the_stale_target(
     since turned off.
 
     Deterministic by construction, not by sleep-racing the thread: the
-    injected next_run_at_fn signals `computed_target` on its FIRST call (so
-    the write below is guaranteed to land only after the loop has read the
-    original "daily" settings and started counting down) and `reentered` on
-    its SECOND call (which only happens once the loop has re-read settings
-    post-wait and either fired or correctly skipped -- so by the time that
-    fires, `calls` is settled and safe to assert on)."""
+    injected next_run_at_fn signals `computed_target` on its FIRST call,
+    then waits for `settings_updated`.  The write below therefore lands
+    after the loop read the original "daily" settings but before it can
+    start counting down.  `reentered` fires on the SECOND call, which only
+    happens once the loop has re-read settings post-wait and either fired or
+    correctly skipped -- so by then, `calls` is settled and safe to assert
+    on."""
     calls = []
     spath = bulkhash_refresh.settings_path(str(tmp_path / "state"))
     bulkhash_refresh.write_settings(
         spath, "daily", 6, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
     stop = threading.Event()
     computed_target = threading.Event()
+    settings_updated = threading.Event()
     reentered = threading.Event()
 
     def fake_next_run_at(mode, hour_utc, now):
         if not computed_target.is_set():
             computed_target.set()
+            assert settings_updated.wait(timeout=5)
         elif not reentered.is_set():
             reentered.set()
         return None if mode == "off" else now + 0.15
 
     t = _run_loop(tmp_path, stop, lambda *a, **kw: calls.append((a, kw)),
                  idle_recheck=0.5, next_run_at_fn=fake_next_run_at)
-    assert computed_target.wait(timeout=5)
-    bulkhash_refresh.write_settings(
-        spath, "off", 0, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
-    assert reentered.wait(timeout=5)
-    stop.set()
-    t.join(timeout=5)
+    try:
+        assert computed_target.wait(timeout=5)
+        bulkhash_refresh.write_settings(
+            spath, "off", 0, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
+        settings_updated.set()
+        assert reentered.wait(timeout=5)
+    finally:
+        settings_updated.set()
+        stop.set()
+        t.join(timeout=5)
     assert not t.is_alive()
     assert calls == []
 
@@ -1200,19 +1207,21 @@ def test_loop_hour_utc_pushed_later_during_countdown_skips_the_stale_target(
     target moments afterward (which would be legitimate, and is exercised
     separately by test_loop_fires_when_next_run_at_reports_due).
 
-    Same `computed_target`/`reentered` event handshake as the mode-flip test
-    above, in place of sleep-racing the thread."""
+    Same three-event handshake as the mode-flip test above, in place of
+    sleep-racing the thread."""
     calls = []
     spath = bulkhash_refresh.settings_path(str(tmp_path / "state"))
     bulkhash_refresh.write_settings(
         spath, "daily", 6, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
     stop = threading.Event()
     computed_target = threading.Event()
+    settings_updated = threading.Event()
     reentered = threading.Event()
 
     def fake_next_run_at(mode, hour_utc, now):
         if not computed_target.is_set():
             computed_target.set()
+            assert settings_updated.wait(timeout=5)
         elif not reentered.is_set():
             reentered.set()
         if mode == "off":
@@ -1221,12 +1230,16 @@ def test_loop_hour_utc_pushed_later_during_countdown_skips_the_stale_target(
 
     t = _run_loop(tmp_path, stop, lambda *a, **kw: calls.append((a, kw)),
                  idle_recheck=0.5, next_run_at_fn=fake_next_run_at)
-    assert computed_target.wait(timeout=5)
-    bulkhash_refresh.write_settings(
-        spath, "daily", 20, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
-    assert reentered.wait(timeout=5)
-    stop.set()
-    t.join(timeout=5)
+    try:
+        assert computed_target.wait(timeout=5)
+        bulkhash_refresh.write_settings(
+            spath, "daily", 20, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
+        settings_updated.set()
+        assert reentered.wait(timeout=5)
+    finally:
+        settings_updated.set()
+        stop.set()
+        t.join(timeout=5)
     assert not t.is_alive()
     assert calls == []
 

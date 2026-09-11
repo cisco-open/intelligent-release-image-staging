@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Operate the server's online instruction-signing custody.
+
+The root ceremony is deliberately split: ``--keylist-request`` writes the
+exact unsigned payload; an operator takes those public bytes offline and signs
+them with ``ssh-keygen -Y sign -n iris-keylist-v1``; ``--assemble-keylist``
+combines the returned signature with the unchanged payload.  This CLI accepts
+no root private-key path.  ``--install-keylist`` independently identifies the
+signer from the configured root *public* keys before installing the artifact.
+"""
+
+import argparse
+import json
+import os
+
+import instruction_keys as keys
+
+
+def _read(path, limit):
+    return keys._read_regular(
+        path, limit, unavailable="input is unavailable",
+        too_large="input is too large")
+
+
+def _write_public(path, data):
+    keys._atomic_write(path, data, mode=0o644)
+
+
+def _parser():
+    parser = argparse.ArgumentParser(
+        description="Manage IRIS online instruction-signing custody",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Offline keylist round trip:\n"
+            "  1. Write exact unsigned bytes with --keylist-request.\n"
+            "  2. Take only that public payload offline and sign it under "
+            "namespace iris-keylist-v1.\n"
+            "  3. Return only the signature; combine it with the unchanged "
+            "payload using --assemble-keylist.\n"
+            "  4. Install with --install-keylist, which checks every configured "
+            "root public key.\n"
+            "This program has no root private-key input."
+        ))
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--generate-online-key", action="store_true",
+                         help="generate and age-encrypt the online key")
+    actions.add_argument("--export-public", metavar="OUTPUT",
+                         help="export the online public half for a ceremony")
+    actions.add_argument("--import-certificate", metavar="CERTIFICATE",
+                         help="validate and import an offline-issued certificate")
+    actions.add_argument("--keylist-request", metavar="KRL",
+                         help="write exact unsigned KRL/sequence ceremony bytes")
+    actions.add_argument("--assemble-keylist", metavar="SIGNATURE",
+                         help="assemble a returned offline root signature")
+    actions.add_argument("--install-keylist", metavar="ARTIFACT",
+                         help="verify and atomically install a signed keylist")
+    actions.add_argument("--status", action="store_true",
+                         help="refresh and show count/state/age custody status")
+    actions.add_argument("--new-epoch", action="store_true",
+                         help="advance the independent instruction epoch")
+    actions.add_argument("--show", action="store_true",
+                         help="show the epoch without creating state")
+    parser.add_argument("--output", metavar="PATH",
+                        help="output for a request or assembled artifact")
+    parser.add_argument("--payload", metavar="PATH",
+                        help="unchanged request payload returned from ceremony")
+    parser.add_argument("--keylist-seq", type=int, metavar="N")
+    parser.add_argument("--root-id", metavar="ID",
+                        help="claimed ceremony root hint; independently verified")
+    return parser
+
+
+def main(argv=None):
+    parser = _parser()
+    args = parser.parse_args(argv)
+    paths = keys.InstructionPaths.from_env()
+    try:
+        if args.generate_online_key:
+            recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+            result = keys.generate_online_key(paths, recipients)
+        elif args.export_public:
+            output = keys.export_online_public(paths, args.export_public)
+            result = {"state": "exported", "public_key_path": output}
+        elif args.import_certificate:
+            info = keys.import_online_certificate(
+                paths, args.import_certificate, keys.discover_roots(paths))
+            result = {"state": "imported", "root_id": info["root_id"],
+                      "certificate_days": (
+                          info["lifetime_seconds"] // 86400)}
+            keys.refresh_custody_status(paths)
+        elif args.keylist_request:
+            if args.output is None or args.keylist_seq is None \
+                    or args.root_id is None:
+                parser.error("--keylist-request requires --output, "
+                             "--keylist-seq and --root-id")
+            krl = _read(args.keylist_request, keys.MAX_KRL_BYTES)
+            roots = keys.discover_roots(paths)
+            if roots and args.root_id not in roots:
+                raise keys.InstructionKeyError(
+                    "claimed ceremony root is not configured")
+            payload = keys.build_keylist_payload(
+                krl, keylist_seq=args.keylist_seq,
+                issued_at=int(keys.time.time()), signer_root_id=args.root_id)
+            _write_public(args.output, payload)
+            result = {"state": "request-written", "output": args.output,
+                      "keylist_seq": args.keylist_seq,
+                      "signing_namespace": keys.KEYLIST_NAMESPACE}
+        elif args.assemble_keylist:
+            if args.output is None or args.payload is None:
+                parser.error("--assemble-keylist requires --payload and --output")
+            payload = _read(args.payload, keys.MAX_KEYLIST_PAYLOAD_BYTES)
+            signature = _read(args.assemble_keylist, keys.MAX_SIGNATURE_BYTES)
+            artifact = keys.assemble_keylist_artifact(payload, signature)
+            _write_public(args.output, artifact)
+            result = {"state": "artifact-written", "output": args.output}
+        elif args.install_keylist:
+            artifact = _read(args.install_keylist, keys.MAX_KEYLIST_BYTES)
+            result = keys.install_keylist(
+                paths, artifact, keys.discover_roots(paths))
+            result["state"] = "installed"
+            keys.refresh_custody_status(paths)
+        elif args.status:
+            result = keys.refresh_custody_status(paths)
+        elif args.new_epoch:
+            result = keys.new_epoch(paths)
+        else:
+            epoch = keys.read_epoch(paths)
+            result = epoch if epoch is not None else {"initialized": False}
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+    except (OSError, keys.InstructionKeyError) as exc:
+        parser.exit(1, "iris-instructions: %s\n" % exc)
+
+
+if __name__ == "__main__":
+    main()

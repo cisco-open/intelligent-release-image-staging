@@ -86,6 +86,21 @@ name (`usbflash1:iox_host_data_share`) itself. A Catalyst package supplies only
 the corresponding `-v` mount. Direct deployments may retain the existing
 overrides, but the entrypoint validates both before use; XR rejects them.
 
+The share the Console configures for a job depends on the platform, and it is
+what decides the image hand-off (issue #228):
+
+| Platform | `SHARE_HOST_PATH` | `SHARE_IOS_PATH` | Hand-off |
+| --- | --- | --- | --- |
+| Catalyst 9300 | `/vol/usb1/iox_host_data_share` | `usbflash1:iox_host_data_share` | share mount + IOS-internal `copy` |
+| Catalyst 8000 | *(none — CAF does not mount `-v` paths)* | *(none)* | scp push to `guest-share/iris` |
+| IE-3x00 / IR1x01 | *(none)* | *(none)* | scp push to `guest-share/iris` |
+
+Both pairs live in `server/gui_onboard.py` (`_C9K_IOX_ENV`, `_C8K_IOX_ENV`) —
+change them there and nowhere else. `install.sh` renders `ip scp server enable`
+**only** when no share is set, and a share-configured agent has no scp
+fallback: an unusable share fails the placement with a `ROOTCOPY-FAIL` naming
+what the share probe found.
+
 The IOx agent reuses one short-lived SSH control connection for CLI and SCP
 work. This avoids opening a new VTY login for every filesystem check, transfer,
 and verification call during an agent tick.
@@ -104,88 +119,35 @@ itself remains unchanged and does not need rebuilding.
 > auth where the platform supports it. Rotating the credential means re-running
 > the installer with the new value.
 
-## Deploy to the device (proven recipe)
+## Deploy to the device
 
-1. **Publish + assign an IE image** (server) — required for the device to join a
-   swarm and appear on the map:
-   ```
-   docker compose -f server/docker-compose.yml exec iris \
-     iris-publish /opt/images/iosxe/IE3400/<image>.bin
-   docker compose -f server/docker-compose.yml exec iris \
-     iris-assign <device-id> <image-id>
-   ```
+Use the [Console/API onboarding workflow](../../docs/zensical/fleet-workflows.md)
+or the server's [IOx control CLI](../../docs/zensical/reference.md#iox-control-cli).
+`install.sh` and `uninstall.sh` are private controller recipes; real execution
+requires their inherited controller channel and cannot be run standalone.
 
-2. **Mint the device token** (server):
-   `docker compose -f server/docker-compose.yml exec iris iris-mint-enrollment <device-id>`
+1. Register the device with its management type, network fields and credential
+   profile. Select the IOx platform supported by its model.
+2. Build and stage the architecture-matched package and current public catalog
+   certificate. Supply the two approved public instruction roots and initialize
+   the server's instruction custody as described in the
+   [IOx guide](../../docs/zensical/iox.md).
+3. Submit **Onboard**. The controller owns enrollment, identity checks, HTTPS
+   package/certificate/envelope fetches, application configuration and lifecycle.
+   It records and restores any IRIS-owned device-global verification change
+   before starting the app. Follow the recorded recovery procedure after an
+   interrupted attempt; do not disable verification manually as a prerequisite.
+4. Confirm a successful job and `RUNNING` in `show app-hosting list`. Publish
+   and assign an appropriate image, then verify staging and swarm membership
+   separately from agent onboarding.
 
-3. **Make the package and certificate available**: place the
-   architecture-matched tar in the server's `artifacts/` directory; server
-   bring-up already stages the current public certificate there as
-   `iris-catalog.pem`. `install.sh` validates and reads both locally, then
-   pushes them over its authenticated, host-key-checked SCP session to the
-   selected package filesystem. The credential is supplied to `sshpass`
-   through the environment, never a URL, argument, or log. If you are not
-   using the one-shot installer, copy both files to the device manually.
-
-   These are also the artifact prerequisites for **Console one-click
-   onboarding**: once `iris-arm64.tar` and the public certificate are staged,
-   the Console picks this installer automatically for
-   IE-3x00/IR1101/IR18xx devices (by `model`/`platform`, or by live
-   auto-detection) — see [Web Console](../../docs/zensical/console.md).
-   Onboarding fails fast if the package is missing or the certificate cannot
-   be validated.
-
-4. **On the device** — 3 gotchas, all required:
-   - Keep app-hosting signature verification enabled for a signed package.
-     Only an unsigned local package requires `app-hosting verification
-     disable`, issued in EXEC mode; `install.sh` detects which policy applies.
-   - The `app-hosting appid iris` block **must** include an `app-vnic` interface,
-     and is applied with **no explicit `exit` lines** (IOS auto-pops; explicit
-     exits silently drop the app-vnic). Use the VLAN, guest address, and SVI
-     selected for this device (see the block below).
-   - `app-hosting install appid iris package flash:<package>.tar` → `activate` →
-     `app-hosting data appid iris copy flash:iris-catalog.pem
-     iris-catalog.pem` → `start` (DEPLOYED → ACTIVATED → application-data
-     certificate → RUNNING). Activation mounts application storage. Deliver the
-     certificate before starting the app; a failed copy leaves it unstarted.
-
-   ```
-   app-hosting appid iris
-    app-vnic AppGigabitEthernet trunk
-     vlan <vlan> guest-interface 0
-      guest-ipaddress <guest-ip> netmask <mask>
-    app-default-gateway <svi-ip> guest-interface 0
-    app-resource profile custom
-     cpu 400
-     memory 768
-     persist-disk 2048
-     vcpu 1
-    app-resource docker
-     run-opts 1 "-e IRIS_DEVICE_ID=<device-id>"
-     run-opts 2 "-e IRIS_DEVICE_SSH_PASS=<pw>"
-     run-opts 3 "-e IRIS_CATALOG_TOKEN=<token>"
-     run-opts 4 "-e IRIS_CATALOG_URL=https://<server-ip>:8443"
-     run-opts 5 "-e IRIS_DEVICE_SSH_HOST=<svi-ip>"
-     run-opts 6 "-e IRIS_DEVICE_SSH_USER=<user>"
-     run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"
-     run-opts 8 "-e IRIS_TELEMETRY=on"
-    !                                  C9k share-mount transfer only:
-     run-opts 11 "-v /vol/usb1/iox_host_data_share:/mnt/share"
-   ```
-
-   `install.sh` emits separate numbered `run-opts` lines because Catalyst app
-   hosting limits each option line. For the validated C9300 path, use the
-   amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and
-   `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` (run-opts 11 above; also
-   `mkdir usbflash1:iox_host_data_share` before activation so the bind-mount
-   target exists). IE-3x00 defaults remain ARM64, `AppGigabitEthernet1/1`, and
-   `sdflash:` with no share mount.
-
-5. **Verify**: `show app-hosting list` (RUNNING), `show app-hosting detail appid
-   iris` (Status 0). The device then refreshes its token, downloads the assigned
-   image over the swarm, and appears on the Console swarm map
-   (`https://<server-ip>:8080/`, Swarm tab) labeled with its model; the
-   heartbeat carries model/version/free read over SSH-to-self.
+The controller chooses the platform's application interface, storage and share
+settings. Catalyst 9300 uses the validated SSD share; Catalyst 8000V and IE-3400
+use SSH/SCP to IOS for image placement. Onboarding fetches its files over HTTPS
+and supplies the public certificate and sealed envelope before starting the app.
+See [IOx runtime behavior](../../docs/zensical/iox.md#runtime-behavior) for the
+platform details and [device-global verification](../../docs/zensical/iox.md#device-global-package-verification)
+for the authority and recovery rules.
 
 ## On-box staging target
 
@@ -200,12 +162,20 @@ How the agent hands the downloaded image to IOS depends on the platform:
   path. IRIS uses only `iris-` prefixed filenames at the share root
   (container-created subdirs lock the container out on this platform).
   Before the multi-GB copy the agent probes that IOS can actually read the
-  share and otherwise falls back to the scp push below; the transient share
-  copy is removed after a verified placement.
+  share; the transient share copy is removed after a verified placement.
+- **C8k (scp push)**: no IOS-visible directory reaches the app on a C8000V,
+  so it uses the IE-3x00 scp push below.
 - **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
   **scp-pushes** the image to `<target>guest-share/iris/` through the device's
-  SCP server (`ip scp server enable`, set by `install.sh`), then places it at
-  the target-FS root with the same two-phase sequence.
+  SCP server (`ip scp server enable`, set by `install.sh` **only** for a
+  share-less target), then places it at the target-FS root with the same
+  two-phase sequence.
+
+The two are exclusive. A share-configured target has no scp fallback — its
+SCP server is never enabled — so an unusable share (not mounted, unreadable
+from IOS, or a failed local copy into it) fails the placement with a
+`ROOTCOPY-FAIL` naming what the probe found, having deleted nothing and run
+no placement command.
 
 Both container paths place the image by running plain `copy`/`rename`
 commands DIRECTLY over the SSH-to-self vty rather than through the

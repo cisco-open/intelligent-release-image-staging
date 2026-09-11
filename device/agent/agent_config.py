@@ -17,6 +17,9 @@ then persisted by the next write_conf() round-trip (security fix -- an earlier
 version invented catalog_ca = "" here, which silently and permanently pinned a
 dropped-conf device to unverified TLS the moment anything else reconciled its
 conf). Stdlib only."""
+import errno
+import hashlib
+import json
 import os
 import re
 import tempfile
@@ -29,7 +32,7 @@ DEFAULTS = {
     "target_fs": "",       # optional writable IOS prefix, e.g. sdflash:
     "rpc_port": "6800",
     "rpc_secret": "",
-    "max_peers": "10",     # cap BT peer connections per torrent on a device
+    "max_peers": "10",     # legacy compatibility text; signed instructions own QoS
     "telemetry_stream": "off",  # live sample streaming opt-in (fail-closed; spec §5.5)
     "token_expires_at": "0",   # epoch secs of catalog_token expiry; 0 => refresh next tick
     # catalog_ca is intentionally absent from DEFAULTS -- see module docstring.
@@ -59,6 +62,100 @@ _FACT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:/ -]*$")
 _BOOL_VALUES = frozenset((
     "on", "off", "1", "0", "true", "false", "yes", "no",
     "ON", "OFF", "TRUE", "FALSE", "YES", "NO"))
+_LOWER_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _closed_json_object(value, expected):
+    if not isinstance(value, str):
+        raise ValueError("instruction key record must be canonical JSON")
+
+    def pairs_hook(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("instruction key record has duplicate members")
+            result[key] = item
+        return result
+
+    try:
+        parsed = json.loads(value, object_pairs_hook=pairs_hook)
+    except (TypeError, ValueError):
+        raise ValueError("instruction key record must be canonical JSON")
+    if not isinstance(parsed, dict) or set(parsed) != set(expected):
+        raise ValueError("instruction key record schema is invalid")
+    canonical = json.dumps(
+        parsed, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True)
+    if canonical != value:
+        raise ValueError("instruction key record must be canonical JSON")
+    return parsed
+
+
+def parse_instruction_key(value):
+    """Decode one exact canonical ``{key_id,value}`` instruction record."""
+    record = _closed_json_object(value, ("key_id", "value"))
+    key_id = record["key_id"]
+    encoded = record["value"]
+    if not isinstance(key_id, str) or not _LOWER_HEX_64_RE.fullmatch(key_id):
+        raise ValueError("instruction key id is invalid")
+    if not isinstance(encoded, str) or not _LOWER_HEX_64_RE.fullmatch(encoded):
+        raise ValueError("instruction key value is invalid")
+    key = bytes.fromhex(encoded)
+    if hashlib.sha256(key).hexdigest() != key_id:
+        raise ValueError("instruction key id does not match its value")
+    return {"key_id": key_id, "value": key}
+
+
+def encode_instruction_key(record):
+    """Validate a refresh-bag key record and return its canonical conf text."""
+    if not isinstance(record, dict) or set(record) != {"key_id", "value"}:
+        raise ValueError("instruction key record schema is invalid")
+    key_id = record.get("key_id")
+    value = record.get("value")
+    if not isinstance(key_id, str) or not _LOWER_HEX_64_RE.fullmatch(key_id):
+        raise ValueError("instruction key id is invalid")
+    if not isinstance(value, str) or not _LOWER_HEX_64_RE.fullmatch(value):
+        raise ValueError("instruction key value is invalid")
+    key = bytes.fromhex(value)
+    if hashlib.sha256(key).hexdigest() != key_id:
+        raise ValueError("instruction key id does not match its value")
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+def merge_instruction_key_refresh(cfg, refresh_bag):
+    """Return a copy with the refresh bag's valid key pair applied atomically."""
+    merged = dict(cfg)
+    if not isinstance(refresh_bag, dict) or "instr_key" not in refresh_bag:
+        return merged
+    try:
+        current = encode_instruction_key(refresh_bag["instr_key"])
+        previous = None
+        if "instr_key_prev" in refresh_bag:
+            previous = encode_instruction_key(refresh_bag["instr_key_prev"])
+            if refresh_bag["instr_key_prev"]["key_id"] == \
+                    refresh_bag["instr_key"]["key_id"]:
+                raise ValueError("instruction current and previous keys must differ")
+    except ValueError:
+        return merged
+    merged["instr_key"] = current
+    if previous is None:
+        merged.pop("instr_key_prev", None)
+    else:
+        merged["instr_key_prev"] = previous
+    return merged
+
+
+def parse_lkg_key(value):
+    """Decode the strict local 32-byte LKG key without repairing bad input."""
+    if not isinstance(value, str) or not _LOWER_HEX_64_RE.fullmatch(value):
+        raise ValueError("local LKG key is invalid")
+    return bytes.fromhex(value)
+
+
+def encode_lkg_key(value):
+    if not isinstance(value, bytes) or len(value) != 32:
+        raise ValueError("local LKG key is invalid")
+    return value.hex()
 
 
 def validate_target_fs(value):
@@ -165,7 +262,6 @@ def validate_config(cfg):
         validate_bearer_token("announce_token", cfg.get("announce_token"))
     validate_ios_path("share_ios_path", cfg.get("share_ios_path", ""))
     _validate_uint(cfg, "rpc_port", 1, 65535)
-    _validate_uint(cfg, "max_peers", 1, 1000)
 
     for key in ("stage_dir", "share_dir", "device_ssh_known_hosts"):
         value = (cfg.get(key) or "").strip()
@@ -258,11 +354,21 @@ def write_conf(path, cfg):
         dir=directory, prefix=".%s-" % os.path.basename(path), suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
             for k in sorted(rows):
                 f.write("%s = %s\n" % (k, rows[k]))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            try:
+                os.fsync(directory_fd)
+            except OSError as exc:
+                if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+                    raise
+        finally:
+            os.close(directory_fd)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)

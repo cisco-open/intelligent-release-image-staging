@@ -760,7 +760,11 @@ def test_the_first_tick_after_an_upgrade_re_hashes_nothing():
     device_tid = _tele(state)["transfer_id"]
 
     cat.plans = {"img1": _plan(PLAN_A, XFER_A)}
-    deps, rec = make_deps(cat, sizes)
+    # The staged image is seeding and aria2 holds it, so nothing here is the
+    # board #248 case (an image aria2 forgot across a container recreation).
+    deps, rec = make_deps(cat, sizes,
+                          aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                                                if sizes.get(p) else None))
     for _ in range(3):
         assert iris_agent.run_once(CFG, deps, state) == "complete"
 

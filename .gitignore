@@ -66,6 +66,7 @@ fleet/dist/
 fleet/iris-fleet.conf
 fleet/devices.csv
 fleet/assignments.csv
+fleet/roles.csv
 
 # --- runtime output ---
 artifacts/*

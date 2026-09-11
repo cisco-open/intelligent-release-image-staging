@@ -169,7 +169,7 @@ _run_entrypoint() {
   [ ! -f "$CONF" ]
 }
 
-@test "conf synthesis applies telemetry/rpc_port/max_peers env overrides" {
+@test "conf synthesis applies telemetry/rpc_port env overrides and omits legacy max_peers" {
   _run_entrypoint \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 \
@@ -182,7 +182,8 @@ _run_entrypoint() {
   [[ "$output" == *"rpc_port = 6801"* ]]
   [[ "$output" == *"telemetry = off"* ]]
   [[ "$output" == *"telemetry_stream = on"* ]]
-  [[ "$output" == *"max_peers = 5"* ]]
+  run grep '^max_peers = ' "$CONF"
+  [ "$status" -ne 0 ]
 }
 
 @test "conf synthesis defaults: telemetry on, telemetry_stream off, rpc_port 6800" {
@@ -356,6 +357,25 @@ EOF
   run cat "$CONF"
   [[ "$output" == *"sentinel"* ]]
   [[ "$output" != *"different"* ]]
+}
+
+@test "an old conf with max_peers=65535 remains parseable but inert" {
+  mkdir -p "$(dirname "$CONF")"
+  cat > "$CONF" <<'EOF'
+catalog_url = https://sentinel.example:8443
+catalog_token = sentinel-token
+device_id = sentinel-device
+mode = xr
+target_fs = harddisk:
+max_peers = 65535
+EOF
+  chmod 600 "$CONF"
+  _run_entrypoint
+  # The harness stops at the unavailable in-image agent import; acceptance of
+  # this legacy value is shown by the absence of a max_peers range failure and
+  # by retaining the parsed line for the agent's compatibility reader.
+  [[ "$output" != *"max_peers"* ]]
+  grep -q '^max_peers = 65535$' "$CONF"
 }
 
 # ---------------------------------------------------------------------------

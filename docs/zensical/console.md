@@ -128,9 +128,10 @@ browser before any bytes move.
 The header's **?** button opens a help popover with the running version, the
 stable per-deployment id (with a copy button — quote it when reporting a
 problem so reports from different installations stay distinguishable), a link
-to this documentation site, and two guides the console serves itself —
-*Device-side troubleshooting* and *Server-side setup & troubleshooting* — so
-both stay reachable from a network with no internet access.
+to this documentation site, and three pages the console serves itself —
+the *Local API reference (Swagger)* at `/swagger/`, *Device-side
+troubleshooting*, and *Server-side setup & troubleshooting* — so all of them
+stay reachable from a network with no internet access.
 
 ## Importing images already on disk
 
@@ -210,8 +211,8 @@ Management type alone controls the network fields in Add Device. Model is
 optional free text; known models narrow the **Agent install** choices without
 changing the management type. A model such as `C3650` can be saved, but that
 does not confirm hardware support. XR host selects `xr-appmgr`, router modes
-select `router`, and routed/inband modes require a compatible Guest Shell or
-IOx choice.
+offer `router` (Guest Shell) or `iox`, and routed/inband modes require a
+compatible Guest Shell or IOx choice.
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
@@ -269,11 +270,145 @@ requires the device to report staging complete. Rates and verification results
 identify the image they describe. Measurements that cannot be tied to a
 participant are unavailable.
 
+### Roles and peer-policy status
+
+The Devices table's **Role** column shows the declared fleet role, or a dash
+when none is declared. **Filters → Role** offers *Role: any*, *— no role —*,
+and the complete policy role list, including roles absent from the current
+page. The filter is applied by the server before paging.
+
+For a selection, open **More actions → Set role…**. Leaving the disabled initial
+placeholder untouched is a no-op; choosing the explicit *— no role —* option
+clears membership. **Preview change** sends one aggregate dry run for every
+selected device and shows the four access/membership impact counts, whether QoS
+changes, per-device failures, and the confirmation threshold. **Set role** uses
+the original pre-preview ETag and that preview's confirmation token in one
+aggregate commit. Cancel never commits. A concurrent change or confirmation
+refusal discards the preview and requires a refresh and new preview; the Console
+never silently retries policy intent, and an all-failed preview cannot commit.
+If the commit connection or response is
+unreadable, **changes may have been saved**: refresh policy and Fleet state,
+review drift, and preview again rather than repeating the request.
+
+The collapsed **Peer policy** disclosure above Devices summarizes role and
+restricted-role counts, drift, and outbox occupancy (`N/256`). Expanding it
+shows per-role member counts, the last origin-QoS state and download counts,
+the mutual-origin **preflight count only**, and the explicit-ACL shadowing rule.
+It never displays peer addresses or raw deny lists. Degraded, fail-closed, and
+unavailable states remain distinct. A capability banner blocks role changes
+unless the server explicitly returns `roles_supported: true`; a fully old
+Console/server pair cannot show this warning, which is why downgrade uses the
+quarantine-first procedure in [Role-policy operations and
+rollback](operations.md#role-policy-operations-and-rollback).
+
+The Set role action and its apply controls remain disabled while capability or
+policy health is uncertain. The UI's degraded state can cover LKG fallback or
+lost role state; the state-owning management process startup log provides the
+specific lost-state signal.
+
+The existing quarantine filter and per-row/bulk quarantine actions remain in
+place. Quarantine intent uses its existing badge and stays distinct from the
+tracker's last enforcement state.
+
+### Role definitions
+
+The **Peer policy** disclosure also holds the **Role definitions** table: one
+row per defined role with its restricted flag, peer roles, origin access,
+networks, and QoS overrides, plus **Edit** and **Delete** per row. **New
+role…** opens the editor: role name, peer roles (the role itself is implied),
+IPv4 networks, the instruction-expiry fallback, the restricted and origin
+switches, the eight speed limits in bytes per second (0 = unlimited, otherwise
+at least 8192; a live hint shows the Mbit/s equivalent), and the swarm and
+agent cadence values. A blank QoS field inherits the global default. Saving
+follows the Set role contract exactly: **Preview change** sends one dry run
+with the pre-preview ETag and shows the impact counts; **Save role** commits
+that candidate with the preview's confirmation token; editing any field after
+a preview discards it. Delete previews first and asks for confirmation before
+the committed DELETE. Editing an existing role carries its tracker `qos_state`
+overlay along unchanged, because a definition write is a full replacement.
+
+**Import CSV…** replaces every definition with the chosen file, in the same
+grammar `iris-role import` and `fleet/roles.csv.example` use, after a preview
+and an explicit confirmation that names how many roles the file holds; roles
+missing from the file are removed, and a role a device still declares refuses
+the import as `role_in_use`. **Export CSV** downloads the current definitions
+in that grammar, so a file exported here imports unchanged with `iris-role`
+and vice versa. All three controls, like Set role, are disabled while the
+capability banner shows or the policy is degraded.
+
+The Console still has no role-policy JSON editor: definitions are edited as
+typed fields, and global QoS defaults and tracker `qos_state` stay API-only.
+There is no public per-device QoS write API. Configure, preserve, or remove
+`qos_state` through the documented management API; the Console never edits the
+nested tracker state map. Role pair explanations are available only through
+the documented API.
+
+Tracker/quarantine discovery alone does not sever existing connections or
+remove retained peers. Applied verified device deny lists may cooperatively
+disconnect matching peers. Image unassignment requests containment; torrent
+removal waits for the next successful due policy poll and successful aria2
+policy apply, subject to signed logical cadence and catalog/RPC failures.
+Device-side rate intent is cooperative, and a privileged device administrator
+can alter the device environment.
+
 An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
 agent without using the deployment record as authority. It is kept as the account of what
 IRIS built on that box, but it never authorises a teardown and never blocks an
 onboard again.
+
+## Instruction status and custody
+
+Devices shows a canonical instruction chip with a server-created exact label,
+source evidence and report age. Raw instruction state, accepted
+`{epoch, instr_serial, policy_revision}`, verification level, pointer skew and
+QoS drift are agent-asserted. Device-authored reports are not independent
+measurements. Durable revocation and report age are server-observed: revoked
+wins visually while the underlying agent LKG/state remains visible. Within a
+supported instruction report, raw `stale_expired` or `allowlist_expired` is
+stale by agent assertion before report-age classification, even when age is
+unknown. Other supported reports with missing/invalid/future report arrival time display unknown;
+old valid report arrival times display stale with the last reported state. The chip's
+`reason` distinguishes `unknown_key` from `bad_mac` rejection.
+
+The separate raw and display state vocabularies, including legacy
+`pre-instructions`, derived `stale`/`rejected`/`unavailable`/`unknown` and durable
+`revoked`, are listed in [Reference](reference.md#instruction-protocol-and-state-reference).
+Capability comes from `instr_protocol: 1`, not IOS `version`. Labels retain exact
+i63 values as strings, so browser rounding cannot change identity.
+
+The Peer policy disclosure shows issued policy revision, accepted application
+counts grouped by policy revision, state counts, current `instr_stamp_missing`
+and `pointer_skew` device counts, and observation time. It excludes orphan
+heartbeats and retains accepted identities beneath stale/rejected/revoked
+states. `policy_revision` is server-issued intent; `instr_serial` with
+`instr_epoch` is sealed freshness; `enforcement.applied_revision` and
+`iris_peer_enforcement_applied_revision` are unrelated aria2 blocklist counters.
+Unavailable heartbeat/policy/revocation/custody evidence stays null/unknown,
+never a healthy zero. **violation = 0 does not mean compliant**.
+
+The custody panel shows enablement/state, certificate days remaining (including
+zero/negative values), renewal/signing-refusal flags, keylist age and re-signing
+due, root ceremony status, and roots attested in 180 days. Disabled reads not
+enabled; unavailable evidence stays unavailable. Quorum healthy means recorded
+attestations support both roots, not that the Console inspected private-key
+custody. Follow [root recovery](operations.md#instruction-root-ceremony-and-recovery)
+for warning, critical or degraded status. The current bounded schemas are in
+[OpenAPI](openapi.yaml); the deprecated effective-QoS `delivery_state` sentinel is not
+evidence of instruction application. That response now includes the same canonical
+`instruction` object as Devices.
+
+### IOx onboarding verification
+
+IOx verification is device-global. The onboarding job prefers a signed wrapper
+with no verification-state change. Unsigned/enabled records the obligation,
+disables only for installation and restores with read-back before
+activation/start; initial disabled stays disabled; unknown refuses. Durable
+interruption/resume and uninstall recovery never blindly enables an
+operator-changed or unowned state. Inspect the job/deployment evidence when
+restoration is incomplete. Package readiness and signature-marker presence do
+not validate a native signature. See [IOx prerequisites](iox.md#device-global-package-verification)
+before onboarding other applications on the same device.
 
 ## Bulk device actions
 
@@ -299,6 +434,37 @@ lowercase/kebab form underneath: `onboarding`, `undeploying`,
 `placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
 `not-enrolled`, and `offline` — the last being a modifier, since a device
 filtered on `deployed` (rendered `Staged`) can still have gone quiet.
+
+### Schedules
+
+**Devices → Schedules** opens the schedule list: what is going to run, against
+what, when it next runs, its state, and how its latest run went. Each row
+carries the target summary, the server-computed next run (local time in the
+schedule's own zone, so the console never recomputes a weekly time across a
+daylight-saving boundary), and, for the latest occurrence, its state, the
+`+N / −M since preview` delta and the wave gate's staged / errored / missing
+counts.
+
+**Schedule…** in the bulk bar creates one. Its target is the **current Devices
+filter**, not the rows that happen to be checked: the filter is re-resolved at
+each run, which is the reason to schedule against it. The modal says how many
+devices that filter matches now and offers naming the selected devices instead
+as the explicit second choice. Editing a window, its wave gate or its payload
+is not in the console — that stays with `iris-schedule` and the API, which own
+the full closed schema.
+
+A schedule whose creator is gone shows `created_by <actor> (actor no longer
+exists)`, and **Re-affirm** on that row takes ownership of it. Firing never
+depended on that account, so the schedule kept running either way.
+Re-affirming rewrites `created_by` to the current operator and bumps `rev`,
+against the revision on screen — a concurrent edit makes it a refusal, not an
+overwrite.
+
+Any device row a pending schedule's approved preview names carries a
+**Scheduled** marker, so a **manual** assignment is not made in ignorance of a
+scheduled one. The marker reads the schedule's last approved preview; a
+late-bound target is re-resolved when it fires, so it is the last approved
+answer, not a promise about the next run.
 
 ### Paging and selection at fleet scale
 
@@ -339,6 +505,7 @@ rows in view.
 | Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *Set credential…* + **Apply** | Assigns one credential profile to every checked device. The picker opens on a disabled placeholder, so Apply with nothing chosen does nothing; choosing *no credential (clear the assignment)* clears it instead. The modal does not open while the profile list has failed to load. | Only when clearing — a dialog naming the device count |
+| More actions → Set role… | Previews and applies one role (or an explicit clear) to the whole cross-page selection in a single CAS-protected operation. | Always when effective membership/access or QoS changes; uses the reviewed preview token |
 | Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
 
 A device can have up to ten images assigned at once, staged and transferred in
@@ -389,6 +556,15 @@ just rescued. It behaves the same on every platform, including a router, which
 has no other way to clear an agent with no deployment record — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
+
+Force does not get past an unresolved IOx verification obligation on the board
+itself. The controller recovers that obligation under the board lock before any
+teardown, forced or not, and a journal in phase `indeterminate` — an attempt
+cut off after IRIS began disabling device-global app signature verification
+and before it could restore it — refuses every attempt with
+`predecessor recovery failed` (`reconciliation_required`). Restore verification
+on the device and reconcile the journal first:
+[Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run).
 
 An IOx onboard that failed while the app was activating is also **not** a case
 for Force. It leaves the app installed but never started, which preflight reads
@@ -461,6 +637,23 @@ moment the job wins a slot.
 Successful jobs end with `onboard complete: <IP>` or `undeploy complete: <IP>`.
 Errors name the failed check and any recovery steps. Onboarding completion
 means the agent is set up; check Devices for image staging progress.
+
+The log is step-level on every platform. Guest Shell, router and XR jobs
+stream their installer's `[n/N]` banners and notices. An IOx job streams the
+recipe's `[n/8]` (install) or `[n/4]` (undeploy) headers, its prerequisite
+notices and poll outcomes (`app is DEPLOYED (poll 2/24)`), and one indented
+line per controller operation with its duration -- `  configure_app ok (2.1s)`
+-- as each step completes. A failed step is named the same way
+(`  configure_app failed (2.1s)`), followed by the device's own `% ...`
+verdict and the controller's `IOx command failed: ...` detail. The raw IOS
+session the controller drove is not in the default job log; it is kept as the job's
+persisted transcript under the state directory's `iox/transcripts`. To stream
+it into the job log for a debugging run, select **Detailed logs** in the
+Onboard or Undeploy dialog, or submit `{"log": true}` through the API.
+It defaults to off; credential redaction remains active. Onboarding with this
+option also enables `aria2c.log` on IOx and IOS-XR. Guest Shell logging is
+configured separately through `iris_log` in its agent configuration (see the
+[reference](reference.md#device-container-environment-variables)).
 
 ### Deployment logs
 

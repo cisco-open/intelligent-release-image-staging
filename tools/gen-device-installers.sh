@@ -10,6 +10,8 @@
 #     (iris-mint-enrollment <device_id>, TTL=IRIS_ENROLL_TTL, default 1h); the agent
 #     self-promotes it to a full catalog token on its first tick. RPC secret is NOT
 #     baked — the agent fetches it on that same first token-refresh.
+#   * asks that server to stage a ciphertext-only instruction bootstrap under a
+#     fresh capability with the same short-lived staging horizon
 #   * derives the catalog URL / stage host from IRIS_HOST_IP or this machine's IP
 #
 # Usage:  tools/gen-device-installers.sh [csv]      (legacy routed inventory only)
@@ -64,6 +66,43 @@ mint_enrollment() {  # mint_enrollment <device_id> -> prints a fresh enrollment 
   tok="$(docker exec "$IRIS_CONTAINER" iris-mint-enrollment "$sid")"
   [ -n "$tok" ] || { echo "ERROR: iris-mint-enrollment returned an empty token for $sid" >&2; exit 1; }
   printf '%s' "$tok"
+}
+
+# The container default is authoritative when the variable is absent. A custom
+# artifact path is read from the container environment and passed as one argv
+# element; it is never evaluated as shell text.
+ARTIFACTS_CONTAINER_DIR="$(
+  docker exec "$IRIS_CONTAINER" printenv IRIS_ARTIFACTS_DIR 2>/dev/null || true
+)"
+ARTIFACTS_CONTAINER_DIR="${ARTIFACTS_CONTAINER_DIR:-/srv/artifacts}"
+case "$ARTIFACTS_CONTAINER_DIR" in
+  /*) ;;
+  *) echo "ERROR: the container's IRIS_ARTIFACTS_DIR must be absolute" >&2; exit 1 ;;
+esac
+case "$ARTIFACTS_CONTAINER_DIR" in
+  *$'\n'*|*$'\r'*)
+    echo "ERROR: the container's IRIS_ARTIFACTS_DIR is invalid" >&2
+    exit 1 ;;
+esac
+ARTIFACTS_CONTAINER_DIR="${ARTIFACTS_CONTAINER_DIR%/}"
+[ -n "$ARTIFACTS_CONTAINER_DIR" ] && [ "$ARTIFACTS_CONTAINER_DIR" != "/" ] \
+  || { echo "ERROR: refusing to use the container root as IRIS_ARTIFACTS_DIR" >&2; exit 1; }
+
+new_staging_capability() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+}
+
+materialize_instruction_bootstrap() {  # device_id capability
+  local sid="$1" capability="$2" destination
+  destination="$ARTIFACTS_CONTAINER_DIR/staging/iris-instructions-$sid-$capability.envelope"
+  if ! docker exec "$IRIS_CONTAINER" iris-instruction-bootstrap "$sid" \
+      --output "$destination" >/dev/null; then
+    echo "ERROR: instruction bootstrap unavailable for $sid" >&2
+    return 1
+  fi
 }
 
 # ---------- parse + validate the WHOLE inventory first ----------
@@ -150,6 +189,9 @@ for i in "${!R_ID[@]}"; do
   tok="${R_TOK[$i]}"
   [ -n "$tok" ] || tok="$(mint_enrollment "$device_id")"
   validate_field "$tok" enrollment_token '^[A-Fa-f0-9]{32}$'
+  capability="$(new_staging_capability)"
+  validate_field "$capability" staging_capability '^[a-f0-9]{32}$'
+  materialize_instruction_bootstrap "$device_id" "$capability"
 
   f="$STAGE/install-$device_id.sh"
   cat > "$f" <<EOF
@@ -160,6 +202,7 @@ REPO="\$(cd "\$(dirname "\$0")/../.." && pwd)"
 export DEVICE_IP=$(shell_literal "$device_ip") VLAN=$(shell_literal "$vlan") SVI_IP=$(shell_literal "$svi_ip") SVI_MASK=$(shell_literal "$svi_mask") GUEST_IP=$(shell_literal "$guest_ip") DEVICE_ID=$(shell_literal "$device_id")
 export CATALOG_URL=$(shell_literal "$CATALOG_URL") CATALOG_TOKEN=$(shell_literal "$tok")
 export STAGE_HOST=$(shell_literal "$STAGE_HOST")
+export IRIS_STAGING_CAPABILITY=$(shell_literal "$capability")
 # exported empty so device-install.sh reads a defined (empty) value; the agent fetches the real rpc_secret on its first token-refresh.
 export RPC_SECRET=""
 # Materialize the server's BARE cert (crt.pem) to a temp file and hand its path to

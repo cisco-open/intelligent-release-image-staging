@@ -29,6 +29,43 @@ _xr() {
   _base IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_TEST_SKIP_MOUNT_CHECK=1 "$@"
 }
 
+_placement_from_conf() {
+  env -i PATH="$PATH" PYTHONPATH="$DEVICE/agent:$DEVICE" \
+    python3 - "$CONF" "$1" <<'PY'
+import sys
+import agent_config
+import iris_agent
+
+cfg = agent_config.load(sys.argv[1])
+share_dir, share_ios = iris_agent._share_settings(cfg)
+seen = []
+
+def shared():
+    seen.append("share")
+    return True
+
+def push(name, prefix):
+    seen.append(("scp", name, prefix))
+
+def direct():
+    seen.append("place")
+    return True
+
+def emit(mnemonic, message):
+    raise AssertionError("unexpected placement failure: " + mnemonic)
+
+assert iris_agent._iox_place_impl(
+    "image.bin", cfg["target_fs"], share_dir, share_ios,
+    shared, push, direct, emit) is True
+if sys.argv[2] == "scp":
+    assert (share_dir, share_ios) == ("", "")
+    assert seen == [("scp", "image.bin", cfg["target_fs"]), "place"]
+else:
+    assert share_dir and share_ios
+    assert seen == ["share"]
+PY
+}
+
 @test "one Dockerfile and entrypoint replace both legacy definitions" {
   [ -f "$DEVICE/container/Dockerfile" ]
   [ -f "$ENTRYPOINT" ]
@@ -44,6 +81,30 @@ _xr() {
   grep -q '^ARG TARGETARCH$' "$DEVICE/container/Dockerfile"
   grep -q '^COPY agent_bin/aria2c-${TARGETARCH} /opt/iris/bin/aria2c$' \
     "$DEVICE/container/Dockerfile"
+}
+
+@test "canonical image embeds rendered instruction trust and explicit verifier tooling" {
+  dockerfile="$DEVICE/container/Dockerfile"
+  grep -Eq '^RUN apk add .*openssh-keygen' "$dockerfile"
+  grep -q '^COPY agent/iris-signers.allowed_signers /opt/iris/agent/iris-signers.allowed_signers$' \
+    "$dockerfile"
+  grep -q '^COPY agent/iris-root.allowed_signers /opt/iris/agent/iris-root.allowed_signers$' \
+    "$dockerfile"
+  grep -Eq 'chmod 0444 .*iris-signers.allowed_signers' "$dockerfile"
+  ! grep -q 'IRIS_MAX_PEERS=' "$dockerfile"
+  ! grep -q 'IRIS_MAX_CONCURRENT=' "$dockerfile"
+}
+
+@test "all container package builders forward one root directory to the common renderer" {
+  common="$REPO/tools/build-device-image.sh"
+  iox="$DEVICE/iox/build.sh"
+  xr="$REPO/tools/build-xr-package.sh"
+  grep -q -- '--instruction-roots-dir' "$common"
+  grep -q 'render_device_trust' "$common"
+  grep -q 'iris-signers.allowed_signers' "$common"
+  grep -q 'iris-root.allowed_signers' "$common"
+  grep -Eq 'build-device-image\.sh.*--instruction-roots-dir' "$iox"
+  grep -Eq 'build-device-image\.sh.*--instruction-roots-dir' "$xr"
 }
 
 @test "missing and unknown platform values fail before any config write" {
@@ -104,6 +165,45 @@ _xr() {
   grep -qF "catalog_ca = $STAGE/iris-catalog.pem" "$CONF"
 }
 
+@test "fixed IOx and XR bootstrap candidates import privately into persistent work" {
+  appdata="$BATS_TEST_TMPDIR/appdata"
+  mkdir -p "$appdata"
+  printf '%s' 'iox-private-envelope' > "$appdata/iris-instructions.bootstrap"
+  chmod 600 "$appdata/iris-instructions.bootstrap"
+  run _iox CAF_APP_APPDATA_DIR="$appdata"
+  [ -f "$STAGE/iris-instructions.bootstrap" ]
+  [ "$(stat -c %a "$STAGE/iris-instructions.bootstrap")" = 600 ]
+  [ "$(cat "$STAGE/iris-instructions.bootstrap")" = iox-private-envelope ]
+  [ ! -e "$appdata/iris-instructions.bootstrap" ]
+  [ ! -e "$STAGE/iris-instructions.lkg" ]
+
+  rm -rf "$STAGE" "$CONF"
+  mkdir -p "$STAGE"
+  printf '%s' 'xr-private-envelope' > "$STAGE/iris-instructions.bootstrap"
+  chmod 600 "$STAGE/iris-instructions.bootstrap"
+  run _xr
+  [ -f "$STAGE/iris-work/iris-instructions.bootstrap" ]
+  [ "$(stat -c %a "$STAGE/iris-work/iris-instructions.bootstrap")" = 600 ]
+  [ "$(cat "$STAGE/iris-work/iris-instructions.bootstrap")" = xr-private-envelope ]
+  [ ! -e "$STAGE/iris-instructions.bootstrap" ]
+  [ ! -e "$STAGE/iris-work/iris-instructions.lkg" ]
+}
+
+@test "invalid bootstrap candidate cannot replace an existing pending envelope" {
+  mkdir -p "$STAGE/iris-work"
+  printf '%s' 'existing-pending-envelope' > \
+    "$STAGE/iris-work/iris-instructions.bootstrap"
+  target="$BATS_TEST_TMPDIR/symlink-target"
+  printf '%s' 'replacement-envelope' > "$target"
+  ln -s "$target" "$STAGE/iris-instructions.bootstrap"
+  run _xr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"instruction bootstrap candidate is invalid"* ]]
+  [ "$(cat "$STAGE/iris-work/iris-instructions.bootstrap")" = \
+    existing-pending-envelope ]
+  [ -L "$STAGE/iris-instructions.bootstrap" ]
+}
+
 @test "production IOx requires CAF app-data and refuses a catalog path override" {
   run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
     IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \
@@ -126,24 +226,64 @@ _xr() {
   grep -q '^device_platform = iox$' "$CONF"
   grep -q '^target_fs = sdflash:$' "$CONF"
   grep -q '^runtime_mode = container$' "$CONF"
+  grep -q '^share_dir = $' "$CONF"
+  grep -q '^share_ios_path = $' "$CONF"
+}
+
+@test "IOx without a configured share selects SCP from the generated config" {
+  for target in bootflash: sdflash:; do
+    run _iox IRIS_TARGET_FS="$target" PYTHONPATH="$DEVICE/agent"
+    [[ "$output" == *"catalog_ca is not a readable certificate file"* ]]
+    run _placement_from_conf scp
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "IOx clears stale fabricated share defaults before placement selection" {
+  run _iox IRIS_TARGET_FS=bootflash: PYTHONPATH="$DEVICE/agent" \
+    IRIS_SHARE_DIR=/mnt/share IRIS_SHARE_IOS_PATH=usbflash1:iox_host_data_share
+  grep -q '^share_dir = /mnt/share$' "$CONF"
   grep -q '^share_ios_path = usbflash1:iox_host_data_share$' "$CONF"
+
+  run _iox PYTHONPATH="$DEVICE/agent"
+  [[ "$output" == *"catalog_ca is not a readable certificate file"* ]]
+  grep -q '^share_dir = $' "$CONF"
+  grep -q '^share_ios_path = $' "$CONF"
+  run _placement_from_conf scp
+  [ "$status" -eq 0 ]
+}
+
+@test "partial IOx share options fail before config creation" {
+  for setting in IRIS_SHARE_DIR=/mnt/share \
+      IRIS_SHARE_IOS_PATH=usbflash1:iox_host_data_share; do
+    run _iox "$setting"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"IRIS_SHARE_DIR and IRIS_SHARE_IOS_PATH must be set together"* ]]
+    [ ! -e "$CONF" ]
+  done
 }
 
 @test "unsafe IOx target and share paths fail closed" {
   run _iox IRIS_TARGET_FS='flash:;reload'
   [ "$status" -ne 0 ]
   [[ "$output" == *"safe IOS filesystem prefix"* ]]
-  run _iox IRIS_SHARE_IOS_PATH='flash:x/../escape'
+  run _iox IRIS_SHARE_DIR=/mnt/share IRIS_SHARE_IOS_PATH='flash:x/../escape'
   [ "$status" -ne 0 ]
   [[ "$output" == *"must not contain '..'"* ]]
+  run _iox IRIS_SHARE_DIR=/mnt/../escape IRIS_SHARE_IOS_PATH=usbflash1:iris
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not contain '..'"* ]]
+  [ ! -e "$CONF" ]
 }
 
 @test "IOx accepts and persists a validated alternate mounted-share pair" {
-  run _iox IRIS_SHARE_DIR=/mnt/alternate \
+  run _iox IRIS_TARGET_FS=flash: IRIS_SHARE_DIR=/mnt/alternate \
     IRIS_SHARE_IOS_PATH=usbflash2:iris-alt
   [ -f "$CONF" ]
   grep -q '^share_dir = /mnt/alternate$' "$CONF"
   grep -q '^share_ios_path = usbflash2:iris-alt$' "$CONF"
+  run _placement_from_conf share
+  [ "$status" -eq 0 ]
 }
 
 @test "XR fixes harddisk storage and rejects IOx target, share and SSH surfaces" {

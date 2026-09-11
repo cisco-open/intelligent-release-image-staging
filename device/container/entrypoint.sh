@@ -187,11 +187,11 @@ case "$DEVICE_PLATFORM" in
     # explicit, validated installer override remains supported for IOx models
     # whose storage policy is known by their deployment record.
     TARGET_FS="${IRIS_TARGET_FS:-}"
-    # C9K installers mount this path; IE3x00 has no mount and the existing
-    # share probe falls back to SCP. The target filesystem itself is proved
-    # from IOS show/dir output by flash_target.py, never guessed here.
-    SHARE_DIR="${IRIS_SHARE_DIR:-/mnt/share}"
-    SHARE_IOS_PATH="${IRIS_SHARE_IOS_PATH:-usbflash1:iox_host_data_share}"
+    # Only a deployment that mounts an IOS-visible share supplies this pair.
+    # With no share, C8000V and IE3x00 use the agent's SCP hand-off. Inventing
+    # a share here makes its failed probe refuse placement before SCP runs.
+    SHARE_DIR="${IRIS_SHARE_DIR:-}"
+    SHARE_IOS_PATH="${IRIS_SHARE_IOS_PATH:-}"
     ;;
   xr-appmgr)
     STAGE_DIR="/hostmount"
@@ -229,12 +229,16 @@ if [ "$DEVICE_PLATFORM" = iox ]; then
   [ -z "$TARGET_FS" ] \
     || printf '%s' "$TARGET_FS" | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:$' \
     || fatal "IRIS_TARGET_FS must be a safe IOS filesystem prefix such as sdflash:"
-  absolute_path IRIS_SHARE_DIR "$SHARE_DIR"
-  single_line IRIS_SHARE_IOS_PATH "$SHARE_IOS_PATH"
-  printf '%s' "$SHARE_IOS_PATH" \
-    | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$' \
-    || fatal "IRIS_SHARE_IOS_PATH must be a safe IOS filesystem path"
-  case "${SHARE_IOS_PATH#*:}" in *../*|../*|*/..|..) fatal "IRIS_SHARE_IOS_PATH must not contain '..'" ;; esac
+  if [ -n "$SHARE_DIR" ] || [ -n "$SHARE_IOS_PATH" ]; then
+    [ -n "$SHARE_DIR" ] && [ -n "$SHARE_IOS_PATH" ] \
+      || fatal "IRIS_SHARE_DIR and IRIS_SHARE_IOS_PATH must be set together"
+    absolute_path IRIS_SHARE_DIR "$SHARE_DIR"
+    single_line IRIS_SHARE_IOS_PATH "$SHARE_IOS_PATH"
+    printf '%s' "$SHARE_IOS_PATH" \
+      | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$' \
+      || fatal "IRIS_SHARE_IOS_PATH must be a safe IOS filesystem path"
+    case "${SHARE_IOS_PATH#*:}" in *../*|../*|*/..|..) fatal "IRIS_SHARE_IOS_PATH must not contain '..'" ;; esac
+  fi
 else
   [ "${IRIS_TARGET_FS+x}" != x ] || fatal "xr-appmgr forbids IRIS_TARGET_FS; target is harddisk:"
   [ "${IRIS_SHARE_DIR+x}" != x ] || fatal "xr-appmgr forbids IRIS_SHARE_DIR"
@@ -258,16 +262,24 @@ TICK="${IRIS_TICK_SECONDS:-60}"
 #     firing together.
 #   * BACKOFF_MAX bounds the OTHER case -- the agent process itself failing
 #     outright (catalog unreachable, timed out, or answering a non-2xx
-#     status, the same shape a saturated server produces). See
-#     next_tick_sleep below. Comfortably inside the token's multi-day
-#     refresh slack (iris_agent.py's needs_refresh docstring), so a run of
-#     backed-off ticks never strands the device.
+#     status, the same shape a saturated server produces). The loop keys on
+#     the agent's exit status alone: iris_agent.py exits non-zero for a tick
+#     whose catalog policy fetch failed (_tick_exit_code, #232) as well as
+#     for an uncontained crash, so a catalog outage actually reaches this
+#     backoff. See next_tick_sleep below. Comfortably inside the token's
+#     multi-day refresh slack (iris_agent.py's needs_refresh docstring), so
+#     a run of backed-off ticks never strands the device.
 JITTER_PCT="${IRIS_TICK_JITTER_PCT:-10}"
 BACKOFF_MAX="${IRIS_TICK_BACKOFF_MAX:-600}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 MAX_CONCURRENT="${IRIS_MAX_CONCURRENT:-100}"
 uint_between IRIS_RPC_PORT "$RPC_PORT" 1 65535
 uint_between IRIS_TICK_SECONDS "$TICK" 1 86400
+# Shell arithmetic may interpret a leading zero as an octal prefix.  Keep the
+# validated cadence canonical so this launcher and the Python agent use the
+# same base-10 value.
+while [ "${TICK#0}" != "$TICK" ]; do TICK="${TICK#0}"; done
+export IRIS_TICK_SECONDS="$TICK"
 uint_between IRIS_TICK_JITTER_PCT "$JITTER_PCT" 0 100
 uint_between IRIS_TICK_BACKOFF_MAX "$BACKOFF_MAX" 1 86400
 uint_between IRIS_MAX_PEERS "$MAX_PEERS" 1 1000
@@ -384,6 +396,134 @@ fi
 
 mkdir -p "$STAGE_DIR" "$WORK_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"
 
+# Import the transport-owned bootstrap ciphertext into the agent's persistent
+# work directory before the first tick.  The two source names are platform
+# facts: no environment value or run option can redirect them.  The agent later
+# verifies the envelope and promotes accepted policy through its own LKG
+# transaction; transport bytes never enter the LKG path here.
+import_instruction_bootstrap() {
+  _source="$1"
+  _destination="$2"
+  [ -n "$_source" ] || return 0
+  export IRIS_BOOTSTRAP_IMPORT_SOURCE="$_source"
+  export IRIS_BOOTSTRAP_IMPORT_DESTINATION="$_destination"
+  _import_rc=0
+  python3 - <<'PY' >/dev/null 2>&1 || _import_rc=$?
+import os
+import stat
+import tempfile
+
+source_path = os.environ["IRIS_BOOTSTRAP_IMPORT_SOURCE"]
+destination = os.environ["IRIS_BOOTSTRAP_IMPORT_DESTINATION"]
+try:
+    named_before = os.lstat(source_path)
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISLNK(named_before.st_mode) or not stat.S_ISREG(named_before.st_mode):
+    raise SystemExit(2)
+if os.path.abspath(source_path) == os.path.abspath(destination):
+    raise SystemExit(2)
+
+flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+source = -1
+temporary = -1
+temporary_path = None
+try:
+    source = os.open(source_path, flags)
+    before = os.fstat(source)
+    if (not stat.S_ISREG(before.st_mode) or
+            (before.st_dev, before.st_ino) !=
+            (named_before.st_dev, named_before.st_ino) or
+            not 1 <= before.st_size <= 256 * 1024):
+        raise ValueError("invalid source")
+    directory = os.path.dirname(destination)
+    temporary, temporary_path = tempfile.mkstemp(
+        prefix=".iris-instructions-bootstrap.", dir=directory)
+    os.fchmod(temporary, 0o600)
+    total = 0
+    while True:
+        chunk = os.read(source, min(65536, 256 * 1024 + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > 256 * 1024:
+            raise ValueError("oversize source")
+        view = memoryview(chunk)
+        while view:
+            written = os.write(temporary, view)
+            view = view[written:]
+    after = os.fstat(source)
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+    named_after = os.lstat(source_path)
+    if (total != before.st_size or
+            any(getattr(before, field) != getattr(after, field)
+                for field in fields) or
+            (named_after.st_dev, named_after.st_ino) !=
+            (before.st_dev, before.st_ino) or
+            stat.S_ISLNK(named_after.st_mode)):
+        raise ValueError("source changed")
+    os.fsync(temporary)
+    installed = os.fstat(temporary)
+    if (not stat.S_ISREG(installed.st_mode) or
+            stat.S_IMODE(installed.st_mode) != 0o600 or
+            installed.st_size != total):
+        raise ValueError("invalid temporary")
+    os.close(temporary)
+    temporary = -1
+    os.replace(temporary_path, destination)
+    temporary_path = None
+    directory_fd = os.open(
+        directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+        getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    final_source = os.lstat(source_path)
+    if ((final_source.st_dev, final_source.st_ino) !=
+            (before.st_dev, before.st_ino) or
+            stat.S_ISLNK(final_source.st_mode)):
+        raise ValueError("source changed after import")
+    os.unlink(source_path)
+    source_directory = os.path.dirname(source_path)
+    source_directory_fd = os.open(
+        source_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+        getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(source_directory_fd)
+    finally:
+        os.close(source_directory_fd)
+except Exception:
+    raise SystemExit(2)
+finally:
+    if source >= 0:
+        os.close(source)
+    if temporary >= 0:
+        os.close(temporary)
+    if temporary_path is not None:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+PY
+  unset IRIS_BOOTSTRAP_IMPORT_SOURCE IRIS_BOOTSTRAP_IMPORT_DESTINATION
+  [ "$_import_rc" -eq 0 ] || fatal "instruction bootstrap candidate is invalid"
+}
+
+if [ "$DEVICE_PLATFORM" = iox ]; then
+  _instruction_source=""
+  if [ -n "${CAF_APP_APPDATA_DIR:-}" ]; then
+    _instruction_source="$CAF_APP_APPDATA_DIR/iris-instructions.bootstrap"
+  fi
+else
+  _instruction_source="$STAGE_DIR/iris-instructions.bootstrap"
+fi
+import_instruction_bootstrap \
+  "$_instruction_source" "$WORK_DIR/iris-instructions.bootstrap"
+unset _instruction_source
+
 # --- 1. config: use a dropped conf if present, else synthesize from env ---------
 # A conf dropped onto persistent storage wins, and the agent rewrites it in
 # place on token refresh. On first boot, secrets arrive through runtime env;
@@ -444,7 +584,6 @@ if [ ! -f "$CONF" ]; then
         "device_version = ${IRIS_VERSION:-}"
     fi
     printf '%s\n' \
-      "max_peers = ${MAX_PEERS}" \
       "telemetry = ${IRIS_TELEMETRY:-on}" \
       "telemetry_stream = ${IRIS_TELEMETRY_STREAM:-off}" \
       "rpc_port = ${RPC_PORT}" \
@@ -488,12 +627,9 @@ for _key in stage_dir share_dir catalog_ca device_ssh_known_hosts; do
   _value="$(conf_value "$_key" "$CONF")"
   [ -z "$_value" ] || absolute_path "$_key" "$_value"
 done
-for _key in rpc_port max_peers device_ssh_port; do
+for _key in rpc_port device_ssh_port; do
   _value="$(conf_value "$_key" "$CONF")"
-  [ -z "$_value" ] || case "$_key" in
-    rpc_port|device_ssh_port) uint_between "$_key" "$_value" 1 65535 ;;
-    max_peers) uint_between "$_key" "$_value" 1 1000 ;;
-  esac
+  [ -z "$_value" ] || uint_between "$_key" "$_value" 1 65535
 done
 _value="$(conf_value target_fs "$CONF")"
 [ -z "$_value" ] || printf '%s' "$_value" | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:$' \
@@ -540,6 +676,8 @@ if [ "$DEVICE_PLATFORM" = iox ]; then
   [ -z "$TARGET_FS" ] || reconcile_conf_fact target_fs "$TARGET_FS"
   reconcile_conf_fact mode ""
   reconcile_conf_fact runtime_mode container
+  # Deployment facts include the absence of a share: clear stale defaults
+  # from older packages so they cannot suppress this platform's SCP path.
   reconcile_conf_fact share_dir "$SHARE_DIR"
   reconcile_conf_fact share_ios_path "$SHARE_IOS_PATH"
 else

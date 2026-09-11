@@ -5,25 +5,29 @@
 # aria2c deliverable — handed in as a binary artifact.
 # NOT downloaded. NOT built during a normal IRIS build.
 #
-# Rebuilt 2026-09-04 from the corresponding source published in
-# tools/aria2c-build/ (the same recipe this repository ships for GPLv2 §3),
-# against OpenSSL 3.5.8. The previous binaries were built on OpenSSL 3.5.7,
-# which Alpine withdrew when 3.5.8 shipped; because OpenSSL is linked
-# STATICALLY into aria2c, an OS update cannot patch it, so the ten issues
-# fixed in 3.5.8 could only be cleared by rebuilding. None of them looked
-# reachable in IRIS's client-only usage (see issue #109), but this was the
-# last change window before the client is frozen for Cisco signing.
+# Rebuilt 2026-09-10 with tools/aria2c-build/ and patches 0001 through 0007.
+# Adds the seeder good-bye grace (#68): a seeder<->seeder connection now
+# survives 5 s past completion on both ends, so the device's
+# --on-bt-download-complete hook can still read per-peer bytes over RPC.
+# Retains the hard peer admission cap (#168), coalesced-handshake
+# preservation (#174) and OpenSSL 3.5.8; same pinned toolchain as before.
+# Validated via wire/RPC regressions, real BitTorrent transfers and the
+# loopback grace check described in tools/aria2c-build/README.md.
+# Execution: native x86_64; aarch64 under QEMU.
 #
 # aria2-next version : 2.5.6
 # source pin         : d4971f0e12322e2ffcdb1721911b7d5c6206d0e5
-# patches applied    : 4
+# patches applied    : 7
 #   - 0001-getpeers-keys-filter.patch
 #   - 0002-fix-uaf-peer-blocklist-disconnect.patch
 #   - 0003-fix-pkcs12-chain-type-confusion.patch
 #   - 0004-fix-ed2k-iterator-invalidation.patch
+#   - 0005-hard-bt-max-peers.patch
+#   - 0006-preserve-coalesced-bt-handshake.patch
+#   - 0007-seeder-goodbye-grace.patch
 #
 # tools/get-aria2c.sh verifies the handed-in binary against these
 # checksums and FAILS CLOSED on a mismatch, so a stale client cannot
 # silently ship. Update this file only when adopting a new build.
-66663337b99b3d8e273801999a37820fa18f42713cfab4af57a3caefc957555f  x86_64
-ea5b905702ed3e5674cde1f5628ea86faa1365a69342a3806cafaf881f82fcfd  aarch64
+f6af5c2d90050436f736864476d7b4f062df30122fd8a510eec4794abbf6c38c  x86_64
+4d507ccd6a7f5ee297644097d070c1afeedb64d76b202f2a23294f6432180f20  aarch64

@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 # IOx App
 
 The IOx path runs the agent as a Docker-based IOx application. It supports
-ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 app hosting. IOx and
-IOS-XR package the same canonical device image and run the same entrypoint;
+ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 and Catalyst 8000V app
+hosting. IOx and IOS-XR package the same canonical device image and run the same entrypoint;
 `IRIS_DEVICE_PLATFORM=iox` selects this profile.
 
 ## When to use it
@@ -21,10 +21,89 @@ normally selects `sdflash:`, while Catalyst 9300 normally selects `flash:`
 (bootflash, like Guest Shell) and uses the SSD share to carry the transfer. The table in
 [Device Agents](device-agents.md#platform-targets) reflects the same rule.
 
-The installer reads the selected package from the server's local
-`artifacts/` directory and pushes it to IOS over its authenticated,
-host-key-checked SCP session before driving app hosting. It does not put a
-credential in an artifact URL.
+The installer first pastes the catalog trustpoint over its authenticated,
+host-key-checked SSH session — the same block the Guest Shell installers
+use — and then has the **device** fetch the package, the public catalog
+certificate and its sealed instruction envelope from the artifact server with
+`copy https:`, validated against that trustpoint. Each copy authenticates
+with the device's own enrollment credential (HTTP Basic: the device id and
+its enrollment token, the artifact API's resource-bound form), which the
+controller configures as `ip http client username` / `ip http client
+password` for the span of that copy and removes right after it. The token
+never enters a URL or a job log (it is redacted from every capture and
+transcript), and the envelope is published under `staging/<device-id>/` for
+that one fetch. Package delivery uses HTTPS; a device whose running-config
+already carries an operator's `ip http client username` or `password` is refused at preflight
+rather than having them overwritten. `ip scp server enable` is configured for
+the agent, not the installer, and only on a platform with no bind-mounted
+share (IE-3400 or Catalyst 8000V): the runtime image hand-off described below
+pushes the downloaded image to `guest-share` through the device's SCP server.
+A Catalyst 9300 job uses its configured SSD share, and onboarding leaves that
+device's SCP server untouched.
+
+IOx preflight requests the app list, narrowly filtered IRIS collision lines,
+and counts of HTTP client credential settings. It does not request the full
+running configuration or stored password values. Each count is checked against
+its own completed command response; missing or ambiguous evidence stops the
+job. Transcripts retained by older builds may still contain full configuration
+and must be treated as sensitive.
+
+## Catalyst 8000 routers
+
+A Catalyst 8000 router has no `AppGigabitEthernet`. With platform `iox` on a
+`router-routed` or `router-nat` row, the installer creates the same
+IRIS-owned `VirtualPortGroup<N>` (and, for `router-nat`, the same NAT ACL,
+overload rule and BitTorrent static translation) that the Guest Shell router
+recipe creates, attaches the app with `app-vnic gateway0 virtualportgroup N`,
+and points its SSH-to-self at the VPG address. The package is the amd64 IOx
+tar and the staging target is `bootflash:`, reached over the scp push — a
+C8000V cannot bind-mount its bootflash into the app — see the hand-off
+section below.
+Teardown removes the app and the VPG, and un-marks a NAT outside interface
+only when the deployment record says IRIS marked it. Package verification is
+handled exactly as below — the controller disables and restores the
+device-global setting around an unsigned install — so nothing needs to be
+changed by hand on the router first.
+
+## Device-global package verification
+
+Before onboarding, inspect `show app-hosting infra` and the other IOx apps on
+the device. Verification is device-global, so a change affects more than IRIS.
+Prefer a natively signed wrapper and keep verification enabled. The controller
+in `server/iox_verification.py`, consumed by `device/iox/install.sh`, owns the
+entire transaction:
+
+| Wrapper / initial observation | Owned behavior |
+| --- | --- |
+| Signed marker present | No verification-state change. Native signature verification depends on platform enforcement being enabled; marker presence alone is not cryptographic validation. |
+| Unsigned / `enabled` | Durably record the initial state and restoration obligation; disable only for installation; restore and read-back before activation/start. |
+| Unsigned / `disabled` | Leave disabled; no unowned enable operation. |
+| Unsigned / `unknown` | Refuse mutation and installation. Obtain readable platform evidence first. |
+
+Interruption/resume and uninstall recovery use durable obligations. They do
+not blindly enable an operator-changed or unowned state. Inspect the onboarding
+job and deployment record before retrying; unresolved restoration blocks
+progress. This is the current supported unsigned transaction, not evidence of
+production signing. Current proof artifacts are unsigned.
+
+Cisco documents signature enforcement, SD/bootflash restrictions and the global
+setting in the [IE-3x00 IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html).
+The [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html)
+limits disabling verification to USB/SSD media. Platform/media signature
+refusals remain failures; do not interpret an unsigned build as proof that
+activation succeeds after verification is restored. The claim that the
+container never changes in the field depends on a natively signed IOx wrapper
+and platform verification remaining enabled.
+
+The enrollment bearer and SSH-to-self password remain in IOx `run-opts`,
+readable by a privileged device administrator and potentially diagnostic
+output. Enrollment defaults to 3,600 seconds (one hour), followed promptly by
+authenticated refresh with normal 120-second token overlap. Instruction keys,
+LKG keys, online signing private keys and offline-root private keys never enter
+`run-opts` or installer arguments. The agent's mode-0600 config receives
+instruction keys only from refresh. F3 redelivery uses an encrypted bootstrap
+envelope through the controller's application-data channel; see
+[offline recovery](operations.md#f3-offline-bootstrap-envelope-redelivery).
 
 ## Files
 
@@ -35,8 +114,11 @@ credential in an artifact URL.
 | `device/iox/package.yaml` | ARM64 IOx package metadata. |
 | `device/iox/package-amd64.yaml` | x86_64 IOx package metadata. |
 | `device/iox/build.sh` | Packages the canonical image in the IOx envelope. |
-| `device/iox/install.sh` | Installs the IOx app on a target device. |
-| `device/iox/uninstall.sh` | Removes the IOx app. |
+| `device/iox/install.sh` | Private controller recipe for IOx onboarding. |
+| `device/iox/uninstall.sh` | Private controller recipe for IOx removal. |
+
+Submit jobs through the Console, API, or [IOx control CLI](reference.md#iox-control-cli).
+The recipes require the controller's private channel and cannot be run standalone.
 
 ## Runtime behavior
 
@@ -45,9 +127,9 @@ agent. It downloads resumable swarm data under the CAF persistent directory
 (`/iox_data/iris` on the validated Catalyst 9300 runtime).
 
 The IOx package contains no deployment certificate. On every onboarding,
-`device/iox/install.sh` validates the current public certificate from the
-served artifacts directory, pushes it with the package, and uses IOS-XE's
-`app-hosting data` channel to place it in the app's application-data directory
+the controller validates the current public certificate from the served
+artifacts directory, has the device fetch it over HTTPS, and uses IOS-XE's
+`app-hosting data` channel to copy it into the app's application-data directory
 after activation and before app start. Activation mounts application storage;
 the `DEPLOYED` state cannot accept the copy. The entrypoint requires and validates
 that runtime-delivered certificate before it starts either the catalog client
@@ -60,33 +142,46 @@ The hand-off of the verified scratch file to IOS depends on the platform:
   into the container (`run-opts "-v …:/mnt/share"`). The agent copies the
   scratch to the share ROOT under its fixed `iris-staged.bin` name at disk
   speed, then drives an IOS-internal
-  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
-  over its SSH-to-self CLI. That is the same bootflash-root placement as Guest
-  Shell, with no image bytes crossing the device CPU; the copy is a plain
-  copy that restores the real image name, and the agent attests the
-  placement by polling for the file and confirming it matches the catalog's
-  declared byte size exactly. The image was already verified by sha256
-  against the catalog before the placement copy; the catalog can separately
+  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>.iris-tmp`
+  over its SSH-to-self CLI. After confirming the temporary file matches the
+  catalog's exact byte size, the agent renames it to the final image name and
+  confirms the final size and the temporary file's absence. The image was
+  already verified by SHA-256 against the catalog before the placement copy; the catalog can separately
   verify authenticity against Cisco's signed Bulk Hash feed, and a mismatch
   quarantines the image. IRIS never creates a subdirectory in the
   share (a container-created subdir becomes inaccessible to the container
   itself on this platform) and confines
   itself to `iris-` prefixed filenames: each attempt sweeps only its own
   leftovers, a tiny probe proves IOS can actually read the share before any
-  multi-GB copy is committed (falling back to scp otherwise), the transient
-  copy is removed after placement, and undeploy deletes the prefixed files.
+  multi-GB copy is committed, the transient copy is removed after placement,
+  and undeploy deletes the prefixed files.
+- **Catalyst 8000V (scp push)**: the router exposes no IOS-visible directory
+  to an IOx app (verified on IOS-XE 17.15.5: CAF accepts a `-v` run option for
+  `bootflash:iox_host_data_share` but never mounts it, and `app-hosting data`
+  copies only into the app), so it uses the same scp push as the IE-3400 and
+  its SCP server stays enabled. Measured alternative, not implemented: IOS
+  pulling the staged file from the app with `copy http://<app-ip>` moved a
+  973 MB image in 153 s against about 124 s over scp.
 - **IE-3400 (scp push)**: IOx cannot bind-mount the SD card there, so the
   container SCP-pushes the scratch to `guest-share/iris` through the device's
-  SCP server and then runs a plain `copy` for the final placement, attested
-  afterward by the agent polling for an exact byte-size match at the
-  destination. The agent also falls back to this path automatically if the
-  share mount is absent or unreadable from IOS. This scp traffic is addressed
-  to the device itself, so default CoPP caps it at roughly 1.4 MB/s; IRIS
-  never modifies CoPP.
+  SCP server. As on the other IOx paths, IOS copies it to `<img>.iris-tmp`,
+  the agent verifies the exact byte size, then renames it and confirms the
+  final size and temporary file's absence. This scp traffic is addressed to
+  the device itself, so default CoPP caps it at roughly 1.4 MB/s; IRIS never modifies CoPP.
 
-Both platforms drive IOS over the app's SSH-to-self CLI, for the placement copy and
-for the one-shot EEM applets that place and reclaim files at the target-FS root. That
-connection can optionally be pinned: set `device_ssh_known_hosts` in the agent config
+There is no fallback between the two. Onboarding enables the device's SCP
+server (`ip scp server enable`) **only on platforms with no share**, whose
+agents need it. Where a share is configured, an unusable share (not mounted,
+unreadable from IOS, or a failed local copy into
+it) fails the placement with a `ROOTCOPY-FAIL` naming what the share probe
+found, rather than pushing the same bytes over a control plane the device is
+not even listening on. IOS images remain untouched and no IOS placement
+command runs in that case; the agent may still clean its reserved `iris-`
+temporary files from the share and retries placement on later ticks.
+
+Both hand-off paths drive IOS over the app's SSH-to-self CLI for placement and
+reclaim commands at the target-FS root. That connection can optionally be
+pinned: set `device_ssh_known_hosts` in the agent config
 and, when that file exists, the app's `ssh` and `scp` calls verify the IOS host key
 against it instead of running unverified. See
 [Device Agents](device-agents.md).
@@ -107,25 +202,31 @@ certificate validation.
 The first time a device sees a given package, the IOx runtime has to load its
 docker layers into the image cache before the app can activate; a
 byte-identical package the box has run before activates in seconds because
-those layers are already cached. The installer's lifecycle waits are sized for
-that cold case: `INSTALL_TIMEOUT`, `ACTIVATE_TIMEOUT` and `START_TIMEOUT`
-default to 300 seconds each (`STATE_POLL`, the poll interval, to 5), the same
-budget `device/xr-install.sh` uses. They are flat rather than scaled by package
-size — each wait returns as soon as the state is reached, so a generous ceiling
-costs a healthy install nothing — and every one of them is an environment
-override for a device that needs longer. A wait that does run out prints the
-device's full, unfiltered reply to the `app-hosting` command and the last state
-it observed.
+those layers are already cached. The controller allows 300 seconds by default
+for each install, activation, and start phase, within the remaining overall
+session deadline (7,200 seconds by default). Each onboarding lifecycle wait
+makes at most 24 state polls, spaced adaptively across the remaining phase
+budget with a default five-second minimum, and returns as soon as the state is reached. These are
+controller-owned limits, not shell environment overrides. A failed wait names
+the failed step in the job log; enable **Detailed logs** when submitting the
+job to include its command output.
 
 An onboard that fails at activation leaves the app-hosting configuration in
 place, because the activation may still be in flight. That is deliberate and
-does **not** need an undeploy or a forced teardown: re-run the installer, or
-press Onboard again in the console. Console preflight treats an IRIS app that
+does **not** need an undeploy or a forced teardown: press **Onboard** again in
+the Console, submit the onboard API request, or use the IOx control CLI's
+`submit-install` command. Preflight treats an IRIS app that
 is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry. The
 installer removes that incomplete app before retrying. An app that is
 `RUNNING` is a live deployment and requires undeploy first.
 
 ## Build modes
+
+Builds require exactly two distinct approved public-root `.pub` files in
+`IRIS_INSTRUCTION_ROOTS_DIR` (or `--instruction-roots-dir DIR`). Use
+`ARIA2C_BIN_AMD64` and `ARIA2C_BIN_ARM64` for the current pinned binaries when
+older fallback artifacts remain on disk; architecture/checksum verification
+fails closed. These public-root inputs do not provide native package signing.
 
 The canonical build always persists one OCI archive with one image manifest
 per CPU architecture under one multi-architecture identity. `--image-only`
@@ -245,8 +346,9 @@ SHA-256 while retaining its canonical image provenance. A manifest for the
 unsigned input will correctly report a digest mismatch beside the signed
 output. This manifest is a readiness check, not a signature or an attestation
 from the signer; native signature verification remains the platform's job.
-The IOx installer keeps app-hosting verification enabled when the tar carries
-signature metadata.
+The IOx installer makes no verification-state change for a wrapper carrying
+signature metadata; only native platform verification establishes authenticity.
+For unsigned wrappers, use the [owned transaction](#device-global-package-verification).
 
 For a source change, rebuild the package and obtain a new signature. For a
 certificate change, re-onboard using the existing package so the installer

@@ -60,7 +60,7 @@ boundary before the first start, and again whenever either is recreated:
 # from the repository root
 mkdir -p artifacts
 sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"                 # keep it mode 600
-sudo chown -R 10001:10001 artifacts
+sudo chown -R 10001:"$(id -g)" artifacts && sudo chmod -R g+w artifacts   # server owns it; you can write it
 ```
 
 If you enable authenticated Prometheus scraping, create another raw token with
@@ -88,15 +88,28 @@ manually created volumes, check [Volume permissions](server.md#volume-permission
 
 ## Start the server
 
-`start-compose-server.sh` builds the server and Console images, so hand in the
-pinned `aria2c` binary first — the Dockerfile's `COPY bin/aria2c` step fails without it.
-Then build the images, initialize a fresh encrypted config volume, start the
-stack, and prepare both IOx packages from the repository root:
+`start-compose-server.sh` is the whole first start. Before it builds anything
+it checks every input a fresh clone lacks and reports all of them in one list:
+the handed-in `aria2c` (`bin/aria2c`), `ioxclient`, the per-architecture
+`aria2c` deliverables the IOx builder needs, and the two instruction-root
+public keys. It then grants uid 10001 the `artifacts/` directory (or tells you
+the exact `chown`), builds the images, initializes a fresh encrypted config
+volume, installs the two public roots, starts the stack, waits for health, and
+builds the Guest Shell bundle (self-provisioned by the server), both IOx
+packages and the XR RPM — everything the Console's **Device packages** screen
+lists. From the repository root:
 
 ```bash
 tools/get-aria2c.sh amd64
-tools/start-compose-server.sh
+IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
+
+`IRIS_INSTRUCTION_ROOTS_DIR` defaults to `instr-roots/` in the repository and
+must hold exactly two `.pub` files and nothing else. The helper reads those
+public halves and **never creates roots**: they come from the
+[custody ceremony](operations.md#instruction-root-ceremony-and-recovery), and
+the private halves stay with their custodians. Set `IRIS_SKIP_XR=1` on a
+deployment with no XR devices.
 
 `iris-bootstrap` never overwrites existing encrypted state on a plain run: a
 volume that already holds all three `.age` files (and whose files decrypt with
@@ -119,17 +132,20 @@ rotatable credential over pinned HTTPS. The age-encrypted server store lives
 on `iris-config` and is decrypted into `/run/iris` tmpfs; the Console does not
 mount that volume. The separate tier credential persists in `iris-tier-auth`.
 
-`start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
-container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
-`iris-amd64.tar` for Catalyst 9300 IOx, both as deployment-neutral wrappers of
-the same canonical device image. Onboarding supplies the current public server
-certificate separately as IOx application data.
+After the container becomes healthy the helper runs
+`tools/provision-iox-packages.sh`, which produces `iris-arm64.tar` for IE-3400
+and `iris-amd64.tar` for Catalyst 9300 IOx as deployment-neutral wrappers of
+the same canonical device image, and then `tools/build-xr-package.sh` for the
+XR RPM, placed through the running container so `artifacts/` stays owned by
+the runtime uid. Onboarding supplies the current public server certificate
+separately as IOx application data.
 
-The helper builds arm64 first. If emulation or a build input is missing, it
-exits nonzero after the stack has started; a reachable Console does not mean
-packages are ready. Fix the reported prerequisite and rerun
-`tools/provision-iox-packages.sh`. A Guest Shell-only deployment can bring up
-the two services without native package builds:
+Because the hand-ins are checked up front, a build failure after the stack is
+up is now limited to emulation or the build itself; a reachable Console still
+does not mean packages are ready, so read the helper's exit status. Fix the
+reported problem and rerun `tools/provision-iox-packages.sh` or
+`tools/build-xr-package.sh --out artifacts/`. A Guest Shell-only deployment can
+bring up the two services without native package builds:
 
 ```bash
 docker compose -f server/docker-compose.yml build --pull
@@ -199,6 +215,37 @@ for what makes a file eligible, and
 [Import skip reasons](reference.md#import-skip-reasons) for the reasons a file is
 listed greyed out instead.
 
+## Prepare instruction trust
+
+Before building device packages, provision exactly two distinct offline-root
+public keys through the [custody ceremony](operations.md#instruction-root-ceremony-and-recovery).
+Keep private roots with separate custodians/sites. Point package builders at the
+public `.pub` directory with `IRIS_INSTRUCTION_ROOTS_DIR` or
+`--instruction-roots-dir DIR`; use the current pinned amd64/arm64 aria2c inputs.
+Initialize server online certificate/keylist custody and producer authority
+before expecting a device instruction stamp. Build success with disposable
+roots is not production custody or signing evidence. Guest Shell can remain
+tracker-only when its runtime verifier is absent.
+
+## IOx verification prerequisite
+
+Before IOx onboarding, read `show app-hosting infra`: app-hosting verification
+is device-global. A signed wrapper is preferred and causes no verification-state
+change. The unsigned transaction durably records initial enabled state,
+disables only for installation, then restores with read-back before
+activation/start. Initial disabled stays disabled; unknown refuses mutation
+and installation. Interruption/resume and uninstall recovery honor owned
+obligations, never blindly enabling an operator-changed or unowned state.
+Check media/platform restrictions in [IOx verification](iox.md#device-global-package-verification).
+Unsigned proof packages do not establish successful live activation.
+
+A privileged device administrator can read the bootstrap enrollment bearer in
+IOx `run-opts` or XR `docker-run-opts`, plus IOx's SSH-to-self password. The
+bearer defaults to a 3,600-second TTL; complete the first authenticated refresh
+promptly (normal token overlap is 120 seconds). Instruction/LKG/signing/root
+private keys never belong in platform configuration. See the
+[security boundary](security.md#two-root-trust-and-custody).
+
 ## Prepare devices
 
 Create an inventory from the template:
@@ -264,10 +311,16 @@ tools/apply-assignments.sh fleet/assignments.csv
 
 This requires the running `iris` container by that name; set
 `IRIS_CONTAINER=<name>` if yours differs.
+Each CSV device id appears once, and its image is merged into that device's
+existing ordered assignment. Use `iris-assign DEVICE IMAGE [IMAGE ...]` to add
+several directly, or `iris-assign --replace DEVICE IMAGE [IMAGE ...]` when the
+reviewed intent is to remove images omitted from the new set.
 
 Agents poll the catalog, transfer assigned images, verify them, and stage them
 on the device filesystem. Removing an assignment stops that image's torrent
-and clears its working copy, including when the last assignment is removed.
+and clears its working copy after the next successful due policy poll and
+successful aria2 policy apply, including when the last assignment is removed.
+Signed logical cadence and catalog/RPC failures can delay that cleanup.
 IOS-XE keeps the placed root file for reuse. XR removes root files recorded as
 IRIS downloads; operator-adopted files and files with unknown ownership remain.
 See [Unassigned image park](device-agents.md#unassigned-image-park) for storage

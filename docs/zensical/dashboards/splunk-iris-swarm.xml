@@ -5,7 +5,7 @@
     SPDX-License-Identifier: Apache-2.0
   -->
   <label>IRIS — Peer-to-Peer Distribution (measured peer tracing)</label>
-  <description>Does P2P actually carry load, how much, and among whom. Byte totals come from the durable peer ledger, so a finished transfer keeps its history and no panel goes blank when the swarm goes idle. Every derived number says so in its own title.</description>
+  <description>Does P2P actually carry load, how much, and among whom. Origin counters come from the durable peer ledger; device peer captures provide separate direct evidence. Panels need samples or captures within their search window, so missing data can render blank. Every derived number says so in its own title.</description>
 
   <!--
     Splunk is external to IRIS (spec §14): this board is a supported import
@@ -67,7 +67,7 @@
 
   <fieldset submitButton="false" autoRun="true">
     <input type="time" token="tr" searchWhenChanged="true">
-      <label>Window (drives EVERY panel — see the provenance panel before quoting a number)</label>
+      <label>Window (historical panels; Seeder RPC uses the last 15 minutes)</label>
       <default><earliest>-24h</earliest><latest>now</latest></default>
     </input>
     <input type="dropdown" token="img" searchWhenChanged="true">
@@ -92,10 +92,9 @@
 
   <!-- Shared base for every row-1 tile: one mstats call.
        The ledger counters are read as their ALL-TIME CUMULATIVE VALUE
-       (`latest`), never as a delta over the window. The boards exist to keep
-       the history of a transfer after the swarm goes idle, and a window delta
-       reads 0 for a finished transfer while making the headline depend on where
-       the operator dragged the time picker. -->
+       (`latest` within the selected bounds), never as a window delta.
+       An idle transfer retains history only when that window contains a
+       sample; changing the picker can select an older value or no sample. -->
   <search id="mbase">
     <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_peer_unattributed_bytes_total","iris_peer_unattributed_bytes","iris_swarm_peers_attributed","iris_swarm_peers_saturated") AND image="$img$" BY metric_name, image, info_hash | eval fam=replace(metric_name,"_total$","")</query>
     <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
@@ -117,7 +116,7 @@
         <search base="mbase">
           <query>| where fam=="iris_origin_sent_bytes" | stats sum(v) AS b | eval MiB=round(b/1048576,1) | fields MiB</query>
         </search>
-        <option name="underLabel">MiB, all-time cumulative — the origin seeder's own aria2 upload counter, banked monotonically by the peer ledger. Not a window delta: it does not move when you drag the time picker. Wire bytes, so re-sends of hashfailed pieces count.</option>
+        <option name="underLabel">MiB, all-time cumulative — the origin seeder's own aria2 upload counter, banked monotonically by the peer ledger. Latest sample within the selected window, not a window delta; a window with no sample is unavailable. Wire bytes, so re-sends of hashfailed pieces count.</option>
         <option name="numberPrecision">0.0</option>
       </single>
       <!-- No series in range renders blank. `stats sum` over zero rows emits no
@@ -211,7 +210,7 @@
         <search base="livebase">
           <query>| stats max(v) AS v | fields v</query>
         </search>
-        <option name="underLabel">liveness — 0 here means the board is blind, not that the swarm is idle</option>
+        <option name="underLabel">current origin sampling, last 15 minutes — 0 means unavailable; historical samples and device captures can still be valid</option>
         <option name="rangeColors">["0xd41f1f","0x118832"]</option>
         <option name="rangeValues">[0.5]</option>
         <option name="useColors">1</option>
@@ -226,7 +225,7 @@
       <title>Delivered to the fleet (measured, device-reported)</title>
       <single>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" | stats sum(got) AS delivered, dc("device.id") AS devices | eval MiB=if(isnull(delivered),null(),round(delivered/1048576,1)) | fields MiB</query>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" | stats sum(got) AS delivered, dc("device.id") AS devices | eval MiB=if(isnull(delivered),null(),round(delivered/1048576,1)) | fields MiB</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>
@@ -266,8 +265,8 @@
         <!-- Q9 = Q8 - Q1: everything the fleet received that the origin did not
              send. DERIVED, not observed. The origin term is the ALL-TIME
              cumulative counter value (mstats latest), never a window delta, so
-             the slice survives an idle swarm and does not move with the time
-             picker.
+             the selected sample can retain idle history; another window may
+             select an older sample or no sample.
              If either input is missing the quantity is null and the pie is not
              drawn at all. The clamp
              at zero applies only to the drawn slice, never to the inputs.
@@ -294,7 +293,7 @@
       </single>
     </panel>
     <panel>
-      <title>Cumulative bytes — durable ledger staircase (survives a finished transfer; filldown means idle reads flat, never blank)</title>
+      <title>Cumulative bytes — durable ledger samples in the selected window</title>
       <chart>
         <search>
           <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_peer_unattributed_bytes_total","iris_peer_unattributed_bytes") AND image="$img$" span=60s BY metric_name, image, info_hash | eval fam=replace(metric_name,"_total$","") | stats sum(v) AS v BY _time, fam | eval MiB=round(v/1048576,2) | timechart span=60s max(MiB) BY fam | filldown | rename iris_origin_sent_bytes AS "Origin sent (measured)", iris_peer_attributed_bytes AS "Traced to a device (measured)", iris_peer_unattributed_bytes AS "Untraced residue (measured)"</query>
@@ -374,7 +373,7 @@
       <title>Origin to peer send rate (measured)</title>
       <chart>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_rate" ("iris.image.id"=$img$ OR $img$="*") | eval bps=tonumber('iris.transfer.peer_send_bps') | timechart span=60s avg(bps) BY "network.peer.address"</query>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_rate" ("iris.image.id"=$img$ OR $img$="*") | eval bps=tonumber('iris.transfer.peer_send_bps') | timechart span=60s avg(bps) BY "network.peer.address"</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="charting.chart">line</option>
@@ -524,7 +523,7 @@
       <title>Origin bytes to this peer (measured, cumulative)</title>
       <table>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | eval dev=if(isnull('iris.device.id') OR 'iris.device.id'=="","unresolved",'iris.device.id') | stats max(sent) AS edge, latest("iris.peer.role") AS role BY "network.peer.address", "iris.torrent.info_hash", dev | stats sum(edge) AS bytes, latest(role) AS role BY "network.peer.address", dev | rename "network.peer.address" AS Peer, dev AS Device, role AS Role | eval "MiB from origin"=round(bytes/1048576,1) | fields Peer, Device, Role, "MiB from origin" | sort - "MiB from origin" | appendpipe [ stats count AS n | where n==0 | eval Peer="— no peer_bytes records in this window (no transfer ran, or the ledger has not emitted yet) —" | fields Peer ]</query>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | eval dev=if(isnull('iris.device.id') OR 'iris.device.id'=="","unresolved",'iris.device.id') | stats max(sent) AS edge, latest("iris.peer.role") AS role BY "network.peer.address", "iris.torrent.info_hash", dev | stats sum(edge) AS bytes, latest(role) AS role BY "network.peer.address", dev | rename "network.peer.address" AS Peer, dev AS Device, role AS Role | eval "MiB from origin"=round(bytes/1048576,1) | fields Peer, Device, Role, "MiB from origin" | sort - "MiB from origin" | appendpipe [ stats count AS n | where n==0 | eval Peer="— no peer_bytes records in this window (no transfer ran, or the ledger has not emitted yet) —" | fields Peer ]</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>
@@ -552,7 +551,7 @@
       <title>Origin bytes to this peer, in range (derived)</title>
       <table>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | eval dev=if(isnull('iris.device.id') OR 'iris.device.id'=="","unresolved",'iris.device.id') | stats max(sent) AS hi, min(sent) AS lo BY "network.peer.address", "iris.torrent.info_hash", dev | eval edge=hi-lo | stats sum(edge) AS bytes BY dev | rename dev AS Device | eval "MiB in range"=round(bytes/1048576,1) | fields Device, "MiB in range" | sort - "MiB in range" | appendpipe [ stats count AS n | where n==0 | eval Device="— no peer_bytes records in this window —" | fields Device ]</query>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | eval dev=if(isnull('iris.device.id') OR 'iris.device.id'=="","unresolved",'iris.device.id') | stats max(sent) AS hi, min(sent) AS lo BY "network.peer.address", "iris.torrent.info_hash", dev | eval edge=hi-lo | stats sum(edge) AS bytes BY dev | rename dev AS Device | eval "MiB in range"=round(bytes/1048576,1) | fields Device, "MiB in range" | sort - "MiB in range" | appendpipe [ stats count AS n | where n==0 | eval Device="— no peer_bytes records in this window —" | fields Device ]</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>
@@ -588,13 +587,109 @@
     </panel>
   </row>
 
+  <!-- ===================== ROW 4b — PEER-TO-PEER EVIDENCE (measured on the receiving device) ===================== -->
+  <!-- The three panels above this row are ORIGIN-side: they see what the
+       seeder sent and are structurally blind to device-to-device traffic.
+       This row is the other half, and the only direct evidence on the board
+       that peers served each other. iris.device.peer_transfer_record is written
+       by the RECEIVING device from aria2's per-connection counters at
+       completion, one row per (transfer, peer), and the server classifies each
+       peer origin | device | unknown before export. Exact, not sampled — which
+       is also why it must never be summed together with iris.swarm.peer_bytes
+       (the origin-side sampled estimate of the same bytes): one transfer would
+       be counted twice, once exactly and once badly.
+       A MISSING ROW IS A CAPTURE GAP, NOT ZERO TRAFFIC. A peer that
+       disconnected before the completion snapshot is erased from aria2's peer
+       storage and leaves no row at all, and a device that filed no peer
+       transfer records contributes nothing here. Read every total in this row
+       as a floor, and read iris.transfer_record.capture_complete=false as
+       "this block is short", not as "this row is wrong" — the row itself is
+       exact either way.
+       Records dedupe on event.id: a report re-exported after a server restart
+       repeats it, and the sender class is pinned on first export, so the
+       copies are identical. Fresh report pulls have NEW event ids but can
+       repeat the same capture, so retain the largest cumulative byte count
+       per (receiver, image, transfer, peer address) before sums or display.
+       Distinct unknown addresses and distinct transfers stay separate. Keep
+       the selected row's own capture time and completeness flag.
+       Span is 1h, not the 60s/300s used by the sampled series above: these are
+       one-shot completion events, not a polled series, and a 60s bucket draws
+       a comb of single columns instead of a shape. -->
+  <row>
+    <panel>
+      <title>Bytes received, by source</title>
+      <description>Cumulative bytes each device reported receiving, grouped by the selected capture's hour and stacked by who sent them: origin (the seeder), peer device (another IRIS device), unknown (a peer the server could not name — a normal outcome, not an error). A visible "peer device" band is the direct evidence that peer-to-peer distribution carried load. Report pulls do not add bytes. These capture totals are not an hourly traffic rate, and an empty bucket is not proof of zero traffic.</description>
+      <chart>
+        <search>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval source=case('iris.peer.attribution'=="origin","origin",'iris.peer.attribution'=="device","peer device",1==1,"unknown") | eval MiB=received_bytes/1048576 | timechart span=1h sum(MiB) BY source</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">MiB received, by capture hour</option>
+        <option name="charting.chart.nullValueMode">zero</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.drilldown">none</option>
+        <!-- The record is device-side, so its iris.image.id is the CATALOG id
+             (.SPA.bin/.bin stripped) while the $img$ token carries aria2
+             basenames from the metric index — hence the same replace() the
+             device-report panels use. Nothing joins the two forms of the id.
+             tonumber() is mandatory: iris.transfer.session_bytes_from_peer is
+             an int64 and rides the OTLP/JSON wire as a STRING, so an
+             un-coerced sum is silently wrong rather than empty.
+             The case() default is "unknown": a BY on an absent field drops the
+             event outright, and a dropped row would quietly shrink the very
+             total this panel exists to show. -->
+      </chart>
+    </panel>
+    <panel>
+      <title>Share of bytes from peer devices</title>
+      <single>
+        <search>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval b=received_bytes | stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes, sum(b) AS all_bytes | eval pct=if(isnull(all_bytes) OR all_bytes&lt;=0,null(),round(100*coalesce(peer_bytes,0)/all_bytes,1)) | fields pct</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit">%</option>
+        <option name="underLabel">bytes from peer devices ÷ all bytes devices reported receiving, in this window. MEASURED on the receiving devices, unlike "Peer share of delivery (derived, %)" above, which subtracts two totals — the two will not match, and when they disagree this one is the observation. The denominator carries every classified source, origin and unknown included, so an unnamed peer never inflates the share.</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+      <!-- Reads "no data", never 0%, when nothing landed in the window: a 0%
+           tile would assert that peers served nothing, which is exactly what a
+           capture gap looks like too. A measured zero (records present, none of
+           them from a peer device) does print 0.0%. -->
+    </panel>
+    <panel>
+      <title>Peer-to-peer transfers (measured, device-reported)</title>
+      <table>
+        <search>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | where 'iris.peer.attribution'=="device" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval "MiB from this peer"=round(received_bytes/1048576,1) | eval Image=coalesce('iris.image.name','iris.image.id') | rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver, "iris.transfer_record.capture_complete" AS "Capture complete" | table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete" | sort - _time | head 100 | appendpipe [ stats count AS n | where n==0 | eval Sender="— no device-to-device peer transfer records in this window (none captured, which is not the same as none happened) —" | fields Sender ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">25</option>
+        <!-- One row per (transfer, peer) the server named as a device.
+             Sender is iris.peer.device_id — the sending device's id on a device
+             row, the literal "origin" on the seeder's row (filtered out here),
+             absent on an unknown row. Receiver is device.id, the device that
+             measured the bytes.
+             _time is the hook's own captured_at, the instant the counters were
+             read on the device, not the server's ingest time.
+             Image falls back to iris.image.id for an image that has since left
+             the catalog, so a row is never printed nameless.
+             Newest first, 100 rows: widen the window rather than the head to
+             see further back. -->
+      </table>
+    </panel>
+  </row>
+
   <!-- ===================== ROW 5 — the per-device split that kills the even-split estimate ===================== -->
   <row>
     <panel>
       <title>Peer share of delivery, per device (derived, %)</title>
       <table>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") "iris.device.id"=* | eval sent=tonumber('iris.transfer.peer_sent_bytes') | stats max(sent) AS edge BY "network.peer.address", "iris.torrent.info_hash", "iris.device.id" | stats sum(edge) AS origin_to_dev BY "iris.device.id" | rename "iris.device.id" AS "device.id" | append [ search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" ] | stats max(origin_to_dev) AS origin_to_dev, max(got) AS got BY "device.id" | eval pct=if(isnull(origin_to_dev) OR isnull(got) OR got&lt;=0, null(), round(100*(got-origin_to_dev)/got,1)) | eval "MiB from origin (measured)"=if(isnull(origin_to_dev),null(),round(origin_to_dev/1048576,1)), "MiB delivered (measured)"=if(isnull(got),null(),round(got/1048576,1)), "MiB from peers (derived)"=if(isnull(origin_to_dev) OR isnull(got),null(),round((got-origin_to_dev)/1048576,1)) | rename "device.id" AS Device, pct AS "Peer share % (derived)" | fields Device, "MiB from origin (measured)", "MiB delivered (measured)", "MiB from peers (derived)", "Peer share % (derived)" | sort - "Peer share % (derived)" | appendpipe [ stats count AS n | where n==0 | eval Device="— no peer_bytes edges and no device reports in this window —" | fields Device ]</query>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") "iris.device.id"=* | eval sent=tonumber('iris.transfer.peer_sent_bytes') | stats max(sent) AS edge BY "network.peer.address", "iris.torrent.info_hash", "iris.device.id" | stats sum(edge) AS origin_to_dev BY "iris.device.id" | rename "iris.device.id" AS "device.id" | append [ search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" ] | stats max(origin_to_dev) AS origin_to_dev, max(got) AS got BY "device.id" | eval pct=if(isnull(origin_to_dev) OR isnull(got) OR got&lt;=0, null(), round(100*(got-origin_to_dev)/got,1)) | eval "MiB from origin (measured)"=if(isnull(origin_to_dev),null(),round(origin_to_dev/1048576,1)), "MiB delivered (measured)"=if(isnull(got),null(),round(got/1048576,1)), "MiB from peers (derived)"=if(isnull(origin_to_dev) OR isnull(got),null(),round((got-origin_to_dev)/1048576,1)) | rename "device.id" AS Device, pct AS "Peer share % (derived)" | fields Device, "MiB from origin (measured)", "MiB delivered (measured)", "MiB from peers (derived)", "Peer share % (derived)" | sort - "Peer share % (derived)" | appendpipe [ stats count AS n | where n==0 | eval Device="— no peer_bytes edges and no device reports in this window —" | fields Device ]</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>
@@ -663,16 +758,20 @@
           board rather than being folded silently into someone's total.
           <b>Traced + untraced = the origin's own upload counter.</b></p>
 
-          <p><b>Derived, and labelled as such.</b> Every "from peers" figure on
-          this board is <i>device-reported delivered bytes minus the measured
+          <p><b>Derived, and labelled as such.</b> Panels labelled "derived" use <i>device-reported delivered bytes minus the measured
           origin contribution</i> — arithmetic on two measured quantities, not
-          an observation of peer-to-peer traffic. IRIS cannot see device-to-device
-          transfers directly; the origin is structurally blind to them. Treat it
-          as a floor.</p>
+          an observation of peer-to-peer traffic. The origin cannot observe device-to-device transfers. The separate measured peer row uses receiving devices’
+          <code>iris.device.peer_transfer_record</code> captures, retaining each
+          transfer/peer’s maximum cumulative bytes. These captures provide direct
+          evidence; missing peers and <code>capture_complete=false</code> mean
+          incomplete coverage. Origin and unknown bytes remain in the measured
+          share denominator. Do not add origin ledger values to these captures.</p>
 
-          <p><b>Window sensitivity.</b> The ledger tiles do <i>not</i> depend on
-          the window: they report the all-time cumulative counter value, so a
-          finished transfer keeps its history however the time picker is dragged.
+          <p><b>Window sensitivity.</b> The ledger tiles select the latest cumulative counter sample <i>within the chosen window</i>.
+          Values include bytes from before that window; they are not window deltas.
+          Changing the bounds can select an older value or no sample at all.
+          <i>Seeder RPC</i> alone uses the fixed last 15 minutes ending now,
+          independent of the picker.
           The event-side panels still depend on which reports land in-window, and
           a device's terminal report arrives at completion, so a window that
           clips the end of a transfer understates the peer share. For a rollout,
@@ -685,9 +784,10 @@
           refusing peers, which is the only way to tell refused peers apart from
           missed short-lived connections inside the residue.</p>
 
-          <p><b>Idle is not broken.</b> Counters keep their last value, so a
-          finished transfer stays on screen. If <i>Seeder RPC</i> reads 0, the
-          board is blind and every other panel on it is stale.</p>
+          <p><b>Idle is not broken.</b> Ledger counters retain history when sampled in the selected window.
+          No metric sample or peer capture means unavailable, not zero traffic.
+          If <i>Seeder RPC</i> reads 0, current origin sampling is unavailable;
+          historical samples and independent device captures can still be valid.</p>
         </div>
       </html>
     </panel>

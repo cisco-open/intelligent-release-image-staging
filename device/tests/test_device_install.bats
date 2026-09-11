@@ -159,6 +159,34 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
+@test "a supplied staging capability is validated and binds the exact fail-closed copy order" {
+  cap=0123456789abcdef0123456789abcdef
+  run env IRIS_STAGING_CAPABILITY="$cap" bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  mapfile -t copies < <(printf '%s\n' "$output" | grep '^copy https://')
+  [ "${#copies[@]}" -eq 8 ] || return 1
+  [[ "${copies[0]}" == *"/bootstrap.sh flash:/guest-share/bootstrap.sh" ]] || return 1
+  [[ "${copies[1]}" == *"/staging/iris-agent-203.0.113.3-$cap.conf flash:/guest-share/iris-agent.conf" ]] || return 1
+  [[ "${copies[2]}" == *"/staging/rpc-secret-$cap flash:/guest-share/rpc-secret" ]] || return 1
+  [[ "${copies[3]}" == *"/iris-catalog.pem flash:/guest-share/iris-catalog.pem" ]] || return 1
+  [[ "${copies[4]}" == *"/iris-signers.pem flash:/guest-share/iris-signers.allowed_signers" ]] || return 1
+  [[ "${copies[5]}" == *"/staging/iris-instructions-203.0.113.3-$cap.envelope flash:/guest-share/iris-instructions.bootstrap" ]] || return 1
+  [[ "${copies[6]}" == *"/staging/bundle-sha256-$cap flash:/guest-share/bundle.tgz.sha256" ]] || return 1
+  [[ "${copies[7]}" == *"/iris-agent.tgz flash:/guest-share/bundle.tgz" ]]
+}
+
+@test "an invalid supplied staging capability is refused without rendering secrets" {
+  run env IRIS_STAGING_CAPABILITY=ABCDEF0123456789abcdef0123456789 \
+    bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"ERROR: IRIS_STAGING_CAPABILITY must be 32 lowercase hexadecimal characters"* ]] || return 1
+  [[ "$output" != *"catalog_token = deadbeef"* ]]
+}
+
+@test "installer source never recursively removes the live Guest Shell stage" {
+  ! grep -Eq 'delete /force /recursive .*IOS_STAGE|rm -rf .*STAGE' "$INSTALL"
+}
+
 # --- TLS trust: trustpoint push + verified-https copies + pinned cafile (#2) ---
 # Each assertion is its OWN @test: in bats, only the LAST statement in a @test body
 # sets the exit code, so consecutive [[ ]] lines hide earlier failures. One assertion
@@ -321,6 +349,20 @@ case "$cmds" in
     echo "__IRIS_PRECHECK_CLOCK__"
     echo "${FAKE_CLOCK_LINE:-14:23:07.512 UTC Thu Aug 20 2026}"
     ;;
+  *"more "*"guest-share/iris/iris-agent.conf"*)
+    [ -n "${FAKE_LKG_KEY:-}" ] && echo "lkg_key = $FAKE_LKG_KEY"
+    ;;
+  *"__IRIS_STAGE_WRITABLE__"*)
+    # IOS echoes submitted commands. Emit that echo independently from the
+    # success line so a test can prove the installer does not trust the echo.
+    printf '%s\n' "$cmds"
+    [ "${FAKE_STAGE_WRITABLE:-yes}" != yes ] \
+      || echo "__IRIS_STAGE_WRITABLE__"
+    ;;
+  *"show app-hosting list"*)
+    [ "${FAKE_EXISTING_GUESTSHELL:-no}" != yes ] \
+      || echo "guestshell RUNNING"
+    ;;
   *)
     echo "bytes free stub"
     ;;
@@ -335,9 +377,18 @@ STUB
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh" 2>/dev/null || true
 
   ARTDIR="$BATS_TEST_TMPDIR/artifacts"
-  mkdir -p "$ARTDIR"
+  mkdir -p "$ARTDIR/staging"
   CRTFILE="$BATS_TEST_TMPDIR/crt.pem"
   echo "-----BEGIN CERTIFICATE-----fake-----END CERTIFICATE-----" > "$CRTFILE"
+  TEST_CAP=0123456789abcdef0123456789abcdef
+  export IRIS_STAGING_CAPABILITY="$TEST_CAP"
+  printf 'bundle fixture\n' > "$ARTDIR/iris-agent.tgz"
+  sha256sum "$ARTDIR/iris-agent.tgz" | awk '{print $1}' \
+    > "$ARTDIR/iris-agent.tgz.sha256"
+  printf 'iris-server cert-authority ssh-ed25519 fixture\n' \
+    > "$ARTDIR/iris-signers.pem"
+  printf 'sealed instruction fixture\n' \
+    > "$ARTDIR/staging/iris-instructions-203.0.113.3-$TEST_CAP.envelope"
 }
 
 # Portable stand-in for GNU `timeout` (not present on macOS/BSD by default):
@@ -391,6 +442,61 @@ run_with_timeout() {
   [[ "$output" != *"set HOST_USER"* ]]
   [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 1 ]
   [ "$(find "$ARTDIR/staging" -name 'rpc-secret-*' | wc -l)" -eq 1 ]
+  digest="$ARTDIR/staging/bundle-sha256-$TEST_CAP"
+  [ "$(wc -c < "$digest")" -eq 65 ]
+  cmp -s "$digest" "$ARTDIR/iris-agent.tgz.sha256"
+}
+
+@test "local staging refuses a missing bundle sidecar before device configuration" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+  rm -f "$ARTDIR/iris-agent.tgz.sha256"
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=203.0.113.3 VLAN=666 SVI_IP=203.0.113.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=203.0.113.126 CATALOG_URL=https://192.0.2.10:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=203.0.113.3 STAGE_HOST=192.0.2.10 \
+    IRIS_CRT_FILE="$CRTFILE" IRIS_STAGING_CAPABILITY="$TEST_CAP" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ] || return 1
+  [ "$status" -ne 124 ] || return 1
+  [[ "$output" == *"ERROR: bundle digest evidence is missing or invalid"* ]] || return 1
+  [[ "$output" != *"[3/6] configure IRIS"* ]]
+}
+
+@test "re-onboarding preserves a valid device lkg_key in the fresh configuration" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+  key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=203.0.113.3 VLAN=666 SVI_IP=203.0.113.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=203.0.113.126 CATALOG_URL=https://192.0.2.10:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=203.0.113.3 STAGE_HOST=192.0.2.10 \
+    IRIS_CRT_FILE="$CRTFILE" IRIS_STAGING_CAPABILITY="$TEST_CAP" \
+    FAKE_LKG_KEY="$key" bash "$STUBDIR/device/device-install.sh"
+
+  conf="$ARTDIR/staging/iris-agent-203.0.113.3-$TEST_CAP.conf"
+  grep -qx "lkg_key = $key" "$conf"
+}
+
+@test "an echoed writable-stage command is not proof that its test succeeded" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=203.0.113.3 VLAN=666 SVI_IP=203.0.113.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=203.0.113.126 CATALOG_URL=https://192.0.2.10:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=203.0.113.3 STAGE_HOST=192.0.2.10 \
+    IRIS_CRT_FILE="$CRTFILE" IRIS_STAGING_CAPABILITY="$TEST_CAP" \
+    FAKE_EXISTING_GUESTSHELL=yes FAKE_STAGE_WRITABLE=no \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]
+  [[ "$output" == *"guest-share/iris is not writable by Guest Shell"* ]]
+  [[ "$output" != *"[3/6] configure IRIS"* ]]
 }
 
 @test "without IRIS_STAGE_LOCAL and a non-local STAGE_HOST, the remote ssh path still demands HOST_USER" {
@@ -649,6 +755,7 @@ EOF
 cmds="\$(cat)"
 printf '%s\n' "\$cmds" >> '$BATS_TEST_TMPDIR/device-commands'
 case "\$cmds" in
+  *'__IRIS_STAGE_WRITABLE__'*) echo '__IRIS_STAGE_WRITABLE__' ;;
   *'__IRIS_PRECHECK_'*)
     # [1/6]+[pre] ride ONE combined session now (marker __IRIS_PRECHECK_) --
     # answer all three sections so the real run sails past the PREREQ gate.
@@ -703,6 +810,7 @@ case "\$cmds" in
   *"__IRIS_PRECHECK_"*) printf 'PRECHECK\n' >> '$CALLLOG' ;;
 esac
 case "\$cmds" in
+  *"__IRIS_STAGE_WRITABLE__"*) echo "__IRIS_STAGE_WRITABLE__" ;;
   *"__IRIS_PRECHECK_"*)
     echo "__IRIS_PRECHECK_FLASH__"
     echo "bytes free stub"

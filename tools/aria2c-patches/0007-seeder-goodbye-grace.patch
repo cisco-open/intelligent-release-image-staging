@@ -1,0 +1,177 @@
+Keep a seeder<->seeder connection for a 5 s grace period after both sides
+are complete, instead of dropping it at once.
+
+Everything above the first "diff --git" line is commentary; git apply skips
+it, so this file still applies exactly like the six before it.
+
+WHY (the peer-transfer capture race)
+
+  IRIS attributes staged bytes per peer by reading aria2's own session
+  counters (getPeers "downloaded"/"uploaded") from the
+  --on-bt-download-complete hook, device/agent/peer-transfer-hook.sh. The
+  hook is exec'd from src/DefaultPieceStorage.cc:501-506 the instant the
+  last piece lands, and its aria2.getPeers call reaches aria2's single
+  threaded RPC loop only after a fork+exec+curl round trip.
+
+  Upstream drops every seeder peer before that call can be served.
+  src/DefaultBtInteractive.cc:510-513 ("If both of us are seeders, drop
+  connection." -> throw DL_ABORT_EX(MSG_GOOD_BYE_SEEDER)) fires on the very
+  next event-loop iteration after completion, and
+  src/DefaultPeerStorage.cc:339-341 (returnPeer: usedPeers_.erase /
+  onErasingPeer) removes the peer from the table getPeers enumerates
+  (src/RpcMethodImpl.cc:1078). On a single-vCPU Catalyst 8000V IOx app the
+  hook's round trip measured 21-50 ms idle, and every download there
+  produced an empty peer list and zero attributed bytes, while faster
+  devices sometimes won the race (board #68). A device fed only by seeders
+  -- the first device of every wave, fed by the origin -- is the worst case.
+
+  The far end drops too, and sooner. checkHave() advertises every completed
+  piece to every peer (src/DefaultPieceStorage.cc:724-742 has no per-CUID
+  filter), so the finishing side's HAVE or BITFIELD for its last piece goes
+  out in the same iteration, and the peer that receives it throws the same
+  MSG_GOOD_BYE_SEEDER at src/BtHaveMessage.cc:62, src/BtBitfieldMessage.cc:85
+  or src/BtHaveAllMessage.cc:68 the moment its view of us becomes complete.
+  Measured on loopback with both ends running a build that patched only
+  DefaultBtInteractive: the seeder was still listed at the completion
+  instant and gone 10 ms later, closed from its end, and the hook still
+  captured an empty list. The origin runs this same binary, so the grace
+  has to hold on both ends of the connection.
+
+WHAT
+
+  DefaultBtInteractive gains seedersSinceTimer_: zero until the first
+  checkActiveInteraction() iteration that observes both sides complete, and
+  the Good Bye Seeder drop fires only once that state has held for
+  SEEDER_GOODBYE_GRACE (5 s). The timer returns to zero if the condition
+  stops holding. The existing 30 s mutual-disinterest and 60 s inactivity
+  drops just above it are untouched and still apply during the grace.
+
+  The three message handlers no longer throw on the message that completes
+  the peer's copy; they leave the drop to checkActiveInteraction(), which
+  runs on every interaction iteration for the same connection, so the same
+  condition now ends the connection after the same grace from either side.
+
+  Peers that never announce a complete copy (the loopback peer-cap fixtures
+  send only a handshake) are unaffected. The visible cost is that a finished
+  torrent holds each seeder slot for up to 5 s longer before freeing it,
+  and a seeder that connects to an already finished torrent is turned away
+  after 5 s instead of at its BITFIELD.
+
+diff --git a/src/BtBitfieldMessage.cc b/src/BtBitfieldMessage.cc
+index 239239afd..57cce257f 100644
+--- a/src/BtBitfieldMessage.cc
++++ b/src/BtBitfieldMessage.cc
+@@ -82,9 +82,9 @@ void BtBitfieldMessage::doReceivedAction()
+   getPieceStorage()->updatePieceStats(bitfield_.data(), bitfield_.size(),
+                                       getPeer()->getBitfield());
+   getPeer()->setBitfield(bitfield_.data(), bitfield_.size());
+-  if (getPeer()->isSeeder() && getPieceStorage()->downloadFinished()) {
+-    throw DL_ABORT_EX(MSG_GOOD_BYE_SEEDER);
+-  }
++  // A seeder<->seeder connection is dropped by
++  // DefaultBtInteractive::checkActiveInteraction() after its grace
++  // period, not here on the message that completes the peer's copy.
+ }
+ 
+ std::vector<unsigned char> BtBitfieldMessage::createMessage()
+diff --git a/src/BtHaveAllMessage.cc b/src/BtHaveAllMessage.cc
+index 35e478073..48b1d9b9a 100644
+--- a/src/BtHaveAllMessage.cc
++++ b/src/BtHaveAllMessage.cc
+@@ -65,9 +65,9 @@ void BtHaveAllMessage::doReceivedAction()
+   getPeer()->setAllBitfield();
+   getPieceStorage()->addPieceStats(getPeer()->getBitfield(),
+                                    getPeer()->getBitfieldLength());
+-  if (getPeer()->isSeeder() && getPieceStorage()->downloadFinished()) {
+-    throw DL_ABORT_EX(MSG_GOOD_BYE_SEEDER);
+-  }
++  // A seeder<->seeder connection is dropped by
++  // DefaultBtInteractive::checkActiveInteraction() after its grace
++  // period, not here on the message that completes the peer's copy.
+ }
+ 
+ } // namespace aria2
+diff --git a/src/BtHaveMessage.cc b/src/BtHaveMessage.cc
+index 246526f85..9f18c79b4 100644
+--- a/src/BtHaveMessage.cc
++++ b/src/BtHaveMessage.cc
+@@ -59,9 +59,9 @@ void BtHaveMessage::doReceivedAction()
+   if (!getPeer()->hasPiece(index)) {
+     getPeer()->updateBitfield(index, 1);
+     getPieceStorage()->addPieceStats(index);
+-    if (getPeer()->isSeeder() && getPieceStorage()->downloadFinished()) {
+-      throw DL_ABORT_EX(MSG_GOOD_BYE_SEEDER);
+-    }
++    // A seeder<->seeder connection is dropped by
++    // DefaultBtInteractive::checkActiveInteraction() after its grace
++    // period, not here on the message that completes the peer's copy.
+   }
+ }
+ 
+diff --git a/src/DefaultBtInteractive.cc b/src/DefaultBtInteractive.cc
+index 4edffd601..fcbbbcbb4 100644
+--- a/src/DefaultBtInteractive.cc
++++ b/src/DefaultBtInteractive.cc
+@@ -98,6 +98,7 @@ DefaultBtInteractive::DefaultBtInteractive(
+       inactiveTimer_(global::wallclock()),
+       pexTimer_(global::wallclock()),
+       perSecTimer_(global::wallclock()),
++      seedersSinceTimer_(Timer::zero()),
+       keepAliveInterval_(120),
+       utPexEnabled_(false),
+       dhtEnabled_(false),
+@@ -462,6 +463,16 @@ void DefaultBtInteractive::sendPendingMessage() { dispatcher_->sendMessages(); }
+ 
+ namespace {
+ constexpr auto FLOODING_CHECK_INTERVAL = 5_s;
++// How long a seeder<->seeder connection is kept once both sides are known
++// to be complete, before "Good Bye Seeder". Upstream drops it at once,
++// here and in the HAVE / HAVE_ALL / BITFIELD handlers that now defer to
++// this check. IRIS reads the per-peer session counters through
++// aria2.getPeers from the --on-bt-download-complete hook, which is exec'd
++// when the last piece lands and reaches the RPC loop only after a
++// fork+exec+curl round trip; a peer erased in the same event-loop
++// iteration -- on either end of the connection -- is missing from that
++// answer. Five seconds covers a slow single-vCPU device many times over.
++constexpr auto SEEDER_GOODBYE_GRACE = 5_s;
+ } // namespace
+ 
+ void DefaultBtInteractive::detectMessageFlooding()
+@@ -507,9 +518,20 @@ void DefaultBtInteractive::checkActiveInteraction()
+           fmt(EX_DROP_INACTIVE_CONNECTION, static_cast<long int>(interval)));
+     }
+   }
+-  // If both of us are seeders, drop connection.
++  // If both of us are seeders, drop connection -- after a grace period
++  // measured from the first iteration that saw both sides complete. The
++  // inactivity drops above are unchanged and still apply meanwhile.
+   if (peer_->isSeeder() && pieceStorage_->downloadFinished()) {
+-    throw DL_ABORT_EX(MSG_GOOD_BYE_SEEDER);
++    if (seedersSinceTimer_.isZero()) {
++      seedersSinceTimer_ = global::wallclock();
++    }
++    else if (seedersSinceTimer_.difference(global::wallclock()) >=
++             SEEDER_GOODBYE_GRACE) {
++      throw DL_ABORT_EX(MSG_GOOD_BYE_SEEDER);
++    }
++  }
++  else {
++    seedersSinceTimer_ = Timer::zero();
+   }
+ }
+ 
+diff --git a/src/DefaultBtInteractive.h b/src/DefaultBtInteractive.h
+index 11e48729b..4e104e349 100644
+--- a/src/DefaultBtInteractive.h
++++ b/src/DefaultBtInteractive.h
+@@ -134,6 +134,10 @@ private:
+   Timer inactiveTimer_;
+   Timer pexTimer_;
+   Timer perSecTimer_;
++  // When both sides were first observed to be seeders; zero until then.
++  // A seeder<->seeder connection is dropped only once it has been in
++  // that state for SEEDER_GOODBYE_GRACE (see checkActiveInteraction()).
++  Timer seedersSinceTimer_;
+   std::chrono::seconds keepAliveInterval_;
+   bool utPexEnabled_;
+   bool dhtEnabled_;

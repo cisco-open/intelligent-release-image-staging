@@ -5,9 +5,11 @@
 # Run the documented test suites (CLAUDE.md / TESTING.md "Tests") on every
 # pull request and on pushes to main. Everything here is what a fresh
 # ubuntu runner has plus `pip install -r requirements-dev.txt` and
-# `apt-get install bats mktorrent`; no docker build, no network access from
-# the tests. The Python dependency list lives in requirements-dev.txt so a
-# developer and this workflow install exactly the same thing.
+# `apt-get install age bats mktorrent`; no docker build, no network access
+# from the tests. The `age` package carries `age-keygen`, which the real
+# (unstubbed) instruction-custody tests run; without it they skip. The Python
+# dependency list lives in requirements-dev.txt so a developer and this
+# workflow install exactly the same thing.
 #
 # Known host-dependent cases (tracked on the scrubber board, not fixed here):
 #   #33  device/iox/tests/test_stage_iox_package.bats "fails clearly when no
@@ -49,7 +51,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bats mktorrent
+          sudo apt-get install -y --no-install-recommends age bats mktorrent
 
       - name: pytest
         env:

@@ -98,7 +98,7 @@
   // picking. Filter state lives in the DOM controls, not in the row data,
   // so the periodic re-render never clears it.
   //
-  // Issue #112: the six column filters and the status filter now have
+  // Issue #112: the nine column filters now have
   // SERVER-SIDE parity (gui_server.py's _row_matches_extra_filters mirrors
   // deviceMatchesFilters below condition-for-condition) -- a prerequisite
   // for paging the table, because a page filtered only on what the server
@@ -138,22 +138,135 @@
       cred: val('dev-filter-cred'),
       telemetry: val('dev-filter-telemetry'),
       peer: val('dev-filter-peer'),
+      role: val('dev-filter-role'),
+      modelFamily: val('dev-filter-model-family'),
+      osFamily: val('dev-filter-os-family'),
       status: val('dev-filter-status')
     };
   }
   // The SAME filter state as a GET /api/v1/devices query string (q/
-  // management_type/platform/cred/telemetry/peer/status) -- the wire names
+  // management_type/platform/cred/telemetry/peer/role/model_family/
+  // os_family/status) -- the wire names
   // _device_filter_params (gui_server.py) reads. Kept as one function so a
   // filter added to deviceFilterState() above can never be forgotten here.
   function deviceFilterQuery(f) {
     var names = { q: 'q', managementType: 'management_type', platform: 'platform',
-                  cred: 'cred', telemetry: 'telemetry', peer: 'peer', status: 'status' };
+                  cred: 'cred', telemetry: 'telemetry', peer: 'peer',
+                  role: 'role', modelFamily: 'model_family',
+                  osFamily: 'os_family', status: 'status' };
     var parts = [];
     Object.keys(names).forEach(function (key) {
       if (f[key]) parts.push(names[key] + '=' + encodeURIComponent(f[key]));
     });
     return parts.join('&');
   }
+
+  // ---- schedule projections (Phase 2) ----
+  // Pure string/document builders over the schedule and occurrence documents
+  // the API returns. They are deliberately free of DOM and fetch so the
+  // console's account of a window -- what it targets, when it next runs, how
+  // much of the preceding wave landed -- can be executed and pinned by tests
+  // rather than eyeballed.
+  function scheduleTargetSummary(row) {
+    var target = (row && row.target) || {};
+    var filters = target.filters || {};
+    var parts = Object.keys(filters).sort().filter(function (key) {
+      return filters[key] !== '' && filters[key] != null;
+    }).map(function (key) { return key + '=' + filters[key]; });
+    var named = (target.device_ids || []).length;
+    if (named) parts.push(named + ' named device(s)');
+    return (parts.length ? parts.join(', ') : 'whole fleet') + ' · ' +
+      (target.bind === 'early'
+        ? 'bound at creation' : 'resolved at each run');
+  }
+
+  // The slot the SERVER computed (see _schedule_views): local weekly time
+  // across a DST boundary is the runner's arithmetic, never the browser's.
+  function scheduleNextFireText(row) {
+    var slot = row && row.next_fire;
+    // A paused or completed schedule reports its own state; anything else
+    // with no slot has simply run out of them. An unreadable row says the
+    // latter rather than rendering "undefined" at an operator.
+    if (!slot) {
+      var state = row && row.state;
+      return state && state !== 'pending' ? state : 'no further run';
+    }
+    return slot.local_time + ' ' + slot.tz + ' (' + slot.status + ')';
+  }
+
+  // What the target actually resolved to at fire time, against the preview
+  // the operator approved. A late-bound target is meant to move; this is how
+  // much it moved.
+  function scheduleDeltaText(occurrence) {
+    var delta = occurrence && occurrence.delta;
+    if (!delta) return '';
+    return '+' + delta.added + ' / \u2212' + delta.removed + ' since preview';
+  }
+
+  // Missing is reported apart from errored on purpose: a dark device is not
+  // a failed one, and an operator deciding whether to wait needs to see which
+  // of the two is holding the wave.
+  function scheduleWaveText(occurrence) {
+    var wave = occurrence && occurrence.annotations &&
+      occurrence.annotations.wave;
+    if (!wave) return '';
+    return 'wave ' + wave.gate + ' · ' + wave.staged + ' staged / ' +
+      wave.errored + ' errored / ' + wave.missing + ' missing of ' +
+      wave.total;
+  }
+
+  function scheduleCreatorText(row) {
+    return row.created_by + (row.creator_exists ? ''
+      : ' (actor no longer exists)');
+  }
+
+  // The Devices filter IS the schedule's target: it is re-resolved at each
+  // run, which is the reason to schedule against it rather than against the
+  // rows that happen to be checked now. Naming devices instead is the
+  // explicit second choice, and it says so in the modal.
+  function scheduleTargetFromFilters(state, ids, scope) {
+    if (scope === 'selection') {
+      return { filters: {}, device_ids: (ids || []).slice(), bind: 'late' };
+    }
+    var names = { q: 'q', managementType: 'management_type',
+                  platform: 'platform', cred: 'cred', telemetry: 'telemetry',
+                  peer: 'peer', role: 'role', modelFamily: 'model_family',
+                  osFamily: 'os_family', status: 'status' };
+    var filters = {};
+    Object.keys(names).forEach(function (key) {
+      if (state[key]) filters[names[key]] = state[key];
+    });
+    return { filters: filters, device_ids: [], bind: 'late' };
+  }
+
+  function scheduleDefinitionFromForm(values) {
+    var when = values.recurring
+      ? { kind: 'recurring', weekday: values.weekday, hour: values.hour,
+          minute: values.minute, tz: values.tz,
+          window_seconds: values.windowSeconds }
+      : { kind: 'once', at: values.at, tz: values.tz,
+          window_seconds: values.windowSeconds };
+    var payload = values.kind === 'assign'
+      ? { image_ids: (values.imageIds || []).slice(), mode: values.mode }
+      : { telemetry: !!values.telemetry,
+          telemetry_stream: !!values.telemetryStream,
+          mode: 'new-only', max_devices: values.maxDevices };
+    return { id: values.id, kind: values.kind, target: values.target,
+             payload: payload, when: when };
+  }
+
+  // A schedule already aimed at this device, shown on the row itself so a
+  // manual assignment is not made in ignorance of one. It reads the stored
+  // preview: a late-bound target is re-resolved at fire time, so this is the
+  // last approved answer, not a promise about the next one.
+  function pendingScheduleText(deviceId, rows) {
+    var names = (rows || []).filter(function (row) {
+      return row.state === 'pending' &&
+        ((row.preview && row.preview.device_ids) || []).indexOf(deviceId) > -1;
+    }).map(function (row) { return row.id; });
+    return names.length ? 'Scheduled: ' + names.join(', ') : '';
+  }
+  // ---- end schedule projections ----
 
   // ONE derivation of the Status cell, read by the row renderer AND by the
   // filter. It used to be written twice, and the filter's copy knew only three
@@ -208,6 +321,16 @@
   };
   function agentInstallLabel(platform) {
     return AGENT_INSTALL_LABELS[platform] || platform || '—';
+  }
+  // Why a row cannot take an agent install: the same rules gui_fleet
+  // enforces, said in the operator's terms rather than as a 400 after the fact.
+  function installRefusal(d, platform) {
+    var mt = d.management_type || '';
+    if (mt === 'router-routed' || mt === 'router-nat') return 'Router management types run Guest Shell on the router (platform router) or an IOx app, both through the IRIS VirtualPortGroup.';
+    if (mt === 'xr-host') return 'XR host runs the XR appmgr container only.';
+    if (platform === 'router') return 'Platform router needs management type router-routed or router-nat.';
+    if (platform === 'xr-appmgr') return 'The XR appmgr container needs management type xr-host.';
+    return 'Model ' + (d.model || d.heartbeat_model || '') + ' cannot run ' + agentInstallLabel(platform) + '.';
   }
   // Whether *d*'s device has staged image *iid*: membership in the
   // heartbeat's staged_image_ids when the agent reports it directly (Task
@@ -579,7 +702,7 @@
     // remove: the option itself stays exactly as it is).
     if (f.managementType && (d.management_type === 'legacy_routed' ? 'legacy' : (d.management_type || 'legacy')) !== f.managementType) return false;
     if (f.platform) {
-      var plat = d.platform || '';
+      var plat = d.platform_resolved || d.platform || '';
       if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
     }
     if (f.cred) {
@@ -599,6 +722,12 @@
       var q = peerPolicyAssigned(d.device_id) ? 'quarantined' : 'not-quarantined';
       if (q !== f.peer) return false;
     }
+    if (f.role) {
+      var role = d.role || '';
+      if (f.role === '__none' ? role !== '' : role !== f.role) return false;
+    }
+    if (f.modelFamily && d.model_family !== f.modelFamily) return false;
+    if (f.osFamily && (d.os_family || '') !== f.osFamily) return false;
     if (f.status) {
       // "offline" is a modifier on top of whatever the cell says (a device can
       // read "deployed" and still be stale), so it stays its own choice.
@@ -1113,6 +1242,7 @@
   // as "no credential" (an empty option list matches nothing).
   var credListOk = false;
   var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
+  var peerPolicyReadOk = false;
   // Image and device ids are operator-chosen strings (the server accepts
   // "constructor", "toString", ...), so every id-keyed map is
   // prototype-free; a plain {} made a device called "constructor" render
@@ -1248,25 +1378,63 @@
     var jobsPromise = fetch('/api/v1/onboard/jobs', { signal: signal }).then(function (r) {
       return r.ok ? r.json() : null;
     }).catch(function () { return null; });
+    // Schedules ride along with the device read so a row can show a pending
+    // window before an operator assigns over it. Its own failure never fails
+    // the table: the marker is advisory and stays as it was.
+    var schedulesPromise = refreshScheduleList(signal);
     var results;
     try {
-      results = await Promise.all([fetch('/api/v1/devices?' + devicesQuery, { signal: signal }), fetch('/api/v1/images', { signal: signal }), fetch('/api/v1/credentials', { signal: signal }), fetch('/api/v1/peer-policy', { signal: signal }), jobsPromise]);
+      results = await Promise.all([fetch('/api/v1/devices?' + devicesQuery, { signal: signal }), fetch('/api/v1/images', { signal: signal }), fetch('/api/v1/credentials', { signal: signal }), fetch('/api/v1/peer-policy', { signal: signal }), jobsPromise, schedulesPromise]);
     } catch (e) {
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
       if (e && e.name === 'AbortError') return;
+      if (mine === devicesRefreshGeneration) {
+        peerPolicyReadOk = false;
+        renderPeerPolicyPanel();
+      }
       throw e;
     }
     var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jobsBody = results[4];
-    if (!dr.ok || mine !== devicesRefreshGeneration) return;
-    var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
+    if (mine !== devicesRefreshGeneration) return;
+    var nextPolicy = null;
+    try { if (pr.ok) nextPolicy = await pr.json(); } catch (e) { /* unreadable policy */ }
+    if (mine !== devicesRefreshGeneration) return;
+    peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
+    if (peerPolicyReadOk) peerPolicy = nextPolicy;
+    renderPeerPolicyPanel();
+    var targetWarning = document.getElementById('dev-target-warning');
+    if (!dr.ok) {
+      devStatus.textContent = 'Device target preview unavailable (' + dr.status +
+        ').';
+      LAST_DEVICES = [];
+      LAST_DEV_NOW = 0;
+      document.getElementById('dev-rows').innerHTML =
+        '<tr><td colspan="13" class="muted">Device target preview unavailable.</td></tr>';
+      document.getElementById('dev-count').textContent = 'Results unavailable';
+      devTotal = 0;
+      devOffset = 0;
+      updateDevPager(0);
+      var markAll = document.getElementById('mark-all');
+      if (markAll) {
+        markAll.checked = false;
+        markAll.indeterminate = false;
+      }
+      if (targetWarning) {
+        targetWarning.textContent =
+          'Target preview unavailable — filters are not confirmed.';
+      }
+      return;
+    }
     var dbody = await dr.json();
     if (mine !== devicesRefreshGeneration) return;
-    peerPolicy = nextPolicy;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     devTotal = dbody.total || 0;
     devOffset = dbody.offset || 0;
+    if (targetWarning) {
+      targetWarning.textContent = (dbody.target_warnings || []).join(' · ');
+    }
     if (devicesPageWentEmpty(devs)) return refreshDevices();
     var imgs = ir.ok ? ((await ir.json()).images || []) : [];
     imageListOk = ir.ok;
@@ -1319,22 +1487,40 @@
   // from a slow /api/v1/credentials response.
   function syncDeviceFilterOptions() {
     var sel = document.getElementById('dev-filter-cred');
-    if (!sel) return;
-    var keep = sel.value;
-    sel.innerHTML = ['<option value="">Credential: any</option>',
-                     '<option value="__none">— none —</option>']
-      .concat(credOpts.map(function (c) {
-        return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+    if (sel) {
+      var keep = sel.value;
+      sel.innerHTML = ['<option value="">Credential: any</option>',
+                       '<option value="__none">— none —</option>']
+        .concat(credOpts.map(function (c) {
+          return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+        })).join('');
+      sel.value = keep;
+      if (sel.value !== keep) sel.value = '';
+    }
+    var roleSel = document.getElementById('dev-filter-role');
+    if (!roleSel) return;
+    var keepRole = roleSel.value;
+    var roles = Object.keys(
+      (((peerPolicy || {}).roles || {}).members || {})).sort();
+    if (keepRole && keepRole !== '__none' && roles.indexOf(keepRole) === -1) {
+      roles.push(keepRole);
+      roles.sort();
+    }
+    roleSel.innerHTML = ['<option value="">Role: any</option>',
+                         '<option value="__none">— no role —</option>']
+      .concat(roles.map(function (role) {
+        return '<option value="' + esc(role) + '">' + esc(role) + '</option>';
       })).join('');
-    sel.value = keep;
-    if (sel.value !== keep) sel.value = '';
+    roleSel.value = keepRole;
   }
 
-  // The four filter fields living inside the <details id="more-filters">
+  // The seven filter fields living inside the <details id="more-filters">
   // disclosure panel (density pass, Task 8) -- Search/Agent
   // install/Status stay above the fold and are not counted here.
   var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
-                          'dev-filter-telemetry', 'dev-filter-peer'];
+                          'dev-filter-telemetry', 'dev-filter-peer',
+                          'dev-filter-role', 'dev-filter-model-family',
+                          'dev-filter-os-family'];
   function updateMoreFiltersSummary() {
     // Magnetic Filter bar > Anatomy fixes the overflow button's format as
     // "<icon> + Filters", so the label lives in its own span and the icon
@@ -1385,11 +1571,24 @@
       var credAttrs = credListOk ? '' :
         ' disabled title="Credential list unavailable; showing the assignment as recorded in the inventory"';
       var platVal = d.platform || '';
+      // Offer only the installs this row can actually take. The server's
+      // fleet store refuses the rest (a router management type runs the
+      // router recipe or the IOx app, xr-host only the appmgr container),
+      // and an operator who picked one used to watch the dropdown silently
+      // snap back on the next refresh with the reason parked in the status
+      // line. A refused choice is now unselectable and says why; the stored
+      // value stays selectable even when it is one the row could no longer
+      // take, so what the inventory actually holds is never hidden.
+      var allowed = Array.isArray(d.install_options) ? d.install_options : null;
       var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map(function (key) {
         var label = key ? agentInstallLabel(key) : '— auto —';
-        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') + '>' + esc(label) + '</option>';
+        var refused = allowed && key && key !== platVal && allowed.indexOf(key) === -1;
+        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') +
+          (refused ? ' disabled title="' + esc(installRefusal(d, key)) + '"' : '') +
+          '>' + esc(label) + '</option>';
       }).join('');
       var status = deviceStatusHtml(d, devNow);
+      var scheduled = pendingScheduleText(d.device_id, SCHEDULES);
       var managementType = d.management_type || 'legacy';
       var managementTypeDetail = managementType.indexOf('router-') === 0
         ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
@@ -1401,22 +1600,27 @@
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '" aria-label="Select ' + esc(d.device_id) + '"' +
         (SELECTED[d.device_id] ? ' checked' : '') + '></td>' +
-        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + dash(d.device_ip) + '</td>' +
+        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="dev-role">' + dash(d.role) + '</td>' +
+        '<td class="machine">' + dash(d.device_ip) + '</td>' +
         '<td class="machine">' + dash(d.model || d.heartbeat_model) + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
-        '<td><span class="peer-intent">' + (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
+        '<td><span class="peer-intent badge ' + (peerPolicyAssigned(d.device_id) ? 'badge-fail' : 'badge-off') + '">' +
+        (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
         '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
         'title="' + (peerPolicyAssigned(d.device_id) ? 'Release device from quarantine' : 'Quarantine device') + '" aria-label="' +
         (peerPolicyAssigned(d.device_id) ? 'Release ' : 'Quarantine ') + esc(d.device_id) + '"' +
         (peerPolicyBusy[d.device_id] ? ' disabled' : '') + '>' +
         (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
+        '<td>' + instructionCell(d) + '</td>' +
         '<td>' + status +
+        (scheduled ? ' <span class="sched-chip badge badge-off" title="' +
+          esc(scheduled) + '">Scheduled</span>' : '') +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
-    }).join('') : '<tr><td colspan="11" class="muted">' +
+    }).join('') : '<tr><td colspan="13" class="muted">' +
       (total ? 'No devices match the current filters.' : 'No devices yet.') + '</td></tr>';
     document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -1866,6 +2070,13 @@
     return { telemetry: !t || t.checked,
              telemetry_stream: !!(s && s.checked) };
   }
+  function jobFlags(action, forced) {
+    var flags = action === 'onboard' ? telemetryFlags()
+      : (forced ? { force: true } : {});
+    var log = document.getElementById(action + '-log');
+    flags.log = !!(log && log.checked);
+    return flags;
+  }
   // The header checkbox can only ever mean "every row on THIS page" -- once
   // the table pages (issue #112 step 3), a page is a fraction of what the
   // filter matches, and silently treating "select all" as "select the
@@ -1970,6 +2181,8 @@
     var overlay = document.getElementById(id);
     if (!overlay || overlay.hidden) return;
     overlay.hidden = true;
+    if (id === 'role-modal') cancelRoleDialog();
+    if (id === 'role-def-modal') cancelRoleDefinitionDialog();
     // Return focus to whatever opened it -- if that button has since been
     // hidden with the bulk bar (the batch cleared the selection), focus()
     // on it is simply a no-op and the browser falls back to the document.
@@ -1999,10 +2212,13 @@
     });
     trapDialogFocus(overlay);
   }
-  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'cred-modal'];
+  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'cred-modal', 'role-modal'];
   wireModal('onboard-modal', ['onboard-cancel', 'onboard-modal-x']);
   wireModal('undeploy-modal', ['undeploy-cancel', 'undeploy-modal-x']);
   wireModal('cred-modal', ['cred-modal-cancel', 'cred-modal-x']);
+  wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
+  wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
+  wireModal('sched-modal', ['sched-modal-cancel', 'sched-modal-x']);
   document.getElementById('onboard-selected').addEventListener('click', function () {
     openModal('onboard-modal');
   });
@@ -2234,6 +2450,7 @@
     if (!ids) return;
     var forceEl = document.getElementById('undeploy-force');
     var forced = action === 'undeploy' && forceEl && forceEl.checked;
+    var options = jobFlags(action, forced);
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
           ? '\n\nFORCE is on. For any device with no deployment record this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a record there is no proof IRIS created them; clean those up yourself if IRIS did. On an IOS-XR device, force removes the same IRIS-named footprint a normal undeploy would — the appmgr application iris, its iris-xr package source, the RPM, iris-work/, and the IRIS sidecar files at harddisk: root — but a staged image file there is never removed by IRIS teardown, and the agent deletes an adopted file only when the catalog republishes new content under that same image id — never otherwise.'
@@ -2252,8 +2469,7 @@
       await Promise.all(ids.map(async function (id) {
         try {
           var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/' + action,
-                              action === 'onboard' ? telemetryFlags()
-                                : (forced ? { force: true } : {}));
+                              options);
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';
@@ -2335,13 +2551,15 @@
   // modal primaries; the bulk bar's own Onboard…/Undeploy… buttons only open
   // those modals and are listed as openers below.
   var BULK_BTNS = ['onboard-confirm', 'undeploy-confirm', 'adopt-selected',
-                   'delete-selected', 'apply-cred-selected',
+                   'delete-selected', 'apply-cred-selected', 'apply-role-selected',
                    'assign-images-selected',
-                   'quarantine-selected', 'release-selected'];
+                   'quarantine-selected', 'release-selected',
+                   'create-schedule'];
   // Openers claim no lock of their own -- there is nothing to claim until the
   // modal's primary is pressed -- but they must not hand out a second modal
   // while a batch is still starting.
-  var BULK_OPENERS = ['onboard-selected', 'undeploy-selected', 'set-cred-selected'];
+  var BULK_OPENERS = ['onboard-selected', 'undeploy-selected', 'set-cred-selected', 'set-role-selected',
+                      'schedule-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
     bulkBusy = busy;
@@ -2349,6 +2567,7 @@
       var el = document.getElementById(id);
       if (el) el.disabled = busy;
     });
+    syncRoleActionAvailability();
   }
   // Claim the lock for a selected-action, returning the checked ids (or null if
   // another action holds it or nothing is selected).
@@ -2383,10 +2602,13 @@
   // shows for an image, so a picker/drawer row never makes the operator go
   // find the id in the Images tab to see what it actually is. Falls back to
   // the bare id when the filename is not known (a stale id the catalog no
-  // longer has, or imageFilenames not loaded yet).
+  // longer has, or imageFilenames not loaded yet), and shows the id ONCE when
+  // it IS the filename: publish.derive_id strips only .SPA.bin/.bin, so an
+  // IOS-XR .iso/.tar image's id is its whole filename and would otherwise
+  // read "8000-x64-26.2.1.iso — 8000-x64-26.2.1.iso".
   function imageLabel(id) {
     var fn = imageFilenames[id];
-    return fn ? esc(id) + ' — ' + esc(fn) : esc(id);
+    return fn && fn !== id ? esc(id) + ' — ' + esc(fn) : esc(id);
   }
   // ---- Image picker: one control shared by the per-row assign button and
   // the bulk "Assign images to N devices…" toolbar action below. Both POST
@@ -2684,7 +2906,8 @@
       '<option value="__attention">Needs attention (any)</option>';
   })();
   ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
-   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
+   'dev-filter-model-family', 'dev-filter-os-family',
    'dev-filter-status'].forEach(function (id) {
     var el = document.getElementById(id);
     if (!el) return;
@@ -2696,7 +2919,8 @@
     if (!clear) return;
     clear.addEventListener('click', function () {
       ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
-       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
+       'dev-filter-model-family', 'dev-filter-os-family',
        'dev-filter-status'].forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.value = '';
@@ -2717,6 +2941,806 @@
     });
   })();
 
+  // ---- Role workflow ----
+  // Consume the count-only view explicitly. Never render arbitrary policy or
+  // status objects: role member counts are the only dynamic keyed collection.
+  function policyCount(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : '—';
+  }
+  // ---- Instruction status projection ----
+  function instructionBadgeClass(state) {
+    if (state === 'applied') return 'badge-ok';
+    if (state === 'pending') return 'badge-running';
+    if (state === 'rejected' || state === 'revoked' || state === 'forbidden') return 'badge-fail';
+    if (state === 'pre-instructions' || state === 'none' || state === 'tracker-only') return 'badge-off';
+    return 'badge-queued';
+  }
+  function instructionCell(device) {
+    var instruction = device && device.instruction;
+    if (!instruction || typeof instruction !== 'object' || Array.isArray(instruction)) {
+      return '<span class="badge badge-queued">unknown</span>';
+    }
+    var state = typeof instruction.display_state === 'string'
+      ? instruction.display_state : 'unknown';
+    var label = typeof instruction.label === 'string'
+      ? instruction.label : 'unknown';
+    var detail = [];
+    if (typeof instruction.evidence === 'string') detail.push(instruction.evidence);
+    if (instruction.underlying_state && instruction.underlying_state !== state) {
+      detail.push('last agent report (agent-asserted): ' + instruction.underlying_state);
+    }
+    if (typeof instruction.reason === 'string') {
+      detail.push('reason: ' + instruction.reason);
+    }
+    if (Number.isSafeInteger(instruction.report_age_seconds)
+        && instruction.report_age_seconds >= 0) {
+      detail.push('report ' + instruction.report_age_seconds + 's old');
+    } else {
+      detail.push('report age unavailable');
+    }
+    if (instruction.pointer_skew === true) detail.push('pointer skew');
+    if (Number.isSafeInteger(instruction.qos_drift_count)
+        && instruction.qos_drift_count >= 0) {
+      detail.push(instruction.qos_drift_count + ' QoS drift violation' +
+        (instruction.qos_drift_count === 1 ? '' : 's'));
+    } else {
+      detail.push('QoS drift unavailable');
+    }
+    return '<span class="badge ' + instructionBadgeClass(state) + '">' +
+      esc(label) + '</span><div class="muted">' + detail.map(esc).join(' · ') + '</div>';
+  }
+  function decimalRevisionCompare(a, b) {
+    a = String(a); b = String(b);
+    return a.length === b.length ? (a < b ? -1 : a > b ? 1 : 0)
+      : a.length - b.length;
+  }
+  function instructionMapRows(values, revisionKeys, emptyText) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+      return '<li class="muted">unavailable</li>';
+    }
+    var keys = Object.keys(values).filter(function (key) {
+      return Number.isSafeInteger(values[key]) && values[key] >= 0;
+    }).sort(revisionKeys ? decimalRevisionCompare : undefined);
+    return keys.map(function (key) {
+      return '<li><span class="machine">' + esc(revisionKeys ? 'r' + key : key) +
+        '</span>: ' + values[key] + '</li>';
+    }).join('') || '<li class="muted">' + esc(emptyText) + '</li>';
+  }
+  function instructionDeviceCount(value) {
+    return Number.isSafeInteger(value) && value >= 0
+      ? value + ' device' + (value === 1 ? '' : 's') : 'unavailable';
+  }
+  function custodyInteger(value, suffix) {
+    return Number.isSafeInteger(value) ? value + suffix : 'unavailable';
+  }
+  function renderInstructionPanel(policy) {
+    policy = policy && typeof policy === 'object' ? policy : {};
+    var rollup = policy.fleet_rollup && typeof policy.fleet_rollup === 'object'
+      && !Array.isArray(policy.fleet_rollup) ? policy.fleet_rollup : null;
+    var status = policy.instruction_status || {};
+    var custody = policy.instruction_keys;
+    document.getElementById('policy-issued-revision').textContent =
+      typeof status.issued_revision_label === 'string'
+        ? status.issued_revision_label
+        : (rollup && Number.isSafeInteger(rollup.issued_revision)
+          && rollup.issued_revision >= 0 ? 'r' + rollup.issued_revision : 'unavailable');
+    document.getElementById('policy-applied-revisions').innerHTML =
+      instructionMapRows(Number.isSafeInteger(status.pointer_skew)
+        && status.pointer_skew >= 0 && rollup ? rollup.applied : null,
+      true, 'No accepted identity reported.');
+    document.getElementById('policy-instruction-states').innerHTML =
+      instructionMapRows(rollup && rollup.states, false, 'No inventory devices.');
+    document.getElementById('policy-instr-stamp-missing').textContent =
+      instructionDeviceCount(status.instr_stamp_missing);
+    document.getElementById('policy-pointer-skew').textContent =
+      instructionDeviceCount(status.pointer_skew);
+    document.getElementById('policy-instruction-observed').textContent =
+      typeof status.observed_at === 'number' && Number.isFinite(status.observed_at)
+        ? fmtDate(status.observed_at) : 'unavailable';
+    if (!custody || typeof custody !== 'object' || Array.isArray(custody)) {
+      document.getElementById('instruction-key-state').textContent = 'unavailable';
+      document.getElementById('instruction-cert-days').textContent = 'unavailable';
+      document.getElementById('instruction-keylist-age').textContent = 'unavailable';
+      document.getElementById('instruction-root-ceremony').textContent = 'unknown';
+      document.getElementById('instruction-root-quorum').textContent = 'unknown';
+      document.getElementById('instruction-key-actions').textContent = 'unavailable';
+      return;
+    }
+    document.getElementById('instruction-key-state').textContent =
+      typeof custody.state === 'string' ? custody.state : 'unavailable';
+    document.getElementById('instruction-cert-days').textContent =
+      custodyInteger(custody.certificate_days_to_expiry, ' days');
+    document.getElementById('instruction-keylist-age').textContent =
+      custodyInteger(custody.keylist_age_days, ' days');
+    document.getElementById('instruction-root-ceremony').textContent =
+      ['ok', 'warn', 'critical', 'unknown'].indexOf(custody.root_ceremony_overdue) >= 0
+        ? custody.root_ceremony_overdue : 'unknown';
+    var roots = Number.isSafeInteger(custody.roots_attested_180d)
+      && Number.isSafeInteger(custody.roots_configured)
+      ? ' · ' + custody.roots_attested_180d + '/' + custody.roots_configured +
+        ' roots attested in 180 days' : '';
+    var enabled = custody.enabled;
+    document.getElementById('instruction-root-quorum').textContent = enabled === false
+      ? 'not enabled' : enabled !== true ? 'unknown'
+      : custody.root_quorum_degraded === true ? 'degraded' + roots
+      : custody.root_quorum_degraded === false ? 'healthy' + roots : 'unknown';
+    var actionFlags = [
+      ['certificate_renewal_due', 'certificate renewal due'],
+      ['signing_refused', 'signing refused'],
+      ['keylist_resign_due', 'key list re-sign due']
+    ];
+    var actions = actionFlags.filter(function (entry) {
+      return custody[entry[0]] === true;
+    }).map(function (entry) { return entry[1]; });
+    var actionsKnown = actionFlags.every(function (entry) {
+      return typeof custody[entry[0]] === 'boolean';
+    });
+    document.getElementById('instruction-key-actions').textContent = enabled === false
+      ? 'not enabled' : enabled !== true || !actionsKnown
+      ? 'unavailable' : actions.join(' · ') || 'none';
+  }
+  // ---- End instruction status projection ----
+  function roleCapabilityMessage() {
+    if (!peerPolicyReadOk) return 'Peer policy unavailable. Role changes are disabled; refresh to read current policy.';
+    if (peerPolicy.roles_supported !== true) {
+      return 'This Console cannot confirm backend role support. ' +
+        (peerPolicy.roles_present ? 'The backend declares role state. ' : '') +
+        'Role changes are disabled. Use a compatible server. Independent peer quarantine is not ' +
+        'enforced by older servers. ' +
+        'Use a reviewed containment and compatibility procedure before downgrading. ' +
+        'A fully downgraded Console and server cannot show this warning.';
+    }
+    if (peerPolicy.fail_closed) return 'Peer policy is fail-closed. Peer discovery is denied and role changes are disabled. Restore a valid policy.';
+    if (peerPolicy.degraded) return 'Peer policy is degraded. The server may be using a last-known-good policy or have lost role state. ' +
+      'Role changes are disabled; check server startup logs and restore authoritative policy state.';
+    return '';
+  }
+  function syncRoleActionAvailability() {
+    var unavailable = !!roleCapabilityMessage();
+    document.getElementById('set-role-selected').disabled = bulkBusy || unavailable;
+    document.getElementById('apply-role-selected').disabled =
+      unavailable || roleRequestBusy || (bulkBusy && !rolePreview);
+  }
+  function renderPeerPolicyPanel() {
+    var p = peerPolicyReadOk ? peerPolicy : {};
+    var roles = p.roles || {}, drift = p.role_drift || {}, outbox = p.outbox || {};
+    var origin = p.origin_qos || {}, enforcement = p.enforcement || {};
+    var mutual = enforcement.mutual_origin || {};
+    var banner = document.getElementById('role-capability-banner');
+    banner.textContent = roleCapabilityMessage();
+    banner.hidden = !banner.textContent;
+    syncRoleActionAvailability();
+    renderInstructionPanel(p);
+    document.getElementById('policy-roles-defined').textContent = policyCount(roles.defined);
+    document.getElementById('policy-roles-restricted').textContent = policyCount(roles.restricted);
+    document.getElementById('policy-role-drift').textContent = policyCount(drift.count);
+    // Capacity is the API's bounded contract, never a count derived from rows.
+    var backlog = policyCount(outbox.unacknowledged) + '/' + policyCount(outbox.capacity);
+    document.getElementById('policy-outbox').textContent = backlog;
+    document.getElementById('peer-policy-summary').textContent = peerPolicyReadOk
+      ? policyCount(roles.defined) + ' roles · ' + policyCount(roles.restricted) +
+        ' restricted · ' + policyCount(drift.count) + ' drift · outbox ' + backlog
+      : 'Policy counts unavailable';
+    var members = roles.members || {};
+    document.getElementById('policy-role-members').innerHTML = Object.keys(members).sort().map(function (name) {
+      return '<li><span class="machine">' + esc(name) + '</span>: ' + policyCount(members[name]) + '</li>';
+    }).join('') || '<li class="muted">' + (peerPolicyReadOk && roles.defined === 0
+      ? 'No roles defined.' : 'Role member counts unavailable.') + '</li>';
+    var stateLabels = { enforced: 'enforced', degraded: 'degraded', rpc_unavailable: 'RPC unavailable' };
+    var state = Object.prototype.hasOwnProperty.call(stateLabels, origin.state)
+      ? stateLabels[origin.state] : 'unavailable';
+    document.getElementById('policy-origin-qos').textContent = 'Last origin QoS state: ' + state +
+      ' · ' + policyCount(origin.applied_download_count) + '/' + policyCount(origin.target_download_count) +
+      ' downloads applied · last reconciled: ' + (typeof origin.last_reconciled_at === 'number'
+        ? fmtDate(origin.last_reconciled_at) : 'never') + '. Origin limits apply globally or per torrent, not per role.';
+    var preflightCount = mutual.newly_denied_device_count;
+    var preflightText = Number.isSafeInteger(preflightCount) && preflightCount >= 0
+      ? 'Mutual-origin preflight only: ' + preflightCount + ' newly denied devices.'
+      : 'Mutual-origin preflight count unavailable.';
+    document.getElementById('policy-mutual-origin').textContent = mutual.mode === 'preflight'
+      ? preflightText + ' This additional origin restriction is not active.' +
+        (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '')
+      : 'Mutual-origin preflight status unavailable.';
+    syncRoleDefinitionsWithPolicy();
+  }
+
+  var rolePreview = null, roleDialogGeneration = 0, roleRequestBusy = false;
+  function resetRolePreview() {
+    rolePreview = null;
+    document.getElementById('role-preview').hidden = true;
+    document.getElementById('apply-role-selected').textContent = 'Preview change';
+  }
+  function cancelRoleDialog() {
+    roleDialogGeneration++;
+    resetRolePreview();
+    // Closing does not cancel a request already on the wire. Its finally
+    // releases the lock, so another batch cannot race that outstanding write.
+    if (!roleRequestBusy) setBulkBusy(false);
+  }
+  function roleFailureText(failed) {
+    var ids = Object.keys(failed || {});
+    if (!ids.length) return '';
+    return '; failed: ' + ids.slice(0, 10).map(function (id) {
+      var reason = failed[id] === 'role_shadowed_by_assignment'
+        ? 'explicit ACL assignment shadows the role' : failed[id];
+      return id + ' (' + reason + ')';
+    }).join(', ') + (ids.length > 10 ? '; and ' + (ids.length - 10) + ' more' : '');
+  }
+  function roleRequestError(status, body) {
+    if (status === 412 || body.error === 'revision_conflict') {
+      return 'Peer policy changed. Refresh, then preview the change again before saving.';
+    }
+    if (status === 428) return 'A fresh preview and confirmation are required. Preview the change again.';
+    if (body.error === 'operation_backlog_full') return 'The operation backlog is full (' +
+      policyCount(body.unacknowledged) + '/' + policyCount(body.capacity) +
+      '). Wait for the tracker to acknowledge operations, then preview again.';
+    if (status === 503) return 'Role changes are unavailable. Check policy state and the tracker, then refresh before retrying.';
+    return 'Set role was refused' + (body.error ? ': ' + body.error : ' (' + status + ')') +
+      '. Refresh and preview again.';
+  }
+  document.getElementById('set-role-selected').addEventListener('click', function () {
+    if (bulkBusy || !selectedIds().length) return;
+    var warning = roleCapabilityMessage();
+    if (warning) { devStatus.textContent = warning; return; }
+    roleDialogGeneration++;
+    resetRolePreview();
+    document.getElementById('role-modal-msg').textContent = '';
+    document.getElementById('role-modal-count').textContent = selectedIds().length + ' selected';
+    var sel = document.getElementById('role-selected');
+    sel.innerHTML = '<option value="" disabled selected>— choose a role —</option>' +
+      '<option value="__none">— no role —</option>' +
+      Object.keys((peerPolicy.roles || {}).members || {}).sort().map(function (name) {
+        return '<option value="' + esc(name) + '">' + esc(name) + '</option>';
+      }).join('');
+    sel.value = '';
+    sel.disabled = false;
+    if (!Object.keys((peerPolicy.roles || {}).members || {}).length) {
+      document.getElementById('role-modal-msg').textContent =
+        'No roles are defined yet. Expand Peer policy above the table and choose New role.';
+    }
+    openModal('role-modal');
+  });
+  document.getElementById('role-selected').addEventListener('change', function () {
+    if (roleRequestBusy) return;
+    resetRolePreview();
+    setBulkBusy(false);
+    document.getElementById('role-modal-msg').textContent = '';
+  });
+  document.getElementById('apply-role-selected').addEventListener('click', async function () {
+    if (roleRequestBusy) return;
+    var msg = document.getElementById('role-modal-msg');
+    var raw = document.getElementById('role-selected').value;
+    if (!raw) { msg.textContent = 'Choose a role, or "no role" to clear the declared role.'; return; }
+    var warning = roleCapabilityMessage();
+    if (warning) { msg.textContent = warning; resetRolePreview(); setBulkBusy(false); return; }
+    var committing = !!rolePreview;
+    var ids = committing ? rolePreview.ids : claimSelection();
+    if (!ids) return;
+    // The preview response has a candidate revision. CAS always carries the
+    // revision read BEFORE preview, even when the regular table poll advances.
+    var revision = committing ? rolePreview.revision : peerPolicy.revision;
+    var role = committing ? rolePreview.role : (raw === '__none' ? null : raw);
+    var payload = { device_ids: ids, role: role };
+    if (committing) payload.confirm_token = rolePreview.confirm_token;
+    var generation = roleDialogGeneration;
+    var keepLock = false;
+    roleRequestBusy = true;
+    document.getElementById('role-selected').disabled = true;
+    document.getElementById('apply-role-selected').disabled = true;
+    msg.textContent = committing ? 'Setting role… Closing this dialog does not cancel the request.' : 'Previewing change…';
+    try {
+      var response = await fetch('/api/v1/devices/bulk-role' + (committing ? '' : '?dry_run=1'), {
+        method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json',
+          'If-Match': '"iris-peer-policy-' + revision + '"' }), body: JSON.stringify(payload)
+      });
+      var body = await response.json();
+      if (!committing && generation !== roleDialogGeneration) return;
+      if (committing && typeof body.applied === 'number') {
+        devStatus.textContent = 'Set role applied to ' + body.applied + '/' + ids.length + ' device(s)' +
+          roleFailureText(body.failed) + '; role drift: ' + policyCount((body.role_drift || {}).count) + '.';
+      }
+      if (!response.ok) {
+        msg.textContent = roleRequestError(response.status, body);
+        if (committing && (body.partial || typeof body.applied === 'number')) {
+          msg.textContent = devStatus.textContent + ' ' + msg.textContent;
+        }
+        resetRolePreview();
+      } else if (committing) {
+        if (!body.ok || Object.keys(body.failed || {}).length) {
+          msg.textContent = devStatus.textContent + ' Review the failed devices before another preview.';
+          resetRolePreview();
+        } else {
+          closeModal('role-modal');
+        }
+      } else if (!body.ok || !body.applied) {
+        msg.textContent = 'No role changes can be applied' + roleFailureText(body.failed) + '.';
+        resetRolePreview();
+      } else {
+        rolePreview = { ids: ids.slice(), role: role, revision: revision, confirm_token: body.confirm_token };
+        var previewEl = document.getElementById('role-preview');
+        previewEl.textContent = 'Set role to ' + (role || 'no role') + ' for ' + body.applied + '/' + ids.length + ' device(s)' +
+          roleFailureText(body.failed) + '.\n' +
+          'Membership changes: ' + policyCount(body.member_delta) +
+          '\nDevices losing origin access: ' + policyCount(body.origin_access_lost) +
+          '\nEmpty permitted peer sets: ' + policyCount(body.empty_permitted_sets) +
+          '\nRole pairings stopped: ' + policyCount(body.role_pairs_stopped) +
+          '\nQoS policy changed: ' + (body.qos_changed === true ? 'yes' : body.qos_changed === false ? 'no' : 'unknown') +
+          '\nChanges affect new pairings; existing device-to-device sessions may continue.' +
+          (body.requires_confirmation ? '\nThis exceeds the confirmation threshold. Set role confirms these effects.' : '');
+        previewEl.hidden = false;
+        msg.textContent = 'Review the preview, then choose Set role to save or Cancel to leave roles unchanged.';
+        document.getElementById('apply-role-selected').textContent = 'Set role';
+        document.getElementById('role-modal-count').textContent = ids.length + ' selected';
+        keepLock = true;
+      }
+    } catch (e) {
+      msg.textContent = committing
+        ? 'Response unavailable. Role changes may have been saved; refresh and review before trying again.'
+        : 'Preview unavailable. No commit was sent; refresh and preview again.';
+      if (committing) devStatus.textContent = msg.textContent;
+      resetRolePreview();
+    } finally {
+      roleRequestBusy = false;
+      document.getElementById('role-selected').disabled = false;
+      if (!keepLock || generation !== roleDialogGeneration) setBulkBusy(false);
+      syncRoleActionAvailability();
+      if (keepLock) document.getElementById('apply-role-selected').focus();
+      if (committing || !keepLock) refreshDevices().catch(function () {});
+    }
+  });
+  // ---- Role definitions: create, edit, delete, import, export ----
+  // Definitions are the policy's own objects (GET /peer-policy/roles), read
+  // when the Peer policy panel is open and again after every definition
+  // write. The Set role dialog and the Role filter keep reading the member
+  // map from /peer-policy, which lists every defined role, so a new
+  // definition reaches them on the next device refresh. Every write follows
+  // the Set role contract: strong CAS on the revision read BEFORE preview,
+  // one dry run, then one commit carrying that preview's confirmation token.
+  var ROLE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+  var ROLE_QOS_FIELDS = [
+    ['seed_up_bps', 'Upload while seeding', 'rate'],
+    ['seed_down_bps', 'Download while seeding', 'rate'],
+    ['leech_up_bps', 'Upload while downloading', 'rate'],
+    ['leech_down_bps', 'Download while downloading', 'rate'],
+    ['overall_up_bps', 'Overall upload', 'rate'],
+    ['overall_down_bps', 'Overall download', 'rate'],
+    ['per_peer_bps', 'Per-peer modelling rate', 'rate'],
+    ['request_peer_speed_limit_bps', 'Requested peer speed', 'rate'],
+    ['max_peers', 'Peers per torrent', '1–1000'],
+    ['fanout', 'Fanout multiplier', '1–1000, ≤ peers per torrent'],
+    ['max_concurrent', 'Concurrent torrents', '1–1000'],
+    ['numwant', 'Peers per announce', '4–200'],
+    ['announce_min_interval_s', 'Announce interval', 'seconds, 10–300'],
+    ['handout_budget', 'Handouts per window', '0–1000'],
+    ['catalog_tick_s', 'Catalog tick', 'seconds, 60–900, multiple of 60'],
+    ['telemetry_every_ticks', 'Telemetry every', 'ticks, 1–60'],
+    ['telemetry_pause', 'Pause telemetry', 'bool']
+  ];
+  var roleDefinitions = {}, roleDefinitionsRevision = null, roleDefinitionsOk = false;
+  var roleDefinitionsError = '', roleDefinitionsLoading = false;
+  var roleDefEditing = null, roleDefPreview = null, roleDefBusy = false, roleDefGeneration = 0;
+  var roleDefRevision = null, roleDefOriginal = {};
+
+  function renderRoleQosFields() {
+    var rates = [], swarm = [];
+    ROLE_QOS_FIELDS.forEach(function (f) {
+      var key = f[0], label = f[1], kind = f[2], html;
+      if (kind === 'bool') {
+        html = '<label class="field"><span class="field-label">' + esc(label) + '</span>' +
+          '<select data-qos="' + key + '"><option value="">Inherit</option>' +
+          '<option value="true">Yes</option><option value="false">No</option></select></label>';
+      } else {
+        html = '<label class="field"><span class="field-label">' + esc(label) +
+          ' <span class="muted">' + (kind === 'rate' ? 'bytes/s' : esc(kind)) + '</span></span>' +
+          '<input data-qos="' + key + '" inputmode="numeric" placeholder="inherit" autocomplete="off">' +
+          (kind === 'rate' ? '<span class="muted rate-hint" data-rate-hint="' + key + '"></span>' : '') +
+          '</label>';
+      }
+      (kind === 'rate' ? rates : swarm).push(html);
+    });
+    document.getElementById('rd-rates').innerHTML = rates.join('');
+    document.getElementById('rd-swarm').innerHTML = swarm.join('');
+  }
+  function rateHint(raw) {
+    if (raw === '') return '';
+    if (!/^[0-9]+$/.test(raw)) return 'whole number of bytes per second';
+    var n = parseInt(raw, 10);
+    if (n === 0) return 'unlimited';
+    if (n < 8192) return 'too low: 0 or at least 8192';
+    var bits = n * 8;
+    return '≈ ' + (bits >= 1e9 ? (bits / 1e9).toFixed(2) + ' Gbit/s'
+      : bits >= 1e6 ? (bits / 1e6).toFixed(1) + ' Mbit/s' : (bits / 1e3).toFixed(0) + ' kbit/s');
+  }
+  function updateRateHints() {
+    document.querySelectorAll('#role-def-modal [data-rate-hint]').forEach(function (el) {
+      var input = document.querySelector('#role-def-modal [data-qos="' + el.getAttribute('data-rate-hint') + '"]');
+      el.textContent = input ? rateHint(input.value.trim()) : '';
+    });
+  }
+  renderRoleQosFields();
+  document.getElementById('role-def-modal').addEventListener('input', function (e) {
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-qos')) updateRateHints();
+    roleDefGeneration++;
+    // Any edit invalidates a pending preview: the commit must carry the
+    // token of exactly the candidate the operator reviewed.
+    if (roleDefPreview && !roleDefBusy) {
+      resetRoleDefinitionPreview();
+      document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
+    }
+  });
+  document.getElementById('role-def-modal').addEventListener('change', function () {
+    roleDefGeneration++;
+    if (roleDefPreview && !roleDefBusy) {
+      resetRoleDefinitionPreview();
+      document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
+    }
+  });
+
+  function resetRoleDefinitionPreview() {
+    roleDefPreview = null;
+    document.getElementById('role-def-preview').hidden = true;
+    document.getElementById('role-def-save').textContent = 'Preview change';
+  }
+  function cancelRoleDefinitionDialog() {
+    roleDefGeneration++;
+    resetRoleDefinitionPreview();
+  }
+  function setRoleDefBusy(busy) {
+    roleDefBusy = busy;
+    document.getElementById('role-def-save').disabled = busy;
+    renderRoleDefinitionControls();
+  }
+  function renderRoleDefinitionControls() {
+    var unavailable = !!roleCapabilityMessage();
+    ['role-def-new', 'role-def-import', 'role-def-export'].forEach(function (id) {
+      document.getElementById(id).disabled = unavailable || roleDefBusy;
+    });
+    document.querySelectorAll('#role-def-rows button').forEach(function (b) {
+      b.disabled = unavailable || roleDefBusy;
+    });
+  }
+  function policyRevisionFromEtag(etag) {
+    var m = /iris-peer-policy-(\d+)/.exec(etag || '');
+    return m ? parseInt(m[1], 10) : null;
+  }
+  async function policyWrite(method, url, payload, revision) {
+    var r = await fetch(url, {
+      method: method,
+      headers: csrfHdr({ 'Content-Type': 'application/json',
+                         'If-Match': '"iris-peer-policy-' + revision + '"' }),
+      body: JSON.stringify(payload || {})
+    });
+    var body = {};
+    if (r.status !== 204) { try { body = await r.json(); } catch (e) { body = {}; } }
+    if (!body || typeof body !== 'object') body = {};
+    return { ok: r.ok, status: r.status, body: body,
+             revision: typeof body.revision === 'number' ? body.revision : policyRevisionFromEtag(r.headers.get('ETag')) };
+  }
+  function roleDefinitionProblem(status, body, verb) {
+    body = body || {};
+    var code = body.code || body.error || '';
+    if (status === 412 || code === 'revision_conflict') return 'Peer policy changed. Refresh, then preview again.';
+    if (status === 428) return 'A fresh preview and confirmation are required. Preview again.';
+    if (code === 'role_in_use') {
+      var parts = [];
+      if (typeof body.member_count === 'number') {
+        parts.push(body.member_count + ' device(s) declare it' + (body.device_ids && body.device_ids.length
+          ? ' (' + body.device_ids.slice(0, 10).join(', ') + (body.truncated ? ', …' : '') + ')' : ''));
+      }
+      if (body.roles && body.roles.length) parts.push('declared roles missing from the file: ' + body.roles.join(', '));
+      if (body.referring_roles && body.referring_roles.length) parts.push('referred to by ' + body.referring_roles.join(', '));
+      if (body.referring_schedules && body.referring_schedules.length) parts.push('used by schedule(s) ' + body.referring_schedules.join(', '));
+      return verb + ' refused: role in use' + (parts.length ? ' — ' + parts.join('; ') : '') + '.';
+    }
+    if (code === 'operation_backlog_full') return 'The operation backlog is full (' +
+      policyCount(body.unacknowledged) + '/' + policyCount(body.capacity) +
+      '). Wait for the tracker to acknowledge operations, then preview again.';
+    if (status === 401) return 'Your session expired. Log in again, then preview again.';
+    if (status === 503) return verb + ' unavailable: check policy state and the tracker, then refresh before retrying.';
+    var reason = body.detail || code || ('HTTP ' + status);
+    if (code === 'role_isolated') reason = 'a role must permit itself; check the peer roles';
+    if (code === 'role_reserved_name') reason = 'that role name is reserved';
+    return verb + ' refused: ' + reason + '.';
+  }
+  function blastText(title, body) {
+    return title + '.\nMembership changes: ' + policyCount(body.member_delta) +
+      '\nDevices losing origin access: ' + policyCount(body.origin_access_lost) +
+      '\nEmpty permitted peer sets: ' + policyCount(body.empty_permitted_sets) +
+      '\nRole pairings stopped: ' + policyCount(body.role_pairs_stopped) +
+      '\nQoS policy changed: ' + (body.qos_changed === true ? 'yes' : body.qos_changed === false ? 'no' : 'unknown') +
+      '\nChanges affect new pairings; existing device-to-device sessions may continue.' +
+      (body.requires_confirmation ? '\nThis exceeds the confirmation threshold; applying confirms these effects.' : '');
+  }
+  function qosSummary(qos) {
+    var keys = Object.keys(qos || {});
+    if (!keys.length) return '<span class="muted">inherit</span>';
+    return keys.map(function (k) {
+      return '<span class="machine qos-chip">' + esc(k) + '=' + esc(String(qos[k])) + '</span>';
+    }).join('');
+  }
+  function renderRoleDefinitions() {
+    var rows = document.getElementById('role-def-rows');
+    if (!roleDefinitionsOk) {
+      rows.innerHTML = '<tr><td colspan="7" class="muted">' + esc(roleDefinitionsError || 'Role definitions unavailable.') + '</td></tr>';
+    } else {
+      var names = Object.keys(roleDefinitions).sort();
+      rows.innerHTML = names.map(function (name) {
+        var d = roleDefinitions[name] || {};
+        var peers = (d.peers || []).filter(function (p) { return p !== name; });
+        return '<tr>' +
+          '<td class="machine">' + esc(name) + '</td>' +
+          '<td>' + (d.restricted ? 'yes' : 'no') + '</td>' +
+          '<td class="machine">' + (peers.length ? esc(peers.join(', ')) : '<span class="muted">only itself</span>') + '</td>' +
+          '<td>' + (d.origin === false ? 'no' : 'yes') + '</td>' +
+          '<td class="machine">' + (d.nets && d.nets.length ? esc(d.nets.join(', ')) : '—') + '</td>' +
+          '<td class="qos">' + qosSummary(d.qos) + '</td>' +
+          '<td><button class="linkish role-def-edit" type="button" data-role="' + esc(name) + '">Edit</button> · ' +
+          '<button class="linkish danger-link role-def-delete" type="button" data-role="' + esc(name) + '">Delete</button></td></tr>';
+      }).join('') || '<tr><td colspan="7" class="muted">No roles defined. Choose New role, or import a roles CSV.</td></tr>';
+    }
+    renderRoleDefinitionControls();
+  }
+  async function loadRoleDefinitions(background) {
+    if (roleDefinitionsLoading) return;
+    roleDefinitionsLoading = true;
+    try {
+      var r = await fetch('/api/v1/peer-policy/roles', background ? { headers: { 'X-IRIS-Poll': '1' } } : {});
+      var body = null;
+      try { body = r.ok ? await r.json() : null; } catch (e) { body = null; }
+      roleDefinitionsOk = !!body && typeof body === 'object' && body.roles && typeof body.roles === 'object';
+      if (roleDefinitionsOk) {
+        roleDefinitions = body.roles;
+        roleDefinitionsRevision = body.revision;
+        roleDefinitionsError = '';
+        if (typeof body.revision === 'number' &&
+            (typeof peerPolicy.revision !== 'number' || body.revision > peerPolicy.revision)) {
+          peerPolicy.revision = body.revision;
+        }
+      } else {
+        roleDefinitionsError = r.status === 401 ? 'Your session expired; log in again.'
+          : 'Role definitions unavailable (' + r.status + ').';
+      }
+    } catch (e) {
+      roleDefinitionsOk = false;
+      roleDefinitionsError = 'Role definitions unavailable.';
+    } finally {
+      roleDefinitionsLoading = false;
+      renderRoleDefinitions();
+    }
+  }
+  // Called from renderPeerPolicyPanel on every device refresh: keep the
+  // gating current and, while the panel is open, follow the policy revision
+  // so a definition written elsewhere (CLI, another session) shows up.
+  function syncRoleDefinitionsWithPolicy() {
+    renderRoleDefinitionControls();
+    var panel = document.getElementById('peer-policy-panel');
+    if (panel.open && peerPolicyReadOk && roleDefinitionsOk && !roleDefBusy &&
+        typeof peerPolicy.revision === 'number' && peerPolicy.revision !== roleDefinitionsRevision) {
+      loadRoleDefinitions(true);
+    }
+  }
+  document.getElementById('peer-policy-panel').addEventListener('toggle', function (e) {
+    if (e.target.open) loadRoleDefinitions();
+  });
+
+  function openRoleDefinitionEditor(name) {
+    var d = JSON.parse(JSON.stringify(name ? (roleDefinitions[name] || {}) : {}));
+    roleDefEditing = name || null;
+    // The form and its unedited overlay belong to this exact read. Polling
+    // cannot lend a stale editor a newer revision that bypasses its CAS.
+    roleDefRevision = name ? roleDefinitionsRevision : peerPolicy.revision;
+    roleDefOriginal = d;
+    roleDefGeneration++;
+    resetRoleDefinitionPreview();
+    document.getElementById('role-def-msg').textContent = '';
+    document.getElementById('role-def-modal-title').textContent = name ? 'Edit role ' + name : 'New role';
+    var nameEl = document.getElementById('rd-name');
+    nameEl.value = name || '';
+    nameEl.disabled = !!name;
+    document.getElementById('rd-peers').value = (d.peers || []).filter(function (p) { return p !== name; }).join(', ');
+    document.getElementById('rd-nets').value = (d.nets || []).join(', ');
+    document.getElementById('rd-on-stale').value = d.on_stale || '';
+    document.getElementById('rd-restricted').checked = !!d.restricted;
+    document.getElementById('rd-origin').checked = d.origin !== false;
+    var qos = d.qos || {};
+    document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
+      var key = el.getAttribute('data-qos');
+      el.value = Object.prototype.hasOwnProperty.call(qos, key) ? String(qos[key]) : '';
+    });
+    updateRateHints();
+    document.getElementById('role-def-save').disabled = false;
+    openModal('role-def-modal');
+    if (name) document.getElementById('rd-peers').focus();
+  }
+  function roleDefinitionFromForm() {
+    var name = document.getElementById('rd-name').value.trim();
+    if (!ROLE_NAME_RE.test(name)) {
+      return { error: 'Role name must be 1–32 characters of a–z, 0–9, dot, underscore or hyphen, starting with a letter or digit.' };
+    }
+    var listOf = function (id) {
+      return document.getElementById(id).value.split(/[\s,;]+/).filter(Boolean);
+    };
+    var peers = [name], bad = null;
+    listOf('rd-peers').forEach(function (p) {
+      if (!ROLE_NAME_RE.test(p)) bad = bad || p;
+      else if (peers.indexOf(p) === -1) peers.push(p);
+    });
+    if (bad) return { error: 'Peer role name is invalid: ' + bad };
+    var def = { restricted: document.getElementById('rd-restricted').checked, peers: peers,
+                origin: document.getElementById('rd-origin').checked };
+    var nets = listOf('rd-nets');
+    if (nets.length) def.nets = nets;
+    var onStale = document.getElementById('rd-on-stale').value;
+    if (onStale) def.on_stale = onStale;
+    var qos = {}, qosError = null;
+    document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
+      var key = el.getAttribute('data-qos'), raw = el.value.trim();
+      if (!raw) return;
+      if (key === 'telemetry_pause') { qos[key] = raw === 'true'; return; }
+      if (!/^[0-9]+$/.test(raw)) {
+        qosError = qosError || (key + ' must be a whole number' + (/_bps$/.test(key) ? ' of bytes per second' : '') + '.');
+        return;
+      }
+      qos[key] = parseInt(raw, 10);
+    });
+    if (qosError) return { error: qosError };
+    if (Object.keys(qos).length) def.qos = qos;
+    // A definition PUT is a full replacement, so the tracker-only qos_state
+    // overlay (API-configured, not edited here) rides along unchanged.
+    if (roleDefEditing && roleDefOriginal.qos_state) {
+      def.qos_state = roleDefOriginal.qos_state;
+    }
+    return { name: name, definition: def };
+  }
+  document.getElementById('role-def-new').addEventListener('click', function () {
+    if (roleDefBusy) return;
+    var warning = roleCapabilityMessage();
+    if (warning) { document.getElementById('role-def-status').textContent = warning; return; }
+    openRoleDefinitionEditor(null);
+  });
+  document.getElementById('role-def-rows').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button[data-role]') : null;
+    if (!b || b.disabled || roleDefBusy) return;
+    var name = b.getAttribute('data-role');
+    if (b.classList.contains('role-def-edit')) openRoleDefinitionEditor(name);
+    else if (b.classList.contains('role-def-delete')) deleteRoleDefinition(name);
+  });
+  document.getElementById('role-def-save').addEventListener('click', async function () {
+    if (roleDefBusy) return;
+    var msg = document.getElementById('role-def-msg');
+    var warning = roleCapabilityMessage();
+    if (warning) { msg.textContent = warning; resetRoleDefinitionPreview(); return; }
+    var committing = !!roleDefPreview;
+    var built = committing ? roleDefPreview : roleDefinitionFromForm();
+    if (built.error) { msg.textContent = built.error; return; }
+    var revision = committing ? roleDefPreview.revision : roleDefRevision;
+    if (typeof revision !== 'number') { msg.textContent = 'Peer policy revision unknown. Close this editor, refresh, and reopen it.'; return; }
+    var payload = Object.assign({}, built.definition);
+    if (committing) payload.confirm_token = roleDefPreview.confirm_token;
+    var generation = roleDefGeneration;
+    var verb = roleDefEditing ? 'Replace role ' : 'Create role ';
+    setRoleDefBusy(true);
+    msg.textContent = committing ? 'Saving role… Closing this dialog does not cancel the request.' : 'Previewing change…';
+    try {
+      var res = await policyWrite('PUT', '/api/v1/peer-policy/roles/' + encodeURIComponent(built.name) +
+        (committing ? '' : '?dry_run=1'), payload, revision);
+      if (!committing && generation !== roleDefGeneration) {
+        msg.textContent = 'The definition changed. Preview again before saving.';
+        return;
+      }
+      if (!res.ok) {
+        msg.textContent = roleDefinitionProblem(res.status, res.body, committing ? 'Save' : 'Preview');
+        if (res.status === 412 || res.body.code === 'revision_conflict') {
+          msg.textContent = 'Peer policy changed. Close this editor, refresh, and reopen the current definition before previewing again.';
+        }
+        resetRoleDefinitionPreview();
+        return;
+      }
+      if (committing) {
+        if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
+        document.getElementById('role-def-status').textContent = 'Role ' + built.name + ' saved at policy revision ' +
+          policyCount(res.revision) + '.';
+        closeModal('role-def-modal');
+        loadRoleDefinitions();
+        refreshDevices().catch(function () {});
+        return;
+      }
+      roleDefPreview = { name: built.name, definition: built.definition, revision: revision,
+                         confirm_token: res.body.confirm_token };
+      var previewEl = document.getElementById('role-def-preview');
+      previewEl.textContent = blastText(verb + built.name, res.body);
+      previewEl.hidden = false;
+      msg.textContent = 'Review the preview, then choose Save role to apply or Cancel to leave definitions unchanged.';
+      document.getElementById('role-def-save').textContent = 'Save role';
+    } catch (e) {
+      msg.textContent = committing
+        ? 'Response unavailable. The role may have been saved; refresh and review before trying again.'
+        : 'Preview unavailable. No commit was sent; try again.';
+      resetRoleDefinitionPreview();
+    } finally {
+      setRoleDefBusy(false);
+      if (roleDefPreview) document.getElementById('role-def-save').focus();
+    }
+  });
+  async function deleteRoleDefinition(name) {
+    if (roleDefBusy) return;
+    var status = document.getElementById('role-def-status');
+    var warning = roleCapabilityMessage();
+    if (warning) { status.textContent = warning; return; }
+    var revision = peerPolicy.revision;
+    if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
+    var url = '/api/v1/peer-policy/roles/' + encodeURIComponent(name);
+    setRoleDefBusy(true);
+    status.textContent = 'Previewing deletion of ' + name + '…';
+    try {
+      var preview = await policyWrite('DELETE', url + '?dry_run=1', {}, revision);
+      if (!preview.ok) { status.textContent = roleDefinitionProblem(preview.status, preview.body, 'Delete'); return; }
+      if (!confirm(blastText('Delete role ' + name, preview.body) + '\n\nDelete this role definition?')) {
+        status.textContent = 'Deletion of ' + name + ' cancelled; nothing changed.';
+        return;
+      }
+      var res = await policyWrite('DELETE', url, { confirm_token: preview.body.confirm_token }, revision);
+      if (!res.ok) { status.textContent = roleDefinitionProblem(res.status, res.body, 'Delete'); return; }
+      if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
+      status.textContent = 'Role ' + name + ' deleted' +
+        (typeof res.revision === 'number' ? ' at policy revision ' + res.revision : '') + '.';
+      loadRoleDefinitions();
+      refreshDevices().catch(function () {});
+    } catch (e) {
+      status.textContent = 'Response unavailable. The role may have been deleted; refresh and review before retrying.';
+    } finally {
+      setRoleDefBusy(false);
+    }
+  }
+  document.getElementById('role-def-import').addEventListener('click', function () {
+    if (roleDefBusy) return;
+    var warning = roleCapabilityMessage();
+    if (warning) { document.getElementById('role-def-status').textContent = warning; return; }
+    document.getElementById('role-def-file').click();
+  });
+  document.getElementById('role-def-file').addEventListener('change', function (e) {
+    var f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () { importRoleDefinitions(String(rd.result || ''), f.name); };
+    rd.readAsText(f);
+  });
+  async function importRoleDefinitions(csv, filename) {
+    if (roleDefBusy) return;
+    var status = document.getElementById('role-def-status');
+    var warning = roleCapabilityMessage();
+    if (warning) { status.textContent = warning; return; }
+    var revision = peerPolicy.revision;
+    if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
+    setRoleDefBusy(true);
+    status.textContent = 'Previewing import of ' + filename + '…';
+    try {
+      var preview = await policyWrite('POST', '/api/v1/peer-policy/roles/import-csv?dry_run=1', { csv: csv }, revision);
+      if (!preview.ok) { status.textContent = roleDefinitionProblem(preview.status, preview.body, 'Import'); return; }
+      var text = blastText('Replace every role definition with the ' + policyCount(preview.body.roles) +
+        ' role(s) in ' + filename, preview.body) + '\n\nRoles missing from the file are removed. Continue?';
+      if (!confirm(text)) { status.textContent = 'Import of ' + filename + ' cancelled; nothing changed.'; return; }
+      var res = await policyWrite('POST', '/api/v1/peer-policy/roles/import-csv',
+        { csv: csv, confirm_token: preview.body.confirm_token }, revision);
+      if (!res.ok) { status.textContent = roleDefinitionProblem(res.status, res.body, 'Import'); return; }
+      if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
+      status.textContent = 'Imported ' + policyCount(res.body.roles) + ' role definition(s) from ' + filename +
+        ' at policy revision ' + policyCount(res.revision) + '.';
+      loadRoleDefinitions();
+      refreshDevices().catch(function () {});
+    } catch (e) {
+      status.textContent = 'Import response unavailable. Definitions may have changed; refresh and review before retrying.';
+    } finally {
+      setRoleDefBusy(false);
+    }
+  }
+  document.getElementById('role-def-export').addEventListener('click', function () {
+    if (roleDefBusy) return;
+    downloadCsv('/api/v1/peer-policy/roles/export-csv', 'roles.csv');
+  });
+  // ---- End role workflow ----
+
   // Quarantine/release the whole selection. The peer-policy API is one device
   // per call and carries a revision, so these run in sequence and carry the
   // revision forward; a losing race re-reads the policy once rather than
@@ -2727,8 +3751,7 @@
     var verb = quarantined ? 'Quarantine' : 'Release';
     if (!confirm(verb + ' ' + ids.length + ' device' + (ids.length === 1 ? '' : 's') +
         '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
-        'It may not terminate existing device-to-device sessions immediately. ' +
-        'It never installs or reloads a device.')) return;
+        'It may not terminate existing device-to-device sessions immediately. ')) return;
     setBulkBusy(true);
     var ok = 0, failed = [];
     try {
@@ -3129,6 +4152,244 @@
   }
   document.getElementById('export-csv').addEventListener('click', function () { downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
   document.getElementById('example-csv').addEventListener('click', function () { downloadCsv('/api/v1/devices/example-csv', 'devices-example.csv'); });
+  // ---- schedules panel and the "Schedule…" action ----
+  // The schedules a pending window could touch, read alongside the device
+  // table so a row can say so before an operator assigns over it. A failed
+  // read leaves the previous answer alone and says nothing new: the marker is
+  // advisory, and inventing "no schedule" from a failed fetch would be worse
+  // than saying nothing at all.
+  var SCHEDULES = [];
+  var schedPanel = document.getElementById('sched-panel');
+  var schedStatus = document.getElementById('sched-status');
+  var schedRefreshGeneration = 0;
+
+  async function refreshScheduleList(signal) {
+    try {
+      var response = await fetch('/api/v1/schedules', signal ? { signal: signal } : {});
+      if (!response.ok) return;
+      var body = await response.json();
+      if (!body || !Array.isArray(body.schedules)) return;
+      SCHEDULES = body.schedules;
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw e;
+    }
+  }
+
+  // The occurrence the row reports on: the newest one, which is the last page
+  // of an ascending history. Two small reads per schedule beat inventing a
+  // "latest" from the first page and quietly reporting last week's run.
+  async function latestOccurrence(id) {
+    var base = '/api/v1/schedules/' + encodeURIComponent(id) + '/occurrences';
+    var probe = await fetch(base + '?limit=1');
+    if (!probe.ok) return;
+    var head = await probe.json();
+    if (head.total === 0) return null;
+    if (!Number.isSafeInteger(head.total) || head.total < 0) return;
+    var page = await fetch(base + '?limit=1&offset=' + (head.total - 1));
+    if (!page.ok) return;
+    var body = await page.json();
+    return (body.occurrences || [])[0];
+  }
+
+  async function reaffirmSchedule(row) {
+    var response;
+    try {
+      response = await fetch(
+        '/api/v1/schedules/' + encodeURIComponent(row.id) + '/reaffirm', {
+          method: 'POST',
+          headers: csrfHdr({ 'Content-Type': 'application/json',
+                             'If-Match': row.etag }),
+          body: '{}'
+        });
+    } catch (e) {
+      // The request may or may not have been applied. Say that, rather than
+      // reporting a failure the operator would re-attempt blindly.
+      schedStatus.textContent = 'Re-affirming ' + row.id +
+        ' did not complete; refresh to see whether it was applied.';
+      return renderSchedules();
+    }
+    if (response.status === 412) {
+      schedStatus.textContent = 'Schedule ' + row.id +
+        ' changed elsewhere; nothing was re-affirmed. Refresh and retry.';
+    } else if (!response.ok) {
+      schedStatus.textContent = 'Re-affirming ' + row.id + ' failed (' +
+        response.status + ').';
+    } else {
+      schedStatus.textContent = 'Re-affirmed ' + row.id +
+        '; it is now owned by this account.';
+    }
+    return renderSchedules();
+  }
+
+  // At most this many schedules get their latest run read per refresh. The
+  // list itself is never truncated -- a schedule the operator cannot see is
+  // the one failure this panel exists to prevent -- only the extra per-row
+  // history read is bounded.
+  var SCHED_HISTORY_ROWS = 25;
+
+  async function renderSchedules() {
+    var mine = ++schedRefreshGeneration;
+    var rows = document.getElementById('sched-rows');
+    var response;
+    try {
+      response = await fetch('/api/v1/schedules');
+    } catch (e) {
+      schedStatus.textContent = 'Schedule list unavailable; retrying on the next refresh.';
+      return;
+    }
+    if (mine !== schedRefreshGeneration) return;
+    if (!response.ok) {
+      rows.innerHTML = '<tr><td colspan="8" class="muted">Schedule list unavailable (' +
+        response.status + ').</td></tr>';
+      return;
+    }
+    var body = await response.json();
+    if (mine !== schedRefreshGeneration) return;
+    SCHEDULES = body.schedules || [];
+    var latest = Object.create(null);
+    for (var i = 0; i < SCHEDULES.length && i < SCHED_HISTORY_ROWS; i++) {
+      try {
+        latest[SCHEDULES[i].id] = await latestOccurrence(SCHEDULES[i].id);
+      } catch (e) { latest[SCHEDULES[i].id] = undefined; }
+      if (mine !== schedRefreshGeneration) return;
+    }
+    rows.innerHTML = SCHEDULES.length ? SCHEDULES.map(function (row) {
+      var occurrence = latest[row.id];
+      var run = occurrence
+        ? [occurrence.state, scheduleDeltaText(occurrence),
+           scheduleWaveText(occurrence)].filter(function (part) { return part; }).join(' · ')
+        : occurrence === null ? 'no run yet' : 'run history unavailable';
+      return '<tr data-id="' + esc(row.id) + '"><td class="machine"><b>' +
+        esc(row.id) + '</b></td><td>' + esc(row.kind) + '</td><td>' +
+        esc(scheduleTargetSummary(row)) + '</td><td>' +
+        esc(scheduleNextFireText(row)) + '</td><td>' + esc(row.state) +
+        '</td><td>' + esc(run) + '</td><td>' + esc(scheduleCreatorText(row)) +
+        '</td><td>' + (row.creator_exists ? '' :
+          '<button type="button" class="linkish sched-reaffirm">Re-affirm</button>') +
+        '</td></tr>';
+    }).join('') : '<tr><td colspan="8" class="muted">No schedules yet. Filter the device table, select devices, and use Schedule… in the bulk bar.</td></tr>';
+    document.querySelectorAll('#sched-rows .sched-reaffirm').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.closest('tr').getAttribute('data-id');
+        var row = SCHEDULES.filter(function (item) { return item.id === id; })[0];
+        if (row) reaffirmSchedule(row);
+      });
+    });
+  }
+
+  function schedModalFields() {
+    var recurring = document.getElementById('sched-modal-when').value === 'recurring';
+    var assign = document.getElementById('sched-modal-kind').value === 'assign';
+    document.getElementById('sched-modal-at').closest('.field').hidden = recurring;
+    document.getElementById('sched-modal-weekday').closest('.field').hidden = !recurring;
+    document.getElementById('sched-modal-time').closest('.field').hidden = !recurring;
+    document.getElementById('sched-modal-images').closest('.field').hidden = !assign;
+    document.getElementById('sched-modal-mode').closest('.field').hidden = !assign;
+    document.getElementById('sched-modal-max').closest('.field').hidden = assign;
+  }
+
+  // What this window will actually be aimed at, in the operator's own terms,
+  // before it is created. A filter target is re-resolved at each run, so its
+  // count is the CURRENT match and is labelled as such rather than as a
+  // promise about the next run.
+  function schedModalPreview() {
+    var scope = document.getElementById('sched-modal-scope').value;
+    var selected = selectedIds().length;
+    document.getElementById('sched-modal-preview').textContent = scope === 'selection'
+      ? selected + ' selected device(s), named explicitly. Devices matching the ' +
+        'filter later are not added.'
+      : 'The current filter matches ' + devTotal + ' device(s) now. The schedule ' +
+        're-resolves it at each run, so that set can differ when it fires.';
+  }
+
+  document.getElementById('schedule-selected').addEventListener('click', function () {
+    if (bulkBusy || !selectedIds().length) return;
+    var images = document.getElementById('sched-modal-images');
+    images.innerHTML = imageIds.map(function (id) {
+      return '<option value="' + esc(id) + '">' + esc(imageLabel(id)) + '</option>';
+    }).join('');
+    var tz = document.getElementById('sched-modal-tz');
+    if (!tz.value) {
+      try { tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
+      catch (e) { tz.value = 'UTC'; }
+    }
+    document.getElementById('sched-modal-msg').textContent = '';
+    document.getElementById('sched-modal-count').textContent =
+      selectedIds().length + ' selected';
+    schedModalFields();
+    schedModalPreview();
+    openModal('sched-modal');
+  });
+  ['sched-modal-when', 'sched-modal-kind'].forEach(function (id) {
+    document.getElementById(id).addEventListener('change', schedModalFields);
+  });
+  document.getElementById('sched-modal-scope').addEventListener('change', schedModalPreview);
+
+  document.getElementById('create-schedule').addEventListener('click', async function () {
+    var msg = document.getElementById('sched-modal-msg');
+    msg.textContent = '';
+    var scope = document.getElementById('sched-modal-scope').value;
+    var ids = scope === 'selection' ? claimSelection() : selectedIds();
+    if (scope === 'selection' && !ids) return;
+    if (scope !== 'selection') setBulkBusy(true);
+    var recurring = document.getElementById('sched-modal-when').value === 'recurring';
+    var time = (document.getElementById('sched-modal-time').value || '02:30').split(':');
+    var at = document.getElementById('sched-modal-at').value;
+    var values = {
+      id: document.getElementById('sched-modal-id').value.trim(),
+      kind: document.getElementById('sched-modal-kind').value,
+      target: scheduleTargetFromFilters(deviceFilterState(), ids, scope),
+      imageIds: Array.prototype.slice.call(
+        document.getElementById('sched-modal-images').selectedOptions || []
+      ).map(function (option) { return option.value; }),
+      mode: document.getElementById('sched-modal-mode').value,
+      maxDevices: parseInt(document.getElementById('sched-modal-max').value, 10),
+      telemetry: true, telemetryStream: false,
+      recurring: recurring,
+      at: recurring ? 0 : Math.floor(new Date(at).getTime() / 1000),
+      weekday: parseInt(document.getElementById('sched-modal-weekday').value, 10),
+      hour: parseInt(time[0], 10), minute: parseInt(time[1], 10),
+      tz: document.getElementById('sched-modal-tz').value.trim(),
+      windowSeconds: Math.round(
+        parseFloat(document.getElementById('sched-modal-window').value) * 60)
+    };
+    if (!values.id) { msg.textContent = 'Give the schedule an id.'; setBulkBusy(false); return; }
+    if (!recurring && !(values.at > 0)) {
+      msg.textContent = 'Choose when this window starts.'; setBulkBusy(false); return;
+    }
+    if (values.kind === 'assign' && !values.imageIds.length) {
+      msg.textContent = 'Choose at least one image to assign.'; setBulkBusy(false); return;
+    }
+    msg.textContent = 'Creating… Closing this dialog does not cancel the request.';
+    try {
+      var response = await jpost('/api/v1/schedules',
+                                 scheduleDefinitionFromForm(values));
+      var body = await response.json().catch(function () { return {}; });
+      if (response.ok) {
+        devStatus.textContent = 'Schedule ' + values.id + ' created; next run ' +
+          scheduleNextFireText(body.schedule || {}) + '.';
+        closeModal('sched-modal');
+        schedPanel.hidden = false;
+        await renderSchedules();
+        refreshDevices().catch(function () {});
+      } else {
+        msg.textContent = 'Schedule not created: ' +
+          (body.title || body.error || response.status) + '.';
+      }
+    } catch (e) {
+      msg.textContent = 'Response unavailable. The schedule may have been created; refresh schedules before trying again.';
+    } finally {
+      setBulkBusy(false);
+    }
+  });
+
+  document.getElementById('manage-schedules').addEventListener('click', function () {
+    schedPanel.hidden = !schedPanel.hidden;
+    if (!schedPanel.hidden) renderSchedules();
+  });
+  document.getElementById('sched-close').addEventListener('click', function () { schedPanel.hidden = true; });
+  document.getElementById('sched-refresh').addEventListener('click', function () { renderSchedules(); });
+
   var credPanel = document.getElementById('cred-panel');
   var _credProfs = [];
   async function renderCreds() {

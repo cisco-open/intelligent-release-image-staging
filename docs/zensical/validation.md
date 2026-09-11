@@ -101,6 +101,48 @@ navigation. See [Documentation loop](development.md#documentation-loop) for
 the commands and supported tool versions. A build checks generated pages;
 review the Console's bundled help pages separately.
 
+## Phase 1 layout validation
+
+Record configuration, unit/static checks, package inspection/build evidence and
+actual lab/device observations separately. A disposable-root, unsigned package
+build proves buildability and byte propagation only; it proves no production
+root ceremony, native signing, release, deployment or live application. Every
+shared-agent change requires fresh Guest Shell bundles, unified OCI, both IOx
+tars and XR RPM from the same source and the current pinned aria2c binaries.
+Compare agent-source and two-public-root bytes across every artifact, record
+wrapper/OCI provenance, and run `tools/check-package-freshness.sh`. Its
+certificate-drift check does not waive the source rebuild rule.
+
+Apply the checklist only to the selected supported layout:
+
+| Layout | Phase 1 checks to record |
+| --- | --- |
+| Single-host Compose | Authenticated instructions/keylist GETs on 8443; 9443 management-only; custody/status windows and a current stamp; one device apply, LKG during catalog loss and QoS drift/reassertion observation; all device artifact provenance. Confirm server startup without the optional signing key and the explicit absent-key status. Verify that an already running Console serves its UI during server outage; default cold startup requires the healthy server to supply initial browser TLS. |
+| Split-host Compose | The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; prove instruction state, age identity, encrypted signing key and runtime plaintext exist only on the server host and are absent from Console mounts. Confirm server startup without the optional signing key, and Console startup with its independent default TLS while the server is unavailable; forwarded APIs report unavailable. |
+| Single-replica Kubernetes | The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; confirm `replicas: 1`, existing `iris-data` PVC at `/data`, runtime tmpfs, and no new Secret, port, Service or NetworkPolicy rule. Confirm server startup without the optional signing key, and Console startup with independently provisioned TLS while the server is unavailable; forwarded APIs report unavailable. |
+| Multi-replica server tier | Not covered and unsupported: instruction production has no cross-pod coordination. A one-replica manifest cannot produce multi-replica evidence. |
+
+For each device platform, probe the actual verifier. Both packaged verifier
+architectures must accept both provisioned roots and reject wrong roots and
+namespaces. Guest Shell `ssh-keygen -Y verify` remains a runtime probe; absence
+must yield tracker-only, so do not claim universal Guest Shell instruction
+application. Check LKG survival through two instruction-key rotations, expiry
+and allow-list/deny-list asymmetry, one-shot refresh and no in-tick retry loop.
+Validate IOx's owned verification transaction with state read-back and recovery,
+including actual media/signature restrictions, before claiming live support.
+
+Exercise F3 ciphertext bootstrap-envelope redelivery and the transactional
+Guest Shell bundle/sidecar drop, including prior-runnable-bundle preservation on
+refusal, then observe instruction state after the next tick. These update the
+agent only; staged IOS images remain untouched. Use the
+[operator runbooks](operations.md#f3-offline-bootstrap-envelope-redelivery).
+
+Issue #153 mutual-origin union remains preflight-only. One complete tagged-release
+dwell, a separately authorized activation release, and authorized lab/live
+checks for union semantics, connection reconciliation, shared-address handling,
+fail-closed behavior and rollback are required before activation. The checklist
+above and Unreleased documentation do not cross that boundary.
+
 ## Validated platforms
 
 This table records hardware coverage. Verify the packages being rolled out,
@@ -111,6 +153,7 @@ including both architectures of the shared IOx/XR image.
 | Catalyst 9300 | Guest Shell | Lab-validated |
 | Catalyst 9300 | IOx on app-hosting SSD share | Lab-validated runtime and direct share hand-off to `flash:` |
 | Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
+| Catalyst 8000V | IOx (router, VirtualPortGroup, amd64, `bootflash:`) | Lab-validated onboard and record-backed undeploy 2026-09-10; app runs on the IRIS-owned VirtualPortGroup |
 | IE-3400 | IOx | Lab-validated |
 | Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
 
@@ -147,6 +190,9 @@ not establish that an agent package works on a particular device.
 | Partial failure | A current per-image hash, catalog, or RPC error stays visible while other assigned images continue. |
 | Clear assignments | Torrents stop, including when the last assignment is cleared. IOS-XE keeps root copies; XR removes downloaded files but retains adopted files or files of unknown origin. |
 | Undeploy from deployment record | Teardown targets only resources tracked in the deployment record; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the deployment record's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
+| Scheduled window stages and stops there | A `once` schedule targeting the current Devices filter fires inside its window, its occurrence records the target it resolved, and every device it reached has a durable outcome. The staged image is verified at the storage root; no install, activation, boot-variable change, or reload happens anywhere in the window. |
+| Window closes honestly | At the window end, no new work is admitted and queued jobs are cancelled with `window_closed` outcomes. Already-running jobs are allowed to finish and their terminal outcomes remain recorded. |
+| Wave gate holds and stalls visibly | A schedule gated on a preceding one does not admit work until the ratios are met, and an unmet gate ends the occurrence `stalled` at its deadline carrying staged / errored / missing counts, with missing distinguished from errored. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 
 Automated coverage for the management-type/deployment-record behavior lives in

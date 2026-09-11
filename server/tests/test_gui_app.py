@@ -1,7 +1,10 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -285,3 +288,27 @@ def test_login_in_the_same_second_as_a_break_glass_reset_is_honoured(tmp_path):
     cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
     clock[0] = 1030.30
     assert console.session_info(pre_sid) is None
+
+
+def test_image_label_shows_an_id_that_is_its_own_filename_once():
+    """publish.derive_id strips only .SPA.bin/.bin, so an IOS-XR .iso/.tar
+    image's id IS its filename. The console's "id — filename" label must then
+    show the name once, not "8000-x64-26.2.1.iso — 8000-x64-26.2.1.iso", while
+    an XE image keeps both facts and an unknown id stays the bare id."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for the imageLabel check")
+    js = _app_js()
+    start = js.index("  function imageLabel(id) {")
+    fn = js[start:js.index("\n  }\n", start) + 4]
+    script = ("const esc=s=>String(s);"
+              "const imageFilenames={'cat9k_iosxe.26.01.01':'cat9k_iosxe.26.01.01.SPA.bin',"
+              "'8000-x64-26.2.1.iso':'8000-x64-26.2.1.iso','blank':''};"
+              + fn +
+              "console.log(JSON.stringify([imageLabel('cat9k_iosxe.26.01.01'),"
+              "imageLabel('8000-x64-26.2.1.iso'),imageLabel('blank'),imageLabel('gone')]));")
+    out = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=10)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert json.loads(out.stdout) == [
+        "cat9k_iosxe.26.01.01 — cat9k_iosxe.26.01.01.SPA.bin",
+        "8000-x64-26.2.1.iso", "blank", "gone"]

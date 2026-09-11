@@ -15,6 +15,29 @@ import pytest
 import artifact_server
 
 
+def test_guest_shell_trust_and_instruction_capability_names_are_exact():
+    token = "0123456789abcdef" * 2
+    accepted = (
+        "/iris-signers.pem",
+        "/staging/iris-instructions-edge-01-%s.envelope" % token,
+        "/staging/bundle-sha256-%s" % token,
+    )
+    assert [artifact_server._legacy_guest_shell_target(path)
+            for path in accepted] == [path.lstrip("/") for path in accepted]
+    rejected = (
+        "/iris-signers.pem/extra",
+        "/iris-signers.pem.sha256",
+        "/iris-agent.tgz.sha256",
+        "/staging/iris-instructions-edge-01-%s.envelope.extra" % token,
+        "/staging/iris-instructions-edge-01-%s.envelope" % token.upper(),
+        "/staging/bundle-sha256-%s" % token.upper(),
+        "/staging/bundle-sha256-%s.sha256" % token,
+        "/staging/bundle-sha256-%s/extra" % token,
+    )
+    assert all(artifact_server._legacy_guest_shell_target(path) is None
+               for path in rejected)
+
+
 def _throwaway_cert(tmp_path):
     """Generate a throwaway self-signed cert (bare crt + combined cert+key) with
     SAN=IP:127.0.0.1, mirroring the server's real cert shape (CN=iris, IP SAN).

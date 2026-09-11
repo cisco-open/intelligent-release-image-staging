@@ -30,6 +30,14 @@ setup() {
   [[ "$output" != *"IRIS-NAT-"* ]]
 }
 
+@test "router teardown removes and verifies interrupted integrity-stage inputs" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"delete /force bootflash:guest-share/bundle.tgz.sha256"* ]] || return 1
+  [[ "$output" == *"delete /force bootflash:guest-share/iris-instructions.bootstrap"* ]] || return 1
+  [[ "$output" == *"delete /force bootflash:guest-share/iris-signers.allowed_signers"* ]]
+}
+
 @test "router NAT teardown removes record-owned NAT rules" {
   MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
@@ -166,12 +174,42 @@ setup() {
   [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup7")" -ge 1 ]
 }
 
+@test "force teardown reclaims a VPG marked by the IOx-on-router recipe (#209/#212)" {
+  # An IOx app on a router marks its VPG "description IRIS IOx VPG", not the
+  # Guest Shell string. A record-less force reclaim must still recognise it,
+  # or the group and its NAT footprint are stranded and every re-onboard is
+  # refused for the collision.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_IOX_VPG=yes _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup9")" -ge 1 ]
+}
+
 @test "force teardown never removes a VPG that lacks IRIS's description" {
   # THE safety property: an operator's own VirtualPortGroup carries no IRIS
   # marker and must survive a force teardown untouched.
   _router_uninstall_stub_setup
   FAKE_RUNNING_OPERATOR_VPG=yes _router_uninstall_run_live_forced
   [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ]
+}
+
+@test "force teardown preserves an operator description that mentions the IRIS marker" {
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_OPERATOR_VPG=yes FAKE_RUNNING_OPERATOR_STATIC=yes \
+    FAKE_OPERATOR_DESCRIPTION="Customer backup; description IRIS IOx VPG" \
+    run _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.2")" -eq 0 ] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "force teardown preserves an operator description that extends the IRIS marker" {
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_OPERATOR_VPG=yes FAKE_RUNNING_OPERATOR_STATIC=yes \
+    FAKE_OPERATOR_DESCRIPTION="IRIS Guest Shell VPG - reassigned to operator" \
+    run _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.2")" -eq 0 ] || return 1
+  [ "$status" -eq 0 ]
 }
 
 @test "force teardown reclaims the IRIS VPG while leaving the operator's alone" {
@@ -319,6 +357,9 @@ case "$cmds" in
   *"no interface VirtualPortGroup7"*) touch "$FAKE_STATE_DIR/vpg7_removed" ;;
 esac
 case "$cmds" in
+  *"no interface VirtualPortGroup9"*) touch "$FAKE_STATE_DIR/vpg9_removed" ;;
+esac
+case "$cmds" in
   *"clear ip nat translation inside"*)
     printf '%s\n' "$cmds" | grep 'clear ip nat translation' >> "$FAKE_STATE_DIR/cleared" ;;
 esac
@@ -335,8 +376,12 @@ case "$cmds" in
         echo "hostname iris8kv-1"
         if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
           echo "interface VirtualPortGroup3"
+          [ -z "${FAKE_OPERATOR_DESCRIPTION:-}" ] || echo " description $FAKE_OPERATOR_DESCRIPTION"
           echo " ip address 192.168.254.1 255.255.255.252"
           echo "!"
+        fi
+        if [ "${FAKE_RUNNING_OPERATOR_STATIC:-no}" = "yes" ]; then
+          echo "ip nat inside source static tcp 192.168.254.2 6881 interface GigabitEthernet1 6881"
         fi
         # A VPG carrying the description router-install.sh writes into every
         # VPG IRIS creates -- on-device proof of IRIS ownership.
@@ -344,6 +389,12 @@ case "$cmds" in
           echo "interface VirtualPortGroup7"
           echo " description IRIS Guest Shell VPG"
           echo " ip address 192.168.254.9 255.255.255.252"
+          echo "!"
+        fi
+        if [ "${FAKE_RUNNING_IOX_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg9_removed" ]; then
+          echo "interface VirtualPortGroup9"
+          echo " description IRIS IOx VPG"
+          echo " ip address 192.168.254.13 255.255.255.252"
           echo "!"
         fi
         # What router-install.sh leaves on EVERY router it onboards and only
@@ -393,13 +444,23 @@ case "$cmds" in
     echo "hostname iris8kv-1"
     if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
       echo "interface VirtualPortGroup3"
+      [ -z "${FAKE_OPERATOR_DESCRIPTION:-}" ] || echo " description $FAKE_OPERATOR_DESCRIPTION"
       echo " ip address 192.168.254.1 255.255.255.252"
       echo "!"
+    fi
+    if [ "${FAKE_RUNNING_OPERATOR_STATIC:-no}" = "yes" ]; then
+      echo "ip nat inside source static tcp 192.168.254.2 6881 interface GigabitEthernet1 6881"
     fi
     if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg7_removed" ]; then
       echo "interface VirtualPortGroup7"
       echo " description IRIS Guest Shell VPG"
       echo " ip address 192.168.254.9 255.255.255.252"
+      echo "!"
+    fi
+    if [ "${FAKE_RUNNING_IOX_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg9_removed" ]; then
+      echo "interface VirtualPortGroup9"
+      echo " description IRIS IOx VPG"
+      echo " ip address 192.168.254.13 255.255.255.252"
       echo "!"
     fi
     if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
