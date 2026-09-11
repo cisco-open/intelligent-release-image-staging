@@ -449,7 +449,7 @@ workdir_has_entries() {
     | grep -vE '^[0-9]+ kbytes total \([0-9]+ kbytes free\)$' \
     | grep -vE '^[^[:space:]]*#' \
     | grep -vE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$' \
-    | grep -vE '(^|[[:space:]])\.iris-verify-[A-Za-z0-9_]+$' \
+    | grep -vE '(^|[[:space:]])\.iris-(verify|krl)-[A-Za-z0-9_]+$' \
     | grep -q .
 }
 
