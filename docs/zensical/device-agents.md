@@ -576,7 +576,10 @@ lets the agent check and reuse that copy.
 
 On XR, the staging file is already on the storage root. Unassigning removes
 files IRIS downloaded; files adopted from the operator, or whose origin is
-unknown, remain in place.
+unknown, remain in place. When multiple historical image records name the same
+root file, every record must establish downloaded ownership before parking can
+delete it. An adopted or unknown claim protects the file even if that record
+is already parked.
 
 If a later IOS-XE assignment needs more space, the agent can reclaim parked
 root copies during its storage check.

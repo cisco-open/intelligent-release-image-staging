@@ -300,9 +300,22 @@ class ScheduleRunner:
             # one side of a coordinated edit and a claim from the other.
             with self.role_guard(row):
                 facts = self.resolve_target(copy.deepcopy(row))
-                snapshot = schedules.normalize_snapshot({
+                snapshot = {
                     key: facts[key]
-                    for key in ("revision", "now", "device_ids")})
+                    for key in ("revision", "now", "device_ids")}
+                bound_ids = (row["preview"]["device_ids"]
+                             if row["target"]["bind"] == "early"
+                             else snapshot["device_ids"])
+                # Early binding keeps the creation-time target even when a
+                # later resolver no longer sees one of those devices.  Never
+                # combine those IDs with a different late-resolution set.
+                snapshot["device_ids"] = list(bound_ids)
+                bindings = facts.get("registration_ids")
+                if isinstance(bindings, dict):
+                    snapshot["registration_ids"] = {
+                        device_id: bindings.get(device_id)
+                        for device_id in bound_ids}
+                snapshot = schedules.normalize_snapshot(snapshot)
                 # Resolution can cross the end boundary; never publish a
                 # fabricated fired set for a slot already missed.
                 if self._now() >= slot["window_end"]:

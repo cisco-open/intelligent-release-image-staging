@@ -81664,6 +81664,29 @@
                     "const": "seeder"
                   }
                 }
+              },
+              "registration_ids": {
+                "type": "object",
+                "maxProperties": 20000,
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
+                  "not": {
+                    "const": "seeder"
+                  }
+                },
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "description": "Registration identity for each fired target, frozen when the occurrence is claimed. Legacy snapshots may omit these bindings; new execution requires a durable registration identity."
               }
             },
             "required": [
@@ -81708,6 +81731,29 @@
                     "const": "seeder"
                   }
                 }
+              },
+              "registration_ids": {
+                "type": "object",
+                "maxProperties": 20000,
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
+                  "not": {
+                    "const": "seeder"
+                  }
+                },
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "description": "Registration identity for each fired target, frozen when the occurrence is claimed. Legacy snapshots may omit these bindings; new execution requires a durable registration identity."
               }
             },
             "required": [

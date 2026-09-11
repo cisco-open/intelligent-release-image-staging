@@ -266,6 +266,13 @@ what the table shows is what the window will act on.
 Either way the occurrence records the `+N / −M` delta between the preview and
 what actually fired, so a target that moved is visible rather than silent.
 
+At claim time, each fired target is also bound to its unique registration
+identity. Deleting and re-adding the same device name after the claim cannot
+redirect that occurrence to the replacement device. An older occurrence with
+no durable registration identity refuses fresh execution as
+`identity_unavailable`; already prepared work retains its recorded identity
+for recovery. Inspect the occurrence and receipts before scheduling a new run.
+
 A `role` filter selects on the **declared** role — the value in the inventory
 `role` column, which an operator sets — not on the **compiled** peer-policy
 index the tracker enforces with. The two are normally the same; when they are

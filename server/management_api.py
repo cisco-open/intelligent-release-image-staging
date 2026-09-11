@@ -2452,6 +2452,28 @@ class _ScheduledExecutor(object):
                 raise schedule_runner.ExecutionRefused(artifact_reason)
         return device
 
+    @staticmethod
+    def _target_registration_id(occurrence, device_id, prior=None, record=None):
+        """Return the identity frozen with a new occurrence target.
+
+        A legacy occurrence can recover an already prepared receipt or
+        deployment record that has its own durable identity. It cannot safely
+        admit fresh work after a delete/re-add, so callers must record an
+        explicit identity-unavailable refusal instead of learning a
+        replacement.
+        """
+        bindings = occurrence.get("target_snapshot", {}).get(
+            "registration_ids")
+        value = ((bindings or {}).get(device_id)
+                 if isinstance(bindings, dict) else None)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+        for row in (prior or {}, record or {}):
+            value = row.get("fleet_registration_id")
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+                return value
+        return None
+
     @contextlib.contextmanager
     def _authority(self, schedule, occurrence, device_id, attempt):
         if self.role_guard is None or self.fleet is None or not self.secrets_path:
@@ -2503,6 +2525,10 @@ class _ScheduledExecutor(object):
 
     def _dispatch_assignment(self, schedule, occurrence, device_id, prior):
         actor = "schedule:" + schedule["id"]
+        target_registration_id = self._target_registration_id(
+            occurrence, device_id, prior)
+        if target_registration_id is None:
+            return self._terminal("identity_unavailable")
         if "manual_generation" not in prior:
             try:
                 with self.role_guard(schedule) as policy:
@@ -2514,6 +2540,8 @@ class _ScheduledExecutor(object):
                 reason = self._map_exception(exc)
                 return self._terminal(
                     reason, error=reason.endswith("unavailable"))
+            if captured["fleet_registration_id"] != target_registration_id:
+                return self._terminal("conflict")
             return {"status": "prepared", "reason": "assignment_prepared",
                     "manual_generation": captured["manual_generation"],
                     "fleet_registered_at": captured["fleet_registered_at"],
@@ -2767,6 +2795,10 @@ class _ScheduledExecutor(object):
         if self.onboard is None or self.submission is None \
                 or self.record_store is None:
             return self._terminal("onboarding_service_unavailable", error=True)
+        target_registration_id = self._target_registration_id(
+            occurrence, device_id, prior, owned)
+        if target_registration_id is None:
+            return self._terminal("identity_unavailable")
         device, plan, problem = self._onboard_precondition(
             device_id, occurrence["id"])
         if isinstance(problem, dict):
@@ -2783,6 +2815,7 @@ class _ScheduledExecutor(object):
         record_registration_id = (owned or {}).get(
             "fleet_registration_id", self._UNBOUND)
         for bound_registration_id in (
+                target_registration_id,
                 receipt_registration_id, record_registration_id):
             if (bound_registration_id is not self._UNBOUND and
                     bound_registration_id != fleet_registration_id):
@@ -2813,7 +2846,8 @@ class _ScheduledExecutor(object):
             receipt_registration_id
             if receipt_registration_id is not self._UNBOUND else
             record_registration_id
-            if record_registration_id is not self._UNBOUND else self._UNBOUND)
+            if record_registration_id is not self._UNBOUND else
+            target_registration_id)
         if resume_record_id is not None:
             interrupted_from = (owned.get("recovery") or {}).get(
                 "interrupted_from")
@@ -3276,7 +3310,27 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         if not isinstance(schedule, dict) or not isinstance(
                 schedule.get("target"), dict):
             raise schedules.ScheduleValidationError("invalid schedule target")
-        return schedule_target_resolver(copy.deepcopy(schedule["target"]))
+        resolved = schedule_target_resolver(copy.deepcopy(schedule["target"]))
+        # schedule_role_guard holds the membership guard across this resolver
+        # and ScheduleRunner's durable claim.  Bind each fired target to its
+        # current registration identity before that guard is released, so a
+        # later delete/re-add cannot turn an already-claimed occurrence into
+        # work for the replacement device.
+        device_ids = (schedule["preview"]["device_ids"]
+                      if schedule["target"].get("bind") == "early"
+                      else resolved["device_ids"])
+        bindings = {}
+        ensure_registration_id = getattr(fleet, "ensure_registration_id", None)
+        for device_id in device_ids:
+            device = fleet.get_device(device_id)
+            if device is not None and callable(ensure_registration_id):
+                device = ensure_registration_id(device_id)
+            registration_id = (device or {}).get("registration_id")
+            bindings[device_id] = (
+                registration_id if isinstance(registration_id, str)
+                and re.fullmatch(r"[0-9a-f]{32}", registration_id) else None)
+        resolved["registration_ids"] = bindings
+        return resolved
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread

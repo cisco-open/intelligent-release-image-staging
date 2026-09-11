@@ -171,6 +171,23 @@ def test_binding_revision_delta_and_frozen_recovery(setup, bind, ids, delta):
     assert occurrence(store)["target_snapshot"] == first["target_snapshot"]
 
 
+def test_early_binding_keeps_its_target_when_registration_lookup_changes(setup):
+    store, clock, executor, _reads, runner = setup
+    create(store, bind="early", ids=["edge-1", "gone"])
+    runner.resolve_target = lambda _row: {
+        "revision": 8, "now": clock.now, "device_ids": ["edge-1"],
+        "registration_ids": {"edge-1": "a" * 32},
+    }
+
+    runner.run_once()
+
+    frozen = occurrence(store)
+    assert frozen["target_snapshot"]["device_ids"] == ["edge-1", "gone"]
+    assert frozen["target_snapshot"]["registration_ids"] == {
+        "edge-1": "a" * 32, "gone": None}
+    assert frozen["delta"] == {"added": 0, "removed": 0}
+
+
 @pytest.mark.parametrize("mutation", ["delete", "edit", "recreate"])
 def test_definition_change_during_resolution_prevents_stale_claim(setup, mutation):
     store, clock, executor, reads, runner = setup

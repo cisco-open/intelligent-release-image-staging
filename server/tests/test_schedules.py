@@ -507,6 +507,25 @@ def test_reserved_service_id_cannot_be_a_device_target_or_preview():
         schedules.normalize_snapshot({"revision": 1, "now": NOW, "device_ids": ["seeder"]})
 
 
+def test_snapshot_registration_bindings_are_complete_and_canonical():
+    binding = "a" * 32
+    assert schedules.normalize_snapshot({
+        "revision": 1, "now": NOW, "device_ids": ["edge-1"],
+        "registration_ids": {"edge-1": binding},
+    })["registration_ids"] == {"edge-1": binding}
+    assert schedules.normalize_snapshot({
+        "revision": 1, "now": NOW, "device_ids": ["edge-1"],
+        "registration_ids": {"edge-1": None},
+    })["registration_ids"] == {"edge-1": None}
+    for invalid in (
+            {}, {"other": binding}, {"edge-1": "not-a-registration"}):
+        with pytest.raises(schedules.ScheduleValidationError):
+            schedules.normalize_snapshot({
+                "revision": 1, "now": NOW, "device_ids": ["edge-1"],
+                "registration_ids": invalid,
+            })
+
+
 def test_receipt_updates_require_cas_and_cannot_replace_ownership(tmp_path):
     oid = receipt_occurrence(tmp_path)
     store = schedules.ReceiptStore(tmp_path)

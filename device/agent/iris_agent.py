@@ -1514,27 +1514,23 @@ def _root_file_origin(state, fname):
         origin == "downloaded" for origin in origins) else None
 
 
-def _protect_adopted_root(deps, entry, fname):
-    """True when `entry` names `fname` as the root-FS placement it made,
-    on a platform where that must never be agent-deleted: a platform whose
-    copy_to_root is attest-in-place (deps.copy_in_place) succeeded WITHOUT
-    this agent writing anything — origin 'adopted', or missing/legacy
-    (fail-safe).
+def _protect_adopted_root(deps, state, fname):
+    """Protect an in-place root if any record leaves its ownership unproven.
 
-    Keyed on `root_file == fname` — the durable fact that THIS record IS
-    the placement about to be deleted — rather than `copied`. `copied` is
-    RECOMPUTED every tick from a fresh root_present() call (the steady-state
-    self-heal) and goes False on nothing more than a transient size drift
-    or a single stat miss, while `root_file`/`origin` do not move with that
-    noise (reviewer PROBE1: keying on `copied` failed OPEN exactly when a
-    placement's provenance was most in doubt). An entry with no root_file
-    at all — never successfully placed, or already cleared — can never
-    match here, which is what preserves ordinary cleanup of an in-progress
-    or failed placement. A platform that physically writes its own root
-    copy (copy_in_place=False) has no adoption path — see xr_deps' module
-    docstring — so it is never protected here."""
-    return bool(deps.copy_in_place and entry.get("root_file") == fname
-               and entry.get("origin") != "downloaded")
+    Parking addresses a filename, so every placement claiming that filename
+    participates, including already parked records and other image ids. A
+    downloaded record cannot override another record's adoption or unknown
+    origin. Use root_file rather than copied: transient presence/size failures
+    can clear copied without changing the placement's durable provenance.
+
+    Without any matching root_file, an unfinished download remains ordinary
+    owned scratch that park can clean up. On platforms with a separate stage
+    directory, park removes only that scratch and leaves the root untouched.
+    """
+    return bool(deps.copy_in_place and any(
+        _is_image_entry(entry) and entry.get("root_file") == fname
+        and entry.get("origin") != "downloaded"
+        for entry in state.values()))
 
 
 def _reconcile_set(deps, state, ids, stage_dir):
@@ -1673,7 +1669,7 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # operator-staged ISO. Only a copy this agent proved it downloaded is
         # still fair game; an in-progress/failed placement was never proven
         # to be anyone's root copy at all and is cleaned up as always.
-        protected = _protect_adopted_root(deps, entry, fname)
+        protected = _protect_adopted_root(deps, state, fname)
         if protected:
             deps.emit("ROOTCOPY-KEPT",
                       "left in place: operator-adopted %s" % fname)

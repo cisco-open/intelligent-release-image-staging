@@ -390,6 +390,39 @@ def test_park_still_deletes_a_downloaded_root_copy_when_stage_is_root():
     assert state["img-a"]["parked"] is True
 
 
+@pytest.mark.parametrize("origin", ["adopted", None])
+@pytest.mark.parametrize("protected_first", [False, True])
+@pytest.mark.parametrize("already_parked", [False, True])
+@pytest.mark.parametrize("placed", [False, True])
+def test_park_preserves_shared_root_with_conflicting_provenance(
+        origin, protected_first, already_parked, placed):
+    # Historical ids can claim the same root file. A downloaded record (or
+    # unfinished acquisition) cannot override another record's adoption,
+    # even after that record has already been parked.
+    cat = MultiCatalog([dict(_img("old"), filename="shared.iso")], ids=[])
+    sizes = {"/stage/shared.iso": 5}
+    deps, rec = make_deps(cat, sizes)
+    deps = deps._replace(copy_in_place=True)
+    downloaded = {"download_started": True, "done": placed, "copied": placed}
+    if placed:
+        downloaded.update(root_file="shared.iso", origin="downloaded")
+    protected = {"root_file": "shared.iso", "done": True, "copied": True,
+                 "parked": already_parked}
+    if origin is not None:
+        protected["origin"] = origin
+    entries = [("old", downloaded), ("protected", protected)]
+    if protected_first:
+        entries.reverse()
+    state = {"schema_version": iris_agent._STATE_SCHEMA, **dict(entries)}
+
+    assert iris_agent.run_once(CFG, deps, state) == "no-assignment"
+
+    assert rec["removed"] == []
+    assert sizes["/stage/shared.iso"] == 5
+    assert state["old"]["parked"] is True
+    assert any("shared.iso" in msg for msg in _emits(rec, "ROOTCOPY-KEPT"))
+
+
 def test_park_deletes_an_uncopied_partial_regardless_of_origin_when_stage_is_root():
     # An in-progress (never successfully attested) download has no placement
     # to have provenance about — park's ordinary cleanup of an abandoned

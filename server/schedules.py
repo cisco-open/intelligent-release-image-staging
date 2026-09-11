@@ -149,10 +149,31 @@ def _actor(actor):
 
 
 def normalize_snapshot(value):
-    _object(value, {"revision", "now", "device_ids"}, "snapshot", {"revision", "now", "device_ids"})
-    return {"revision": _integer(value["revision"], "snapshot revision"),
-            "now": _integer(value["now"], "snapshot now", maximum=MAX_EPOCH),
-            "device_ids": _ids(value["device_ids"])}
+    _object(value, {"revision", "now", "device_ids", "registration_ids"},
+            "snapshot", {"revision", "now", "device_ids"})
+    device_ids = _ids(value["device_ids"])
+    normalized = {
+        "revision": _integer(value["revision"], "snapshot revision"),
+        "now": _integer(value["now"], "snapshot now", maximum=MAX_EPOCH),
+        "device_ids": device_ids,
+    }
+    if "registration_ids" in value:
+        bindings = value["registration_ids"]
+        if not isinstance(bindings, dict) or set(bindings) != set(device_ids):
+            raise ScheduleValidationError(
+                "snapshot registration bindings must match device ids")
+        for device_id, registration_id in bindings.items():
+            _device_id(device_id)
+            # A null binding records that this particular early-bound target
+            # had disappeared before the claim.  It keeps healthy targets
+            # bound without granting fresh work to the missing identity.
+            if (registration_id is not None and
+                    (not isinstance(registration_id, str) or not re.fullmatch(
+                        r"[0-9a-f]{32}", registration_id))):
+                raise ScheduleValidationError("invalid snapshot registration id")
+        normalized["registration_ids"] = {
+            device_id: bindings[device_id] for device_id in device_ids}
+    return normalized
 
 
 WAVE_GATES = frozenset(("open", "held"))

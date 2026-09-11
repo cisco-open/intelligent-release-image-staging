@@ -483,6 +483,21 @@ Download [splunk-iris-swarm.xml](dashboards/splunk-iris-swarm.xml) and follow
 Its default searches use `iris_logs` and `iris_metrics`; edit them if you
 chose different index names.
 
+For the tracker and transfer-health dashboard, use
+[splunk-iris-rollout.xml](dashboards/splunk-iris-rollout.xml) and the
+[existing-view update procedure](dashboards/README.md#updating-the-rollout-view).
+Its `dev` filter selects receivers in the measured peer row; it preserves
+the `tr` time picker and the rollout panels. The table includes exact bytes
+and the selected capture's completeness. Both views deduplicate cumulative
+captures before aggregation, keeping origin and unknown bytes in the peer-share
+denominator. No captures mean unavailable; origin-only captures mean 0%.
+
+In the swarm view, ledger tiles read the latest cumulative metric sample
+within the selected bounds, not bytes transferred during that window. A
+window without a sample can be blank. *Seeder RPC* alone uses a fixed
+15-minute window ending now. Incomplete peer captures limit observed traffic
+totals; the resulting percentage has unknown bias.
+
 Both the OTLP log pipeline and the Prometheus scrape pipeline are required.
 The view's peer-share panels use the origin's sampled records, while its
 *Peer-to-peer evidence* row uses the device-measured peer transfer records.

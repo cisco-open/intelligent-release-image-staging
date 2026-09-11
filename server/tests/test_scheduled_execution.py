@@ -103,15 +103,25 @@ def _base_executor(tmp_path, *, store, fleet, policy, writer,
         record_store=records, now_fn=clock or _Clock())
 
 
+def _target_facts(fleet, clock, ids, policy):
+    bindings = {}
+    for device_id in ids:
+        device = fleet.get_device(device_id)
+        if device is not None:
+            device = fleet.ensure_registration_id(device_id)
+            bindings[device_id] = device["registration_id"]
+    return {"revision": 2, "now": clock.now, "device_ids": list(ids),
+            "registration_ids": bindings,
+            "missing_os_family": 0, "role_drift": 0,
+            "quarantined_ids": sorted(
+                set(ids).intersection(policy.document["quarantined_devices"]))}
+
+
 def _run_schedule(store, executor, policy, clock, ids):
+    def resolve(_row):
+        return _target_facts(executor.fleet, clock, ids, policy)
     runner = schedule_runner.ScheduleRunner(
-        store,
-        lambda _row: {"revision": 2, "now": clock.now,
-                      "device_ids": list(ids),
-                      "missing_os_family": 0, "role_drift": 0,
-                      "quarantined_ids": sorted(
-                          set(ids).intersection(
-                              policy.document["quarantined_devices"]))},
+        store, resolve,
         executor=executor, role_guard=_role_guard(policy), now_fn=clock,
         poll_interval=.01)
     runner.run_once()
@@ -184,10 +194,8 @@ def test_due_assignment_intents_keep_their_own_baselines(tmp_path):
         tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
         clock=clock)
     runner = schedule_runner.ScheduleRunner(
-        store,
-        lambda _row: {"revision": 2, "now": clock.now,
-                      "device_ids": ["edge-1"], "missing_os_family": 0,
-                      "role_drift": 0, "quarantined_ids": []},
+        store, lambda _row: _target_facts(
+            fleet, clock, ["edge-1"], policy),
         executor=executor, role_guard=_role_guard(policy), now_fn=clock,
         poll_interval=.01, error_fn=errors.append)
 
@@ -264,11 +272,8 @@ def test_overlapping_scheduled_replace_keeps_prepared_cas(
 
     def make_runner():
         return schedule_runner.ScheduleRunner(
-            store,
-            lambda _row: {"revision": 2, "now": clock.now,
-                          "device_ids": ["edge-1"],
-                          "missing_os_family": 0, "role_drift": 0,
-                          "quarantined_ids": []},
+            store, lambda _row: _target_facts(
+                fleet, clock, ["edge-1"], policy),
             executor=executor, role_guard=_role_guard(policy), now_fn=clock,
             poll_interval=.01, error_fn=errors.append)
 
@@ -500,14 +505,16 @@ def _routed_device(*, role=None):
     return row
 
 
-def _claim(store, device_ids):
+def _claim(store, device_ids, registration_ids=None):
     row = store.get("nightly")
     slot = schedules.occurrence_slot(row, NOW)
     return store.claim_occurrence(
         row["id"], expected_rev=row["rev"],
         expected_generation=row["generation"], slot=slot,
         target_snapshot={"revision": 2, "now": NOW,
-                         "device_ids": list(device_ids)}, now=NOW)
+                         "device_ids": list(device_ids),
+                         **({"registration_ids": registration_ids}
+                            if registration_ids is not None else {})}, now=NOW)
 
 
 def test_onboard_queue_to_terminal_receipt_keeps_occurrence_provenance(tmp_path):
@@ -614,7 +621,63 @@ def test_assignment_refuses_device_id_reused_after_preparation(tmp_path):
     assert images.get_policy("edge-1")["approved_image_ids"] == []
 
 
-def test_terminal_assignment_without_prepared_claim_needs_no_authority_db(
+@pytest.mark.parametrize("kind", ("assign", "onboard"))
+def test_claimed_occurrence_never_prepares_work_for_a_readded_device(
+        tmp_path, kind):
+    """A receipt may not learn the identity of a replacement after claim."""
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    device = (_routed_device() if kind == "onboard" else
+              {"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    fleet.upsert(device)
+    original = fleet.get_device("edge-1")
+    policy = _Policy()
+    images = catalog.CatalogStore(str(tmp_path)) if kind == "assign" else None
+    writer = None
+    onboard = records = submission = None
+    if kind == "assign":
+        images.save_image(_image("image-a"))
+        writer = assignment_service.AssignmentService(
+            images, fleet, authority_path=str(tmp_path / "authority.sqlite3"))
+    else:
+        onboard, records, submission = _onboard_components(tmp_path, fleet, clock)
+    store = _make_schedule(
+        tmp_path, _definition(kind, ["edge-1"]), ["edge-1"])
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
+        submission=submission, onboard=onboard, records=records, clock=clock)
+
+    def resolve(_row):
+        bound = fleet.ensure_registration_id("edge-1")
+        return {"revision": 2, "now": clock.now, "device_ids": ["edge-1"],
+                "registration_ids": {"edge-1": bound["registration_id"]}}
+
+    runner = schedule_runner.ScheduleRunner(
+        store, resolve, executor=executor, role_guard=_role_guard(policy),
+        now_fn=clock, poll_interval=.01)
+    row = store.get("nightly")
+    claimed = runner._claim(row, runner._slot(row, clock.now))
+    assert claimed["target_snapshot"]["registration_ids"] == {
+        "edge-1": original["registration_id"]}
+
+    fleet.delete("edge-1")
+    fleet.upsert(dict(device, device_ip="192.0.2.99"))
+    replacement = fleet.get_device("edge-1")
+    assert replacement["registration_id"] != original["registration_id"]
+
+    runner.run_once()
+    receipt = schedules.ReceiptStore(tmp_path).get(claimed["id"], "edge-1")
+    assert receipt["status"] == "skipped"
+    assert receipt["reason"] == "conflict"
+    assert receipt.get("fleet_registration_id") is None
+    if kind == "assign":
+        assert images.get_policy("edge-1")["approved_image_ids"] == []
+    else:
+        assert not onboard.list_jobs()
+        onboard.shutdown()
+
+
+def test_unbound_assignment_target_refuses_without_creating_authority_db(
         tmp_path):
     fleet = gui_fleet.FleetStore(str(tmp_path))
     images = catalog.CatalogStore(str(tmp_path))
@@ -630,10 +693,87 @@ def test_terminal_assignment_without_prepared_claim_needs_no_authority_db(
     _run_schedule(store, executor, policy, clock, ["gone"])
     occurrence = schedules.OccurrenceStore(tmp_path).list()[0]
     receipt = schedules.ReceiptStore(tmp_path).get(occurrence["id"], "gone")
-    assert receipt["status"] == "skipped" and receipt["reason"] == "vanished"
+    assert receipt["status"] == "skipped" and receipt["reason"] == "identity_unavailable"
     assert schedules.OccurrenceStore(tmp_path).get(
         occurrence["id"])["state"] == "completed"
     assert not authority.exists()
+
+
+def test_early_binding_skips_only_deleted_target_and_runs_healthy_target(tmp_path):
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    images = catalog.CatalogStore(str(tmp_path))
+    images.save_image(_image("image-a"))
+    writer = assignment_service.AssignmentService(
+        images, fleet, authority_path=str(tmp_path / "authority.sqlite3"))
+    definition = _definition(device_ids=["edge-1", "gone"])
+    definition["target"]["bind"] = "early"
+    store = _make_schedule(tmp_path, definition, ["edge-1", "gone"])
+    policy = _Policy()
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
+        clock=clock)
+
+    def resolve(_row):
+        facts = _target_facts(fleet, clock, ["edge-1"], policy)
+        assert facts["registration_ids"] == {
+            "edge-1": fleet.get_device("edge-1")["registration_id"]}
+        return facts
+
+    runner = schedule_runner.ScheduleRunner(
+        store, resolve, executor=executor, role_guard=_role_guard(policy),
+        now_fn=clock, poll_interval=.01)
+    runner.run_once()
+
+    occurrence = schedules.OccurrenceStore(tmp_path).list()[0]
+    assert occurrence["target_snapshot"]["registration_ids"] == {
+        "edge-1": fleet.get_device("edge-1")["registration_id"],
+        "gone": None}
+    receipt_store = schedules.ReceiptStore(tmp_path)
+    missing = receipt_store.get(occurrence["id"], "gone")
+    assert missing["status"] == "skipped"
+    assert missing["reason"] == "identity_unavailable"
+
+    clock.now += 1
+    runner.run_once()
+    healthy = receipt_store.get(occurrence["id"], "edge-1")
+    assert healthy["status"] == "ok"
+    assert images.get_policy("edge-1")["approved_image_ids"] == ["image-a"]
+
+
+def test_legacy_prepared_assignment_recovers_from_its_receipt_identity(tmp_path):
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    images = catalog.CatalogStore(str(tmp_path))
+    images.save_image(_image("image-a"))
+    writer = assignment_service.AssignmentService(
+        images, fleet, authority_path=str(tmp_path / "authority.sqlite3"))
+    store = _make_schedule(
+        tmp_path, _definition(device_ids=["edge-1"]), ["edge-1"])
+    policy = _Policy()
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
+        clock=clock)
+    runner = _run_schedule(store, executor, policy, clock, ["edge-1"])
+    occurrence = schedules.OccurrenceStore(tmp_path).list()[0]
+    receipt = schedules.ReceiptStore(tmp_path).get(occurrence["id"], "edge-1")
+    assert receipt["status"] == "intent"
+    expected_registration = receipt["fleet_registration_id"]
+
+    occurrences = schedules.OccurrenceStore(tmp_path)
+    occurrences._rows.update(occurrence["id"], lambda row: dict(
+        row, target_snapshot={key: value for key, value in
+                              row["target_snapshot"].items()
+                              if key != "registration_ids"}))
+
+    clock.now += 1
+    runner.run_once()
+    final = schedules.ReceiptStore(tmp_path).get(occurrence["id"], "edge-1")
+    assert final["status"] == "ok"
+    assert final["fleet_registration_id"] == expected_registration
+    assert images.get_policy("edge-1")["approved_image_ids"] == ["image-a"]
 
 
 def test_prepared_assignment_closes_without_admitting_catalog_write(tmp_path):
@@ -733,7 +873,9 @@ def test_queued_onboard_authority_refuses_plan_drift_but_not_role_drift(
     definition = _definition("onboard", ["edge-1"])
     definition["target"]["filters"] = {"role": "boat"}
     store = _make_schedule(tmp_path, definition, ["edge-1"])
-    occurrence = _claim(store, ["edge-1"])
+    occurrence = _claim(
+        store, ["edge-1"], _target_facts(
+            fleet, clock, ["edge-1"], policy)["registration_ids"])
     prior = schedules.ReceiptStore(tmp_path).begin(
         occurrence["id"], "edge-1", now=NOW)
     executor = _base_executor(
@@ -775,7 +917,9 @@ def test_queued_onboard_refuses_same_second_replacement_and_identifies_legacy(
     monkeypatch.setattr(onboard, "_ensure_maintenance", lambda: None)
     store = _make_schedule(
         tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
-    occurrence = _claim(store, ["edge-1"])
+    occurrence = _claim(
+        store, ["edge-1"], _target_facts(
+            fleet, clock, ["edge-1"], policy)["registration_ids"])
     prior = schedules.ReceiptStore(tmp_path).begin(
         occurrence["id"], "edge-1", now=NOW)
     executor = _base_executor(
@@ -832,7 +976,9 @@ def test_legacy_interrupted_onboard_uses_registered_at_for_replacement(
     onboard._probe = lambda *_args: io_calls.append("probe") or True
     store = _make_schedule(
         tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
-    occurrence = _claim(store, ["edge-1"])
+    occurrence = _claim(
+        store, ["edge-1"], _target_facts(
+            fleet, clock, ["edge-1"], policy)["registration_ids"])
     prior = schedules.ReceiptStore(tmp_path).begin(
         occurrence["id"], "edge-1", now=NOW)
     executor = _base_executor(
@@ -970,7 +1116,9 @@ def test_interrupted_applying_onboard_never_retargets_from_fresh_plan(
     onboard, records, submission = _onboard_components(tmp_path, fleet, clock)
     store = _make_schedule(
         tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
-    occurrence = _claim(store, ["edge-1"])
+    occurrence = _claim(
+        store, ["edge-1"], _target_facts(
+            fleet, clock, ["edge-1"], policy)["registration_ids"])
     prior = schedules.ReceiptStore(tmp_path).begin(
         occurrence["id"], "edge-1", now=NOW)
     executor = _base_executor(
@@ -1033,7 +1181,9 @@ def test_interrupted_applying_collision_keeps_occurrence_teardown_authority(
         tmp_path, fleet, clock, platform=platform)
     store = _make_schedule(
         tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
-    occurrence = _claim(store, ["edge-1"])
+    occurrence = _claim(
+        store, ["edge-1"], _target_facts(
+            fleet, clock, ["edge-1"], policy)["registration_ids"])
     prior = schedules.ReceiptStore(tmp_path).begin(
         occurrence["id"], "edge-1", now=NOW)
     executor = _base_executor(

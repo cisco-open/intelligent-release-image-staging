@@ -638,6 +638,20 @@ def test_schedule_response_views_history_and_receipts_are_closed_and_bounded():
             occurrence_media["schema"], document))
         occurrence_page = copy.deepcopy(_media_examples(occurrence_media)[0])
         occurrence_schema.validate(occurrence_page)
+        bound_page = copy.deepcopy(occurrence_page)
+        bound_snapshot = bound_page["occurrences"][0]["target_snapshot"]
+        bound_snapshot["registration_ids"] = {
+            device_id: "a" * 32 for device_id in bound_snapshot["device_ids"]}
+        occurrence_schema.validate(bound_page)
+        absent_page = copy.deepcopy(bound_page)
+        absent_bindings = absent_page["occurrences"][0]["target_snapshot"]["registration_ids"]
+        absent_bindings[next(iter(absent_bindings))] = None
+        occurrence_schema.validate(absent_page)
+        for invalid_registration in ("", "a" * 31, "g" * 32, "a" * 32 + "\n"):
+            broken = copy.deepcopy(bound_page)
+            bindings = broken["occurrences"][0]["target_snapshot"]["registration_ids"]
+            bindings[next(iter(bindings))] = invalid_registration
+            assert list(occurrence_schema.iter_errors(broken))
         occurrence = occurrence_page["occurrences"][0]
         for field in ("schedule", "slot", "preview", "schedule_generation",
                       "schedule_rev", "state", "created_at", "updated_at"):

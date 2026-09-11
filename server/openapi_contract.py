@@ -637,6 +637,17 @@ def _schedule_occurrence_schema():
     snapshot = _schedule_object({
         "revision": _schedule_integer(), "now": epoch,
         "device_ids": _schedule_ids_schema()})
+    snapshot["properties"]["registration_ids"] = {
+        "type": "object", "maxProperties": schedules.MAX_TARGETS,
+        "propertyNames": _schedule_ids_schema()["items"],
+        "additionalProperties": {"oneOf": [
+            {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+            {"type": "null"}]},
+        "description": (
+            "Registration identity for each fired target, frozen when the "
+            "occurrence is claimed. Legacy snapshots may omit these bindings; "
+            "new execution requires a durable registration identity."),
+    }
     slot = _schedule_slot_schema()
     properties = {
         "id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},

@@ -11,6 +11,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Fixed
+- XR parking preserves a shared root file when any historical image record
+  marks it adopted or leaves its ownership unknown, including parked records.
+- Scheduled occurrences bind device registration identities at claim time, so
+  deleting and re-adding a device cannot redirect already claimed work. Missing
+  targets refuse individually; prepared work retains its recovery identity.
+- Splunk Simple XML queries avoid a duplicated `search` command that silently
+  hid matching events in the browser. The portable `iris_rollout` source keeps
+  the rollout panels and device/time filters, adds measured peer captures with
+  exact bytes, and includes bytes omitted by capture row caps in received totals.
+- Splunk descriptions distinguish direct device captures from derived peer
+  estimates, selected metric samples from window deltas, and missing captures
+  from measured zero traffic (#287–#289).
+
 ## [2026.09.10.1]
 
 ### Added
