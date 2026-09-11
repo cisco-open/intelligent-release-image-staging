@@ -158,6 +158,15 @@ def _configure_roots(paths, roots):
         shutil.copyfile(str(private) + ".pub", directory / (root_id + ".pub"))
 
 
+# The two tests below drive the real age binaries rather than a stub, the
+# way the mktorrent cases in test_iris_publish.py do. CI installs `age`
+# (.github/workflows/tests.yml); a machine without it skips them instead of
+# reporting a custody failure it cannot have.
+_needs_age = pytest.mark.skipif(
+    shutil.which("age") is None or shutil.which("age-keygen") is None,
+    reason="age not installed")
+
+
 def _age_identity(tmp_path, name):
     identity = tmp_path / name
     subprocess.run(
@@ -1323,6 +1332,7 @@ def test_correction_revocation_update_is_serialized_with_actual_signature(
         and "install_error" not in outcomes
 
 
+@_needs_age
 def test_correction_generation_rejects_unrecoverable_recipient_and_cleans(
         tmp_path):
     paths = _paths(tmp_path)
@@ -1385,6 +1395,7 @@ def test_correction_generation_publication_failure_restores_absence_and_retries(
     assert result["state"] == "generated"
 
 
+@_needs_age
 def test_correction_cold_cli_loads_export_import_status_and_install(tmp_path):
     paths = _paths(tmp_path)
     identity, recipient = _age_identity(tmp_path, "cold identity")

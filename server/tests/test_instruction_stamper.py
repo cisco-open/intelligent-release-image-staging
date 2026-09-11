@@ -1715,6 +1715,12 @@ def test_task13_s11_restrictive_stamp_survives_orphan_handout_admission_loss(
     assert Path(row_path).read_bytes() == row_before
 
 
+# This case drives the real age binaries rather than a stub. CI installs `age`
+# (.github/workflows/tests.yml); a machine without it skips rather than
+# reporting a rotation failure it cannot have.
+@pytest.mark.skipif(
+    shutil.which("age") is None or shutil.which("age-keygen") is None,
+    reason="age not installed")
 def test_task13_s13_real_default_rotate_failure_resume_and_supersession(
         tmp_path, monkeypatch, capsys):
     now = int(time.time())
