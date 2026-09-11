@@ -305,16 +305,13 @@ def test_mixed_direction_and_incomparable_role_changes_are_stable_422(tmp_path):
         manager.set_roles({"d00": None, "d01": "tight"}, actor="test")
     assert mixed.value.status == 422
     assert mixed.value.code == "mixed_role_direction"
-    # Seed the starting restricted membership directly. Going from
-    # unrestricted to ``left`` also gains the existing ``left-peer`` cohort,
-    # so the full mutual-edge classifier correctly refuses that combined
-    # add/remove operation as incomparable.
-    fleet.bulk_set_roles({"d01": "left", "d02": "left-peer",
-                          "d03": "right-peer"})
-    peer_policy.commit_mutation(
-        auth_path, lkg_path, "seed", "d01", "test", 11,
-        lambda candidate: candidate["roles"]["role_of"].update({
-            "d01": "left", "d02": "left-peer", "d03": "right-peer"}))
+    # Entering a restricted role from no role at all is never refused, so the
+    # starting restricted membership goes in through the coordinator like any
+    # other first assignment.  The refusal under test is the role-to-role move:
+    # ``left`` reaches the ``left-peer`` cohort and ``right`` the
+    # ``right-peer`` cohort, so neither permitted set nests in the other.
+    manager.set_roles({"d01": "left", "d02": "left-peer",
+                       "d03": "right-peer"}, actor="test")
     with pytest.raises(_module().RoleManagementError) as incomparable:
         manager.set_role("d01", "right", actor="test")
     assert incomparable.value.status == 422
@@ -345,6 +342,181 @@ def test_restricted_role_direction_uses_actual_reachable_populations():
         document, "isolated-a", "isolated-b") == "incomparable"
     assert mod._change_direction(
         document, "connected-a", "connected-b") == "neutral"
+
+
+def test_first_restricted_assignment_tightens_and_clearing_it_relaxes():
+    mod = _module()
+    document = peer_policy.base_document()
+    document["roles"] = {
+        "defs": {
+            "boat": {"restricted": True, "peers": ["boat"]},
+            "open": {"restricted": False},
+        },
+        "role_of": {}, "qos_default": {}, "qos_device": {},
+    }
+    document["roles_present"] = True
+    peer_policy.validate_document(document)
+    # Default access and ``boat``'s permitted set each reach something the
+    # other cannot, so the signature comparison cannot order this pair.  A
+    # device policy places in no role is entering a restricted set for the
+    # first time: that is a tightening, not an unorderable move.
+    assert mod._change_direction(document, None, "boat") == "tighten"
+    # The mirror: leaving that restricted set returns the device to default
+    # access, which is the relaxation of the same pair.
+    assert mod._change_direction(document, "boat", None) == "relax"
+    # An unrestricted role permits exactly what the default already permits,
+    # so the signatures are equal and the restricted boundary does not move:
+    # the ordinary comparison still answers "neutral" here.
+    assert mod._change_direction(document, None, "open") == "neutral"
+
+
+def test_set_role_enters_and_clears_a_populated_restricted_role(tmp_path):
+    fleet = _fleet(tmp_path, 3)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d01", "boat", actor="test")
+    # d00 is in no role and d02 stays role-less, so the default cohort and the
+    # ``boat`` cohort each hold a peer the other cannot reach.
+    preview = manager.set_role("d00", "boat", actor="test", dry_run=True)
+    assert preview["dry_run"] is True and preview["direction"] == "tighten"
+
+    result = manager.set_role("d00", "boat", actor="test")
+    assert result["ok"] is True and result["direction"] == "tighten"
+    assert fleet.get_device("d00")["role"] == "boat"
+    assert _policy(auth_path, lkg_path).roles.role_of["d00"] == "boat"
+
+    # The move must be reversible: the same unorderable pair read the other
+    # way round is the relaxation, so the clear commits policy first.
+    cleared = manager.set_role("d00", None, actor="test")
+    assert cleared["ok"] is True and cleared["direction"] == "relax"
+    assert cleared["role_drift"]["count"] == 0
+    assert fleet.get_device("d00").get("role") is None
+    assert "d00" not in _policy(auth_path, lkg_path).roles.role_of
+
+
+def test_first_assignment_rule_keeps_a_nesting_signature_answer(tmp_path):
+    fleet = _fleet(tmp_path, 3)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("open", {"restricted": False}),
+        ("narrow", {"restricted": True, "peers": ["narrow", "open"]}),
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "narrow", actor="test")
+    manager.set_role("d02", "boat", actor="test")
+    # Every other device already holds a role, so the default access d01 has
+    # today nests inside ``boat``'s permitted set.  The signature comparison
+    # orders this first assignment on its own and the first-assignment rule
+    # must not override it.
+    preview = manager.set_roles({"d01": "boat"}, actor="test", dry_run=True)
+    assert preview["direction"] == "relax"
+
+    # Both halves are relaxations, so the bulk is accepted rather than
+    # refused as a mixed direction.
+    result = manager.set_roles({"d00": "open", "d01": "boat"}, actor="test")
+    assert result["ok"] is True and result["direction"] == "relax"
+    assert fleet.get_device("d00")["role"] == "open"
+    assert fleet.get_device("d01")["role"] == "boat"
+    role_of = _policy(auth_path, lkg_path).roles.role_of
+    assert role_of["d00"] == "open" and role_of["d01"] == "boat"
+
+
+def test_bulk_first_role_assignment_into_several_restricted_roles(tmp_path):
+    fleet = _fleet(tmp_path, 5)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("fiber", {"restricted": True, "peers": ["fiber"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+    result = manager.set_roles({"d01": "boat", "d02": "fiber"}, actor="test")
+    assert result["ok"] is True and result["direction"] == "tighten"
+    assert result["role_drift"]["count"] == 0
+    assert {fleet.get_device("d01")["role"],
+            fleet.get_device("d02")["role"]} == {"boat", "fiber"}
+    role_of = _policy(auth_path, lkg_path).roles.role_of
+    assert role_of["d01"] == "boat" and role_of["d02"] == "fiber"
+
+
+def test_bulk_mixing_a_first_role_assignment_and_a_relaxation_is_refused(
+        tmp_path):
+    fleet = _fleet(tmp_path, 4)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("open", {"restricted": False}),
+        ("narrow", {"restricted": True, "peers": ["narrow", "open"]}),
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "narrow", actor="test")
+    # Populate ``boat`` and leave d03 role-less, so d01 joining ``boat``
+    # really is the unorderable first assignment and not a nesting move.
+    manager.set_role("d02", "boat", actor="test")
+    assert manager.set_roles({"d01": "boat"}, actor="test",
+                             dry_run=True)["direction"] == "tighten"
+    # ``narrow`` already reaches ``open``, so moving d00 to the unrestricted
+    # role only widens its permitted set.
+    assert manager.set_roles({"d00": "open"}, actor="test",
+                             dry_run=True)["direction"] == "relax"
+    before = fleet.snapshot(), _policy(auth_path, lkg_path).document
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.set_roles({"d00": "open", "d01": "boat"}, actor="test")
+
+    assert caught.value.status == 422
+    assert caught.value.code == "mixed_role_direction"
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+
+def test_bulk_mixing_a_role_clear_and_a_first_assignment_is_refused(tmp_path):
+    fleet = _fleet(tmp_path, 4)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_roles({"d00": "boat", "d01": "boat"}, actor="test")
+    # d03 stays role-less, so both halves of the bulk are unorderable pairs:
+    # clearing d00 relaxes and d02 joining ``boat`` tightens.
+    assert manager.set_roles({"d00": None}, actor="test",
+                             dry_run=True)["direction"] == "relax"
+    assert manager.set_roles({"d02": "boat"}, actor="test",
+                             dry_run=True)["direction"] == "tighten"
+    before = fleet.snapshot(), _policy(auth_path, lkg_path).document
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.set_roles({"d00": None, "d02": "boat"}, actor="test")
+
+    assert caught.value.status == 422
+    assert caught.value.code == "mixed_role_direction"
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+
+def test_csv_import_of_new_devices_declaring_restricted_roles(tmp_path):
+    fleet = _fleet(tmp_path, 2)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("fiber", {"restricted": True, "peers": ["fiber"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    # d01 already holds ``boat`` and d00 stays role-less, so the CSV rows join
+    # a populated role from outside it.
+    manager.set_role("d01", "boat", actor="test")
+    rows = [
+        "n1,10.0.0.11,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,"
+        "255.255.255.252,10.0.0.2,,,C9300,,,,boat,guestshell",
+        "n2,10.0.0.12,routed,777,10.0.0.6,255.255.255.252,10.0.0.5,"
+        "255.255.255.252,10.0.0.6,,,C9300,,,,fiber,guestshell",
+    ]
+    text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + "\n".join(rows) + "\n"
+
+    result = manager.import_csv(text, actor="test")
+
+    assert result["ok"] is True and result["direction"] == "tighten"
+    assert result["stats"]["imported"] == 2 and result["stats"]["new"] == 2
+    assert result["role_drift"]["count"] == 0
+    assert fleet.get_device("n1")["role"] == "boat"
+    assert fleet.get_device("n2")["role"] == "fiber"
+    role_of = _policy(auth_path, lkg_path).roles.role_of
+    assert role_of["n1"] == "boat" and role_of["n2"] == "fiber"
 
 
 def test_bulk_direction_computes_each_distinct_transition_once(tmp_path,
@@ -789,29 +961,38 @@ def test_unrestricted_direction_includes_restricted_candidate_side_edges(
 
 def test_restricted_boundary_uses_full_signature_and_rejects_added_edge(
         tmp_path):
-    fleet = _fleet(tmp_path, 3)
+    fleet = _fleet(tmp_path, 4)
     auth_path, lkg_path = _write_roles(tmp_path, [
         ("peer", {"restricted": True, "peers": ["peer"]}),
         ("target", {"restricted": True,
                     "peers": ["target", "peer"]}),
+        ("other-peer", {"restricted": True, "peers": ["other-peer"]}),
+        ("other", {"restricted": True,
+                   "peers": ["other", "other-peer"]}),
     ])
     fleet.bulk_upsert(["d01"], {"role": "peer"})
     peer_policy.set_role(
         auth_path, lkg_path, "d01", "peer", actor="test", now=3)
-    with pytest.raises(_module().RoleManagementError) as caught:
-        _manager(tmp_path, fleet).set_role("d00", "target", actor="test")
-    assert caught.value.code == "incomparable_role_change"
-    assert fleet.get_device("d00").get("role") is None
+    fleet.bulk_upsert(["d03"], {"role": "other-peer"})
+    peer_policy.set_role(
+        auth_path, lkg_path, "d03", "other-peer", actor="test", now=4)
+    # Entering ``target`` does add an edge to the ``peer`` cohort, but a
+    # device policy places in no role only held the default access: its first
+    # assignment replaces that default and is classified as a tightening
+    # rather than refused.
+    entered = _manager(tmp_path, fleet).set_role("d00", "target", actor="test")
+    assert entered["direction"] == "tighten"
+    assert fleet.get_device("d00")["role"] == "target"
+    assert _policy(auth_path, lkg_path).roles.role_of["d00"] == "target"
 
-    fleet.bulk_upsert(["d00"], {"role": "target"})
-    peer_policy.commit_mutation(
-        auth_path, lkg_path, "seed", "d00", "test", 12,
-        lambda candidate: candidate["roles"]["role_of"].__setitem__(
-            "d00", "target"))
+    # A move between two roles is a different matter: leaving ``target``
+    # drops the ``peer`` cohort while ``other`` adds the ``other-peer``
+    # cohort, so the full signature still refuses the added edge.
     with pytest.raises(_module().RoleManagementError) as reverse:
-        _manager(tmp_path, fleet).set_role("d00", None, actor="test")
+        _manager(tmp_path, fleet).set_role("d00", "other", actor="test")
     assert reverse.value.code == "incomparable_role_change"
     assert fleet.get_device("d00")["role"] == "target"
+    assert _policy(auth_path, lkg_path).roles.role_of["d00"] == "target"
 
 
 @pytest.mark.parametrize("source,target", [("u", "r"), ("r", "u")])

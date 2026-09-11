@@ -164,6 +164,26 @@ def _change_direction(document, old_role, new_role, quarantined=False,
         return "tighten"
     if new > old:
         return "relax"
+    if old_role is None and new_restricted:
+        # Reaching here means default access and the restricted role's
+        # permitted set each hold a peer the other cannot reach, so the
+        # comparison above could not order them.  A device policy places in
+        # no role holds only that default, and entering a restricted role
+        # replaces it with the role's permitted set: classify the first
+        # assignment as a tightening so the fleet row is written first.  A
+        # failed policy commit then leaves the device exactly where it was,
+        # under default enforcement, with the new declaration visible as
+        # drift, which is the safe residue.
+        return "tighten"
+    if new_role is None and old_restricted:
+        # The mirror of that first assignment, so a device can always leave a
+        # restricted role it was allowed to enter.  Policy first returns the
+        # device to default enforcement; a failed fleet write then leaves a
+        # stale declared role over default enforcement, visible in
+        # drift_report and ``iris-role explain`` -- the same residue shape
+        # the ``new == old`` boundary rule already chooses for leaving a
+        # restricted role.
+        return "relax"
     return "incomparable"
 
 

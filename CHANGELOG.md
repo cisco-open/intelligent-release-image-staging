@@ -28,6 +28,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - The Console streams static files and the bundled API reference in fixed-size
   chunks, so a stalled client holds one chunk per connection rather than a
   whole file.
+- A device that policy places in no role is classified as tightening when it
+  enters a restricted role and as relaxing when it is cleared back, so Console
+  **Set role**, `iris-role set`, `iris-role bulk`, and a devices CSV import
+  that gives new devices a restricted role now succeed instead of refusing
+  with `incomparable_role_change`; such a first assignment still cannot share
+  one bulk or import with a relaxation.
 - XR parking preserves a shared root file when any historical image record
   marks it adopted or leaves its ownership unknown, including parked records.
 - Scheduled occurrences bind device registration identities at claim time, so

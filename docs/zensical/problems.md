@@ -177,7 +177,14 @@ filesystem text.
 ## incomparable_role_change
 
 The server cannot classify the requested membership move safely as one
-tightening or relaxation. Split the change into separately previewed steps.
+tightening or relaxation. This applies to a move between two roles whose
+permitted sets do not nest; split such a change into separately previewed
+steps. A device that policy does not currently place in any role can always
+enter a restricted role (classified as a tightening) and can always be cleared
+back to no role (a relaxation). A first assignment into an unrestricted role,
+and a device whose declared and enforced roles differ (`role_drift`), are
+classified like any other move. A first assignment cannot share one bulk or
+CSV import with a relaxation; apply relaxations separately.
 
 ## invalid-authorization-request
 
