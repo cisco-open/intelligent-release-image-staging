@@ -1,0 +1,1896 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../docker-hosts/">
+      
+      
+        <link rel="next" href="../device-agents/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Kubernetes - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#kubernetes" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Kubernetes
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Topology
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#phase-1-storage-and-network-impact" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Phase 1 storage and network impact
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#external-address" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        External address
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#small-lab-with-k3s" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Small lab with K3s
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unprivileged-runtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unprivileged runtime
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Unprivileged runtime">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#recover-a-volume-whose-private-modes-were-changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Recover a volume whose private modes were changed
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#secrets-and-storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Secrets and storage
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#health-and-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Health and operation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Topology
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#phase-1-storage-and-network-impact" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Phase 1 storage and network impact
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#external-address" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        External address
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#small-lab-with-k3s" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Small lab with K3s
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unprivileged-runtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unprivileged runtime
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Unprivileged runtime">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#recover-a-volume-whose-private-modes-were-changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Recover a volume whose private modes were changed
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#secrets-and-storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Secrets and storage
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#health-and-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Health and operation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="kubernetes">Kubernetes</h1>
+<p>Docker can use the same separation on independent hosts; see
+<a href="../docker-hosts/">Docker on separate hosts</a>.</p>
+<p>The server and Console images run as separate Kubernetes Deployments and
+Services. The alpha manifests live under <code>kubernetes/</code> and use Kustomize; the
+server owns persistent state; the Console reaches it through authenticated
+HTTPS on the internal management Service.</p>
+<h2 id="topology">Topology</h2>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris-seed-server</code> Deployment</td>
+<td>One amd64 pod running tracker, catalog, seeder, artifacts, telemetry, and the internal management API.</td>
+</tr>
+<tr>
+<td><code>iris-console</code> Deployment</td>
+<td>One state-free Console pod serving browser HTTPS and its same-origin API gateway.</td>
+</tr>
+<tr>
+<td>Server init container</td>
+<td>Runs idempotent <code>iris-bootstrap</code> against the data PVC.</td>
+</tr>
+<tr>
+<td>PVC</td>
+<td>Stores catalog state, encrypted configuration, images, and served artifacts; mounted by server only.</td>
+</tr>
+<tr>
+<td>Secrets</td>
+<td>Supply the age identity, management and observability current/previous tokens, and two distinct TLS identities outside the PVC.</td>
+</tr>
+<tr>
+<td>Memory <code>emptyDir</code></td>
+<td>Holds decrypted server runtime secrets under <code>/run/iris</code>.</td>
+</tr>
+<tr>
+<td>Two LoadBalancer Services</td>
+<td>Publish device/server ports separately from the operator Console.</td>
+</tr>
+<tr>
+<td>ClusterIP Service</td>
+<td>Publishes management HTTPS on 9443 inside the cluster; NetworkPolicy restricts its ingress to Console pods.</td>
+</tr>
+<tr>
+<td>NetworkPolicies</td>
+<td>Permit the declared ingress paths and deny incidental cross-tier access.</td>
+</tr>
+</tbody>
+</table>
+<pre class="mermaid"><code>flowchart LR
+    Device["Devices"] --&gt;|"6969, 8443, 8000, 6881"| Server["Server Deployment"]
+    Operator["Operator browser"] --&gt;|"8080"| Console["Console Deployment"]
+    Console --&gt;|"authenticated HTTPS 9443"| Api["Internal management Service"]
+    Api --&gt; Server
+    Server --&gt; PVC["RWO data PVC"]</code></pre>
+<p>The server Deployment uses <code>replicas: 1</code> with <code>Recreate</code>. There are three single-replica reasons: the tracker peer
+registry is in memory; catalog state is file-backed and seeder RPC is local to
+the pod; and the instruction stamper, serial history, activation/admission
+state and file-backed instruction artifacts have single-writer semantics with
+no cross-pod coordination. Multi-replica server operation is unsupported and
+not covered by validation. More replicas would split coordination state rather
+than add capacity. Console can restart independently without interrupting devices. Pods receive
+private cluster addresses and use Service DNS; devices and browsers use the
+LoadBalancer addresses. Neither pod needs its own external IP.</p>
+<p>Deployment records live under <code>IRIS_STATE</code> (<code>/data/state</code>) on the PVC, and
+server-side onboarding stages artifacts under <code>/data/artifacts</code>. Console
+reaches both through the management API and never mounts the PVC. A server pod
+restart marks in-flight deployment records <code>unknown</code> and requires
+reconciliation rather than blindly retrying a device operation. See
+<a href="../management-type/">Management Type and VLAN Ownership</a>.</p>
+<p>IOx onboarding needs <code>iris-arm64.tar</code> and/or <code>iris-amd64.tar</code> under
+<code>/data/artifacts</code>; IOS-XR onboarding needs <code>iris-xr.rpm</code>. When the aria2c pin
+in <code>tools/aria2c.sha256</code> changes, refresh both <code>deliverables/</code> binaries,
+rebuild both images and every device package from them, and copy the packages
+again: the agents must be file-identical across packages. Copy each package's
+adjacent <code>.manifest</code> as well, because readiness binds the served wrapper bytes
+to their canonical OCI provenance. Kubernetes does not run host-side package
+builders. Build the deployment-neutral packages elsewhere and copy them to the
+server pod with <code>kubectl cp --no-preserve</code>. Rebuild and re-copy every package
+after a shared-agent or common image-definition change, and rebuild/redeploy
+the server image to refresh its Guest Shell bundle. A certificate rotation
+does not require rebuilding them: server startup refreshes the distributed
+<code>/data/artifacts/iris-catalog.pem</code>; re-onboard devices so IOx app data or the
+IOS-XR harddisk bind mount receives the new runtime trust anchor. Package
+readiness checks bytes against manifests, not whether the source has changed;
+use the <a href="../development/#embedded-agent-packages">rebuild procedure</a>.</p>
+<p>Before publishing fresh bundles, provision exactly two distinct approved public
+instruction roots as <code>.pub</code> files under <code>/data/config/instr/roots.d</code>, readable
+by the server's UID 10001. Use the same approved pair when building every
+device package; never generate replacement roots in the pod or copy offline
+private keys there. Follow the <a href="../operations/#instruction-root-ceremony-and-recovery">instruction-root ceremony</a>.
+Missing or invalid roots leave bundle publication unavailable even when the
+pod's listeners are ready. Check package readiness in Console Setup after rollout.</p>
+<h2 id="phase-1-storage-and-network-impact">Phase 1 storage and network impact</h2>
+<p>The existing <code>iris-data</code> PVC stays mounted at <code>/data</code>, with <code>IRIS_STATE</code> at
+<code>/data/state</code>, <code>IRIS_CONFIG</code> at <code>/data/config</code>, images and artifacts under that
+layout. <code>IRIS_RUN</code> remains <code>/run/iris</code> on memory <code>emptyDir</code>; plaintext signing
+material never becomes PVC state. Public roots and encrypted signing material
+use the existing configuration storage. Phase 1 requires no new Secret, port,
+Service or NetworkPolicy rule.</p>
+<p><code>GET /v1/devices/{device_id}/instructions</code> and
+<code>GET /v1/devices/{device_id}/instruction-keylist</code> add authenticated traffic on
+existing device HTTPS 8443, with no new listener, network path or firewall flow.
+TCP 9443 remains Console-to-server management-only. Server-only instruction
+state, age identity, encrypted signing key and runtime plaintext must never
+be mounted into Console pods. Validate this <a href="../validation/#phase-1-layout-validation">single-replica layout</a>
+without claiming multi-replica coverage.</p>
+<h2 id="external-address">External address</h2>
+<p>Reserve stable device/server and operator-Console addresses before bootstrap.
+Put the device-reachable address in <code>kubernetes/iris-seed-server.env</code> as
+<code>IRIS_HOST_IP</code>, and configure the server LoadBalancer to use it. IRIS uses it
+in the catalog certificate, tracker announce URL, and seeder endpoint.</p>
+<p>The server Service sets <code>externalTrafficPolicy: Local</code>. The tracker uses the
+connection source address when a device does not send an explicit peer IP, so
+source NAT could advertise an unreachable node address. See Kubernetes
+<a href="https://kubernetes.io/docs/tutorials/services/source-ip/">source-IP behavior</a>.
+Port 6969 is an HTTPS listener using the same server certificate devices pin
+for the catalog; the Service remains a layer-4 TCP mapping and terminates no
+TLS itself.</p>
+<p>The management Service is ClusterIP-only and port 9443 is absent from both
+LoadBalancers. Its ingress NetworkPolicy selects only Console pods. The API also requires a scoped service credential and pinned TLS. These
+NetworkPolicies require a CNI that enforces them. The base policies allow any
+source on the published server ports and on Console 8080; restrict operator,
+device, and monitoring source ranges at the LoadBalancer or firewall. Egress
+is unrestricted because SSH, DNS, and optional feed/telemetry destinations
+depend on the deployment.</p>
+<h2 id="small-lab-with-k3s">Small lab with K3s</h2>
+<p>A single amd64 Linux host can run K3s with MetalLB providing the two
+LoadBalancer addresses. Reserve two addresses on the node's layer-2 network,
+outside its DHCP pool: one for devices and one for the Console. Choose distinct
+Pod, Service, and Docker subnets that do not overlap the host or device networks.</p>
+<p>Configure K3s before starting it:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># /etc/rancher/k3s/config.yaml</span>
+<span class="nt">disable</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">traefik</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">servicelb</span>
+<span class="nt">kube-proxy-arg</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">proxy-mode=iptables</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nodeport-addresses=127.0.0.0/8</span>
+<span class="nt">secrets-encryption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="nt">write-kubeconfig-mode</span><span class="p">:</span><span class="w"> </span><span class="s">"0600"</span>
+</code></pre></div>
+<p>IRIS uses direct TCP Services, so it needs no ingress controller. Disabling
+ServiceLB lets MetalLB handle LoadBalancer Services without occupying the
+node's host ports. Keep K3s's embedded NetworkPolicy controller enabled; do
+not set <code>disable-network-policy</code>. The NodePort setting limits NodePort access
+to loopback while clients use the LoadBalancer addresses. See
+<a href="https://docs.k3s.io/networking/networking-services">K3s networking services</a>
+and <a href="https://docs.k3s.io/cli/server">server configuration</a>.</p>
+<p>Install a pinned MetalLB release using its
+<a href="https://metallb.io/installation/">installation guide</a>. Create an
+<code>IPAddressPool</code> containing the two reserved addresses and an
+<code>L2Advertisement</code> for that pool. Set <code>autoAssign: false</code> and give each IRIS
+Service explicit <code>metallb.io/address-pool</code> and <code>metallb.io/loadBalancerIPs</code>
+annotations in a Kustomize overlay. Retain <code>externalTrafficPolicy: Local</code> and
+restrict the Console's <code>loadBalancerSourceRanges</code> to operator networks. See
+<a href="https://metallb.io/configuration/">MetalLB configuration</a>.</p>
+<p>For local storage, create a dedicated directory owned by <code>10001:10001</code> with
+mode <code>2770</code> at the volume root, before any server pod mounts it. Also
+pre-create its <code>state</code> child (<code>/data/state</code> in the pod), owned by
+<code>10001:10001</code> with exact mode <code>0700</code> and setgid explicitly cleared. Only the
+volume root needs setgid; <code>state</code> must not pass it into private authority
+directories. Otherwise, a fresh IOx directory inherits mode <code>2700</code> and fails
+its strict <code>0700</code> check. Keep other private files and subdirectories at their
+own required modes; the root mode is not a recursive permission setting.
+Bind it through a local PersistentVolume with node affinity,
+<code>Retain</code> reclaim policy, and a storage class using <code>WaitForFirstConsumer</code>.
+Match the PVC's storage class and request to that volume. The base request is
+<code>50Gi</code>; a smaller lab overlay can use <code>10Gi</code> if its images and artifacts fit.
+A directory-backed local volume does not impose a disk quota, so check free
+space on the host. Back up its contents and the separately held age identity.
+See <a href="https://kubernetes.io/docs/concepts/storage/volumes/#local">Kubernetes local volumes</a>.</p>
+<p>K3s can share this host with Docker when its LoadBalancer addresses differ
+from Docker's published host address. Keep IRIS pods on the cluster network
+without <code>hostNetwork</code> or <code>hostPort</code>. Preserve Docker firewall rules and verify
+both Docker endpoints and Kubernetes source-IP handling after installation.
+Keep the management Service internal on 9443. This layout uses one node and
+local storage; it does not provide host failover.</p>
+<h2 id="unprivileged-runtime">Unprivileged runtime</h2>
+<p>Both pods run as uid/gid <code>10001</code>, drop all capabilities, disallow privilege
+escalation, and inherit <code>RuntimeDefault</code> seccomp. The namespace enforces the
+restricted Pod Security profile. All listeners bind above 1024.</p>
+<p>The server uses <code>fsGroup: 10001</code> with <code>fsGroupChangePolicy: OnRootMismatch</code>.
+For kubelet-managed volume permissions, preparing the root as above prevents
+recursive permission changes on mount. The default <code>Always</code> behavior widens
+private <code>0600</code> authority files to <code>0660</code>, which IRIS correctly rejects.
+<code>OnRootMismatch</code> still permits a recursive change if the root does not match;
+it does not repair files changed by an earlier mount. It does not alter the
+group handling of Secret, ConfigMap, or <code>emptyDir</code> volumes, so the age-key
+projection remains readable. The Console has no PVC.</p>
+<p>Verify the storage driver's behavior before first deploy. CSI drivers that
+delegate <code>VOLUME_MOUNT_GROUP</code> handle permissions themselves and do not use
+<code>fsGroupChangePolicy</code>; they must preserve IRIS's private file modes. See
+<a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods">Kubernetes volume permission controls</a>.</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>get<span class="w"> </span>csidriver<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-o<span class="w"> </span>custom-columns<span class="o">=</span>NAME:.metadata.name,FSGROUPPOLICY:.spec.fsGroupPolicy
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>--<span class="w"> </span>id
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>ls<span class="w"> </span>-ld<span class="w"> </span>/data<span class="w"> </span>/data/state<span class="w"> </span>/data/images<span class="w"> </span>/data/artifacts<span class="w"> </span>/run/secrets/iris_age_key
+</code></pre></div>
+<p>If the driver does not apply the group, pre-create volume ownership out of band
+or use a storage class that supports it. Do not make either container root to
+work around storage ownership.</p>
+<h3 id="recover-a-volume-whose-private-modes-were-changed">Recover a volume whose private modes were changed</h3>
+<p>If startup reports an unsafe deployment-authority or transcript mode after a
+mount, retain the failure evidence and repair the storage before retrying:</p>
+<ol>
+<li>Stop new job admission and wait for all onboard, undeploy, and scheduled
+   work to finish. Then stop the server pod and any maintenance pods mounting
+   the PVC. Do not restart or change permissions while a job is running.</li>
+<li>Inspect ownership, modes, inode/link metadata, and trusted backup evidence
+   without printing file contents. Confirm the problem is a permission change;
+   an unexplained content or identity change requires investigation.</li>
+<li>Restore only the verified, explicitly identified paths to their required
+   ownership and modes: UID/GID <code>10001:10001</code>, <code>0600</code> for
+   <code>/data/state/deployment_records.json</code>, its <code>.lock</code>, and IOx transcript files;
+   <code>0700</code> with setgid explicitly cleared for <code>/data/state</code>, the private
+   <code>/data/state/iox</code> directory, and its authority subdirectories. Restore the
+   public catalog certificate <code>/data/config/tls/crt.pem</code> to <code>0644</code>; startup
+   rejects group-writable modes such as <code>0660</code> or <code>0664</code> left by a recursive
+   mount rewrite. Check
+   other affected authority files and public instruction roots against their
+   own validation rules. Never use recursive <code>chmod</code>/<code>chown</code>, delete authority
+   evidence, or weaken the validators to make startup pass.</li>
+<li>Verify the dedicated volume root is <code>10001:10001</code> with mode <code>2770</code> and
+   <code>/data/state</code> is <code>10001:10001</code> with exact mode <code>0700</code>, without setgid.
+   Apply the <code>OnRootMismatch</code> Deployment policy before starting the server.
+   Recheck the private modes after mounting, then verify management API health
+   and deployment-record access before admitting jobs.</li>
+</ol>
+<h2 id="secrets-and-storage">Secrets and storage</h2>
+<p>Before applying the Kustomization, replace the address/recipient sentinels in
+<code>iris-seed-server.env</code>, set its <code>IRIS_CONSOLE_URL</code> to the full external Console
+HTTPS URL, configure <code>iris-console.env</code>, and set both image names and immutable
+digests in <code>kustomization.yaml</code>. The server IP and Console URL can be different;
+Settings reports both. Build the images from
+<code>server/Dockerfile</code> and <code>server/Dockerfile.console</code> and publish them to a
+registry reachable by every node. Configure the LoadBalancers and source
+restrictions for the reserved addresses.</p>
+<p>Create the namespace, age identity, both token pairs, and both TLS identities.
+Use a protected directory outside the repository in place of <code>/secure/path</code>
+below. The management certificate must have DNS SANs for <code>iris-server-api</code>, <code>iris-server-api.iris</code>, and
+<code>iris-server-api.iris.svc</code>; its private key goes only to the server, while
+Console receives only the issuing CA. The separate Console certificate must
+cover the exact DNS name or IP address operators use in their browser:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
+age-keygen<span class="w"> </span>-o<span class="w"> </span>/secure/path/iris-age.txt
+age-keygen<span class="w"> </span>-y<span class="w"> </span>/secure/path/iris-age.txt
+openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="w"> </span>&gt;<span class="w"> </span>/secure/path/management-current
+openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="w"> </span>&gt;<span class="w"> </span>/secure/path/observability-current
+:<span class="w"> </span>&gt;<span class="w"> </span>/secure/path/management-previous
+:<span class="w"> </span>&gt;<span class="w"> </span>/secure/path/observability-previous
+
+kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>kubernetes/namespace.yaml
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>iris-age<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">identity</span><span class="o">=</span>/secure/path/iris-age.txt
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>iris-tier-auth<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">current</span><span class="o">=</span>/secure/path/management-current<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">previous</span><span class="o">=</span>/secure/path/management-previous
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>iris-observability-auth<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">current</span><span class="o">=</span>/secure/path/observability-current<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">previous</span><span class="o">=</span>/secure/path/observability-previous
+<span class="c1"># Optional: outbound OTLP collector authentication.</span>
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>iris-otlp-headers<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">headers</span><span class="o">=</span>/secure/path/otlp-headers
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>tls<span class="w"> </span>iris-management-tls<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cert<span class="o">=</span>/secure/path/server-api.crt<span class="w"> </span>--key<span class="o">=</span>/secure/path/server-api.key
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>configmap<span class="w"> </span>iris-management-ca<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-file<span class="o">=</span>ca.crt<span class="o">=</span>/secure/path/server-api-ca.crt
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>tls<span class="w"> </span>iris-console-tls<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cert<span class="o">=</span>/secure/path/console.crt<span class="w"> </span>--key<span class="o">=</span>/secure/path/console.key
+</code></pre></div>
+<p>Set <code>IRIS_AGE_RECIPIENTS</code> to the public recipient printed above plus a separately
+held break-glass recipient, then apply:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>apply<span class="w"> </span>-k<span class="w"> </span>kubernetes
+</code></pre></div>
+<p>After both Deployments are ready, open the Console from the trusted management
+network and sign in with the default first-run credential <code>iris</code> /
+<code>irisisgreat!</code>. The login creates no session; it returns a one-use setup grant
+that expires after ten minutes and leads to administrator creation. Creating
+the administrator permanently ends this special behavior.</p>
+<div class="admonition warning">
+<p class="admonition-title">The first reachable caller can claim a fresh Console</p>
+<p>Restrict the Console LoadBalancer to trusted operators and complete setup
+immediately after deployment. Do not make a brand-new Console reachable
+from an untrusted network while no administrator exists.</p>
+</div>
+<p>The base manifests require both <code>current</code> files even when external monitoring
+is disabled. The initially empty <code>previous</code> files satisfy the projections
+until the first rotation. A scoped JSON <code>management</code> record makes a management-token
+mis-mount auditable. Keep observability files as raw token values so Prometheus
+can consume <code>current</code> directly with <code>authorization.credentials_file</code>; the
+server assigns those files the <code>observability</code> scope when it validates them,
+so their values are not accepted by the management API.</p>
+<p>Management-token rotation is two phase: put the new token in <code>current</code> and the
+former token in <code>previous</code>, recreate/apply <code>iris-tier-auth</code> from both files,
+and restart both Deployments. The Console tries <code>current</code> first and can use
+<code>previous</code> after a management-authentication rejection, so either pod can
+receive the new Secret projection first. Before retiring the overlap, confirm
+that both pods have the replacement in their mounted <code>current</code> file and verify
+an authenticated Console request. Readiness or a successful request alone can
+still reflect the previous token. Then empty <code>previous</code>, recreate/apply the
+Secret, and restart both again. Do not begin another rotation before completing
+these checks. The <a href="https://github.com/cisco-open/intelligent-release-image-staging/blob/main/kubernetes/README.md#management-tier-bearer-token">rotation commands</a>
+include the mounted-file check without printing credentials. Use
+<code>kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -</code>
+for each update so the command works for an existing Secret. Observability
+rotation follows the same current/previous overlap, but
+only the server Deployment and external scraper need to move. The server
+rereads both observability files on each request. Missing, unreadable,
+wrongly-scoped, or weak credentials fail closed; rotation never opens an
+anonymous fallback.</p>
+<p>Only a management-authentication rejection permits the Console's token
+fallback. Browser session and CSRF failures are returned unchanged. A mutation
+uses the token accepted by its authorization preflight; its body is sent once.</p>
+<p>The optional <code>iris-otlp-headers</code> Secret is different from the observability
+pair: it authenticates outbound OTLP pushes, not inbound Prometheus scrapes.
+Its <code>headers</code> key contains the comma-separated <code>Name=Value</code> header spec and is
+mounted only by the server. Do not put it in a ConfigMap, URL, or command
+argument. With the Secret absent IRIS sends no collector header; with it
+present, the configured OTLP endpoint must use HTTPS. Re-apply that Secret and
+restart only <code>iris-seed-server</code> to rotate it.</p>
+<p><code>iris-console-tls</code> is mounted read-only only by the Console. Its key never
+enters the server pod, PVC, ConfigMap, or image. On a normal start the Console
+checks the authenticated management API for an operator-installed override.
+If the server is unavailable during cold start, or explicitly reports that
+the default is active, the Console validates this Secret and copies it into
+its memory-backed runtime directory. A malformed or authentication-failed API
+response is not treated as a reason to fall back.</p>
+<p>Each env file is a hashed <code>configMapGenerator</code> input, so an edit and re-apply
+rolls the affected Deployment. Keep deployment images pinned to immutable
+registry digests. The default server PVC request is <code>50Gi</code>; size it for
+retained images.</p>
+<h2 id="health-and-operation">Health and operation</h2>
+<p>Server startup/readiness probes call <code>https://&lt;server-pod&gt;:9101/readyz</code>, which
+checks tracker, catalog, artifact, and management listeners. Server liveness
+calls <code>/healthz</code>, proving the telemetry process is alive without restarting the
+pod for a dependency-readiness failure. Console probes call its local
+<code>/readyz</code> and <code>/healthz</code> on 8080. Console readiness checks local serving files,
+a valid credential file, and the presence of its management CA file, not
+server availability; the independent
+<code>iris-console-tls</code> identity lets it start while the server is cold. API
+requests arriving while server is down get a redacted 503 with <code>Retry-After</code>.</p>
+<p>After a rollout, verify an authenticated Console API request before starting
+device jobs. Allow Service routing and the server connection to settle; pod
+readiness checks the individual tier, while this confirms the complete path.</p>
+<p>The server LoadBalancer publishes 6969, 8443, 8000, 6881, and 9101; the Console
+LoadBalancer publishes 8080. Metrics export is optional, but the base Service
+publishes 9101 for probes regardless. Ports 6800 and 9443 remain internal.
+Metrics require monitoring authentication. <code>/healthz</code> and <code>/readyz</code> disclose
+no state; login/setup have their own credential/grant checks. The existing
+Guest Shell bootstrap, CA, and agent-bundle HTTPS downloads are separate static
+endpoints and are anonymous; per-install staging-artifact
+paths still carry their resource capability in the filename.</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/iris-seed-server
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/iris-console
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>logs<span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>logs<span class="w"> </span>deployment/iris-console
+<span class="nv">POD</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>get<span class="w"> </span>pod<span class="w"> </span>-l<span class="w"> </span>app.kubernetes.io/name<span class="o">=</span>iris-seed-server<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-o<span class="w"> </span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">'{.items[0].metadata.name}'</span><span class="k">)</span><span class="s2">"</span>
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>cp<span class="w"> </span>--no-preserve<span class="w"> </span>&lt;image&gt;.bin<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$POD</span><span class="s2">:/data/images/&lt;image&gt;.bin"</span>
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>iris-publish<span class="w"> </span>/data/images/&lt;image&gt;.bin
+</code></pre></div>
+<p>Back up the server PVC and keep the age identity in separate protected storage.
+Include the independently supplied Secrets in your recovery plan. Treat a
+public IP change as certificate and device-trust rotation, not a transparent Service
+update.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2148 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../telemetry-export/">
+      
+      
+        <link rel="next" href="../reference/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Splunk Setup - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#splunk-setup" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Splunk Setup
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prepare-splunk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Prepare Splunk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prepare-certificates-and-secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Prepare certificates and secrets
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configure-the-collector" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Configure the collector
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enable-iris-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Enable IRIS export
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#check-delivery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Check delivery
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Check delivery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#device-staging-reports" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device staging reports
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bytes-received-from-each-peer" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Bytes received from each peer
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#peer-to-peer-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Peer-to-peer evidence
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#assignment-to-confirmed-seeding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Assignment to confirmed seeding
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#import-the-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Import the dashboard
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Troubleshooting
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prepare-splunk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Prepare Splunk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prepare-certificates-and-secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Prepare certificates and secrets
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configure-the-collector" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Configure the collector
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enable-iris-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Enable IRIS export
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#check-delivery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Check delivery
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Check delivery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#device-staging-reports" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device staging reports
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bytes-received-from-each-peer" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Bytes received from each peer
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#peer-to-peer-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Peer-to-peer evidence
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#assignment-to-confirmed-seeding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Assignment to confirmed seeding
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#import-the-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Import the dashboard
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Troubleshooting
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="splunk-setup">Splunk Setup</h1>
+<p>Send IRIS telemetry through an OpenTelemetry Collector to Splunk Enterprise
+or Splunk Cloud Platform. This guide configures HTTPS on each connection,
+creates the two indexes the shipped dashboard uses, and provides searches to
+check the result. All hostnames, addresses, and paths below are examples.</p>
+<pre class="mermaid"><code>flowchart LR
+    IRIS["IRIS server"] --&gt;|"OTLP JSON over HTTPS :4318"| Collector["Collector Contrib"]
+    Collector --&gt;|"Authenticated HTTPS scrape :9101"| IRIS
+    Collector --&gt;|"HTTPS HEC"| Splunk["Splunk: iris_logs + iris_metrics"]</code></pre>
+<p>The OTLP push carries log records and aggregate metrics. The scrape supplies
+additional aggregate families used by the dashboard, including origin bytes
+and peer attribution. <strong>Configure both paths for the shipped Splunk view.</strong>
+Telemetry is best-effort: bounded queues and retries can lose data during an
+outage, and staging continues independently.</p>
+<h2 id="prepare-splunk">Prepare Splunk</h2>
+<p>In <strong>Settings → Indexes</strong>, create these indexes and give dashboard users
+permission to search them:</p>
+<table>
+<thead>
+<tr>
+<th>Index</th>
+<th>Data type</th>
+<th>Source</th>
+<th>Sourcetype</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris_logs</code></td>
+<td>Events</td>
+<td><code>iris</code></td>
+<td><code>otel:logs</code></td>
+</tr>
+<tr>
+<td><code>iris_metrics</code></td>
+<td>Metrics</td>
+<td><code>iris</code></td>
+<td><code>otel:metrics</code></td>
+</tr>
+</tbody>
+</table>
+<p>On Splunk Enterprise, open <strong>Settings → Data inputs → HTTP Event Collector →
+Global Settings</strong>. Enable HEC, select <strong>Enable SSL</strong>, and set its port to
+<code>8088</code>. Install a certificate whose subject alternative name matches the HEC
+hostname. Create an enabled token named <code>iris-otel</code>, allow both indexes, and
+use <code>iris_logs</code> as its default index. The collector sets source and sourcetype
+on each export. Leave indexer acknowledgment disabled for this configuration.
+See <a href="https://help.splunk.com/en/splunk-enterprise/get-data-in/get-started-with-getting-data-in/10.0/get-data-with-http-event-collector/set-up-and-use-http-event-collector-in-splunk-web">Splunk's HEC setup instructions</a>.</p>
+<p>For Splunk Cloud Platform, obtain the HEC hostname and port for your stack.
+Use its <strong>HEC ingest endpoint</strong>, including <code>/services/collector</code>, in both
+exporters below. Managed stacks normally use port <code>443</code>; trial stacks can
+use <code>8088</code>. Use the stack's supported index and token management workflow.</p>
+<p>Keep these three credentials separate:</p>
+<table>
+<thead>
+<tr>
+<th>Credential</th>
+<th>Used by</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Splunk HEC token</td>
+<td>Collector</td>
+<td>Write to the two Splunk indexes</td>
+</tr>
+<tr>
+<td>Collector bearer token</td>
+<td>IRIS server</td>
+<td>Submit OTLP to the collector</td>
+</tr>
+<tr>
+<td>IRIS observability token</td>
+<td>Collector</td>
+<td>Read IRIS <code>/metrics</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="prepare-certificates-and-secrets">Prepare certificates and secrets</h2>
+<p>On the collector host, create a working directory containing <code>compose.yaml</code>,
+<code>otel-collector.yaml</code>, <code>secrets/</code>, and <code>tls/</code>. These files belong to your
+monitoring deployment, outside the IRIS repository. Keep <code>.env</code>, private
+keys, and tokens out of version control.</p>
+<p>The complete configuration below uses these files:</p>
+<table>
+<thead>
+<tr>
+<th>File on collector host</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tls/collector.crt</code></td>
+<td>Collector server certificate and any intermediate certificates, valid for <code>collector.example.com</code></td>
+</tr>
+<tr>
+<td><code>tls/collector.key</code></td>
+<td>Its private key</td>
+</tr>
+<tr>
+<td><code>tls/splunk-ca.pem</code></td>
+<td>CA certificates that validate <code>splunk.example.com</code></td>
+</tr>
+<tr>
+<td><code>tls/iris-catalog.pem</code></td>
+<td>IRIS server's public catalog certificate or issuing CA</td>
+</tr>
+<tr>
+<td><code>secrets/collector-token</code></td>
+<td>Raw bearer token accepted by the collector</td>
+</tr>
+<tr>
+<td><code>secrets/iris-observability-token</code></td>
+<td>Raw token configured on the IRIS server for <code>/metrics</code></td>
+</tr>
+<tr>
+<td><code>.env</code></td>
+<td>Collector bind address and HEC token</td>
+</tr>
+</tbody>
+</table>
+<p>Obtain certificates through your certificate authority. The collector verifies
+the HEC and IRIS certificates, including hostname matching. For a HEC endpoint
+already trusted by the collector's system roots, omit its <code>tls.ca_file</code> and
+corresponding mount instead of providing a separate CA file.</p>
+<p>For the built-in IRIS certificate, copy the public <code>artifacts/iris-catalog.pem</code>
+from your IRIS deployment over an authenticated channel. Use an IRIS target
+name or address present in that certificate. If you connect to an address
+while validating a different certificate name, set the scrape's
+<code>tls_config.server_name</code> to the certificate's valid name.</p>
+<p>Create a collector bearer token on the collector host:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span>secrets<span class="w"> </span>tls
+openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="w"> </span>&gt;<span class="w"> </span>secrets/collector-token
+</code></pre></div>
+<p>Use the token and header-file instructions in
+<a href="../telemetry-export/#turning-export-on">Turning export on</a> to configure:</p>
+<ul>
+<li>The IRIS observability token, with the same raw value copied securely to
+  <code>secrets/iris-observability-token</code> on the collector.</li>
+<li>The IRIS OTLP header file, containing <code>Authorization=Bearer</code> followed by
+  the raw value from <code>secrets/collector-token</code>.</li>
+</ul>
+<p>The example runs the collector as UID/GID <code>10001</code>. Make the mounted files
+readable by that account, keep secret/key files mode <code>0600</code>, and allow it to
+traverse their directories. For example, after placing the files:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>chown<span class="w"> </span>-R<span class="w"> </span><span class="m">10001</span>:10001<span class="w"> </span>secrets<span class="w"> </span>tls
+sudo<span class="w"> </span>chmod<span class="w"> </span><span class="m">0700</span><span class="w"> </span>secrets<span class="w"> </span>tls
+sudo<span class="w"> </span>chmod<span class="w"> </span><span class="m">0600</span><span class="w"> </span>secrets/*<span class="w"> </span>tls/collector.key
+sudo<span class="w"> </span>chmod<span class="w"> </span><span class="m">0644</span><span class="w"> </span>tls/*.crt<span class="w"> </span>tls/*.pem
+</code></pre></div>
+<p>Save the collector's <code>.env</code> with mode <code>0600</code>. Replace both values locally:</p>
+<div class="highlight"><pre><span></span><code>COLLECTOR_BIND_IP=192.0.2.10
+SPLUNK_HEC_TOKEN=replace-with-your-hec-token
+</code></pre></div>
+<h2 id="configure-the-collector">Configure the collector</h2>
+<p>This example pins Collector Contrib <code>0.160.0</code> and uses its current filter
+syntax. Contrib includes the <code>splunk_hec</code> exporter. Its
+<a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.160.0/exporter/splunkhecexporter/README.md">exporter reference</a>,
+<a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.160.0/extension/bearertokenauthextension/README.md">bearer authentication extension</a>,
+and <a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.160.0/processor/filterprocessor/README.md">filter processor</a>
+describe the configuration fields.</p>
+<p>Save as <code>compose.yaml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">otel-collector</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">otel/opentelemetry-collector-contrib:0.160.0</span>
+<span class="w">    </span><span class="nt">user</span><span class="p">:</span><span class="w"> </span><span class="s">"10001:10001"</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"--config=/etc/otelcol/otel-collector.yaml"</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">SPLUNK_HEC_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="s">"${SPLUNK_HEC_TOKEN:?Set</span><span class="nv"> </span><span class="s">SPLUNK_HEC_TOKEN}"</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./otel-collector.yaml:/etc/otelcol/otel-collector.yaml:ro</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./secrets:/etc/otelcol/secrets:ro</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./tls:/etc/otelcol/tls:ro</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"${COLLECTOR_BIND_IP:?Set</span><span class="nv"> </span><span class="s">COLLECTOR_BIND_IP}:4318:4318"</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"127.0.0.1:8888:8888"</span>
+</code></pre></div>
+<p>Allow the IRIS server to reach collector port <code>4318</code>, the collector to reach
+IRIS port <code>9101</code>, and the collector to reach your HEC port. Port <code>8888</code> is
+published only on the collector host's loopback interface for local diagnosis.
+IRIS uses OTLP/HTTP JSON; it does not need the gRPC port <code>4317</code>.</p>
+<p>Save as <code>otel-collector.yaml</code>, replacing the example hostnames:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">extensions</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">bearertokenauth/iris</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">filename</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/secrets/collector-token</span>
+
+<span class="nt">receivers</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">otlp/iris</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">protocols</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">http</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0.0.0:4318</span>
+<span class="w">        </span><span class="nt">tls</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">cert_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/tls/collector.crt</span>
+<span class="w">          </span><span class="nt">key_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/tls/collector.key</span>
+<span class="w">        </span><span class="nt">auth</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">authenticator</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bearertokenauth/iris</span>
+
+<span class="w">  </span><span class="nt">prometheus/iris9101</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">scrape_configs</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">iris-9101</span>
+<span class="w">          </span><span class="nt">scrape_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15s</span>
+<span class="w">          </span><span class="nt">scheme</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https</span>
+<span class="w">          </span><span class="nt">authorization</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Bearer</span>
+<span class="w">            </span><span class="nt">credentials_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/secrets/iris-observability-token</span>
+<span class="w">          </span><span class="nt">tls_config</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">ca_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/tls/iris-catalog.pem</span>
+<span class="w">          </span><span class="nt">static_configs</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"iris.example.com:9101"</span><span class="p p-Indicator">]</span>
+
+<span class="nt">processors</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">filter/iris_logs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">error_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">propagate</span>
+<span class="w">    </span><span class="nt">log_conditions</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">'resource.attributes["service.name"]</span><span class="nv"> </span><span class="s">!=</span><span class="nv"> </span><span class="s">"iris-tracker"'</span>
+<span class="w">  </span><span class="nt">filter/iris_metrics</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">error_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">propagate</span>
+<span class="w">    </span><span class="nt">metric_conditions</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">'not</span><span class="nv"> </span><span class="s">IsMatch(metric.name,</span><span class="nv"> </span><span class="s">"^iris[._].*")'</span>
+<span class="w">  </span><span class="nt">batch</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">send_batch_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">512</span>
+<span class="w">    </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5s</span>
+
+<span class="nt">exporters</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">splunk_hec/iris_logs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">token</span><span class="p">:</span><span class="w"> </span><span class="s">"${env:SPLUNK_HEC_TOKEN}"</span>
+<span class="w">    </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://splunk.example.com:8088/services/collector</span>
+<span class="w">    </span><span class="nt">index</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">iris_logs</span>
+<span class="w">    </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">iris</span>
+<span class="w">    </span><span class="nt">sourcetype</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">otel:logs</span>
+<span class="w">    </span><span class="nt">tls</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">ca_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/tls/splunk-ca.pem</span>
+<span class="w">    </span><span class="nt">retry_on_failure</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">sending_queue</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="w">  </span><span class="nt">splunk_hec/iris_metrics</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">token</span><span class="p">:</span><span class="w"> </span><span class="s">"${env:SPLUNK_HEC_TOKEN}"</span>
+<span class="w">    </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://splunk.example.com:8088/services/collector</span>
+<span class="w">    </span><span class="nt">index</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">iris_metrics</span>
+<span class="w">    </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">iris</span>
+<span class="w">    </span><span class="nt">sourcetype</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">otel:metrics</span>
+<span class="w">    </span><span class="nt">tls</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">ca_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/otelcol/tls/splunk-ca.pem</span>
+<span class="w">    </span><span class="nt">retry_on_failure</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">sending_queue</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="nt">service</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">extensions</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">bearertokenauth/iris</span><span class="p p-Indicator">]</span>
+<span class="w">  </span><span class="nt">telemetry</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">metrics</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">detailed</span>
+<span class="w">      </span><span class="nt">readers</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">pull</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">exporter</span><span class="p">:</span>
+<span class="w">              </span><span class="nt">prometheus</span><span class="p">:</span>
+<span class="w">                </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0.0.0</span>
+<span class="w">                </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8888</span>
+<span class="w">  </span><span class="nt">pipelines</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">logs/iris_splunk</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp/iris</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">processors</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">filter/iris_logs</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">batch</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">splunk_hec/iris_logs</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">metrics/iris_splunk</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">otlp/iris</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">processors</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">filter/iris_metrics</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">batch</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">splunk_hec/iris_metrics</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">metrics/iris9101</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">receivers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">prometheus/iris9101</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">processors</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">filter/iris_metrics</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">batch</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">exporters</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">splunk_hec/iris_metrics</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p>Filter conditions describe records to <strong>drop</strong>. This keeps IRIS logs and both
+metric naming styles: dotted OTLP names and underscored scrape names. Scrape
+housekeeping series such as <code>up</code> are deliberately excluded from Splunk.</p>
+<p>On a shared collector, merge these named components into its existing
+configuration and preserve its other pipelines. A receiver can feed several
+pipelines. The queues above are held in memory; they do not survive collector
+replacement. Use the collector's persistent queue support if you need that
+additional protection.</p>
+<p>Validate and start the collector from its working directory:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>--no-deps<span class="w"> </span>otel-collector<span class="w"> </span>validate<span class="w"> </span>--config<span class="o">=</span>/etc/otelcol/otel-collector.yaml
+docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>otel-collector
+docker<span class="w"> </span>compose<span class="w"> </span>logs<span class="w"> </span>--tail<span class="w"> </span><span class="m">50</span><span class="w"> </span>otel-collector
+</code></pre></div>
+<h2 id="enable-iris-export">Enable IRIS export</h2>
+<p>On the IRIS host, set these deployment defaults in <code>server/.env</code> alongside
+the secret-file paths configured above:</p>
+<div class="highlight"><pre><span></span><code>IRIS_OBSERVABILITY=1
+IRIS_OTLP_ENDPOINT=https://collector.example.com:4318
+</code></pre></div>
+<p>Use the collector <strong>base URL</strong>. IRIS adds <code>/v1/logs</code> and <code>/v1/metrics</code> itself.
+It verifies the collector using system roots and the IRIS trust store. For a
+private CA, upload its public certificate under <strong>Settings → TLS &amp; trust →
+Trusted CAs</strong>. See <a href="../console/#tls-trust">TLS &amp; trust</a>.</p>
+<p>Apply changed deployment variables from the IRIS <code>server/</code> directory:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>iris<span class="w"> </span>console
+</code></pre></div>
+<p><strong>Settings → Telemetry</strong> can override the OTLP endpoint and enabled flag
+without a restart. Ensure any saved override matches the intended destination.
+The Prometheus endpoint is controlled by <code>IRIS_OBSERVABILITY</code> at server
+startup, independently of that runtime OTLP setting. Keep the telemetry
+listener on port <code>9101</code>; the server and Console also use it for health and
+swarm state.</p>
+<h2 id="check-delivery">Check delivery</h2>
+<p>On the collector host, inspect its local counters:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>--fail<span class="w"> </span>--silent<span class="w"> </span>--show-error<span class="w"> </span>http://127.0.0.1:8888/metrics<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>rg<span class="w"> </span><span class="s1">'otelcol_(receiver_accepted|exporter_sent|exporter_send_failed)'</span>
+</code></pre></div>
+<p>Accepted and sent counts should increase while IRIS exports. Failed sends
+point to the HEC connection, token, or index configuration. Accepted records
+with no sends can also mean the filter excluded them. Inspect collector logs
+for scrape, authentication, and TLS errors. An idle fleet can have few log
+records while aggregate metrics continue.</p>
+<p>In Splunk, start with these searches:</p>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+| stats count BY "otel.log.name", "service.version"
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>| mcatalog values(metric_name) WHERE index=iris_metrics earliest=-2h
+</code></pre></div>
+<p>Expect <code>iris.transfer.*</code> OTLP names and <code>iris_*</code> scrape names. For example,
+<code>iris_tracker_up</code> confirms the IRIS scrape feed. Per-image byte series appear
+when their image and ledger data exist. A receiver may trim a counter's
+<code>_total</code> suffix; the shipped view accepts both spellings.</p>
+<p>The HEC exporter supplies record attributes as searchable fields. Dotted
+names need single quotes when used as field values in SPL expressions, as
+shown below. Integer byte attributes use strings in OTLP JSON; use
+<code>tonumber()</code> before arithmetic.</p>
+<h3 id="device-staging-reports">Device staging reports</h3>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.transfer.report"
+| dedup "event.id"
+| eval completed_bytes=tonumber('iris.transfer.completed_content_bytes')
+| table _time "device.id" "iris.image.id" "iris.transfer.id"
+    "iris.report.event" completed_bytes "iris.transfer.content_sha256.state" "iris.transfer.ios_copy_verify.state"
+</code></pre></div>
+<p><code>iris.device.transfer.report</code> carries the transfer fields. The separate
+<code>iris.device.report</code> projection contains fewer fields. Do not add both
+projections when counting deliveries. Use device, image, and transfer identity
+together when comparing repeated assignments or several images on one device.</p>
+<h3 id="bytes-received-from-each-peer">Bytes received from each peer</h3>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| eval image=coalesce('iris.image.name', 'iris.image.id')
+| eval source=coalesce('iris.peer.device_id', "unknown")
+| stats max(received_bytes) AS received_bytes
+    values("iris.transfer_record.capture_complete") AS capture_complete
+    BY "device.id", image, "iris.transfer.id", "network.peer.address", source, "iris.peer.attribution"
+</code></pre></div>
+<p>The query keeps the largest cumulative capture per transfer and peer address.
+The address keeps separate unnamed peers from collapsing into one <code>unknown</code> row.
+<code>source</code> is the sender: <code>origin</code> for the seeder, the sending device's id for
+a <code>device</code> row (<code>iris.peer.device_id</code> carries both), and <code>unknown</code> for a row
+the server could not name. That attribute is absent on unknown rows, and a
+<code>BY</code> on an absent field silently drops the event, so the <code>eval</code> fills it in.
+<code>image</code> is the catalog filename (<code>iris.image.name</code>, looked up when the report
+is exported); it falls back to <code>iris.image.id</code> for an image that has since
+left the catalog. Each row is measured by the receiving device, but a peer
+that disconnected before capture can be absent; <code>capture_complete=false</code>
+marks that incomplete capture. Missing rows do not mean zero bytes. A report
+is re-exported under the same <code>event.id</code> after a server restart; its sender
+classification is pinned on first export, so the copies are identical and
+<code>dedup</code> collapses them. <code>iris.swarm.peer_bytes</code> is the origin-side sampled
+view of traffic; summing it with device peer records would count the same
+traffic twice.</p>
+<h3 id="peer-to-peer-evidence">Peer-to-peer evidence</h3>
+<p>These three searches back the <em>Peer-to-peer evidence</em> row of the shipped view.
+They read the same device-measured record as the search above, split by who
+sent the bytes, so a peer-to-peer claim rests on an observation rather than on
+a subtraction of two origin-side totals.</p>
+<p>A fresh report pull can repeat an existing capture under a new <code>event.id</code>.
+After removing retries by event ID, each search keeps the largest cumulative
+byte count for each receiver, image, transfer and peer address. Separate
+transfers and separate unknown peers remain distinct. The selected row keeps
+its capture time and completeness flag; a pull adds no received bytes.</p>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| eval source=case('iris.peer.attribution'=="origin","origin",
+    'iris.peer.attribution'=="device","peer device",1==1,"unknown")
+| eval MiB=received_bytes/1048576
+| timechart span=1h sum(MiB) BY source
+</code></pre></div>
+<p>Read the stacked columns as cumulative bytes grouped by the selected capture's
+hour. They do not measure traffic rate within that hour. A visible <em>peer device</em>
+band is traffic devices served each other, <em>origin</em> is the seeder's share of
+those captures, and <em>unknown</em> is a peer the server could not name.</p>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| stats sum(eval(if('iris.peer.attribution'=="device",received_bytes,null()))) AS peer_bytes,
+    sum(received_bytes) AS all_bytes
+| eval pct=if(isnull(all_bytes) OR all_bytes&lt;=0,null(),
+    round(100*coalesce(peer_bytes,0)/all_bytes,1))
+| fields pct
+</code></pre></div>
+<p>Read the single number as the share of received bytes that came from a peer
+device over the window, measured on the receiving devices; the denominator
+carries origin and unknown rows too, so an unnamed peer never inflates it.</p>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| where 'iris.peer.attribution'=="device"
+| eval "MiB from this peer"=round(received_bytes/1048576,1)
+| eval Image=coalesce('iris.image.name','iris.image.id')
+| rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver,
+    "iris.transfer_record.capture_complete" AS "Capture complete"
+| table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete"
+| sort - _time
+</code></pre></div>
+<p>Read each row as one device-to-device transfer leg: <em>Sender</em> served those bytes
+to <em>Receiver</em>, <code>_time</code> is when the receiver read its counters, and
+<code>Capture complete</code> false marks a snapshot that missed peers rather than a wrong
+byte count.</p>
+<p>The caveat from the search above applies to all three: a peer that disconnected
+before the completion snapshot leaves no row at all, so a missing row is a
+capture gap, not zero traffic, and every total here is a floor. Do not add
+<code>iris.swarm.peer_bytes</code> to these sums — it is the origin-side sampled view of
+the same bytes, and the two together count one transfer twice.</p>
+<h3 id="assignment-to-confirmed-seeding">Assignment to confirmed seeding</h3>
+<div class="highlight"><pre><span></span><code>index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.transfer.lifecycle" event="seeding_started"
+| dedup "event.id"
+| eval planned=strptime('iris.transfer.planned_at', "%Y-%m-%dT%H:%M:%S.%N%Z")
+| eval seeding=strptime('iris.transfer.seeding_started_at', "%Y-%m-%dT%H:%M:%S.%N%Z")
+| eval elapsed_seconds=round(seeding-planned,3)
+| table "device.id" "iris.image.id" "iris.plan.id" elapsed_seconds
+    "iris.transfer.report_received_at" "iris.transfer.tracker_seeder_at"
+    "iris.transfer.recovered_promotion"
+</code></pre></div>
+<p>This measures server-observed time from assignment to confirmed seeding. It
+includes report-delivery delay and is not a raw download duration. A tracker
+seeder alone does not prove device verification or final placement. See
+<a href="../observability/#transfer-lifecycle-events">Transfer lifecycle events</a> for
+the confirmation rules and recovery semantics.</p>
+<h2 id="import-the-dashboard">Import the dashboard</h2>
+<p>Download <a href="../dashboards/splunk-iris-swarm.xml">splunk-iris-swarm.xml</a> and follow
+<a href="../dashboards/#importing-the-splunk-view">Importing the Splunk view</a>.
+Its default searches use <code>iris_logs</code> and <code>iris_metrics</code>; edit them if you
+chose different index names.</p>
+<p>For the tracker and transfer-health dashboard, use
+<a href="../dashboards/splunk-iris-rollout.xml">splunk-iris-rollout.xml</a> and the
+<a href="../dashboards/#updating-the-rollout-view">existing-view update procedure</a>.
+Its <code>dev</code> filter selects receivers in the measured peer row; it preserves
+the <code>tr</code> time picker and the rollout panels. The table includes exact bytes
+and the selected capture's completeness. Both views deduplicate cumulative
+captures before aggregation, keeping origin and unknown bytes in the peer-share
+denominator. No captures mean unavailable; origin-only captures mean 0%.</p>
+<p>In the swarm view, ledger tiles read the latest cumulative metric sample
+within the selected bounds, not bytes transferred during that window. A
+window without a sample can be blank. <em>Seeder RPC</em> alone uses a fixed
+15-minute window ending now. Incomplete peer captures limit observed traffic
+totals; the resulting percentage has unknown bias.</p>
+<p>Both the OTLP log pipeline and the Prometheus scrape pipeline are required.
+The view's peer-share panels use the origin's sampled records, while its
+<em>Peer-to-peer evidence</em> row uses the device-measured peer transfer records.
+The device peer searches above expose those same separate device measurements.
+Read <a href="../telemetry-export/#known-limits">Telemetry Export</a> before interpreting
+missing records, untraced bytes, or peer-share estimates.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Collector rejects <code>splunk_hec</code></td>
+<td>Run the Contrib distribution and validate against the image version you deploy.</td>
+</tr>
+<tr>
+<td>Collector cannot read a file</td>
+<td>Check bind-mount paths, directory traversal permissions, and UID <code>10001</code> access.</td>
+</tr>
+<tr>
+<td>IRIS export is off</td>
+<td>Enable OTLP and set its base endpoint; check saved Console overrides.</td>
+</tr>
+<tr>
+<td>IRIS export is degraded</td>
+<td>Check collector DNS, port <code>4318</code>, its certificate SAN/CA, and the OTLP header file.</td>
+</tr>
+<tr>
+<td>Collector returns <code>401</code></td>
+<td>The OTLP bearer token must match the collector token file, without a duplicated <code>Bearer</code> prefix.</td>
+</tr>
+<tr>
+<td>IRIS scrape returns <code>401</code></td>
+<td>Check the separate raw observability token and its IRIS host mount.</td>
+</tr>
+<tr>
+<td>IRIS scrape returns <code>404</code> after authentication</td>
+<td>Enable <code>IRIS_OBSERVABILITY=1</code> and recreate the server container.</td>
+</tr>
+<tr>
+<td>TLS validation fails</td>
+<td>Install the issuing CA and use a name or address in the certificate. Keep certificate verification enabled.</td>
+</tr>
+<tr>
+<td>HEC reports an invalid token</td>
+<td>Check the HEC token value, enabled state, and destination stack.</td>
+</tr>
+<tr>
+<td>HEC reports an incorrect index</td>
+<td>Both indexes must exist and be allowed by the token; <code>iris_metrics</code> must be a Metrics index.</td>
+</tr>
+<tr>
+<td>Log searches work, metric panels are empty</td>
+<td>Check the <code>/metrics</code> scrape and <code>metrics/iris9101</code> pipeline; OTLP metrics alone do not supply all dashboard families.</td>
+</tr>
+<tr>
+<td>Metrics work, peer tables are empty</td>
+<td>Check OTLP logs and the selected time range; an idle fleet need not emit peer records.</td>
+</tr>
+<tr>
+<td>Byte totals look wrong</td>
+<td>Select one record family, coerce byte values to numbers, and keep device/image/transfer identity in the grouping.</td>
+</tr>
+<tr>
+<td>Imported Simple XML panels are empty but pasted SPL returns rows</td>
+<td>Inspect the resolved job in the browser search manager. <code>search search index=...</code> means the standalone <code>&lt;query&gt;</code> included an extra generating <code>search</code> command; re-import the corrected shipped XML and do not add that prefix.</td>
+</tr>
+<tr>
+<td>Received data by source is below the captured total</td>
+<td>Include <code>iris.transfer.bytes_unattributed_omitted</code> as a separate <strong>Untraced capped rows</strong> bucket. Do not redistribute capped bytes into origin, peer device, or unknown.</td>
+</tr>
+<tr>
+<td>Peer share shows <strong>No data</strong> or <strong>0%</strong></td>
+<td>No capture rows means unavailable. Origin-only or unknown-only captured rows are a measured 0%. With <code>capture_complete=false</code>, displayed row bytes remain exact while capture totals are a floor and the peer ratio is partial with unknown bias.</td>
+</tr>
+<tr>
+<td>A ledger tile changes or disappears with a historical window</td>
+<td>Ledger tiles show the latest cumulative sample inside the selected window, not a delta. No sample means unavailable. <strong>Seeder RPC</strong> intentionally uses a fixed 15-minute window.</td>
+</tr>
+</tbody>
+</table>
+<p>The anonymous IRIS <code>https://iris.example.com:9101/healthz</code> probe reports only
+listener health. Check the Console's telemetry export status and collector
+logs for export health; the anonymous response does not expose those details.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

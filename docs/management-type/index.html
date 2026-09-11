@@ -1,0 +1,1982 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../device-agents/">
+      
+      
+        <link rel="next" href="../iox/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Management type and VLAN ownership - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#management-type-and-vlan-ownership" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Management type and VLAN ownership
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#routed-iris-managed-app-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Routed — IRIS-managed app network
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inband-existing-management-vlan" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inband — existing management VLAN
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Inband — existing management VLAN">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inband-iox-and-the-ios-ssh-endpoint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inband IOx and the IOS SSH endpoint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#router-routed-and-router-nat-iris-managed-virtualportgroup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Router routed and router NAT — IRIS-managed VirtualPortGroup
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Router routed and router NAT — IRIS-managed VirtualPortGroup">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sizing-the-storage-root" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Sizing the storage root
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#xr-host-the-routers-own-network-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        XR host — the router's own network stack
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inventory
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-plans-and-applied-records" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment plans and applied records
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Deployment plans and applied records">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adopting-a-pre-existing-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Adopting a pre-existing deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#router-preflight-and-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Router preflight and ownership
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-and-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console and CLI
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment environments
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#routed-iris-managed-app-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Routed — IRIS-managed app network
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inband-existing-management-vlan" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inband — existing management VLAN
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Inband — existing management VLAN">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inband-iox-and-the-ios-ssh-endpoint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inband IOx and the IOS SSH endpoint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#router-routed-and-router-nat-iris-managed-virtualportgroup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Router routed and router NAT — IRIS-managed VirtualPortGroup
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Router routed and router NAT — IRIS-managed VirtualPortGroup">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sizing-the-storage-root" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Sizing the storage root
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#xr-host-the-routers-own-network-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        XR host — the router's own network stack
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inventory
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-plans-and-applied-records" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment plans and applied records
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Deployment plans and applied records">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adopting-a-pre-existing-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Adopting a pre-existing deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#router-preflight-and-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Router preflight and ownership
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-and-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console and CLI
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment environments
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="management-type-and-vlan-ownership">Management type and VLAN ownership</h1>
+<p>IRIS supports five explicit management type models for the staging agent. The
+choice is per device, recorded in inventory, and determines which network
+fields the Console shows and what IRIS may create and remove on the device.
+Changing the model or agent installer does not change the management type.</p>
+<blockquote>
+<p><strong>Stage-only, network-preserving.</strong> Inband never creates, changes, or removes
+the operator's network, and IRIS never mutates running software state — see
+<a href="../security/#guardrails">Guardrails</a>.</p>
+</blockquote>
+<h2 id="routed-iris-managed-app-network">Routed — IRIS-managed app network</h2>
+<p>The routed management type uses a <strong>dedicated IRIS VLAN and SVI</strong>. Onboarding is
+create-only: the applied deployment record captures the resources IRIS created, and
+teardown removes exactly those.
+Choose a VLAN and SVI that do not already exist on the device: the installer
+applies them as IRIS-created, the deployment record marks them as IRIS-owned, and
+routed teardown removes them.</p>
+<p>Two details of what routed mode touches beyond the VLAN and SVI:</p>
+<ul>
+<li>The AppGigabitEthernet app-hosting trunk is changed <strong>additively</strong> only
+  (<code>switchport trunk allowed vlan add &lt;vlan&gt;</code>), exactly as in inband mode, so
+  other IOx apps riding the same uplink keep their VLANs. Teardown removes
+  only the IRIS VLAN from that allowed list (<code>... allowed vlan remove</code>).</li>
+<li>The SVI joins an IGP only when the record says so: <code>isis</code> adds
+  <code>ip router isis</code> (for fabrics such as an SD-Access underlay that need to
+  learn the IRIS subnet). The default (<code>none</code>) never injects the IRIS subnet
+  into the operator's routing protocol and never creates a <code>router isis</code>
+  process. This is a <strong>per-device</strong> setting —
+  one server routinely onboards devices into different fabrics, only some of
+  which run IS-IS. Set it on the device's inventory record (the <code>svi_igp</code>
+  CSV column, or the same field via the console/API), routed devices only;
+  it is validated against the closed <code>none</code>/<code>isis</code> enum before it is ever
+  interpolated into the device's config, the same command-injection defense
+  every other value on that path gets. A device whose record leaves it blank
+  falls back to the fleet-wide <code>SVI_IGP</code> env var on the server (default
+  <code>none</code>). An explicit <code>svi_igp=none</code> overrides a server default of <code>isis</code>.</li>
+</ul>
+<p>Global <code>ip routing</code> is a switch-wide setting IRIS never enables on the
+operator's behalf — it is an operator decision. Both installers
+(<code>device/device-install.sh</code>, <code>device/iox/install.sh</code>) check for it before
+applying any config on a device using the routed management type. The check is semantic, not a grep
+for a positive <code>ip routing</code> line: that line is absent whenever routing is the
+platform default (as on IE-3x00).
+Instead the installers treat an explicit <code>no ip routing</code> line, or a route
+table answering in host mode (<code>Default gateway ...</code>), as the authoritative
+signal that routing is off — and treat a session that never echoes the
+command back as a transport failure, reported as "could not verify ip
+routing" rather than misrepresented as a routing problem. When routing is
+confirmed off, the installer fails closed with a <code>PREREQ:</code> line and the exact
+command to run. Without this check, onboarding can report success while the
+new VLAN/SVI has no path off the box — a silent failure that is otherwise
+invisible until traffic is debugged.</p>
+<h2 id="inband-existing-management-vlan">Inband — existing management VLAN</h2>
+<p>The inband management type connects the staging agent — Guest Shell or an IOx app — to an
+<strong>existing management VLAN</strong>. IRIS
+does not create, configure, select, claim ownership of, or delete that VLAN, its
+SVI, gateway, routes, or VRF. The operator-owned SVI (and any VRF it belongs to)
+supplies routing; preflight only proves the existing topology can reach IRIS.</p>
+<p>The supported management-type cells:</p>
+<table>
+<thead>
+<tr>
+<th>Management type</th>
+<th>Addressing</th>
+<th>Platform</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Routed</td>
+<td>static</td>
+<td>Guest Shell / IOx</td>
+<td>supported (record/preflight hardened)</td>
+</tr>
+<tr>
+<td>Inband</td>
+<td>static</td>
+<td>Guest Shell</td>
+<td>supported</td>
+</tr>
+<tr>
+<td>Inband</td>
+<td>static</td>
+<td>IOx (IE-3400, Catalyst 9300)</td>
+<td>supported</td>
+</tr>
+<tr>
+<td>Inband</td>
+<td>DHCP</td>
+<td>any</td>
+<td>rejected — separate capability gate</td>
+</tr>
+<tr>
+<td><code>router-routed</code></td>
+<td>static</td>
+<td>Guest Shell (Catalyst 8000)</td>
+<td>supported, lab-tested on Catalyst 8000V</td>
+</tr>
+<tr>
+<td><code>router-routed</code></td>
+<td>static</td>
+<td>IOx (Catalyst 8000)</td>
+<td>supported; the app attaches through the same VirtualPortGroup</td>
+</tr>
+<tr>
+<td><code>router-nat</code></td>
+<td>static</td>
+<td>Guest Shell (Catalyst 8000)</td>
+<td>supported, lab-tested on Catalyst 8000V</td>
+</tr>
+<tr>
+<td><code>router-nat</code></td>
+<td>static</td>
+<td>IOx (Catalyst 8000)</td>
+<td>supported; the app attaches through the same VirtualPortGroup and NAT footprint</td>
+</tr>
+<tr>
+<td><code>xr-host</code></td>
+<td>none</td>
+<td>XR appmgr container (Cisco 8000 series, IOS-XR)</td>
+<td>supported</td>
+</tr>
+</tbody>
+</table>
+<p>Inband install and teardown command streams never contain <code>vlan</code>,
+<code>interface Vlan</code>, <code>no vlan</code>, <code>no interface Vlan</code>, VRF, <code>ip route</code>, IS-IS, or
+DHCP. The one interface IRIS does touch inband is the AppGigabitEthernet
+app-hosting port. Install sets <code>switchport mode trunk</code> and <strong>adds</strong> the inband
+VLAN with <code>switchport trunk allowed vlan add</code> — the additive form only, so an
+existing allowed list is never replaced — because without it the agent's
+traffic has no L2 path off the box. Teardown never removes the VLAN from the
+trunk (it is operator-owned and the trunk may carry other apps). Its scope is
+decided by name, not by mode: it removes the app footprint (Guest Shell or the
+IOx app, IRIS EEM applets, agent files) <em>and</em> every IRIS-named global — the
+IRISQ logging discriminator with its buffered/console/monitor bindings,
+<code>crypto pki trustpoint IRIS</code>, and <code>ip http client secure-trustpoint IRIS</code> —
+because each of those carries IRIS's own name and the next onboard's preflight
+refuses while any of them is present. What inband preserves is the operator's
+network: the VLAN, its SVI, routes, and VRF.</p>
+<h3 id="inband-iox-and-the-ios-ssh-endpoint">Inband IOx and the IOS SSH endpoint</h3>
+<p>Guest Shell runs inside IOS, so it configures the device locally. An <strong>IOx</strong> app
+runs in a container and reaches IOS by SSH-ing to an IOS IP to run the placement copy.
+For a routed IOx device that is the IRIS-managed SVI; for an <strong>inband</strong> IOx
+device there is no IRIS SVI, the app connects to the switch's management IP (<code>device_ip</code>) by default; an
+optional <code>ios_ssh_host</code> overrides that for asymmetric topologies. IRIS adds the
+inband VLAN to the AppGigabitEthernet trunk's allowed list additively at
+install time (see above), so no manual trunk preparation is required.
+The IOx app carries a device SSH credential in its run options exactly as the
+routed IOx path already does; hardening that credential path is a separate
+improvement that applies equally to both.</p>
+<h2 id="router-routed-and-router-nat-iris-managed-virtualportgroup">Router routed and router NAT — IRIS-managed VirtualPortGroup</h2>
+<p>Catalyst 8000 routers run either Guest Shell or an IOx app through
+<code>VirtualPortGroup&lt;N&gt;</code> (VPG), not
+a VLAN/SVI or AppGigabitEthernet interface. Support is <strong>designed for the
+Catalyst 8000 family, lab-tested on Catalyst 8000V</strong>. Both router modes onboard, stage a
+verified image, and undeploy from their deployment record, and both appear on the Swarm Map
+with telemetry when observability is enabled.</p>
+<ul>
+<li><strong>router-routed</strong> creates an IRIS-owned VPG gateway and static app subnet.
+  It performs no NAT. The operator must provide routes (static routes or IGP
+  redistribution) between that app subnet and the IRIS server, tracker, and
+  peers.</li>
+<li><strong>router-nat</strong> adds overload NAT behind the operator-selected outside
+  interface and static TCP PAT for swarm port <strong>6881</strong>, so peers can reach the
+  agent through the router outside address. IRIS owns the VPG, NAT ACL, and NAT
+  rules. The outside interface is canonicalized before rendering. Its deployment
+  record notes whether <code>ip nat outside</code> already existed; a pre-existing marking is
+  preserved and undeploy removes that marking only when IRIS created it.</li>
+</ul>
+<p>Several <code>router-nat</code> participants can share one translated outside address.
+  If origin policy would permit one of those principals and deny another, IRIS
+  reports a <code>shared_permit_deny</code> conflict and leaves the shared address
+  unblocked rather than cutting off the permitted principal. The additional
+  mutual-origin deny proposed by issue #153 remains a count-only preflight in
+  Phase 0; use distinct outside addresses when address-level isolation is
+  required.</p>
+<p><code>device/router-install.sh</code> destroys any pre-existing Guest Shell before
+applying config, then enables it with the selected VPG networking. Agent
+state persists on <code>bootflash:guest-share</code> across the Guest Shell rebuild.</p>
+<p>Undeploy of a <strong>router-nat</strong> device clears only translations whose inside-local
+address matches the app IP recorded in the deployment record, using targeted
+<code>clear ip nat translation inside &lt;global&gt; &lt;local&gt; forced</code> commands before it
+removes the NAT configuration. IOS refuses
+<code>no ip nat inside source list ... overload</code> while translations still reference
+that mapping. Teardown therefore verifies that the overload rule is gone before
+removing <code>IRIS-NAT-&lt;vpg&gt;</code>, and on failure it preserves the ACL for safe
+reconciliation. It never flushes device-wide NAT state. Routed teardown does
+not clear translations because it configures no NAT.</p>
+<p>Both modes stage only to <code>bootflash:</code>.</p>
+<h3 id="sizing-the-storage-root">Sizing the storage root</h3>
+<p>Allow roughly <strong>2× the image size + 200 MB</strong> of free bootflash (about 4.2 GB for
+a 2 GB image) for one image in flight: the staging copy plus the placed copy
+coexist while the placement runs. The agent safely refuses to stage when space
+is insufficient.</p>
+<p>A file already on bootflash consumes space before the free-space check.
+Guest Shell can adopt an existing file after checking its size and native
+SHA-512 against the catalog. A conflicting or unreadable file is kept, and
+staging fails until the operator resolves it. See
+<a href="../device-agents/#crash-safe-same-name-replacement">Crash-safe same-name replacement</a>.</p>
+<p>Budget beyond that for the images you want <strong>resident at once</strong>, not for the
+number of reassignments you expect. Unchecking or reassigning an image parks it
+and deliberately keeps the copy already on the storage root — see
+<a href="../device-agents/#unassigned-image-park">Unassigned image park</a>. That kept copy
+is reclaimable, but it is reclaimed by the <em>next</em> placement's space check when
+that placement is short of room, not at the moment you reassign. On a device
+sized for exactly one image plus headroom this still converges; on a device with
+several parked copies and no headroom the reclaim gate has to free them one
+rollout at a time.</p>
+<h2 id="xr-host-the-routers-own-network-stack">XR host — the router's own network stack</h2>
+<p><code>xr-host</code> is for Cisco 8000 series (IOS-XR) routers, where the agent runs as
+an appmgr Docker container on the router's own network stack: there is no
+VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface, and IRIS never touches
+the router's networking configuration. <code>xr-host</code> and platform <code>xr-appmgr</code> are
+mutually required on any fully-classified device; an inventory-only device
+may carry platform <code>xr-appmgr</code> before its management type is chosen, but planning
+or deploying refuses the half-classified state.</p>
+<p>Onboarding creates the appmgr application <code>iris</code>, registers the package
+source <code>iris-xr</code>, and stages <code>iris-xr.rpm</code>, <code>iris-catalog.pem</code>, and the
+<code>iris-work/</code> directory under <code>harddisk:</code>. Undeploy removes the recorded app
+and package, the IRIS files, and torrent sidecars while preserving router
+networking. It empties <code>iris-work/</code> but can leave that directory in place:
+XR's CLI offers no prompt-free directory removal.</p>
+<p>The successful job ends with <code>undeploy complete: &lt;device-ip&gt;</code>. An empty work
+directory is expected. Repeating undeploy probes the router's current state
+and skips resources already removed. Files an
+operator staged directly on the router (adopted, not downloaded by IRIS)
+are never removed by teardown or by the agent, with one exception: a
+catalog republish of different content under the same image id replaces
+the file IRIS is tracking, and that replacement is logged.</p>
+<h2 id="inventory">Inventory</h2>
+<p>Inventory is a management-type-aware, named-header CSV. The header is required and
+validated; extra, missing, or misplaced columns are rejected.</p>
+<div class="highlight"><pre><span></span><code>device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,role,platform
+</code></pre></div>
+<ul>
+<li><strong>routed</strong> rows fill <code>iris_vlan</code>, <code>svi_ip</code>, <code>svi_mask</code>, <code>app_ip</code>, <code>app_mask</code>,
+  <code>app_gateway</code>, and may fill <code>svi_igp</code> (<code>none</code>, <code>isis</code>, or blank; every other
+  management type must leave it blank).</li>
+<li><strong>inband</strong> rows fill <code>inband_vlan</code>, <code>app_ip</code>, <code>app_mask</code>, <code>app_gateway</code>, and
+  must not carry routed VLAN/SVI fields. There is no IRIS VRF field.</li>
+<li><strong>router-routed</strong> rows fill <code>app_ip</code>, <code>app_mask</code>, <code>app_gateway</code>, and
+  <code>vpg_number</code>; router fields cannot be combined with switch VLAN/SVI fields.</li>
+<li><strong>router-nat</strong> rows additionally fill <code>nat_interface</code>. <code>platform=router</code> is
+  explicit in the Add Device form; an imported blank can resolve from a known
+  Catalyst 8000 (C8xxx) model at onboard time.</li>
+<li><strong>xr-host</strong> rows retain <code>device_id</code> and the router's <code>device_ip</code>, with
+  <code>platform=xr-appmgr</code> required and an optional model. All app-network fields
+  stay empty; the container shares the router's network stack.</li>
+<li><code>ios_ssh_host</code> is an OPTIONAL advanced override: the IOS endpoint the inband
+  IOx app SSHes to for the placement copy. It defaults to the device's management IP
+  (<code>device_ip</code>), which is on the same existing management VLAN. Only set it for an
+  asymmetric topology; Guest Shell never uses it.</li>
+<li><code>role</code> is optional server-side peer-policy membership. It uses the same
+  meaning for routed, inband, router-routed, router-nat, and xr-host devices and
+  never renders an IOS/IOS-XR ACL or changes the device network configuration.
+  A blank import preserves existing membership; clear it through the explicit
+  role action.</li>
+</ul>
+<p>The same server-side validator is applied to the Console, the API, and CSV
+import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and
+static host/subnet consistency.</p>
+<p>The Add Device form requires an explicit agent install. The row editor and CSV
+can still hold a blank <code>platform</code> as inventory-only intent; onboarding resolves
+only known IOS-XE model mappings and fails closed when the platform or OS family
+is uncertain. <code>xr-host</code> is never inferred from a blank platform: it requires
+<code>xr-appmgr</code> explicitly.</p>
+<h2 id="deployment-plans-and-applied-records">Deployment plans and applied records</h2>
+<p>IRIS records three parts of each deployment:</p>
+<ol>
+<li><strong>Desired inventory</strong> — editable operator intent (<code>fleet.d/</code>).</li>
+<li><strong>Deployment plan</strong> — an immutable, resolved plan for one action, including
+   the resolved platform and a <code>plan_hash</code>. Computed before any device contact.</li>
+<li><strong>Deployment record</strong> — a durable, non-secret account of what IRIS actually
+   applied, its resource ownership, lifecycle state, management IP, and
+   processor-board identity.</li>
+</ol>
+<p>Deployment records live under <code>IRIS_STATE</code> (see below) and contain no passwords, tokens,
+certificates, or raw device configuration. Their lifecycle is fail-closed:</p>
+<div class="highlight"><pre><span></span><code>planned → applying → active → (applying) → removed
+                 ↘ unknown / needs-reconcile / drifted / superseded
+</code></pre></div>
+<p>A controller restart converts any non-terminal (<code>planned</code>/<code>applying</code>) deployment record to
+<code>unknown</code>; in-flight device work is never silently resumed. A device has exactly
+one live deployment, so when a new deployment record becomes <code>active</code> — an explicit
+adopt, or an onboard of a device that was undeployed first — any previous
+<code>active</code> deployment record for
+that device is retired to the terminal <code>superseded</code> state. Undeploy therefore
+always finds at most one active deployment record.</p>
+<p>Undeploy renders <strong>exclusively from an active deployment record</strong>, never from the editable
+inventory — so changing a VLAN, model, or CSV import after onboarding cannot
+retarget a device's cleanup. The one exception is a forced undeploy of a device
+that has no deployment record at all: with nothing to render from it resolves the device
+from inventory and skips the processor-board identity check, so it is limited by
+scope instead — it removes only IRIS-named artifacts and never the operator's
+VLAN/SVI, VirtualPortGroup, or NAT. If a deployment record is missing, uncertain, drifted,
+or legacy, cleanup stops in <code>needs-reconcile</code> instead of guessing.</p>
+<h3 id="adopting-a-pre-existing-deployment">Adopting a pre-existing deployment</h3>
+<p>When a device has an IRIS agent but no active deployment record, normal
+undeploy is refused. Non-router deployments may use the explicit, audited
+<strong>Adopt</strong> action, which records current ownership without changing the device.
+Routers cannot be adopted, and preflight refuses to onboard over a live agent,
+so their path is the Undeploy dialog's <strong>Force</strong> checkbox: it strips only the
+IRIS-named agent footprint (EEM applets, Guest Shell or the IOx app, the
+app-hosting stanza, the IRISQ discriminator, the IRIS trustpoint, staged files),
+leaves the VLAN/SVI, VirtualPortGroup and NAT untouched, and is recorded in
+Audit as <code>undeploy_forced</code>. Onboard again after it completes.</p>
+<h3 id="router-preflight-and-ownership">Router preflight and ownership</h3>
+<p>Router preflight is read-only and runs once, in the bounded onboarding worker
+pool, immediately before the enrollment token is minted — not synchronously
+inside the <code>POST /api/v1/devices/&lt;id&gt;/onboard</code> request. Submitting a batch of
+routers therefore returns a job id per device promptly, with progress shown
+as each job queues and then runs, instead of the request blocking on live SSH
+to every router in turn. Preflight rejects collisions for the VPG, NAT
+entries, named IRIS globals, and <code>bootflash:guest-share</code>. These names and the
+guest share are tracked in the deployment record; teardown removes only resources proven by that
+record. Every one of these checks, together with device identity and (for
+router NAT) the outside interface, still completes before any enrollment
+token is minted or router configuration is applied.</p>
+<h2 id="console-and-cli">Console and CLI</h2>
+<p>The Console Add Device flow offers <strong>Routed</strong>, <strong>Inband</strong>, <strong>Router routed</strong>,
+<strong>Router NAT</strong>, and <strong>XR host</strong> management types. This choice alone controls
+which network fields appear. Router choices show VPG number and app addressing;
+Router NAT also shows the outside interface. XR host keeps the device's
+management IP and hides all app-network fields. Its installer is XR appmgr.
+The model is optional free text: typing a model does not change the selected
+management type. Saving a model name does not establish hardware support.
+The device table shows each device's <strong>Management type</strong>, and onboarding uses
+an applied deployment record. See
+<a href="../console/">Web Console</a>.</p>
+<p>A scheduled onboarding needs the same choice: a row that is still inventory
+only has no plan to run, so a scheduled window records it as
+<code>unclassified_management_type</code> and moves on rather than guessing a network for
+it. Classify the row, then let the next window pick it up — a late-bound
+target re-resolves at each run. See
+<a href="../operations/#scheduled-outcomes">Scheduled outcomes</a>.</p>
+<h2 id="deployment-environments">Deployment environments</h2>
+<p>Deployment records use the same contract on both deployments:</p>
+<ul>
+<li><strong>Docker Compose</strong> persists them in the server's <code>IRIS_STATE</code> on the
+  <code>iris-state</code> volume. The server stages artifacts in the host-bound
+  <code>/srv/artifacts</code>; the Console accesses them through the management API.</li>
+<li><strong>Kubernetes</strong> persists them in the server's <code>/data/state</code> on the RWO PVC,
+  with artifacts in <code>/data/artifacts</code>. The separate Console deployment has
+  no state PVC. Each deployment runs one replica with <code>Recreate</code>; a server
+  restart marks in-flight work <code>unknown</code> and requires reconciliation.</li>
+</ul>
+<p>See <a href="../containers/">Container Deployments</a> and <a href="../kubernetes/">Kubernetes</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

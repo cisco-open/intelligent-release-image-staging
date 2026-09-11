@@ -1,0 +1,1893 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../containers/">
+      
+      
+        <link rel="next" href="../kubernetes/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Docker on separate hosts - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#docker-on-separate-hosts" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Docker on separate hosts
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#phase-1-instruction-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Phase 1 instruction custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#addresses-and-prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Addresses and prerequisites
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#certificates-and-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Certificates and trust
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-server-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start the server host
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-console-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start the Console host
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment settings
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotate-the-management-credential" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Rotate the management credential
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotate-certificates" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Rotate certificates
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify-and-troubleshoot" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verify and troubleshoot
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#phase-1-instruction-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Phase 1 instruction custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#addresses-and-prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Addresses and prerequisites
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#certificates-and-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Certificates and trust
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-server-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start the server host
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-console-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start the Console host
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment settings
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotate-the-management-credential" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Rotate the management credential
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotate-certificates" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Rotate certificates
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify-and-troubleshoot" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verify and troubleshoot
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="docker-on-separate-hosts">Docker on separate hosts</h1>
+<p>Run the server on one Docker host and the Console on another. The server owns
+images, credentials, assignments, device jobs, and the swarm. The Console
+serves the browser and forwards API requests over authenticated HTTPS. Each
+host uses its own local storage; no shared filesystem, Docker network, or
+Docker socket is needed.</p>
+<pre class="mermaid"><code>flowchart LR
+    Browser["Operator browser"] --&gt;|"HTTPS 8080"| Console["Console host"]
+    Console --&gt;|"Private HTTPS 9443 + management token"| Server["Server host"]
+    Server --&gt; State["Server volumes and images"]
+    Device["Device agents"] --&gt;|"Catalog, tracker, artifacts, image pieces"| Server
+    Server --&gt;|"SSH/SCP for onboarding"| Device</code></pre>
+<p>Both deployments run one container. This separates the Console from the
+server; it does not cluster the tracker, catalog, or seeder. Kubernetes uses
+the same division of work with Services and Secrets; see
+<a href="../kubernetes/">Kubernetes</a>.</p>
+<h2 id="phase-1-instruction-custody">Phase 1 instruction custody</h2>
+<p>Both <code>GET /v1/devices/{device_id}/instructions</code> and
+<code>GET /v1/devices/{device_id}/instruction-keylist</code> remain authenticated
+application traffic on device-to-server HTTPS 8443. There is no new listener,
+port, network path or firewall flow; 9443 remains Console-to-server
+management-only. Preserve the selected Compose project, env files and volumes.</p>
+<p>Only the server host holds <code>$IRIS_CONFIG/instr/signing-key.age</code>, the separate
+age identity, <code>$IRIS_RUN/instr/signing-key</code> runtime plaintext, and durable
+instruction state under <code>$IRIS_STATE</code>. The Console holds its management
+token/CA files and browser identity; never copy server data during relocation.
+The two offline-root public keys are public material; their private keys remain
+with separate offline custodians. See <a href="../validation/#phase-1-layout-validation">layout validation</a>.</p>
+<h2 id="addresses-and-prerequisites">Addresses and prerequisites</h2>
+<p>Use two amd64 Linux hosts with Docker Engine 23.0 or newer and Docker Compose
+2.24.4 or newer. The server Compose file uses
+<a href="https://docs.docker.com/reference/compose-file/merge/#replace-value"><code>!override</code></a>
+to define its mounts.
+Check out the same IRIS version on both hosts. Building the server also needs
+the pinned <code>aria2c</code> binary; building the Console does not.</p>
+<p>Choose these addresses before provisioning:</p>
+<table>
+<thead>
+<tr>
+<th>Address</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server device address, <code>IRIS_HOST_IP</code></td>
+<td>Device catalog, tracker, artifacts, and origin seeder.</td>
+</tr>
+<tr>
+<td>Server private management address</td>
+<td>The Console's <code>IRIS_MANAGEMENT_API_URL</code>, normally <code>https://iris-mgmt.example.com:9443</code>. Its hostname must resolve from the Console container.</td>
+</tr>
+<tr>
+<td>Console browser address</td>
+<td>Operators, for example <code>https://console.example.com:8080</code>. Set the same full URL as <code>IRIS_CONSOLE_URL</code> on the server.</td>
+</tr>
+</tbody>
+</table>
+<p>The server's management address can share its device-facing interface if that
+interface is on a trusted management network. Bind port 9443 to that specific
+address and allow only the Console host through the firewall. Restrict the
+Console browser port to trusted operator sources. Devices do not need access
+to the Console or port 9443. See <a href="../network-ports/#firewall-rules">Network ports</a>
+for the remaining server and device flows.</p>
+<p>Use assigned addresses from your network's inventory or DHCP reservation
+system.</p>
+<h2 id="certificates-and-trust">Certificates and trust</h2>
+<p>Three identities serve different connections:</p>
+<table>
+<thead>
+<tr>
+<th>Identity</th>
+<th>Private key location</th>
+<th>Trusted by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalog/device certificate</td>
+<td>Encrypted server configuration, decrypted into server tmpfs</td>
+<td>Device agents and installers.</td>
+</tr>
+<tr>
+<td>Management certificate</td>
+<td>Server host's <code>management-tls</code> directory</td>
+<td>Console's <code>management-ca/ca.pem</code>.</td>
+</tr>
+<tr>
+<td>Default browser certificate</td>
+<td>Console host's <code>console-tls</code> directory</td>
+<td>Operator browsers.</td>
+</tr>
+</tbody>
+</table>
+<p>The management certificate must cover the exact DNS name or IP in
+<code>IRIS_MANAGEMENT_API_URL</code>. The browser certificate must cover the Console URL.
+The Console verifies management TLS and sends a separately scoped token read
+from a file. Neither credential is a browser login or device enrollment token.</p>
+<p>On a trusted operator machine, create the host bundles:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/iris
+python3<span class="w"> </span>tools/prepare-docker-hosts.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--out<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/iris/docker-hosts"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--management-host<span class="w"> </span>iris-mgmt.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--console-host<span class="w"> </span>console.example.com
+</code></pre></div>
+<p>Use names that resolve in your network. Repeat either host flag to include
+another DNS name or IP in that certificate. The helper refuses an existing
+output directory. It generates independent self-signed certificates valid for
+365 days and one scoped management token, without printing secrets:</p>
+<div class="highlight"><pre><span></span><code>docker-hosts/
+  server/
+    tier-auth/current.json
+    management-tls/tls.crt
+    management-tls/tls.key
+  console/
+    tier-auth/current.json
+    management-ca/ca.pem
+    console-tls/tls.crt
+    console-tls/tls.key
+</code></pre></div>
+<p>Deliver only the contents of <code>server/</code> to <code>/etc/iris/docker-hosts/</code> on the
+server, and only <code>console/</code> to that path on the Console host. Use SSH/SCP with
+the destination host key verified. The matching path names refer to different
+local filesystems. The server bundle contains no browser private key; the
+Console bundle contains no management private key or age identity.</p>
+<p>On each destination host, set ownership and keep the generated permissions:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>chown<span class="w"> </span>-R<span class="w"> </span><span class="m">10001</span>:10001<span class="w"> </span>/etc/iris/docker-hosts
+sudo<span class="w"> </span>find<span class="w"> </span>/etc/iris/docker-hosts<span class="w"> </span>-type<span class="w"> </span>d<span class="w"> </span>-exec<span class="w"> </span>chmod<span class="w"> </span><span class="m">700</span><span class="w"> </span><span class="o">{}</span><span class="w"> </span>+
+sudo<span class="w"> </span>find<span class="w"> </span>/etc/iris/docker-hosts<span class="w"> </span>-type<span class="w"> </span>f<span class="w"> </span>-exec<span class="w"> </span>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="o">{}</span><span class="w"> </span>+
+</code></pre></div>
+<p>Verify the public management certificate fingerprint against the Console's
+<code>ca.pem</code> through your trusted provisioning channel. Install the browser
+certificate in the operator trust store or use a certificate issued by your
+organization. Organization-issued certificates can replace the generated
+pairs at the same paths; put their management CA chain in <code>ca.pem</code>. Keep keys
+unencrypted inside these protected files so the containers can start without
+a passphrase prompt. Store or remove the provisioning copy according to your
+credential policy.</p>
+<h2 id="start-the-server-host">Start the server host</h2>
+<p>From the repository root, copy and edit the server environment example:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>server/server.env.example<span class="w"> </span>server/server.env
+</code></pre></div>
+<p>Set every example address and path. Provision the age identity, recipient
+list, writable artifacts directory, and readable image root as described in
+<a href="../getting-started/#configure-the-server">Getting Started</a>. The age identity
+belongs only on the server host. Keep it mode 600 or 400 and readable by uid
+10001; that uid also needs write access to artifacts and server volumes.</p>
+<p>The commands below initialize a fresh server. For server data already in use,
+keep its actual <code>COMPOSE_PROJECT_NAME</code>, container name, age identity, and host
+paths; the project name selects the named volumes. Skip the bootstrap command
+and preserve those volumes. Stop and remove only the old Console container
+when replacing it; server data and device assignments stay with the server.</p>
+<p>Use this function in the following commands:</p>
+<div class="highlight"><pre><span></span><code>iris_server<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span>docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span><span class="s2">"</span><span class="nv">$@</span><span class="s2">"</span>
+<span class="o">}</span>
+
+tools/get-aria2c.sh<span class="w"> </span>amd64
+iris_server<span class="w"> </span>build<span class="w"> </span>--pull
+iris_server<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>iris<span class="w"> </span>iris-bootstrap
+iris_server<span class="w"> </span>up<span class="w"> </span>-d
+iris_server<span class="w"> </span>ps
+</code></pre></div>
+<p>Build device packages on the server host as required for your devices:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-a
+.<span class="w"> </span>server/server.env
+<span class="nb">set</span><span class="w"> </span>+a
+tools/provision-iox-packages.sh
+tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>device/xr/out
+sudo<span class="w"> </span>install<span class="w"> </span>-o<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-g<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-m<span class="w"> </span><span class="m">444</span><span class="w"> </span>device/xr/out/iris-xr.rpm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.next"</span>
+sudo<span class="w"> </span>install<span class="w"> </span>-o<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-g<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-m<span class="w"> </span><span class="m">444</span><span class="w"> </span>device/xr/out/iris-xr.rpm.manifest<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.manifest.next"</span>
+sudo<span class="w"> </span>rm<span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/iris-xr.rpm.manifest"</span>
+sudo<span class="w"> </span>mv<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.next"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/iris-xr.rpm"</span>
+sudo<span class="w"> </span>mv<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.manifest.next"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/iris-xr.rpm.manifest"</span>
+</code></pre></div>
+<p>Exporting the example file's settings gives these host-side helpers the same
+container name and artifact directory as Compose. The XR build uses a writable
+local output directory, then publishes the package and its manifest to the
+server-owned artifacts directory. The native builds need both
+architecture binaries and any required ARM64 emulation; see
+<a href="../development/#embedded-agent-packages">package staging</a>.</p>
+<h2 id="start-the-console-host">Start the Console host</h2>
+<p>The Console needs its three provisioned directories and its environment file:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>server/console.env.example<span class="w"> </span>server/console.env
+</code></pre></div>
+<p>Set its bind address, browser port, management URL, and directory paths. Then:</p>
+<div class="highlight"><pre><span></span><code>iris_console<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span>docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/console.env<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-f<span class="w"> </span>server/docker-compose.console.yml<span class="w"> </span><span class="s2">"</span><span class="nv">$@</span><span class="s2">"</span>
+<span class="o">}</span>
+
+iris_console<span class="w"> </span>build<span class="w"> </span>--pull
+iris_console<span class="w"> </span>up<span class="w"> </span>-d
+iris_console<span class="w"> </span>ps
+</code></pre></div>
+<p>The Console can start before the server. It validates and loads its local
+browser certificate when the server is unavailable. API requests return a
+redacted <code>503</code> with <code>Retry-After</code> while the management connection is down;
+Console readiness checks its own listener and required local files. A TLS
+verification failure, rejected credential, or malformed management response
+is not permission to bypass authentication.</p>
+<p>Open the configured Console URL and complete <a href="../console/#first-run">administrator setup</a>.
+The administrator account lives on the server. Connecting another Console to
+the same server uses that account; it does not create another inventory.</p>
+<h2 id="deployment-settings">Deployment settings</h2>
+<p>Use the example environment file for each host. Tokens and private keys stay
+in the provisioned files; the environment contains only their directory paths.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Host</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COMPOSE_PROJECT_NAME</code></td>
+<td>Both</td>
+<td>Local project and volume prefix. Examples use <code>iris-server</code> and <code>iris-console</code>; preserve the actual name for server data already in use.</td>
+</tr>
+<tr>
+<td><code>IRIS_HOST_IP</code></td>
+<td>Server</td>
+<td>Device-reachable server IP.</td>
+</tr>
+<tr>
+<td><code>IRIS_MANAGEMENT_BIND_IP</code></td>
+<td>Server</td>
+<td>Specific private host address publishing TCP 9443.</td>
+</tr>
+<tr>
+<td><code>IRIS_CONSOLE_URL</code></td>
+<td>Server</td>
+<td>Full browser HTTPS URL reported in Settings, including a nondefault port.</td>
+</tr>
+<tr>
+<td><code>IRIS_AGE_KEY_FILE_HOST</code>, <code>IRIS_AGE_RECIPIENTS</code></td>
+<td>Server</td>
+<td>Age identity path and public recipients for encrypted server state.</td>
+</tr>
+<tr>
+<td><code>IRIS_MANAGEMENT_TLS_DIR</code></td>
+<td>Server</td>
+<td>Read-only directory containing <code>tls.crt</code> and <code>tls.key</code> for the management listener.</td>
+</tr>
+<tr>
+<td><code>IRIS_TIER_AUTH_DIR</code></td>
+<td>Both</td>
+<td>Local directory containing scoped <code>current.json</code> and an optional rotation <code>previous.json</code>; server read/write, Console read-only.</td>
+</tr>
+<tr>
+<td><code>IRIS_IMAGE_ROOT</code>, <code>IRIS_ARTIFACTS_HOST_DIR</code></td>
+<td>Server</td>
+<td>Host import tree and served artifacts directory.</td>
+</tr>
+<tr>
+<td><code>IRIS_MANAGEMENT_API_URL</code></td>
+<td>Console</td>
+<td>HTTPS server management endpoint, normally port 9443; its name must match the certificate.</td>
+</tr>
+<tr>
+<td><code>IRIS_CONSOLE_BIND_IP</code>, <code>IRIS_GUI_PUBLISH</code></td>
+<td>Console</td>
+<td>Host browser binding; port defaults to 8080.</td>
+</tr>
+<tr>
+<td><code>IRIS_MANAGEMENT_CA_DIR</code></td>
+<td>Console</td>
+<td>Read-only directory containing trusted management certificates in <code>ca.pem</code>.</td>
+</tr>
+<tr>
+<td><code>IRIS_CONSOLE_TLS_DIR</code></td>
+<td>Console</td>
+<td>Read-only directory containing the default browser <code>tls.crt</code> and <code>tls.key</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>The Console mounts no server state volume. Directory mounts allow files to be
+replaced atomically without leaving the container attached to an old inode.
+Missing provisioned directories fail deployment instead of being silently
+created by Docker.</p>
+<h2 id="rotate-the-management-credential">Rotate the management credential</h2>
+<p>Keep the old credential accepted until the Console uses the replacement:</p>
+<ol>
+<li>On the server host, run <code>iris_server exec iris iris-management-token rotate</code>.
+   This writes the old value to <code>previous.json</code> and atomically replaces
+   <code>current.json</code> in the server's <code>IRIS_TIER_AUTH_DIR</code>. The files must be
+   distinct; aliases are rejected before either rotation or retirement.</li>
+<li>Transfer the new <code>current.json</code> to the Console host through verified SSH.
+   Place it in that host's tier-auth directory under a temporary filename,
+   set ownership <code>10001:10001</code> and mode 600, then rename it to <code>current.json</code>
+   within the same directory. Do not print the token or put it in an argument.</li>
+<li>Make an authenticated Console request, such as opening Devices. A green
+   local readiness probe alone does not prove the new token works.</li>
+<li>On the server, run <code>iris_server exec iris iris-management-token retire-previous</code>.
+   Check the Console again and securely remove any temporary transfer copies.</li>
+</ol>
+<p>Both services reread credential files per request, so token rotation needs no
+container restart. Do not start another rotation until this one is complete.</p>
+<h2 id="rotate-certificates">Rotate certificates</h2>
+<p>For an organization-issued management certificate under the same trusted CA,
+replace the server's certificate and key together, then restart the server.
+For a new management CA or self-signed certificate, first add the replacement
+public certificate or CA to the Console's <code>ca.pem</code> alongside the current one.
+Restart the Console and confirm it still works. Replace the server pair and
+restart the server, confirm an authenticated Console request, then remove the
+old trust entry and restart the Console again. Keep each pair matched and
+retain the same hostname or update the management URL to match. This trust
+change does not alter the device/catalog certificate.</p>
+<p>For the default browser identity, replace the Console host's <code>tls.crt</code> and
+<code>tls.key</code> together and restart the Console. A certificate installed through
+<strong>Settings → TLS &amp; trust</strong> takes precedence; its key is stored encrypted on
+the server and delivered over the authenticated management connection.
+Settings reports the certificate the Console is actually serving.</p>
+<h2 id="verify-and-troubleshoot">Verify and troubleshoot</h2>
+<p>Check <code>iris_server ps</code> and <code>iris_console ps</code> on their respective hosts. Inspect
+logs with <code>iris_server logs --tail=100 iris</code> and
+<code>iris_console logs --tail=100 console</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Console will not start</td>
+<td>Directory mounts exist; uid 10001 can read the token, management CA, and browser certificate/key; the browser pair matches.</td>
+</tr>
+<tr>
+<td>Console loads, API returns 503</td>
+<td>Server health, management DNS from inside the Console container, route/firewall to private TCP 9443, certificate SAN and trust, and matching token files.</td>
+</tr>
+<tr>
+<td>Browser warns about TLS</td>
+<td>The browser trusts the Console issuer and the browser URL matches the certificate; changing management trust does not change browser trust.</td>
+</tr>
+<tr>
+<td>Server starts with an empty inventory</td>
+<td>Check <code>COMPOSE_PROJECT_NAME</code> and the mounted state/config volumes before adding devices or changing assignments.</td>
+</tr>
+<tr>
+<td>Device staging fails while the Console works</td>
+<td>Check device-to-server catalog/tracker/seeder flows and server-to-device SSH. The Console host is outside those paths.</td>
+</tr>
+</tbody>
+</table>
+<p>Verify a login, inventory request, Settings addresses and browser certificate,
+image import or upload, and job log streaming. Restart the Console while the
+server is stopped to check local startup, then restore the server and verify
+API recovery. Use a separate test deployment for outage checks when the server
+has active device work. These checks exercise the same operator API as the
+one-host Compose and Kubernetes deployments.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

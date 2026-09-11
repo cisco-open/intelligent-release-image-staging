@@ -1,0 +1,2617 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../kubernetes/">
+      
+      
+        <link rel="next" href="../management-type/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Device Agents - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#device-agents" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Device Agents
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#guest-shell-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Guest Shell path
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Agent installation
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Agent installation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#guest-shell-and-router-what-the-installer-pushes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Guest Shell and router: what the installer pushes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iox-what-the-installer-delivers" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOx: what the installer delivers
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ios-xr-what-the-installer-pushes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOS-XR: what the installer pushes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#confirming-it-worked" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Confirming it worked
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode-aria2c-alive-but-not-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure mode: aria2c alive but not serving
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode-a-recreated-container-forgets-what-it-is-seeding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure mode: a recreated container forgets what it is seeding
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode-a-busy-aria2c-read-as-a-dead-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure mode: a busy aria2c read as a dead one
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Agent loop
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-trust-by-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction trust by platform
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instruction trust by platform">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#instruction-files-on-each-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction files on each platform
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-failures-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction failures and recovery
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#crash-safe-same-name-replacement" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Crash-safe same-name replacement
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verified-policy-and-mechanical-ticks" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verified policy and mechanical ticks
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cadence-jitter-and-overload-backoff" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cadence jitter and overload backoff
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-side-logging-flash-write-endurance" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device-side logging (flash write endurance)
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification-gates" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verification gates
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unassigned-image-park" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unassigned image park
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-ssh-host-key-pinning" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device SSH host-key pinning
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#platform-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Platform targets
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#guest-shell-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Guest Shell path
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Agent installation
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Agent installation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#guest-shell-and-router-what-the-installer-pushes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Guest Shell and router: what the installer pushes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iox-what-the-installer-delivers" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOx: what the installer delivers
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ios-xr-what-the-installer-pushes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOS-XR: what the installer pushes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#confirming-it-worked" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Confirming it worked
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode-aria2c-alive-but-not-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure mode: aria2c alive but not serving
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode-a-recreated-container-forgets-what-it-is-seeding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure mode: a recreated container forgets what it is seeding
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode-a-busy-aria2c-read-as-a-dead-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure mode: a busy aria2c read as a dead one
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Agent loop
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-trust-by-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction trust by platform
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instruction trust by platform">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#instruction-files-on-each-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction files on each platform
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-failures-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction failures and recovery
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#crash-safe-same-name-replacement" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Crash-safe same-name replacement
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verified-policy-and-mechanical-ticks" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verified policy and mechanical ticks
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cadence-jitter-and-overload-backoff" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cadence jitter and overload backoff
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-side-logging-flash-write-endurance" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device-side logging (flash write endurance)
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification-gates" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verification gates
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unassigned-image-park" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unassigned image park
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-ssh-host-key-pinning" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device SSH host-key pinning
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#platform-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Platform targets
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="device-agents">Device Agents</h1>
+<p>All device paths use the Python agent in <code>device/agent/</code> to read assignments,
+download and verify images, stage them on device storage, and report status.
+IOx and IOS-XR also share one container build and entrypoint, with amd64 and
+arm64 images. <code>IRIS_DEVICE_PLATFORM</code> selects the <code>iox</code> or <code>xr-appmgr</code> profile.
+Guest Shell packages the same agent in a bundle and runs it through bootstrap
+and an EEM timer. The server and Console have their own container images.</p>
+<p>IRIS stages software only. It never installs or activates a network OS image,
+changes boot variables, or reloads the device.</p>
+<p>A device attaches through one of five management types: a dedicated IRIS-managed
+VLAN/SVI (<strong>routed</strong>), an existing operator-owned management VLAN (<strong>inband</strong>),
+an IRIS-managed VirtualPortGroup (<strong>router-routed</strong> or <strong>router-nat</strong>), or the
+router's own network stack with no app-network fields (<strong>xr-host</strong>).
+The management-type choice governs what the installer and uninstaller may configure
+and remove; see
+<a href="../management-type/">Management Type and VLAN Ownership</a>.</p>
+<p>After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
+<code>copy running-config startup-config</code>. This persists the IRIS app-hosting,
+networking, trustpoint, and cleanup state across a reload. Failed or partial
+onboarding is not saved. IOS-XR has no running/startup split to bridge — a
+<code>commit</code> is already the persisted state — so the XR recipes never issue one.</p>
+<h2 id="guest-shell-path">Guest Shell path</h2>
+<p>Catalyst 9300 devices and Catalyst 8000 routers use Guest Shell (routers through an IRIS-managed VirtualPortGroup, staging to <code>bootflash:</code>; a router can run the <a href="../iox/#catalyst-8000-routers">IOx app</a> through that same VirtualPortGroup instead). The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.</p>
+<pre class="mermaid"><code>flowchart TB
+    Install["Generated installer"] --&gt; PKI["Install catalog trustpoint"]
+    Install --&gt; IOx["Enable IOx and Guest Shell"]
+    Install --&gt; Fetch["Fetch bootstrap and agent bundle"]
+    Fetch --&gt; EEM["Install EEM timer"]
+    EEM --&gt; Bootstrap["Run bootstrap every 60 seconds"]
+    Bootstrap --&gt; Agent["Run iris_agent.py"]
+    Agent --&gt; Poll["Poll catalog"]
+    Poll --&gt; Download["Download with aria2c"]
+    Download --&gt; Hash["Verify sha256"]
+    Hash --&gt; Copy["Plain copy to the storage root, byte-size attested"]
+    Copy --&gt; Report["Report status"]</code></pre>
+<h2 id="agent-installation">Agent installation</h2>
+<h3 id="guest-shell-and-router-what-the-installer-pushes">Guest Shell and router: what the installer pushes</h3>
+<p><code>device/device-install.sh</code> (Catalyst 9300 Guest Shell) and
+<code>device/router-install.sh</code> (Catalyst 8000 router) push the same file set to
+the guest-share root, over a <code>copy https://</code> that the PKI trustpoint step
+(pasted over SSH first) lets IOS verify:</p>
+<table>
+<thead>
+<tr>
+<th>File served from the artifact server</th>
+<th>Device-side name</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>staged as <code>iris-agent-&lt;DEVICE_ID&gt;-&lt;CAP&gt;.conf</code></td>
+<td><code>iris-agent.conf</code></td>
+<td>catalog URL, device id, and an empty <code>rpc_secret</code> — the agent fetches the real secret on its first token refresh</td>
+</tr>
+<tr>
+<td>staged as <code>rpc-secret-&lt;CAP&gt;</code></td>
+<td><code>rpc-secret</code></td>
+<td>seeds aria2c's RPC secret; bootstrap.sh reconciles it against the conf on every tick</td>
+</tr>
+<tr>
+<td><code>iris-agent.tgz</code></td>
+<td><code>bundle.tgz</code></td>
+<td>the agent Python, <code>bootstrap.sh</code>, <code>guestshell-start.sh</code>, <code>rotate-logs.sh</code>, <code>agent/peer-transfer-hook.sh</code> (aria2's <code>--on-bt-download-complete</code> program), and an architecture-matched <code>aria2c</code>, packed by <code>tools/make-agent-bundle.sh</code></td>
+</tr>
+<tr>
+<td>the bare server cert</td>
+<td><code>iris-catalog.pem</code></td>
+<td>pinned TLS trust anchor for the agent's catalog calls</td>
+</tr>
+<tr>
+<td>—</td>
+<td><code>bootstrap.sh</code></td>
+<td>the EEM entry point itself</td>
+</tr>
+</tbody>
+</table>
+<p><code>CAP</code> is a fresh 128-bit random capability minted per install run.
+The staged copies live under the artifact server's <code>staging/</code>
+prefix and are only reachable for the 3600 seconds it retains them, ample
+headroom for queued fleet work and the installer's own retry loop. This
+capability-bearing HTTPS surface serves the
+Guest Shell installer; the authenticated <code>/v1/devices/.../artifacts/...</code> API
+used by explicit clients is a separate surface.</p>
+<p>The installer then installs one EEM applet:</p>
+<div class="highlight"><pre><span></span><code>event manager applet IRIS-AGENT authorization bypass
+ event timer watchdog time 60 maxrun 900
+ action 100 cli command "enable"
+ action 200 cli command "guestshell run bash &lt;fs&gt;guest-share/bootstrap.sh"
+</code></pre></div>
+<p>Every 60 seconds it runs <code>bootstrap.sh</code> inside Guest Shell. Bootstrap collects
+the SHA-256 sidecar before the archive and validates bounded archive/member
+contents and coordinated bootstrap/root evidence before adopting a new
+<code>bundle.tgz</code>. Missing, malformed or mismatched evidence refuses adoption and
+preserves the prior runnable bundle; dropping an archive alone is insufficient.
+It then makes sure <code>aria2c</code> is up and serving and runs <code>iris_agent.py --once</code>.</p>
+<p><strong>A validated bundle plus its SHA-256 sidecar and coordinated bootstrap/root
+evidence is the agent upgrade</strong> for Guest Shell and router. A successful
+bootstrap transaction adopts it; there is no separate upgrade command.
+Re-running the installer script directly delivers the coordinated set (it
+mints a new capability and re-copies bundle and evidence). A console
+re-onboard is not that path: its preflight refuses a device that still carries
+the live agent, so undeploy first and then onboard again. <code>router-install.sh</code>
+additionally destroys any pre-existing Guest Shell before re-applying config,
+so a re-onboard never leaves the guest running on stale networking from a
+previous install — see
+<a href="../management-type/#router-routed-and-router-nat-iris-managed-virtualportgroup">Router routed and router NAT</a>.</p>
+<h3 id="iox-what-the-installer-delivers">IOx: what the installer delivers</h3>
+<p>The controller's private <code>device/iox/install.sh</code> recipe never touches Guest
+Shell. Over its authenticated, host-key-checked SSH session it installs the
+catalog trustpoint, then has the device itself <code>copy https:</code> the built package (<code>iris-arm64.tar</code> or
+<code>iris-amd64.tar</code>) and the current public catalog certificate from the artifact
+server to the target IOS filesystem, authenticating with its own enrollment
+credential (<code>ip http client username</code> / <code>password</code>, configured for each copy
+and removed after it). After the app reaches <code>ACTIVATED</code>, the device fetches
+its sealed instruction envelope the same way, the installer copies both into
+app-hosting application data, then starts the app. Nothing is pushed over
+SCP; the <code>ip scp server enable</code> the installer still configures serves the
+agent's runtime image hand-off, not onboarding.
+The package contains no server certificate; the container reads the copy from
+CAF's app-data directory. Deployment-specific values — the enrollment
+token, device id, and SSH-to-self credentials — are passed as numbered
+<code>run-opts -e</code> Docker options at deploy time and never baked into the image.
+<code>IRIS_DEVICE_PLATFORM=iox</code> selects and persists the IOx profile;
+<code>device/container/entrypoint.sh</code> (PID 1) writes the values into
+<code>iris-agent.conf</code> on first boot only if no config already exists on the
+persistent mount. There is no EEM timer on IOx: the common entrypoint is its own
+supervisor loop, running the agent once every <code>IRIS_TICK_SECONDS</code> (default 60s).</p>
+<p>Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.</p>
+<p><strong>Upgrade on IOx is undeploy, then onboard</strong> with the rebuilt package. Use the
+Console, API, or the <a href="../reference/#iox-control-cli">IOx control CLI</a>'s
+<code>submit-uninstall</code> and <code>submit-install</code> commands. The install and uninstall
+shell recipes require the controller's private channel; neither is a
+standalone operator command. A running app requires undeploy first. An incomplete
+IOx onboard left in <code>DEPLOYED</code> or <code>ACTIVATED</code> can be retried with Onboard; see
+<a href="../iox/#first-install-of-a-new-package-version">First install of a new package version</a>.</p>
+<h3 id="ios-xr-what-the-installer-pushes">IOS-XR: what the installer pushes</h3>
+<p><code>device/xr-install.sh</code> deploys the agent to a Cisco 8000-series router running
+IOS-XR as an <strong>appmgr Docker application</strong>. It pushes the pre-built
+<code>iris-xr.rpm</code> and current public catalog certificate to <code>harddisk:</code> over scp,
+registers the agent RPM (<code>appmgr package install rpm</code>), and starts its appmgr
+application in config mode with host networking and the <code>/misc/disk1:/hostmount</code> bind mount.
+<code>/misc/disk1</code> <strong>is</strong> <code>harddisk:</code>, so the container
+writes straight to the router's own filesystem and reads the runtime trust
+anchor at <code>/hostmount/iris-catalog.pem</code>. The deployment-neutral RPM contains no
+server certificate. Secrets and the device id are passed as <code>--env</code> options on
+the activation line and are never baked into the image.
+<code>IRIS_DEVICE_PLATFORM=xr-appmgr</code> selects and persists the XR profile;
+<code>device/container/entrypoint.sh</code> writes the configuration on first boot and
+uses the same supervisor as IOx. The XR profile verifies the <code>harddisk:</code> mount
+before its first write, rejects all IOx SSH/share variables, and never
+instantiates the SSH transport even though the common image contains the client
+binaries IOx needs. <code>device/xr-uninstall.sh</code> is the record-driven
+inverse: deactivate the app, uninstall its package source, remove the RPM and
+runtime certificate, empty <code>iris-work/</code>, and remove torrent sidecars from
+<code>harddisk:</code> root. The empty work directory can remain after successful
+cleanup; image files remain in place.</p>
+<p>All three onboarding paths deliver the current public certificate at runtime.
+A server-certificate rotation therefore requires re-onboarding devices so that
+file is replaced, but it does not require rebuilding the Guest Shell bundle,
+IOx tars, or XR RPM. A shared-agent source change is the opposite: rebuild all
+package families, then redeploy affected devices so they receive the new code.</p>
+<p>These lifecycle commands install and start the IRIS application. They do not
+install or activate any network OS image that IRIS distributes.</p>
+<h3 id="confirming-it-worked">Confirming it worked</h3>
+<p>An inventory row and a deployment job can exist before the agent connects.
+The final <code>onboard complete: &lt;device-ip&gt;</code> line means the installer completed.
+A fresh heartbeat confirms the agent can reach the catalog, even when no
+images are assigned. Check each assigned image in Devices for its staging
+result; onboard completion alone does not mean an image is staged.</p>
+<p>The normal tick is 60 seconds, with jitter and failure backoff described
+below. A new assignment stays <strong>Waiting for staging</strong> until the agent reports
+work on it. Current per-image errors remain visible even if the same image
+was staged previously. Each device reports its own assigned set, so a second
+device starting a transfer does not reset the first device's completed state.</p>
+<p>Immediately after first boot, aria2c may still be running with the empty RPC
+secret deliberately shipped by the installer while the agent has just fetched
+the real one. aria2-next reports that brief mismatch as HTTP 400. IRIS treats it
+as a normal <code>staging</code> state, emits <code>ARIA2-AUTH</code>, and lets the next bootstrap tick
+copy the refreshed secret and restart aria2c; it does not show a false staging
+failure. A connection-refused or otherwise unreachable RPC endpoint remains a
+real error.</p>
+<h3 id="failure-mode-aria2c-alive-but-not-serving">Failure mode: aria2c alive but not serving</h3>
+<p>A running process does not prove aria2 is answering requests. Guest Shell
+bootstrap and the common IOx/XR supervisor probe <code>aria2.getVersion</code> on the
+local RPC port before deciding whether to relaunch it.</p>
+<p>Guest Shell stops a non-serving daemon before replacing its binary; otherwise
+the copy can fail because the binary is still executing. Copy and launch
+failures appear in bootstrap output instead of being ignored.</p>
+<p>The common container supervisor tracks aria2 by its child PID. When it must
+restart that child, it sends TERM, waits up to five seconds, then uses KILL
+if needed and reaps the process. The same shutdown path runs when the
+container stops. TERM lets aria2 save its <code>.aria2</code> checkpoint for resume.
+Launchers enable <code>--check-integrity</code>, so a resumed transfer checks saved
+pieces and downloads damaged pieces again. A completed file re-added for
+seeding uses <code>--bt-seed-unverified</code> to avoid another full read at startup;
+its earlier content check is retained in agent state.</p>
+<p>Every aria2 launcher also loads the device's pinned <code>iris-catalog.pem</code> as its
+CA and keeps certificate checking enabled for tracker announces on TCP 6969.
+IOx and IOS-XR attach their bearer credential as a per-torrent header; Guest
+Shell sends its query credential inside the same verified TLS transport.</p>
+<p>Guest Shell additionally copies the validated CA to a content-addressed path
+on its executable filesystem and launches aria2 against that immutable
+generation. Aria2 loads CA bytes only when it starts, so merely replacing
+<code>iris-catalog.pem</code> at the same path during re-onboard would otherwise leave a
+healthy daemon trusting the previous certificate. A changed digest forces
+one restart; a malformed or
+unverifiable snapshot fails before launch.</p>
+<h3 id="failure-mode-a-recreated-container-forgets-what-it-is-seeding">Failure mode: a recreated container forgets what it is seeding</h3>
+<p>Recreating a container — an IOS-XR appmgr re-onboard or restart, an IOx CAF
+restart — starts a new aria2c with an empty session while the persistent mount
+keeps the images and the agent keeps its state file. A transfer still in
+progress is re-added from its <code>.aria2</code> checkpoint. A <em>finished</em> image has no
+checkpoint, because aria2 deletes it at completion, so the agent re-adds that
+one from its own evidence instead: the staged file is exactly the catalog size
+and the content check recorded for it is <code>verified</code>. The re-add emits <code>RESEED</code>
+and puts the device back in the swarm without re-downloading, re-hashing or
+re-placing the image, and an adopted in-place file stays adopted. With either
+fact missing — a short file, or no recorded verification — nothing is
+announced, because a re-add with no checkpoint seeds without hashing and IRIS
+never offers peers bytes it cannot vouch for. Missing or stale torrent metainfo
+is fetched automatically before the re-add. If that fetch or the re-add fails
+(for example, aria2c is not serving yet), the agent emits
+<code>RESEED-DEFERRED</code>, still reports the image as staged, and retries next tick.</p>
+<h3 id="failure-mode-a-busy-aria2c-read-as-a-dead-one">Failure mode: a busy aria2c read as a dead one</h3>
+<p>A daemon built without asynchronous DNS can pause its event loop while
+resolving a tracker hostname. During that pause it may accept a connection
+without answering the RPC request promptly.</p>
+<p>The supervisor uses separate connection and response timeouts. A refused
+loopback connection triggers a restart; a slow reply must fail a second probe
+before the daemon is stopped. This allows a temporary DNS stall to clear
+without discarding the transfer. Using the configured server IP in the tracker
+URL avoids a hostname lookup on that path.</p>
+<h2 id="agent-loop">Agent loop</h2>
+<p>Each mechanical tick loads configuration, refreshes credentials when needed,
+verifies available instructions/LKG and reasserts verified/default aria2 options.
+It sends a heartbeat even when signed logical catalog cadence is not due. On a
+due tick with readable assignment policy and successful option application:</p>
+<ol>
+<li>Read the current assigned set and stop torrents for removed assignments.</li>
+<li>Skip acquisition for images already staged and verified.</li>
+<li>Download missing content through <code>aria2c</code>.</li>
+<li>Verify each completed file against its catalog SHA-256.</li>
+<li>Place the image at the storage root and attest it by exact byte size. On
+   IOS-XE that is a copy — <a href="#crash-safe-same-name-replacement">crash-safely, never deleting a
+   pre-existing same-named file first</a>; on
+   IOS-XR the download already landed there through the bind mount, so the
+   agent only attests it.</li>
+<li>Report per-image state and one combined heartbeat. A catalog or transfer
+   error for one image does not prevent the remaining assignments from being
+   checked.</li>
+</ol>
+<h2 id="instruction-trust-by-platform">Instruction trust by platform</h2>
+<p>Read the <a href="../security/#device-administrator-trust-boundary">device administrator trust boundary</a>
+before treating an instruction report as compliance. The same verified policy
+engine runs on all supported agents; the trust boundary differs:</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Unified IOx/XR image</th>
+<th>Guest Shell</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Two distinct public roots</td>
+<td>Embedded mode-0444 signer/root files; image pin depends on enforced package signature</td>
+<td>Same public roots in a replaceable bundle on flash; tamper-evidence</td>
+</tr>
+<tr>
+<td>Signature verifier</td>
+<td>Bundled OpenSSH verifier on both architectures</td>
+<td>Runtime probe of <code>ssh-keygen -Y verify</code>; absent support gives <code>verifier_missing</code> and tracker-only peers, not silent acceptance</td>
+</tr>
+<tr>
+<td>Mechanical tick</td>
+<td>Container supervisor; <code>IRIS_TICK_SECONDS</code> interval/floor</td>
+<td>IOS-owned 60-second EEM timer with bounded startup jitter</td>
+</tr>
+<tr>
+<td>Agent update evidence</td>
+<td>Canonical image and wrapper provenance; native signing is a separate gate</td>
+<td>Digest-only bundle update with adjacent SHA-256 sidecar, bounded members and prior-bundle rollback</td>
+</tr>
+<tr>
+<td>Compatibility</td>
+<td>Shared agent sources</td>
+<td>Python 3.6 compatible; no claim that every Guest Shell includes a verifier</td>
+</tr>
+</tbody>
+</table>
+<p>For IOx, onboarding controls the device-global verification setting through a
+durable owned transaction: signed/no mutation; unsigned with initial enabled →
+disable for installation → restore and read-back before activation/start;
+initial disabled stays disabled; unknown refuses. Interruption/resume and
+uninstall recovery honor recorded obligations without blindly enabling an
+operator-changed/unowned state. See <a href="../iox/#device-global-package-verification">IOx verification</a>.</p>
+<p>The instruction envelope is capped at 256 KiB and bound to this device/platform.
+MAC-before-decrypt, signature verification and a monotonic <code>(epoch, instr_serial)</code>
+floor precede application. Authenticated refresh places current/prior instruction
+keys in mode-0600 agent configuration; the LKG key is generated locally. None
+of these keys belongs in platform activation arguments. F3 offline delivery
+carries a ciphertext bootstrap envelope, never a secret key; normal authenticated
+refresh self-heals its key availability. See the <a href="../operations/#f3-offline-bootstrap-envelope-redelivery">redelivery runbook</a>.</p>
+<h3 id="instruction-files-on-each-platform">Instruction files on each platform</h3>
+<p><code>instr.paths_for()</code> uses the configured <code>stage_dir</code> to locate device state:</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Instruction work directory</th>
+<th>Public signer/root trust directory</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Guest Shell / router</td>
+<td><code>stage_dir</code>, normally <code>/flash/guest-share/iris</code></td>
+<td>The same replaceable <code>stage_dir</code></td>
+</tr>
+<tr>
+<td>IOx</td>
+<td><code>stage_dir</code>, derived as <code>$CAF_APP_PERSISTENT_DIR/iris</code> (default <code>/data/iris</code>; <code>/iox_data/iris</code> where CAF supplies that mount)</td>
+<td><code>/opt/iris/agent</code> in the image</td>
+</tr>
+<tr>
+<td>IOS-XR appmgr</td>
+<td><code>/hostmount/iris-work</code>, from <code>stage_dir=/hostmount</code>; visible in IOS as <code>harddisk:iris-work/</code></td>
+<td><code>/opt/iris/agent</code> in the image</td>
+</tr>
+</tbody>
+</table>
+<p>Each instruction work directory contains <code>iris-instructions.lkg</code>,
+<code>iris-instructions.bootstrap</code>, <code>iris-instruction-keylist.current</code> and
+<code>iris-instruction-keylist-state.json</code>. The public trust directory contains
+<code>iris-signers.allowed_signers</code> and <code>iris-root.allowed_signers</code>. The installer
+may first land the bootstrap envelope in platform application data or at the
+XR mount root; the runtime adopts it into the work-directory path above.
+Accepted identities/replay facts persist in the agent state, normally
+<code>iris-agent.state</code> in its work directory. The device-local <code>lkg_key</code> and refreshed
+instruction keys are in mode-0600 <code>iris-agent.conf</code>, not a public trust file.
+Do not delete these state/key files to force acceptance of an older envelope.</p>
+<h2 id="instruction-failures-and-recovery">Instruction failures and recovery</h2>
+<p>Instruction-body fetch/verification failures affect the instruction step only; heartbeat/staging
+continue when usable LKG or defaults can be applied. An aria2 RPC apply failure
+still sends heartbeat but skips staging for that tick. An unreadable assignment
+policy also skips staging reconciliation while heartbeat and existing aria2
+transfers continue. A rejected candidate
+leaves the prior verified LKG's QoS/peer posture in place where usable, otherwise
+defaults apply. Server tracker/origin controls remain
+in force. The state below is agent-asserted unless explicitly marked
+server-observed; it does not prove device compliance.</p>
+<table>
+<thead>
+<tr>
+<th>Condition / visible state</th>
+<th>Retained QoS/peer state</th>
+<th>Retry or operator action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>First tick/no file: <code>none</code></td>
+<td>Defaults and tracker-only peers</td>
+<td>Await a stamp and authenticated refresh. Missing protocol marker on a legacy agent yields server display <code>pre-instructions</code>; IOS <code>version</code> is not capability evidence.</td>
+</tr>
+<tr>
+<td>Valid fresh envelope: <code>applied</code></td>
+<td>Verified QoS and peer posture</td>
+<td>Normal cadence; accepted identity is reported.</td>
+</tr>
+<tr>
+<td>Valid cached instructions during catalog loss: <code>lkg</code> fallback</td>
+<td>Locally re-encrypted verified LKG</td>
+<td>LKG survives instruction-key rotations. A request-error state may override the raw <code>lkg</code> label while this accepted identity/posture is retained; retry on a later ordinary tick.</td>
+</tr>
+<tr>
+<td>Instruction expires: <code>stale_expired</code></td>
+<td>Role <code>on_stale: keep</code> retains verified QoS; <code>defaults</code> restores defaults</td>
+<td>Restore authenticated catalog time and fresh instructions. Peer expiry is independent.</td>
+</tr>
+<tr>
+<td>Attribution expires: <code>allowlist_expired</code></td>
+<td>Expired allow-list falls back to tracker-only; an expired deny-list remains effective independently of <code>on_stale</code></td>
+<td>Refresh endpoint attribution/instructions. Never turn an expired allow-list into open access.</td>
+</tr>
+<tr>
+<td>Older identity: <code>rollback_rejected</code>; authenticated reset: <code>floor_reset</code></td>
+<td>Reject older candidate; a validated reset adopts its new floor</td>
+<td>Repair server epoch/stamp through the recovery runbook; do not delete local replay state.</td>
+</tr>
+<tr>
+<td>Wrong device/platform: <code>audience_mismatch</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>Redeliver the envelope for the exact inventory device/platform.</td>
+</tr>
+<tr>
+<td>Unknown per-device key: <code>key_rejected</code>, reason <code>unknown_key</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>At most one unscheduled refresh in the tick, latched by unknown key ID; retry a later tick.</td>
+</tr>
+<tr>
+<td>Known-key bad MAC: <code>key_rejected</code>, reason <code>bad_mac</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>Record a violation and inspect integrity; bad MAC does not trigger key refresh.</td>
+</tr>
+<tr>
+<td>Bad/revoked signer, invalid envelope or equal identity/different bytes: <code>tamper_rejected</code></td>
+<td>Retain only independently usable LKG/defaults</td>
+<td>Repair signer/keylist or envelope provenance; never bypass verification.</td>
+</tr>
+<tr>
+<td>Missing verifier: <code>verifier_missing</code></td>
+<td>Tracker-only peers, with verified/default QoS</td>
+<td>Supply a supported verifier through the agent package; Guest Shell availability is probed at runtime.</td>
+</tr>
+<tr>
+<td>Rejected/unreadable local cache: <code>lkg_rejected</code>, <code>lkg_unreadable</code></td>
+<td>Defaults and tracker-only peers when no usable LKG exists</td>
+<td>Obtain a fresh envelope; preserve evidence for diagnosis.</td>
+</tr>
+<tr>
+<td>Oversize response: <code>oversize</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>Fix the producer/transport and retry on a later tick; never raise the 256 KiB cap as a recovery shortcut.</td>
+</tr>
+<tr>
+<td>aria2 session restart: <code>reasserted</code>; same-session drift correction</td>
+<td>Unconditionally reapply verified/default global and active-GID options before reconciliation</td>
+<td>Inspect agent-asserted <code>qos_drift_count</code>; every future <code>addTorrent</code> uses the same verified/default policy.</td>
+</tr>
+<tr>
+<td>Instructions 404, 429, 5xx or transport failure: <code>instr_unavailable</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>Later-tick retry; investigate stamp/state and bounded retry hints. No in-tick sleep/retry loop.</td>
+</tr>
+<tr>
+<td>Instructions 409 <code>stale_pointer</code>: <code>instr_pending</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>Later-tick retry; inspect producer convergence. No in-tick sleep/retry loop.</td>
+</tr>
+<tr>
+<td>Instructions 401/403: <code>instr_forbidden</code></td>
+<td>Retain usable LKG/defaults</td>
+<td>One-shot authenticated token refresh, then later-tick retry with no in-tick retry loop; durable revocation cannot be healed by rotation.</td>
+</tr>
+<tr>
+<td>Durable revoked principal: display <code>revoked</code> (server-observed)</td>
+<td>Underlying agent LKG/state remains visible as agent-asserted evidence</td>
+<td>Resolve the retirement/compromise decision on the server; do not rotate to spare the device.</td>
+</tr>
+<tr>
+<td>Pointer/body race</td>
+<td>A valid higher body serial applies; a lower-but-fresh body above the accepted floor applies with <code>pointer_skew</code>; a candidate below the accepted floor reports <code>rollback_rejected</code></td>
+<td>After three skew observations, report the latch and inspect producer convergence. At equal identity, identical envelope bytes are accepted idempotently; different bytes report <code>tamper_rejected</code>.</td>
+</tr>
+<tr>
+<td>Explicit <code>tracker-only</code> peer posture</td>
+<td>Tracker supplies peers under server policy</td>
+<td>No device peer-list enforcement is claimed.</td>
+</tr>
+</tbody>
+</table>
+<p>The closed raw state list and the separate display classifications are in
+<a href="../reference/#instruction-protocol-and-state-reference">Reference</a>. A rejection
+can coexist with a complete older accepted identity; never treat a reported
+candidate failure as proof that the older policy was erased.</p>
+<h2 id="crash-safe-same-name-replacement">Crash-safe same-name replacement</h2>
+<p>Placing an image under a name IRIS finds already on the storage root — the
+operator's ordinary republish flow, or a name the <code>BOOT</code> variable currently
+points at — never deletes the old file first. Guest Shell and IOx can adopt
+an existing root file after reading its size through IOS and comparing its
+native SHA-512 with the catalog. The filename and digest must match, and IOS
+must report the expected size both before and after hashing. An exact match
+is adopted in place, including on IOS releases where <code>rename</code> will not overwrite an existing
+destination. An unreadable or mismatched root file is left untouched and
+reported as <code>copy_failed</code>; replacing it is an explicit operator decision, not
+a destructive guess by IRIS.</p>
+<p>Guest Shell mounts only <code>guest-share</code>, so its local <code>/flash</code> directory cannot
+attest the IOS root. Its one-shot <code>IRIS-ROOT-HASH</code> EEM policy runs the read-only
+hash with a 600-second limit and returns a unique completion record under the
+IRIS share. These Guest Shell hash jobs are serialized; a failed hash waits
+five minutes after completion before another attempt. An interrupted launch
+whose completion cannot be determined remains blocked for operator inspection.
+See <a href="../reference/#guestshell-root-hash-recovery">root-hash recovery</a>.
+IOx runs the native hash directly through SSH-to-self, with a 900-second
+command limit. IOx checks for adoption after downloading and verifying the
+scratch file; its earlier root-presence check only protects the existing file
+from reclaim. Adoption does not rehash an already placed image.
+Ordinary placement continues to verify the downloaded SHA-256 and the copied
+file's exact IOS byte size; it does not run native <code>verify</code>.</p>
+<p>When no destination exists, IOS-XE stages the new bytes under a reserved temp
+name (<code>&lt;image&gt;.iris-tmp</code>), verifies presence and exact byte size there, and
+then renames the proven copy to the real name. A failure or power loss before
+that rename leaves any previous file exactly as it was; a failure at the
+rename step is not assumed to mean it failed — the agent re-checks the real
+name and the temporary file's absence afterwards and reports the observed
+result. IOS-XR is unaffected: <code>attest_in_place</code> never writes a second copy at all.</p>
+<p>A leftover temp-name file — from an attempt that crashed before its own
+retry could clean up after it — is covered by the same low-space
+bundle-reclaim sweep as any other unused image artifact on a <strong>bundle-mode</strong>
+device, so it does not sit invisible on an otherwise-full box there. When
+<code>BOOT</code> names a <code>.conf</code> provisioning file, the sweep keeps every <code>.pkg</code> and
+<code>.conf</code> file, including packages that provisioning file may reference. Only
+otherwise-reclaimable bundle images and IRIS temp files remain candidates.
+An unreadable <code>BOOT</code> setting defers the sweep, and keeping every candidate
+does not consume the once-per-cycle reclaim attempt. On an
+<strong>install-mode</strong> device this sweep does not apply: low-space reclaim there
+runs <code>install remove inactive</code>, which manages installed packages and does
+not touch a stray <code>.bin.iris-tmp</code> at the storage root, so a temp-name
+leftover on an install-mode device is not automatically reclaimed by
+either path. The narrow exception is Guest Shell or IOx adoption of an already
+size-and-SHA-verified root file: if the failed attempt's reserved
+<code>&lt;image&gt;.iris-tmp</code> also exists, IRIS reclaims exactly that temp name after
+checking the running image and <code>BOOT</code> targets, then confirms its absence
+through IOS before reporting the root ready. If cleanup cannot be proved, the
+agent fails closed instead of claiming adoption. Either way, IRIS only ever
+attempts the low-space reclaim once per acquisition cycle for a given image —
+a content republish under the same id, an image returning from park, or that
+image's own placement succeeding all start a fresh cycle and re-arm the
+attempt.</p>
+<p>An existing file already consumes space and is excluded from the device's
+reported free bytes. The placement check budgets for the new copy. Guest
+Shell and IOx same-name adoption do not overwrite a conflicting root file;
+an operator must resolve that conflict. See
+<a href="../management-type/#sizing-the-storage-root">Sizing the storage root</a>.</p>
+<p>Before a low-space IOx download would trigger reclaim, the agent checks for
+the destination through IOS. If it exists, IRIS preserves it and reserves
+one image plus headroom for the download; an unreadable destination check
+defers staging. This presence check does not attest the file or mark it
+staged. After downloading, the normal native size and SHA-512 checks must
+still pass before adoption. A mismatch remains an operator decision.</p>
+<h2 id="verified-policy-and-mechanical-ticks">Verified policy and mechanical ticks</h2>
+<p>Legacy <code>max_peers</code> remains parseable for upgrade compatibility but is ignored
+as policy. The agent emits the value-free <code>MAX-PEERS-IGNORED</code> notice once;
+Guest Shell no longer exports that setting. Container <code>IRIS_MAX_PEERS</code> and
+<code>IRIS_MAX_CONCURRENT</code> are absent from Dockerfile defaults but remain provisional
+launcher inputs until the first successful agent tick. No restored download
+starts in that interval. The agent unconditionally writes verified/default
+global and active-GID options before reconciliation, and every future
+<code>addTorrent</code> uses verified/default values.</p>
+<p><code>IRIS_TICK_SECONDS</code> is an explicit mechanical launcher interval/floor. Signed
+<code>catalog_tick_s</code> controls logical catalog/staging cadence; every mechanical
+tick still reasserts QoS and sends a heartbeat. Telemetry cadence/pause gates
+cannot stop heartbeats, key refresh or the agent recovery path.</p>
+<h2 id="cadence-jitter-and-overload-backoff">Cadence jitter and overload backoff</h2>
+<p>Guest Shell's EEM watchdog and the IOx/XR container supervisors all drive the
+agent on a nominal 60-second tick. Left exactly synchronized, a fleet that is
+bulk-installed or reloaded together keeps every device's tick in the same
+phase indefinitely — turning an ordinary tick into a fleet-wide burst of
+policy GETs, heartbeats, and tracker re-announces. Three independent,
+bounded guards spread that out, sized to smooth <em>arrival</em>, not to compensate
+for a slow catalog — the per-device cost of a policy/heartbeat round trip is
+a fixed, small constant regardless of fleet size (see <a href="../reference/#keyed-per-device-state">Reference → Keyed
+per-device state</a>):</p>
+<ul>
+<li><strong>Steady-state dither (IOx/XR only).</strong> The IOx and XR profiles in
+  <code>device/container/entrypoint.sh</code> vary every ordinary tick by ±10% of
+  <code>IRIS_TICK_SECONDS</code> (54–66s at the 60s default, via <code>IRIS_TICK_JITTER_PCT</code>)
+  — enough that devices which started in the same second drift apart over a
+  handful of ticks, small enough that the <em>average</em> cadence, and so token
+  refresh and assignment convergence latency, barely moves. Guest Shell
+  cannot move the EEM timer's own period (IOS owns that clock), so
+  <code>device/bootstrap.sh</code> instead sleeps a small bounded jitter
+  (<code>IRIS_TICK_JITTER_MAX</code>, default 0–7s) immediately before contacting the
+  catalog each tick — the EEM timer still fires every 60s, but the actual
+  request lands at a different offset within it per device.</li>
+<li><strong>Startup jitter (IOx/XR only).</strong> The first tick after a container starts
+  is spread across the whole tick window (<code>IRIS_STARTUP_JITTER</code>, on by
+  default) — the case the steady-state dither only corrects gradually: many
+  containers restarting in the same second (a platform-wide app-hosting
+  restart, say) get their first catalog contact spread out instead of firing
+  together. Set it to <code>0</code> for a single-device debug session watching for the
+  first tick.</li>
+<li><strong>Failure backoff.</strong> When the agent process exits unsuccessfully, the
+  launcher backs off the next contact exponentially, capped at
+  <code>IRIS_TICK_BACKOFF_MAX</code> (600s by default), instead of retrying on the
+  ordinary cadence. IOx/XR skip the whole tick (<code>next_tick_sleep</code> in
+  <code>entrypoint.sh</code>); Guest Shell/router cannot skip an EEM-fired tick, so
+  <code>bootstrap.sh</code> instead skips only step 5 (catalog contact) while local
+  bundle/aria2c/log upkeep (steps 0–4) keeps running every tick, recording
+  the backoff deadline and failure streak in
+  <code>$STAGE/.iris-tick-backoff</code>. A success immediately clears the streak and
+  resumes ordinary cadence. The cap is comfortably inside the catalog
+  token's multi-day refresh slack, so a run of backed-off ticks never
+  strands a device. A tick whose catalog policy fetch fails outright
+  (unreachable, timed out, or a non-2xx answer) is reported as the contained
+  result <code>catalog-unavailable</code> and the agent exits non-zero for it, so a
+  catalog outage or a saturated server engages this backoff. Other handled
+  Phase 1 instruction fetch or apply failures, and a per-image staging error,
+  return a contained tick result with exit 0 and do not trigger it; their
+  retry is on a later ordinary tick, with no in-tick sleep/retry loop.</li>
+</ul>
+<p>These launcher controls set mechanical timing, not signed policy authority — see <a href="../reference/#device-container-environment-variables">Reference →
+Device container environment variables</a>
+for defaults and ranges.</p>
+<h2 id="device-side-logging-flash-write-endurance">Device-side logging (flash write endurance)</h2>
+<p><code>IRIS_LOG</code> controls aria2's continuous transfer log. It defaults to <code>off</code> on
+all platforms to reduce flash writes. Heartbeats, staging errors, and the
+agent's <code>%IRIS-6-&lt;MNEMONIC&gt;</code> messages remain enabled.</p>
+<table>
+<thead>
+<tr>
+<th>Runtime</th>
+<th>Agent messages</th>
+<th>With the aria2 log enabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Guest Shell / router</td>
+<td>IOS-XE syslog, through the local CLI</td>
+<td><code>aria2c.log</code> in the staging directory, bounded by bootstrap's <code>rotate-logs.sh</code>.</td>
+</tr>
+<tr>
+<td>IOx</td>
+<td>IOS-XE syslog, through SSH-to-self</td>
+<td><code>aria2c.log</code> in the agent working directory, bounded by aria2's <code>--log-max-size=50M --log-max-files=1</code>.</td>
+</tr>
+<tr>
+<td>IOS-XR</td>
+<td>Container stdout, read with <code>show appmgr application name iris logs</code></td>
+<td>The same bounded aria2 log in <code>harddisk:iris-work/</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>On XR, appmgr captures stdout even with <code>IRIS_LOG=off</code>. The installer bounds
+that container log with <code>--log-driver json-file --log-opt max-size=1m
+--log-opt max-file=3</code>. It retains startup and staging diagnostics without an
+unbounded log on the app-hosting partition. XR agent messages do not appear
+in the router's <code>show logging</code> output.</p>
+<p>For an IOx or XR deployment, select <strong>Detailed logs</strong> in the Console's Onboard
+dialog, or send <code>"log": true</code> in the onboard API request. This passes
+<code>IRIS_LOG=on</code> to the common container and, for IOx, includes command output in
+the onboarding job log. The Undeploy dialog has its own <strong>Detailed logs</strong>
+switch for that job's output. Both switches default to off. Use the normal
+undeploy/onboard sequence when changing a deployed app's run options.</p>
+<p>For Guest Shell, add <code>iris_log = on</code> to the persisted <code>iris-agent.conf</code>.
+Bootstrap reads it on each EEM tick before checking aria2. Settings made only
+in an interactive shell do not survive that tick. <code>rpc_port</code>
+is read from the same configuration file. Invalid Guest Shell values fall
+back to launcher defaults; the common container rejects invalid environment
+values at startup.</p>
+<p>See <a href="../reference/#device-agent-config-keys">Device agent config keys</a> and
+<a href="../reference/#device-container-environment-variables">Device container environment variables</a>
+for the supported values. Disabling the aria2 log does not disable writes
+needed for downloads, checkpoints, agent state, or telemetry.</p>
+<p>Guest Shell writes its RPC secret into mode-0600 <code>$EXEC_DIR/aria2.conf</code>
+(default <code>/home/guestshell/aria2.conf</code>). aria2 receives the config path, and the
+RPC readiness probe reads the protected secret file; neither receives the
+secret value in process arguments. Treat these files and the mode-0600
+<code>iris-agent.conf</code> as private. This file boundary does not hide credentials from
+a privileged device administrator.</p>
+<h2 id="verification-gates">Verification gates</h2>
+<p>The server hashes every image when it is published. Device checks use those
+catalog values:</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Where</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Torrent pieces</td>
+<td>aria2 on every device</td>
+<td>Checks pieces during transfer and validates saved pieces when resuming an incomplete download.</td>
+</tr>
+<tr>
+<td>SHA-256</td>
+<td>Shared agent, on the completed staging file</td>
+<td>Confirms the file matches the value recorded at publication.</td>
+</tr>
+<tr>
+<td>Exact byte size</td>
+<td>IOS-XE <code>dir</code>, or XR <code>stat</code> on the bind mount</td>
+<td>Confirms final placement. IOS-XE copies the already-verified file; XR has downloaded directly to its final location.</td>
+</tr>
+<tr>
+<td>SHA-512 and size for an existing Guest Shell or IOx root file</td>
+<td>Bounded IOS-XE native verification</td>
+<td>Allows adoption when the agent cannot read the IOS root itself. IOx checks after the scratch download. This is an existing-file check, not an extra native hash after every placement.</td>
+</tr>
+</tbody>
+</table>
+<p>Cisco Bulk Hash verification on the server separately compares the catalog's
+SHA-512 with Cisco's signed feed; see <a href="../operations/#image-verification">Image verification</a>.
+A torrent download matching the catalog and a vendor feed match are different
+checks.</p>
+<p>If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.</p>
+<h2 id="unassigned-image-park">Unassigned image park</h2>
+<p>Removing an image from a device's assignments <strong>parks</strong> it. The agent stops
+its torrent, removes its staging copy, and marks it parked. Clearing all
+assignments applies the same rules to every image.</p>
+<p>On IOS-XE, the separate copy on the storage root is kept. Reassigning the image
+lets the agent check and reuse that copy.</p>
+<p>On XR, the staging file is already on the storage root. Unassigning removes
+files IRIS downloaded; files adopted from the operator, or whose origin is
+unknown, remain in place. When multiple historical image records name the same
+root file, every record must establish downloaded ownership before parking can
+delete it. An adopted or unknown claim protects the file even if that record
+is already parked.</p>
+<p>If a later IOS-XE assignment needs more space, the agent can reclaim parked
+root copies during its storage check.</p>
+<p>IOS-XE cleanup protects two files:</p>
+<ul>
+<li>the <strong>running image</strong> (<code>show version</code>), and</li>
+<li>the file named by the <strong><code>BOOT</code> variable</strong> (<code>show boot</code>).</li>
+</ul>
+<p>When either read fails, the agent skips deletion, logs
+<code>RECLAIM-DEFERRED</code> or <code>CLEANUP-PENDING</code>, and retries on a later successful
+due staging tick.</p>
+<div class="admonition warning">
+<p class="admonition-title">Storage capacity</p>
+<p>Allow room for all resident images plus working space; see
+<a href="../management-type/#sizing-the-storage-root">Sizing the storage root</a>.
+Undeploying IRIS also keeps staged IOS-XE images on the storage root.
+To free that space, use the next assignment's automatic cleanup or your
+normal device file-management procedure.</p>
+</div>
+<h2 id="device-ssh-host-key-pinning">Device SSH host-key pinning</h2>
+<p>Guest Shell runs inside IOS and configures the device locally. The IOx app instead
+reaches IOS over SSH to run the placement copy and the cleanup applets, so it has a host
+key to consider.</p>
+<p>Host-key pinning is optional and off by default. Set <code>device_ssh_known_hosts</code> in the
+agent config to a <code>known_hosts</code> path and, when that file exists, SSH and SCP run with
+<code>StrictHostKeyChecking=yes</code> against it. With the key unset — or set to a path that
+does not exist — the agent runs <code>StrictHostKeyChecking=no</code> with
+<code>UserKnownHostsFile=/dev/null</code>. Nothing in IRIS writes this agent-side <code>known_hosts</code> file; operators provision
+it when they require this connection to be pinned. Catalog and tracker TLS
+are separate: their public certificate is required, and a missing or invalid
+certificate stops the connection. Server-to-device SSH uses the server's
+persistent host-key policy; see <a href="../security/#device-ssh-host-keys">Device SSH host keys</a>.</p>
+<h2 id="platform-targets">Platform targets</h2>
+<p>The container selector is required before any write. A new deployment with no
+<code>IRIS_DEVICE_PLATFORM</code>, an unknown value, or conflicting persisted value stops
+with a clear error. After first boot the <code>device_platform</code> key in
+<code>iris-agent.conf</code> carries the choice across a restart or already-deployed
+upgrade. Unified IOx/XR container storage is derived and live-attested and
+does not guess <code>flash:</code>. Guest Shell retains its platform-specific target
+selection shown below.</p>
+<table>
+<thead>
+<tr>
+<th>Platform path</th>
+<th>Selector</th>
+<th>Storage target</th>
+<th>Control path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalyst 9300 Guest Shell</td>
+<td>n/a</td>
+<td><code>flash:</code></td>
+<td>EEM timer and Guest Shell process.</td>
+</tr>
+<tr>
+<td>Catalyst 9300 IOx</td>
+<td><code>iox</code></td>
+<td>Live writable-media policy, normally <code>flash:</code> via the SSD share</td>
+<td>Common device container and SSH-to-self IOS commands.</td>
+</tr>
+<tr>
+<td>IE-3400 IOx</td>
+<td><code>iox</code></td>
+<td>Live writable-media policy, normally <code>sdflash:</code></td>
+<td>Common device container and SSH-to-self IOS commands.</td>
+</tr>
+<tr>
+<td>Catalyst 8000 Guest Shell</td>
+<td>n/a</td>
+<td><code>bootflash:</code></td>
+<td>Guest Shell through a VirtualPortGroup.</td>
+</tr>
+<tr>
+<td>Catalyst 8000 IOx</td>
+<td><code>iox</code></td>
+<td><code>bootflash:</code></td>
+<td>The IOx app (amd64 package) through the same VirtualPortGroup; see <a href="../iox/#catalyst-8000-routers">IOx</a>.</td>
+</tr>
+<tr>
+<td>Cisco 8000 series (IOS-XR)</td>
+<td><code>xr-appmgr</code></td>
+<td>Fixed <code>harddisk:</code></td>
+<td>Common device container with a verified direct bind mount and no SSH path.</td>
+</tr>
+</tbody>
+</table>
+<p>The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
+<a href="../management-type/#router-routed-and-router-nat-iris-managed-virtualportgroup">Router routed and router NAT</a>.</p>
+<p>For the lab-validation status behind this table — including which of these
+platforms have been exercised end to end on real hardware and which have not
+— see <a href="../validation/#validated-platforms">Validation: Validated platforms</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

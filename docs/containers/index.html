@@ -1,0 +1,1864 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../server/">
+      
+      
+        <link rel="next" href="../docker-hosts/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Container deployments - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#container-deployments" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Container deployments
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#end-to-end-data-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        End-to-end data path
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#server-and-console-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Server and Console images
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Server and Console images">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#non-root-runtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Non-root runtime
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-trust-and-server-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction trust and server custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unified-app-hosting-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unified app-hosting image
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Unified app-hosting image">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#package-footprint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Package footprint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#alpha-constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Alpha constraints
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#end-to-end-data-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        End-to-end data path
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#server-and-console-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Server and Console images
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Server and Console images">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#non-root-runtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Non-root runtime
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-trust-and-server-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction trust and server custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unified-app-hosting-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unified app-hosting image
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Unified app-hosting image">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#package-footprint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Package footprint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#alpha-constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Alpha constraints
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="container-deployments">Container deployments</h1>
+<p>IRIS builds three images: the server, the Console, and one device image for IOx
+and IOS-XR. The device image contains the shared agent in <code>device/agent/</code> and
+selects its platform adapter at runtime. Guest Shell receives that same agent
+as a bundle. Agents stage images on device storage; they never install or
+activate the staged operating-system image.</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Image architecture</th>
+<th>Durable storage</th>
+<th>Deployment target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server tier</td>
+<td><code>linux/amd64</code></td>
+<td>State, encrypted config, images, served artifacts</td>
+<td>Docker Compose or its own Kubernetes Deployment</td>
+</tr>
+<tr>
+<td>Console tier</td>
+<td><code>linux/amd64</code></td>
+<td>None</td>
+<td>Docker Compose or its own Kubernetes Deployment</td>
+</tr>
+<tr>
+<td>Unified device agent</td>
+<td><code>linux/arm64</code> or <code>linux/amd64</code></td>
+<td>Platform-selected CAF disk or <code>harddisk:</code> mount</td>
+<td>Cisco IOx or IOS-XR appmgr</td>
+</tr>
+</tbody>
+</table>
+<h2 id="end-to-end-data-path">End-to-end data path</h2>
+<pre class="mermaid"><code>flowchart LR
+    Browser["Operator browser"] --&gt; Console["Console container :8080"]
+    Console --&gt;|"HTTPS + tier token :9443"| Seed["Server container"]
+    Operator["Operator image source"] --&gt; Seed
+    Seed --&gt; Catalog["Catalog + private tracker"]
+    Seed --&gt; Swarm["BitTorrent pieces"]
+    Catalog --&gt; Agent["Unified IOx / XR image"]
+    Swarm --&gt; Scratch["Platform-selected persistent storage"]
+    Agent --&gt; Scratch
+    Scratch --&gt; Hand["IOx: SSD share or SCP hand-off"]
+    Hand --&gt; Verify["IOS-XE plain copy, byte-size attested"]
+    Verify --&gt; Target["Selected IOS-XE filesystem root"]
+    Scratch --&gt; XR["XR: verified /hostmount is harddisk:"]</code></pre>
+<p>On IOx, final placement crosses back into IOS-XE. The CAF persistent disk is
+available to the application (for example, as <code>/iox_data</code> on Catalyst 9300), but it is
+not an IOS filesystem root. The agent uses that disk for resumable swarm data,
+then hands the completed file to IOS for the final plain copy, attested by
+the agent afterward against the catalog's exact byte size — the file was
+already checked against the catalog SHA-256 before the placement copy. The
+server separately checks image authenticity against Cisco's signed Bulk Hash
+feed when verification is run; a mismatch quarantines the image. On Catalyst 9300
+the app-hosting SSD share
+(<code>usbflash1:iox_host_data_share</code>) is bind-mounted into the container, so the
+hand-off is a disk-speed write followed by an IOS-internal copy onto
+bootflash. On IE-3400 (where IOx cannot bind-mount the SD card) — or on a
+Catalyst 9300 whose share mount is unavailable — the agent SCP-pushes the
+file to <code>guest-share</code> through SSH-to-self instead. See
+<a href="../iox/#runtime-behavior">IOx App</a>.</p>
+<p>The Console does not mount catalog state, device credentials, image roots, or
+served artifacts. Browser <code>/api/v1</code> requests remain same-origin at the Console;
+it forwards allowlisted operations to the server's internal <code>/internal/v1</code>
+management API over authenticated, CA-pinned HTTPS. Devices do not use that
+management API: they continue to call the device catalog and tracker directly.</p>
+<p>The server and Console can share a Docker host or run on separate hosts.
+On one host, Compose assigns private container addresses and the Console
+resolves <code>iris</code> through Docker DNS. Across hosts, the Console uses the server's
+private management address on HTTPS port 9443. Each host publishes its own
+service ports; the containers do not need separate LAN addresses. See
+<a href="../docker-hosts/">Docker on separate hosts</a> for deployment and credential setup.
+IOx and Guest Shell still need
+an app address, supplied through routed, inband, or router networking. XR uses
+the router's host network and does not take a separate app address. See
+<a href="../network-ports/">Network ports and flows</a>.</p>
+<p><span id="seed-server-image"></span></p>
+<h2 id="server-and-console-images">Server and Console images</h2>
+<p><code>aria2c</code> is handed in, not downloaded or built — run <code>tools/get-aria2c.sh amd64</code>
+first, or the Dockerfile's <code>COPY bin/aria2c</code> step fails. Then build from the
+repository root because the runtime image includes the device installers and
+SSH helper used by console onboarding:</p>
+<div class="highlight"><pre><span></span><code>tools/get-aria2c.sh<span class="w"> </span>amd64
+docker<span class="w"> </span>build<span class="w"> </span>--pull<span class="w"> </span>--platform<span class="w"> </span>linux/amd64<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/Dockerfile<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-t<span class="w"> </span>iris:latest<span class="w"> </span>.
+docker<span class="w"> </span>build<span class="w"> </span>--pull<span class="w"> </span>--platform<span class="w"> </span>linux/amd64<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/Dockerfile.console<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-t<span class="w"> </span>iris-console:latest<span class="w"> </span>.
+</code></pre></div>
+<p><code>--pull</code> re-resolves the <code>python:3.12-slim-trixie</code> base tag instead of reusing
+whatever the build host cached, which can be weeks of Debian security updates
+behind the tag. Set <code>IRIS_NO_PULL=1</code> on the helper scripts to keep a cached base
+for an A/B build of an unrelated change.</p>
+<p>The image exposes the device-facing services, includes a Docker health check
+that probes <code>/readyz</code> (so a container whose catalog, artifact, or internal
+management listener died does not report <code>healthy</code>), and keeps aria2 RPC on
+loopback only. The separate Console image exposes only 8080 and has its own
+local health/readiness checks. Once running, Console readiness checks its own
+files and listener, not server availability. Compose starts it after the server
+is healthy because its initial browser certificate comes from the management
+API. Docker on separate hosts and Kubernetes provide an independent default
+Console certificate, allowing the Console to start while the server is
+unavailable. API requests return a redacted 503 with <code>Retry-After</code> until the
+authenticated server connection is available.</p>
+<p>Docker Compose mounts operator images read-only from <code>IRIS_IMAGE_ROOT</code> (default
+<code>/opt/images</code>) and served artifacts from <code>IRIS_ARTIFACTS_HOST_DIR</code>, which
+defaults to the repository's <code>artifacts/</code> directory (<code>../artifacts</code>, relative to
+<code>server/docker-compose.yml</code>). Run <code>iris-bootstrap</code> once before the normal service
+startup.</p>
+<p>The read-only mount is one of the seed server's two image roots. The other is
+the <code>iris-images</code> uploads volume (<code>IRIS_IMAGES_DIR</code>, default
+<code>/var/lib/iris-images</code>), which holds images uploaded through the Console's
+authenticated HTTPS API.
+Publishing seeds an image from its own directory rather than copying it, so an
+image staged on the host is published in place and the read-only root stays
+read-only. See <a href="../server/#publishing-images">Server</a>.</p>
+<h3 id="non-root-runtime">Non-root runtime</h3>
+<p>Every seed-server service runs as the fixed uid and gid <code>10001</code>, and Compose
+drops all capabilities. The age identity file, the served artifacts directory,
+and the host tree behind <code>IRIS_IMAGE_ROOT</code> must be accessible to that uid; the
+identity file must remain mode 600 or 400. Named volumes must be writable by
+uid 10001. See <a href="../server/#runtime-identity">Runtime identity</a> and
+<a href="../server/#volume-permissions">Volume permissions</a>.</p>
+<p>Deployment records persist under <code>IRIS_STATE</code> on the <code>iris-state</code> volume, so
+undeploy-from-record and restart recovery behave identically to the Kubernetes
+PVC layout. See <a href="../management-type/">Management Type and VLAN Ownership</a>.</p>
+<h2 id="instruction-trust-and-server-custody">Instruction trust and server custody</h2>
+<p>The server still supervises five processes. Custody and stamper loops are two
+daemon threads in the management process, not another service/container. Both
+instruction GETs use existing authenticated catalog HTTPS 8443; 9443 remains
+Console-to-server management-only. The optional encrypted signing key stays at
+<code>$IRIS_CONFIG/instr/signing-key.age</code>, runtime plaintext at
+<code>$IRIS_RUN/instr/signing-key</code>, and durable instruction state under <code>$IRIS_STATE</code>.
+The Console receives none of those files or the age identity, even on split
+hosts. See the <a href="../server/#instruction-state-and-processes">exact path inventory</a>.</p>
+<p>Exactly two distinct offline-root public keys are embedded as mode-0444 signer
+and root files in the unified IOx/XR image. Their private keys remain offline
+with separate custodians. Guest Shell gets identical public trust through a
+replaceable flash bundle, so its guarantee is tamper-evidence rather than an
+image pin. Runtime <code>ssh-keygen -Y verify</code> probing can leave Guest Shell
+tracker-only. The image-pinning premise requires native package signing and
+platform verification; current unsigned proof artifacts do not establish it.</p>
+<p>IOx verification is device-global. Signed wrappers cause no state change;
+unsigned/enabled records an obligation, disables only for installation, then
+restores with read-back before activation/start. Unsigned/disabled stays
+disabled; unknown refuses. Durable interruption/resume and uninstall recovery
+never blindly enables operator-changed or unowned state. Cisco documents the
+control/media limits in its <a href="https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html">IE-3x00 guide</a>
+and <a href="https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html">Catalyst 9000 guide</a>.
+See the <a href="../iox/#device-global-package-verification">IOx transaction</a> before onboarding.</p>
+<p>The enrollment bearer remains in IOx <code>run-opts</code> and XR <code>docker-run-opts</code>, with
+IOx's SSH-to-self password also present. Privileged device administrators can
+read these bootstrap credentials. Enrollment defaults to one hour (3,600
+seconds); prompt authenticated refresh uses normal 120-second token overlap.
+Instruction current/prior keys arrive only through refresh into mode-0600
+agent config; its LKG key is device-local. Neither those keys nor online/offline
+private signing keys enter platform configuration or installer arguments.</p>
+<p><code>IRIS_MAX_PEERS</code> and <code>IRIS_MAX_CONCURRENT</code> are legacy provisional launcher
+inputs, absent from image defaults and superseded by verified/default options
+at the first successful tick before restored downloads can run. Every future
+<code>addTorrent</code> uses verified/default values. Parsed legacy <code>max_peers</code> has no
+policy authority. <code>IRIS_TICK_SECONDS</code> remains the mechanical interval/floor;
+signed <code>catalog_tick_s</code> controls logical catalog/staging cadence while QoS
+reassertion and heartbeat run every mechanical tick.</p>
+<p>For a disconnected device, F3 redelivery transports a ciphertext bootstrap
+envelope through the platform installer; it is not a secret key or a verifier
+bypass. Authenticated refresh self-heals key availability. See
+<a href="../operations/#f3-offline-bootstrap-envelope-redelivery">offline delivery</a>.</p>
+<h2 id="unified-app-hosting-image">Unified app-hosting image</h2>
+<p><code>device/container/Dockerfile</code> and <code>device/container/entrypoint.sh</code> are the one
+image definition and runtime entrypoint for IOx and IOS-XR. The required
+<code>IRIS_DEVICE_PLATFORM</code> value selects the profile:</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Scratch/control path</th>
+<th>Final IOS filesystem</th>
+<th>Runtime path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iox</code></td>
+<td>CAF persistent storage, normally <code>/data/iris</code></td>
+<td>Platform-aware writable media selected and attested by the existing flash-target logic</td>
+<td>IOS-XE SSH-to-self and optional shared-disk hand-off</td>
+</tr>
+<tr>
+<td><code>xr-appmgr</code></td>
+<td><code>/hostmount/iris-work</code></td>
+<td><code>harddisk:</code> through the verified <code>/hostmount</code> bind mount</td>
+<td>IOS-XR appmgr helpers; no SSH config or credentials</td>
+</tr>
+</tbody>
+</table>
+<p>The selector is validated before any directory is created. Missing and unknown
+values fail closed rather than guessing where a multi-gigabyte image belongs.
+The image contains OpenSSH and <code>sshpass</code> because the IOx profile requires them;
+the XR profile rejects IOx SSH/share variables and never creates an SSH
+dependency. BusyBox supplies <code>ps</code>, <code>top</code>, <code>free</code>, and <code>kill</code> on both
+architectures for diagnostics.</p>
+<p>Guest Shell uses the same Python agent sources, packaged with its own
+bootstrap/EEM launcher and installer rather than this container image. Every
+platform pins the current public server certificate at runtime, but the unified
+container does not carry it: IOx onboarding uses application data and XR
+onboarding places it on the router's <code>harddisk:</code> mount.</p>
+<p>Before any device-package build, point <code>IRIS_INSTRUCTION_ROOTS_DIR</code> at a
+reviewed directory containing exactly two distinct public-root <code>.pub</code> files.
+Private root files never belong there. The helpers also accept
+<code>--instruction-roots-dir DIR</code>; no disposable proof root may be substituted for
+production trust. Supply current pinned binaries with <code>ARIA2C_BIN_AMD64</code> and
+<code>ARIA2C_BIN_ARM64</code> when the repository's fallback bundles contain older inputs.
+The builder verifies architecture and <code>tools/aria2c.sha256</code> before packaging.</p>
+<p>Build only the canonical image when iterating locally. <code>--image-only</code> is not
+architecture-selected: every run builds or verifies one OCI archive containing
+both <code>linux/amd64</code> and <code>linux/arm64</code>, by default
+<code>artifacts/iris-device-$VERSION.oci.tar</code>, plus the adjacent
+<code>.oci.tar.manifest</code>:</p>
+<div class="highlight"><pre><span></span><code>device/iox/build.sh<span class="w"> </span>--image-only
+</code></pre></div>
+<p>Build the Cisco IOx package directly when <code>ioxclient</code> is available:</p>
+<div class="highlight"><pre><span></span><code>device/iox/build.sh<span class="w"> </span>device/iox/out
+
+<span class="nv">IOX_ARCH</span><span class="o">=</span>amd64<span class="w"> </span><span class="nv">PACKAGE_NAME</span><span class="o">=</span>iris-amd64.tar<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>device/iox/build.sh<span class="w"> </span>device/iox/out
+</code></pre></div>
+<p>Build the IOS-XR wrapper from the same canonical image:</p>
+<div class="highlight"><pre><span></span><code>tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>artifacts/
+</code></pre></div>
+<p>For the normal Compose workflow, run <code>tools/provision-iox-packages.sh</code> after
+the server becomes healthy. It obtains the pinned Cisco <code>ioxclient</code> tool on the
+Linux server when needed and places both deployment-neutral,
+architecture-specific packages and their provenance manifests in served
+artifacts. Use
+<code>tools/stage-iox-package.sh --arch arm64</code> or <code>--arch amd64</code> only when rebuilding
+one package. Building the arm64 package on an amd64 host needs Docker's arm64
+emulation; if it is not already enabled, <code>stage-iox-package.sh</code> requires
+<code>BINFMT_IMAGE_DIGEST</code> — an audited <code>tonistiigi/binfmt</code> sha256 digest — and
+fails closed without it.</p>
+<h3 id="package-footprint">Package footprint</h3>
+<p>Measure the canonical OCI per platform using compressed layer bytes and
+uncompressed rootfs bytes. Use the current archive and adjacent manifest for
+its identity, and measure the IOx tars and XR RPM separately because their
+native envelopes differ. Guest Shell bundles and staged IOS images are
+separate artifacts.</p>
+<p>The shared Alpine runtime includes OpenSSH and <code>sshpass</code> for IOx, diagnostic
+tools, the agent sources, and architecture-matched <code>aria2c</code>. The IOx
+descriptor's <code>memory: 768</code> and <code>disk: 2048</code> values are runtime quotas in MB,
+not package sizes.</p>
+<p><code>aria2c</code> is handed in, never downloaded: the build takes each architecture
+from an explicit <code>ARIA2C_BIN_AMD64</code> / <code>ARIA2C_BIN_ARM64</code> override, a matching
+local agent bundle, or the handed-in <code>deliverables/aria2c-x86_64</code> or
+<code>deliverables/aria2c-aarch64</code> binary, verifying it against
+<code>tools/aria2c.sha256</code> and failing closed on a mismatch. The builder accepts no
+catalog-certificate input; onboarding supplies the current public certificate
+without changing the canonical image or its wrappers.</p>
+<p>The sidecar records <code>index_digest</code>, <code>archive_sha256</code>, <code>source_sha256</code>, and the
+two platforms. A matching archive is reused; a pre-existing archive whose
+manifest or source digest does not match is refused unless
+<code>IRIS_FORCE_DEVICE_IMAGE_BUILD=1</code> explicitly permits replacement. Replacement
+is built in a private sibling directory and each file is published by rename,
+so neither the archive nor manifest is exposed half-written. During replacement
+the old sidecar is removed before the new archive is visible; a reader therefore
+sees either matching provenance or no provenance, never a stale manifest beside
+new bytes. Each IOx tar and XR RPM follows the same fail-closed publication
+order with an adjacent <code>.manifest</code> that binds its <code>wrapper_sha256</code> and selected
+platform to those three canonical digests.</p>
+<p>Package status calls a wrapper ready only when its readable bytes match that
+adjacent provenance manifest. It does not compare against newer source, inspect
+package contents, or validate a native package signature. After a shared-agent
+change, rebuild the server/Guest Shell bundle, both IOx tars, and XR RPM before
+rollout. See <a href="../development/#embedded-agent-packages">Embedded agent packages</a>.</p>
+<p>The installer passes all environment-specific values at deployment time. The
+image contains no lab address:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_DEVICE_PLATFORM</code></td>
+<td>Required exact profile selector: <code>iox</code> or <code>xr-appmgr</code>; missing/unknown values stop before writes.</td>
+</tr>
+<tr>
+<td><code>IRIS_CATALOG_URL</code></td>
+<td>Reachable HTTPS catalog URL covered by the runtime-delivered certificate.</td>
+</tr>
+<tr>
+<td><code>IRIS_CATALOG_TOKEN</code></td>
+<td>Per-device enrollment token.</td>
+</tr>
+<tr>
+<td><code>IRIS_DEVICE_ID</code></td>
+<td>Catalog identity for the device.</td>
+</tr>
+<tr>
+<td><code>IRIS_DEVICE_SSH_HOST</code></td>
+<td>IOS SVI used for SSH-to-self and SCP.</td>
+</tr>
+<tr>
+<td><code>IRIS_DEVICE_SSH_USER</code> / <code>IRIS_DEVICE_SSH_PASS</code></td>
+<td>Scoped IOS transport credential.</td>
+</tr>
+<tr>
+<td><code>IRIS_TARGET_FS</code></td>
+<td>IOx-only optional filesystem preference; it is validated against live writable media. XR rejects it and always derives <code>harddisk:</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>An explicit target is accepted only if <code>show file systems</code> reports it as a
+writable disk and it is not <code>crashinfo:</code>. If it is unavailable, the agent logs
+the fallback and uses platform-aware auto-detection. <code>device/iox/install.sh</code>
+defaults to <code>sdflash:</code>. Console-onboarded Catalyst 9300 deployments use the SSD-share
+transfer with <code>flash:</code> (bootflash) as the final target — the same placement as
+Guest Shell — and <code>AppGigabitEthernet1/0/1</code>.</p>
+<h2 id="alpha-constraints">Alpha constraints</h2>
+<ul>
+<li>The seed-server image is amd64 so the static binary packed into Catalyst
+  Guest Shell bundles remains x86_64.</li>
+<li>The canonical image is architecture-specific under one multi-architecture
+  identity. IOx still needs an <code>ioxclient</code> tar envelope and XR still needs an
+  appmgr RPM envelope; those wrapper bytes and metadata cannot be identical.
+  Both wrappers consume the same canonical image manifest for their CPU, so
+  an amd64 IOx wrapper and the XR wrapper contain the identical rootfs/config
+  digest. If Cisco requires native wrapper signatures, each native envelope
+  must still be signed in addition to the common image digest.</li>
+<li>IOx packages are architecture-specific. On IE-3400 the image hand-off uses
+  SSH-to-self SCP because IOx there does not expose the SD card as a container
+  bind mount; on Catalyst 9300 the app-hosting SSD share is bind-mounted and carries the
+  hand-off at disk speed.</li>
+<li>Compose requires Docker Engine 23.0 or later, because the <code>/run/iris</code> tmpfs is
+  mounted with <code>uid=</code>, <code>gid=</code>, and <code>mode=</code> mount options that older engines
+  reject.</li>
+<li>Server clustering is not implemented. Kubernetes uses one replica and one
+  ReadWriteOnce PVC.</li>
+<li>The server certificate is IP-pinned. Its public address must be stable, and a
+  change requires certificate rotation plus re-onboarding each deployed device
+  to update runtime trust; package rebuilding is not required.</li>
+</ul>
+<p>The container packaging follows Cisco's
+<a href="https://developer.cisco.com/docs/iox/package-descriptor/">IOx package descriptor</a>
+and <a href="https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/prog/configuration/1718/b-1718-programmability-cg/m_1717_prog_application_hosting.html">IOS XE app-hosting</a>
+contracts.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

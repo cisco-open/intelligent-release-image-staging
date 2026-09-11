@@ -1,0 +1,1945 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../console/">
+      
+      
+        <link rel="next" href="../operations/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Network Workflows - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#network-workflows" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Network Workflows
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inventory
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Inventory">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#credentials-are-not-in-the-csv" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Credentials are not in the CSV
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#role-definitions-and-membership" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Role definitions and membership
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#batch-operations-in-the-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Batch operations in the Console
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#onboarding-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding path
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#assignments" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Assignments
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduling" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Scheduling
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Scheduling">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-schedule-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What a schedule targets
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-it-runs-and-what-daylight-saving-does-to-that" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When it runs, and what daylight saving does to that
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#waves" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Waves
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scheduled-and-manual-work-on-the-same-device" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Scheduled and manual work on the same device
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workflow-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Workflow map
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#review-guidance" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Review guidance
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Inventory
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Inventory">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#credentials-are-not-in-the-csv" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Credentials are not in the CSV
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#role-definitions-and-membership" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Role definitions and membership
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#batch-operations-in-the-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Batch operations in the Console
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#onboarding-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding path
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#assignments" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Assignments
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduling" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Scheduling
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Scheduling">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-schedule-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What a schedule targets
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-it-runs-and-what-daylight-saving-does-to-that" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When it runs, and what daylight saving does to that
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#waves" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Waves
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scheduled-and-manual-work-on-the-same-device" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Scheduled and manual work on the same device
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workflow-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Workflow map
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#review-guidance" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Review guidance
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="network-workflows">Network Workflows</h1>
+<p>IRIS separates network onboarding from image assignment. That keeps connectivity data and release intent in different files, which makes review and rollback easier.</p>
+<p>These CSV workflows exist for reviewed, repeatable batches. The same inventory, assignment, and onboarding actions are available in the console — see <a href="../console/#bulk-device-actions">Bulk device actions</a>.</p>
+<h2 id="inventory">Inventory</h2>
+<p>Start from the template:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>fleet/devices.csv.example<span class="w"> </span>fleet/devices.csv
+</code></pre></div>
+<p>The inventory is a management-type-aware, named-header <strong>CSV</strong>. Every device
+declares a <code>management_type</code>: <code>routed</code> (IRIS creates a dedicated VLAN and SVI),
+<code>inband</code> (the agent attaches to an existing operator-owned management VLAN),
+<code>router-routed</code> (an IRIS-managed VirtualPortGroup subnet), <code>router-nat</code> (that
+VPG subnet behind NAT), or <code>xr-host</code> (an IOS-XR appmgr container sharing the
+router's own network stack):</p>
+<div class="highlight"><pre><span></span><code>device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,role,platform
+</code></pre></div>
+<ul>
+<li><strong>routed</strong> — fill <code>iris_vlan</code>, <code>svi_ip</code>, <code>svi_mask</code>, <code>app_ip</code>, <code>app_mask</code>,
+  <code>app_gateway</code>; leave <code>inband_vlan</code> blank. <code>svi_igp</code> is optional and
+  routed-only: <code>isis</code> adds <code>ip router isis</code> to the IRIS SVI for a fabric
+  (an SD-Access underlay, say) that must learn it; blank keeps the server's
+  <code>SVI_IGP</code> env var default (<code>none</code>) for that device. This is a per-device
+  override, not a fleet-wide setting — one server can onboard devices into
+  different fabrics, only some of which run IS-IS. Validated to exactly
+  <code>none</code>/<code>isis</code> before it reaches the device's config; every other
+  <code>management_type</code> must leave it blank. See
+  <a href="../management-type/#routed-iris-managed-app-network">Management type → Routed</a>.</li>
+<li><strong>inband</strong> — fill <code>inband_vlan</code>, <code>app_ip</code>, <code>app_mask</code>, <code>app_gateway</code>; leave
+  <code>iris_vlan</code>/<code>svi_*</code> blank. Static IPv4 on Guest Shell or IOx (IE-3400, Catalyst 9300);
+  DHCP is not supported. For inband <strong>IOx</strong>, <code>ios_ssh_host</code> (the IOS endpoint
+  the app SSHes to) defaults to the device's management IP — only set it for
+  an asymmetric topology (Guest Shell leaves it blank).</li>
+<li><code>model</code> and <code>platform</code> may be blank in imported inventory. In Add Device,
+  <strong>management type controls which network fields appear</strong>. Editing the model
+  or agent choice does not change that type. XR host uses <code>xr-appmgr</code>; router
+  modes use <code>router</code>. Routed and inband modes require an explicit compatible
+  Guest Shell or IOx choice. Known models limit installer choices; conflicts
+  appear in the form. Model is optional free text: you can enter <code>C3650</code>, but
+  saving it does not confirm hardware support. When an imported platform is
+  blank, onboarding can select an installer for a known IOS-XE model; it
+  refuses devices it cannot classify.</li>
+<li><strong>router-routed</strong> — fill <code>app_ip</code>, <code>app_mask</code>, <code>app_gateway</code>, and
+  <code>vpg_number</code>; use <code>platform=router</code>. The
+  operator must route the VPG subnet to IRIS and peers.</li>
+<li><strong>router-nat</strong> — additionally fill <code>nat_interface</code>. It creates static PAT
+  for TCP 6881; the interface is canonicalized and teardown preserves an
+  outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
+  8000 family and is lab-tested on Catalyst 8000V; see
+  <a href="../management-type/#router-routed-and-router-nat-iris-managed-virtualportgroup">Router routed and router NAT</a>.</li>
+<li><strong>xr-host</strong> — use <code>platform=xr-appmgr</code> on supported Cisco 8000-series IOS-XR
+  routers and leave every addressing, VPG, and NAT field empty. Onboarding
+  requires a current <code>artifacts/iris-xr.rpm</code>.</li>
+</ul>
+<p>See <a href="../management-type/">Management Type and VLAN Ownership</a> for the full
+ownership rules.</p>
+<p>Console/API inventory writes accept only the named operator fields in this
+schema (plus <code>credential_profile_id</code>). Unknown names are rejected instead of
+being stored for a future component to interpret. <code>schema_version</code>,
+<code>registered_at</code>, the unique <code>registration_id</code>, and the observed <code>os_family</code> are
+maintained by the server and cannot be supplied in a JSON request. The
+registration ID distinguishes devices deleted and re-added within the same
+second. Older <code>vlan</code>/<code>guest_ip</code> headers remain a CSV import compatibility path;
+they are not public JSON aliases.</p>
+<p>An old CSV row can remain in inventory before its management type is
+classified. IRIS onboards it only when the complete historical routed tuple is
+valid (<code>device_id</code>, <code>device_ip</code>, VLAN, SVI address/mask, and app address).
+Incomplete rows fail before a job, enrollment credential, or device connection
+is created; edit them into one of the current management types first.</p>
+<h3 id="credentials-are-not-in-the-csv">Credentials are not in the CSV</h3>
+<p>The inventory carries network information only. There is no
+<code>credential_profile_id</code> column, so a newly imported device has no credential
+profile and cannot be onboarded until one is assigned. That assignment is a
+Console step: open <strong>Devices</strong>, check the imported rows, pick a profile in the
+<em>credential for selected</em> dropdown, and press <strong>Apply</strong>. Creating a credential
+profile re-renders the device rows immediately, so devices imported before the
+profile existed become assignable without waiting for the next poll.</p>
+<p>The assignment survives the export → edit → re-import round trip: a re-import
+replaces a device's network fields from the CSV but keeps the credential
+profile (and the machine-determined <code>os_family</code> and registration stamp) already
+stored for that device. A CSV that lists the same <code>device_id</code> twice is rejected
+as a whole, naming both rows, rather than silently keeping the last one.</p>
+<p>Keep operator passwords out of <code>fleet/devices.csv</code> even as a convenience — the
+credential profile lives in the server's secret store, and the CSV is a
+reviewable, Git-friendly file.</p>
+<h3 id="role-definitions-and-membership">Role definitions and membership</h3>
+<p>The optional <code>role</code> inventory column declares one lowercase role per device.
+Copying or re-importing an older pre-role CSV does not clear membership, and a
+blank <code>role</code> cell preserves the stored value. Clear it explicitly through the
+role API, the Console's <strong>Set role</strong> action, or:</p>
+<div class="highlight"><pre><span></span><code>iris-role<span class="w"> </span><span class="nb">set</span><span class="w"> </span>DEVICE_ID<span class="w"> </span>-<span class="w"> </span>--dry-run
+iris-role<span class="w"> </span><span class="nb">set</span><span class="w"> </span>DEVICE_ID<span class="w"> </span>-<span class="w"> </span>--confirm<span class="w"> </span><span class="s1">'&lt;preview token&gt;'</span>
+</code></pre></div>
+<p>Role definitions have their own round-trippable file. Lists in <code>peers</code> and
+<code>nets</code> are semicolon-separated; rates are integer bytes per second and <code>*_s</code>
+values are integer seconds.</p>
+<p><code>fleet/roles.csv.example</code> is the tracked template. The real
+<code>fleet/roles.csv</code> is operator-owned and ignored by Git; keep its review and
+backup controls with the rest of your site inventory.</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>fleet/roles.csv.example<span class="w"> </span>fleet/roles.csv
+iris-role<span class="w"> </span>import<span class="w"> </span>fleet/roles.csv<span class="w"> </span>--dry-run
+iris-role<span class="w"> </span>import<span class="w"> </span>fleet/roles.csv<span class="w"> </span>--confirm<span class="w"> </span><span class="s1">'&lt;preview token&gt;'</span>
+iris-role<span class="w"> </span><span class="nb">export</span><span class="w"> </span>&gt;<span class="w"> </span>fleet/roles.exported.csv
+</code></pre></div>
+<p>The Console offers the same file round trip: <strong>Peer policy → Role
+definitions → Import CSV… / Export CSV</strong> on the Devices page use one shared
+parser and writer with <code>iris-role</code>, so either surface's export imports in the
+other. The Console also edits single definitions in place; see
+<a href="../console/#role-definitions">Console</a>.</p>
+<p>Import validates the whole role graph before writing, including references,
+symmetric restricted-role links, duplicate/canonical-equivalent networks, QoS
+ranges, and reserved names. Duplicate CSV headers and rows with extra cells
+are rejected before any policy write. One bulk membership or CSV action creates one
+policy revision and one tracker-outbox event. A partial two-store write reports
+the exact failed rows and <code>role_drift</code>; correct the storage problem and reapply
+the same intent. Role definitions control tracker peering and the QoS/control
+values delivered to instruction-capable agents through verified instructions.
+Tracker-specific <code>tracker_qos</code> remains server-side. Role changes add no device
+VLAN, IOS ACL, environment variable, or package setting.</p>
+<p>Tracker policy changes stop new introductions; device application is a separate
+observation in the Console's instruction status. Unassigning every image asks
+the current agent to remove its torrents after its next successful due policy
+poll and successful aria2 application; cadence and RPC failures can delay that
+removal. Device controls remain cooperative in the presence of a privileged
+device administrator;
+configured intent alone does not prove that a device applied it.</p>
+<h3 id="batch-operations-in-the-console">Batch operations in the Console</h3>
+<p>The Devices toolbar finishes a CSV import in bulk: onboard, undeploy, adopt,
+delete, credential assignment, role membership, and image assignment all act on the checked
+rows and report per-device refusals instead of failing the whole batch. Image
+assignment applies a <em>set</em> — up to ten images — to the whole selection in one
+pick, not one image per device: the toolbar opens the same checkbox picker as
+each row's own control, pre-checked with the intersection of what the selection
+already has assigned, so applying never adds an image outside what you see
+checked. It does replace each selected device's whole set, dropping anything
+left unchecked, so a selection whose assignments differ is flagged in the
+picker and confirmed on apply. See
+<a href="../console/#bulk-device-actions">Bulk device actions</a>.</p>
+<p>Deleting inventory rows is not an undeploy — undeploy the devices first. See
+<a href="../console/#bulk-device-actions">Bulk device actions</a>.</p>
+<h3 id="onboarding-path">Onboarding path</h3>
+<p>Management-type-aware onboarding uses the <strong>Console / API</strong>. The Console
+forwards the request to the server, which resolves an immutable plan, runs the
+installer, and records what it applied in a durable <em>deployment record</em>.
+Teardown uses that record. Every
+deployment's preflight runs once, at job execution in the bounded onboarding
+worker pool — not inside the onboard request itself — so submitting a large
+batch returns a job per device promptly instead of the request waiting on live
+SSH to each one. Guest Shell, IOx and router deployments all run the same
+IRIS-named collision checks (a device still carrying IRIS configuration is
+refused until it is undeployed), each plus its own extras; a router deployment
+cannot be adopted afterwards. See
+<a href="../management-type/#router-preflight-and-ownership">Router preflight and ownership</a>,
+<a href="../operations/#onboarding-at-scale">Onboarding at scale</a>, and
+<a href="../console/#onboarding-from-the-console">Web Console</a>.</p>
+<p>The server supplies a short-lived enrollment token for first contact. The
+agent obtains its renewable device credential through the catalog's
+token-refresh endpoint.</p>
+<h2 id="assignments">Assignments</h2>
+<p>Start from the template:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>fleet/assignments.csv.example<span class="w"> </span>fleet/assignments.csv
+</code></pre></div>
+<p>Assignments are release intent, one image per device per row. The CSV requires
+each device id once; applying that row adds its image without discarding images
+already assigned to the device:</p>
+<div class="highlight"><pre><span></span><code>device_id,image_id
+</code></pre></div>
+<p>Apply them:</p>
+<div class="highlight"><pre><span></span><code>tools/apply-assignments.sh<span class="w"> </span>fleet/assignments.csv
+</code></pre></div>
+<p>The script validates all rows first, then applies assignments. That avoids partially applying a malformed file.
+Each target must already exist in fleet inventory. The command-line
+To add several images in one operation, use
+<code>iris-assign DEVICE IMAGE [IMAGE ...]</code>, which also merges by default. Use
+<code>iris-assign --replace DEVICE IMAGE [IMAGE ...]</code> only when the reviewed intent
+is to replace the set and remove images that are no longer listed. The Console
+and assignment API keep replacement semantics.
+The agent picks up assignments on its next policy poll. Approval alone is not
+staging activity: the Console shows <strong>Waiting for staging</strong> until the device
+reports work, then uses that device's progress and errors.</p>
+<h2 id="scheduling">Scheduling</h2>
+<p>A schedule runs one action inside one maintenance window, and it has exactly
+two verbs: <strong>assign</strong>, which approves images for staging, and <strong>onboard</strong>,
+which deploys the IRIS agent to devices that do not have it. There is no third
+verb, and neither of these two installs, activates, changes a boot variable, or
+reloads anything. A scheduled window stages images and nothing else — the same
+hard limit that applies to every other path into IRIS.</p>
+<p>Create one from the Console (<strong>Devices → Schedule…</strong>, or the <strong>Schedules</strong>
+panel) or from the CLI, which reads and writes the same durable store:</p>
+<div class="highlight"><pre><span></span><code>iris-schedule<span class="w"> </span>list
+iris-schedule<span class="w"> </span>create<span class="w"> </span>core-wave<span class="w"> </span>--file<span class="w"> </span>core-wave.json
+iris-schedule<span class="w"> </span>get<span class="w"> </span>core-wave
+iris-schedule<span class="w"> </span>patch<span class="w"> </span>core-wave<span class="w"> </span>--file<span class="w"> </span>pause.json<span class="w"> </span>--if-match<span class="w"> </span><span class="s1">'"iris-schedule-core-wave-3"'</span>
+iris-schedule<span class="w"> </span><span class="nb">export</span><span class="w"> </span>&gt;<span class="w"> </span>fleet/schedules.exported.csv
+iris-schedule<span class="w"> </span>import<span class="w"> </span>fleet/schedules.csv
+</code></pre></div>
+<h3 id="what-a-schedule-targets">What a schedule targets</h3>
+<p>A target is a <strong>filter</strong> plus an optional list of named <code>device_ids</code>, and the
+two are combined with <strong>and</strong>: named ids narrow the filter, they never widen
+it. Empty filters and an empty id list explicitly select the whole fleet. The
+filter keys are the Devices table's own — <code>q</code>, <code>management_type</code>, <code>platform</code>,
+<code>cred</code>, <code>telemetry</code>, <code>peer</code>, <code>role</code>, <code>model_family</code>, <code>os_family</code>, <code>status</code> — so
+what the table shows is what the window will act on.</p>
+<p><code>bind</code> decides when that set is fixed:</p>
+<table>
+<thead>
+<tr>
+<th><code>bind</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>late</code> (default)</td>
+<td>The target is <strong>resolved at fire</strong> time, against the fleet as it then is. A device that has since been added, retired or re-roled is included or dropped accordingly.</td>
+</tr>
+<tr>
+<td><code>early</code></td>
+<td>The set frozen in the <strong>preview</strong> at creation time is the set that runs. Devices matching later are not added.</td>
+</tr>
+</tbody>
+</table>
+<p>Either way the occurrence records the <code>+N / −M</code> delta between the preview and
+what actually fired, so a target that moved is visible rather than silent.</p>
+<p>At claim time, each fired target is also bound to its unique registration
+identity. Deleting and re-adding the same device name after the claim cannot
+redirect that occurrence to the replacement device. An older occurrence with
+no durable registration identity refuses fresh execution as
+<code>identity_unavailable</code>; already prepared work retains its recorded identity
+for recovery. Inspect the occurrence and receipts before scheduling a new run.</p>
+<p>A <code>role</code> filter selects on the <strong>declared</strong> role — the value in the inventory
+<code>role</code> column, which an operator sets — not on the <strong>compiled</strong> peer-policy
+index the tracker enforces with. The two are normally the same; when they are
+not, the difference is reported as <code>role_drift</code>, and the schedule still targets
+what was declared. Fix the drift before relying on a role-targeted window.</p>
+<h3 id="when-it-runs-and-what-daylight-saving-does-to-that">When it runs, and what daylight saving does to that</h3>
+<p><code>once</code> names an <strong>absolute instant</strong> (<code>at</code>, an epoch). It is immune to daylight
+saving by construction: an absolute instant does not move when a civil clock
+does.</p>
+<p><code>recurring</code> names a local weekday and time in an IANA zone, so twice a year
+that local time is ambiguous or absent. Each occurrence records which case it
+was, as <code>normal</code>, <code>gap</code> or <code>fold</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Case</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>normal</code></td>
+<td>The local time exists exactly once. It fires there.</td>
+</tr>
+<tr>
+<td><code>gap</code></td>
+<td>Spring forward: the local time does not exist at all. It fires at the <strong>first valid</strong> instant after the gap — never skipped, never doubled.</td>
+</tr>
+<tr>
+<td><code>fold</code></td>
+<td>Fall back: the local time happens <strong>twice</strong>. It fires at the <strong>first</strong> of the two, and the second is not a second run.</td>
+</tr>
+</tbody>
+</table>
+<p>The window is <code>window_seconds</code> long and half-open: work is admitted from the
+scheduled instant up to, but not including, the end. A window that closes with
+devices still unreached closes them out honestly rather than running late — see
+<a href="../operations/#scheduled-outcomes">Scheduled outcomes</a>.</p>
+<h3 id="waves">Waves</h3>
+<p>A schedule may declare an <code>after</code> gate naming a preceding schedule and the
+ratios it must reach — <code>min_staged_ratio</code>, <code>max_errored_ratio</code>,
+<code>max_missing_ratio</code> — before this one admits any work, plus a
+<code>deadline_seconds</code> after which it stops waiting. That is how core → distribution
+→ access ordering is expressed. The gate reads the preceding occurrence's own
+result and counts <strong>missing</strong> apart from <strong>errored</strong>, so one powered-off device
+is not reported as a failure and cannot hold the chain open forever. See
+<a href="../operations/#deployment-waves">Deployment waves</a>.</p>
+<h3 id="scheduled-and-manual-work-on-the-same-device">Scheduled and manual work on the same device</h3>
+<p>A scheduled <code>assign</code> writes the same approved set a manual one does, so the two
+paths can collide. The Console shows a <strong>Scheduled</strong> marker on the row of any
+device a pending schedule's approved preview names, so a manual assignment is
+not made in ignorance of one.</p>
+<p>The collision that actually loses work is narrowing:
+<code>iris-assign --replace DEVICE IMAGE</code> replaces the whole approved set with the
+single image named, including images a schedule put there — and a scheduled
+assignment with <code>"mode":"replace"</code> does the same to a manual one. Merge mode
+(the default on both paths) adds without removing. Every scheduled outcome
+records <code>before_image_ids</code>, <code>after_image_ids</code> and <code>removed_image_ids</code>, so a
+narrowing is visible after the fact even when nobody expected it.</p>
+<h2 id="workflow-map">Workflow map</h2>
+<pre class="mermaid"><code>flowchart LR
+    Inventory["fleet/devices.csv"] --&gt; Console["Console / API onboarding (deployment records)"]
+    Console --&gt; Device["Device onboarded"]
+    Images["Published images"] --&gt; Assignments["fleet/assignments.csv"]
+    Assignments --&gt; Policy["Catalog policy"]
+    Policy --&gt; Agent["Agent polls policy"]
+    Agent --&gt; Stage["Image staged on device"]</code></pre>
+<h2 id="review-guidance">Review guidance</h2>
+<p>Review <code>fleet/devices.csv</code> for network correctness — including the
+<code>management_type</code> of each device and, for inband rows, that the existing
+VLAN/SVI/gateway are operator-owned and correct — and <code>fleet/assignments.csv</code>
+for release correctness. Do not mix credentials, operator passwords, or image
+binaries into either file.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

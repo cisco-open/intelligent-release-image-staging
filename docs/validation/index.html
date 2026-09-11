@@ -1,0 +1,1889 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../problems/">
+      
+      
+        <link rel="next" href="../development/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Validation - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#validation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Validation
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#automated-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Automated tests
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Automated tests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#opt-in-host-integration-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Opt-in host-integration tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#capacity-harness" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Capacity harness
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documentation-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Documentation build
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#phase-1-layout-validation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Phase 1 layout validation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#validated-platforms" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Validated platforms
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lab-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Lab checklist
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-automated-tests-do-not-cover" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What automated tests do not cover
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reporting-bugs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reporting bugs
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#automated-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Automated tests
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Automated tests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#opt-in-host-integration-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Opt-in host-integration tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#capacity-harness" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Capacity harness
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documentation-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Documentation build
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#phase-1-layout-validation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Phase 1 layout validation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#validated-platforms" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Validated platforms
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lab-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Lab checklist
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-automated-tests-do-not-cover" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What automated tests do not cover
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reporting-bugs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reporting bugs
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="validation">Validation</h1>
+<p>Validate documentation, server behavior, device packaging, and lab behavior separately. A passing unit test suite is necessary but not enough for a network rollout.</p>
+<h2 id="automated-tests">Automated tests</h2>
+<p>Run the Python tests:</p>
+<div class="highlight"><pre><span></span><code>python3<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>server/tests/<span class="w"> </span>device/agent/tests/<span class="w"> </span>device/iox/tests/<span class="w"> </span>lab/tests/<span class="w"> </span>device/test_verify_image.py<span class="w"> </span>-q
+</code></pre></div>
+<p>Run the Bats tests:</p>
+<div class="highlight"><pre><span></span><code>bats<span class="w"> </span>device/test_guestshell_start.bats<span class="w"> </span>device/test_bootstrap.bats<span class="w"> </span>device/tests/<span class="w"> </span>device/iox/tests/<span class="w"> </span>device/xr/tests/<span class="w"> </span>server/tests/*.bats
+</code></pre></div>
+<p>Both suites are expected to be fully green on a clean checkout: no host
+provisioning, no running IRIS stack, and no dependence on which machine runs
+them.</p>
+<h3 id="opt-in-host-integration-tests">Opt-in host-integration tests</h3>
+<p>A few tests cannot be hermetic — they run a real <code>docker build</code>, which needs a
+reachable Docker daemon, pulls the pinned base image and takes minutes, or they
+reach the network. They are skipped by default and run only when you set
+<code>IRIS_TEST_HOST_INTEGRATION=1</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">IRIS_TEST_HOST_INTEGRATION</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>bats<span class="w"> </span>device/xr/tests/test_xr_image.bats
+<span class="nv">IRIS_TEST_HOST_INTEGRATION</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>python3<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>server/tests/test_aria2c_build_pins.py
+</code></pre></div>
+<p>Today that covers the two image-build tests in
+<code>device/xr/tests/test_xr_image.bats</code> — run them before cutting a release or
+after changing <code>device/container/Dockerfile</code> — and the pin-resolution test in
+<code>server/tests/test_aria2c_build_pins.py</code>, which asks the live Alpine package
+index whether the pins in the published aria2c build scripts still exist. Run
+that one before a release too: an Alpine security bump withdraws the exact
+version we pinned, which no hermetic test can notice, and it leaves the
+corresponding source we publish unbuildable.</p>
+<h3 id="capacity-harness">Capacity harness</h3>
+<p><code>server/tests/test_capacity_harness.py</code> is a repeatable mixed-workload
+capacity harness: it seeds a synthetic fleet of N devices under its own
+temporary directory (never the live server, its volumes, or a real device)
+and drives a tracker announce, a catalog heartbeat, a device policy read, a
+terminal report, a credential resolution, a fleet-wide bulk credential
+reassignment, and the console's own fleet projection — the operations a real
+fleet drives concurrently — then reports how the cost of each moves as N
+grows. Reassigning the whole selected set through
+<code>FleetStore.bulk_upsert</code> costs at most <code>keyed_state.SHARD_COUNT</code> (256) shard
+writes, however many devices are selected.
+Credential checks call the actual catalog, tracker query and tracker bearer
+resolvers with accepted and unknown tokens. The harness counts index lookups
+and rejects fleet-wide scans during resolution.</p>
+<p>A small pair of sizes (50 and 500 devices) runs by default, in seconds, with
+every test suite. The full progression the project's own scale claims are
+stated at — 100, 1,000 and 10,000 devices, 10,000 being the top of the
+supported fleet size — rebuilds a 10,000-device fleet and is slow by design,
+so it is opt-in behind <code>IRIS_TEST_CAPACITY_LARGE=1</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">IRIS_TEST_CAPACITY_LARGE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>python3<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>server/tests/test_capacity_harness.py<span class="w"> </span>-q<span class="w"> </span>-s<span class="w"> </span>-k<span class="w"> </span>ten_thousand
+</code></pre></div>
+<p>or standalone: <code>python3 server/tests/test_capacity_harness.py --sizes 100
+1000 10000</code>. Every operation calls the real production function (the console
+check drives the real <code>gui_server</code> HTTP handler end to end), never a
+reimplementation, against synthetic state shaped like the real thing.</p>
+<p>Wall-clock timings the harness prints are informational only, not pass/fail:
+this host also runs the live IRIS lab server and real device traffic, so
+absolute milliseconds are noisy and <strong>not comparable across separate runs,
+days, or machines</strong> — only the growth factor within one run, across its own
+sizes, means anything. The assertions that actually run check deterministic
+counted work instead — which shard file changed, how many rows it holds, how
+many credential-index builds and lookups requests cost, how many bytes a
+console response carries — the same style <code>test_keyed_state_scaling.py</code>
+uses. It deliberately does not measure concurrent load (every call runs
+sequentially, never the thousands-of-devices-at-once shape a real fleet
+produces), process/thread/FD growth over time, or real disk-hardware latency
+(state lives under <code>tempfile.TemporaryDirectory()</code>, on whatever filesystem
+backs the host's temp directory). See <code>TESTING.md</code> and the module's own
+docstring for the full accounting.</p>
+<h2 id="documentation-build">Documentation build</h2>
+<p>Build the docs from the repository root after changing the manual or its
+navigation. See <a href="../development/#documentation-loop">Documentation loop</a> for
+the commands and supported tool versions. A build checks generated pages;
+review the Console's bundled help pages separately.</p>
+<h2 id="phase-1-layout-validation">Phase 1 layout validation</h2>
+<p>Record configuration, unit/static checks, package inspection/build evidence and
+actual lab/device observations separately. A disposable-root, unsigned package
+build proves buildability and byte propagation only; it proves no production
+root ceremony, native signing, release, deployment or live application. Every
+shared-agent change requires fresh Guest Shell bundles, unified OCI, both IOx
+tars and XR RPM from the same source and the current pinned aria2c binaries.
+Compare agent-source and two-public-root bytes across every artifact, record
+wrapper/OCI provenance, and run <code>tools/check-package-freshness.sh</code>. Its
+certificate-drift check does not waive the source rebuild rule.</p>
+<p>Apply the checklist only to the selected supported layout:</p>
+<table>
+<thead>
+<tr>
+<th>Layout</th>
+<th>Phase 1 checks to record</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single-host Compose</td>
+<td>Authenticated instructions/keylist GETs on 8443; 9443 management-only; custody/status windows and a current stamp; one device apply, LKG during catalog loss and QoS drift/reassertion observation; all device artifact provenance. Confirm server startup without the optional signing key and the explicit absent-key status. Verify that an already running Console serves its UI during server outage; default cold startup requires the healthy server to supply initial browser TLS.</td>
+</tr>
+<tr>
+<td>Split-host Compose</td>
+<td>The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; prove instruction state, age identity, encrypted signing key and runtime plaintext exist only on the server host and are absent from Console mounts. Confirm server startup without the optional signing key, and Console startup with its independent default TLS while the server is unavailable; forwarded APIs report unavailable.</td>
+</tr>
+<tr>
+<td>Single-replica Kubernetes</td>
+<td>The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; confirm <code>replicas: 1</code>, existing <code>iris-data</code> PVC at <code>/data</code>, runtime tmpfs, and no new Secret, port, Service or NetworkPolicy rule. Confirm server startup without the optional signing key, and Console startup with independently provisioned TLS while the server is unavailable; forwarded APIs report unavailable.</td>
+</tr>
+<tr>
+<td>Multi-replica server tier</td>
+<td>Not covered and unsupported: instruction production has no cross-pod coordination. A one-replica manifest cannot produce multi-replica evidence.</td>
+</tr>
+</tbody>
+</table>
+<p>For each device platform, probe the actual verifier. Both packaged verifier
+architectures must accept both provisioned roots and reject wrong roots and
+namespaces. Guest Shell <code>ssh-keygen -Y verify</code> remains a runtime probe; absence
+must yield tracker-only, so do not claim universal Guest Shell instruction
+application. Check LKG survival through two instruction-key rotations, expiry
+and allow-list/deny-list asymmetry, one-shot refresh and no in-tick retry loop.
+Validate IOx's owned verification transaction with state read-back and recovery,
+including actual media/signature restrictions, before claiming live support.</p>
+<p>Exercise F3 ciphertext bootstrap-envelope redelivery and the transactional
+Guest Shell bundle/sidecar drop, including prior-runnable-bundle preservation on
+refusal, then observe instruction state after the next tick. These update the
+agent only; staged IOS images remain untouched. Use the
+<a href="../operations/#f3-offline-bootstrap-envelope-redelivery">operator runbooks</a>.</p>
+<p>Issue #153 mutual-origin union remains preflight-only. One complete tagged-release
+dwell, a separately authorized activation release, and authorized lab/live
+checks for union semantics, connection reconciliation, shared-address handling,
+fail-closed behavior and rollback are required before activation. The checklist
+above and Unreleased documentation do not cross that boundary.</p>
+<h2 id="validated-platforms">Validated platforms</h2>
+<p>This table records hardware coverage. Verify the packages being rolled out,
+including both architectures of the shared IOx/XR image.</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Device staging</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalyst 9300</td>
+<td>Guest Shell</td>
+<td>Lab-validated</td>
+</tr>
+<tr>
+<td>Catalyst 9300</td>
+<td>IOx on app-hosting SSD share</td>
+<td>Lab-validated runtime and direct share hand-off to <code>flash:</code></td>
+</tr>
+<tr>
+<td>Catalyst 8000V</td>
+<td>Guest Shell (router, VirtualPortGroup)</td>
+<td>Lab-validated</td>
+</tr>
+<tr>
+<td>Catalyst 8000V</td>
+<td>IOx (router, VirtualPortGroup, amd64, <code>bootflash:</code>)</td>
+<td>Lab-validated onboard and record-backed undeploy 2026-09-10; app runs on the IRIS-owned VirtualPortGroup</td>
+</tr>
+<tr>
+<td>IE-3400</td>
+<td>IOx</td>
+<td>Lab-validated</td>
+</tr>
+<tr>
+<td>Cisco 8000 series (IOS-XR)</td>
+<td>appmgr container (stages to <code>harddisk:</code>)</td>
+<td>Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-<code>harddisk:</code> staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown</td>
+</tr>
+</tbody>
+</table>
+<p>IOS-XR validation checks the full agent lifecycle: build <code>iris-xr.rpm</code>,
+onboard through the Console, stage directly through the <code>harddisk:</code> bind
+mount, verify SHA-256, report telemetry, and undeploy from the deployment
+record. Check interrupted-transfer resume, peer seeding, independent status
+for two devices, and cleanup that preserves operator-provided files.</p>
+<p>Cisco 8000 series <code>.iso</code>, <code>.tar</code>, and <code>.rpm</code> images use the same catalog and
+swarm distribution path as other image formats. Successful image import does
+not establish that an agent package works on a particular device.</p>
+<h2 id="lab-checklist">Lab checklist</h2>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Expected result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server and Console start</td>
+<td>Both services are healthy. The Console can reach the internal management API; browsers reach the Console and agents reach the catalog, tracker, and seeder on their intended ports.</td>
+</tr>
+<tr>
+<td>Runtime uid owns the host paths</td>
+<td>The age key file, host <code>artifacts/</code> directory, and named volumes have the required uid <code>10001</code> access (<a href="../server/#volume-permissions">Volume permissions</a>). The Console Images screen lists no file as <code>not readable by the server</code>.</td>
+</tr>
+<tr>
+<td>Admin exists</td>
+<td>Console login succeeds.</td>
+</tr>
+<tr>
+<td>Image publishes</td>
+<td>Catalog lists image id, hashes, and info hash.</td>
+</tr>
+<tr>
+<td>Import publishes in place</td>
+<td>A file already under the read-only image root imports from the Console, and the read-only root is unchanged: no copy of the image and no <code>.torrent</code> beside it.</td>
+</tr>
+<tr>
+<td>Management type recorded</td>
+<td>Device shows routed, inband, router-routed, router-nat, or xr-host; onboarding creates an applied deployment record.</td>
+</tr>
+<tr>
+<td>Installer runs</td>
+<td>The job finishes successfully, the expected agent runtime is running, and a fresh heartbeat follows. Onboard completion alone does not prove image staging.</td>
+</tr>
+<tr>
+<td>Runtime trust delivered</td>
+<td>Guest Shell has its pinned certificate; IOx receives it in application data after activation; XR reads it through the harddisk bind mount. Packages contain no deployment certificate.</td>
+</tr>
+<tr>
+<td>Shared package provenance</td>
+<td>IOx and XR wrappers match their adjacent manifests and the same canonical OCI build. Guest Shell and both container architectures include the current shared agent source.</td>
+</tr>
+<tr>
+<td>Inband preserves network</td>
+<td>For inband, before/after <code>show running-config</code> shows the existing VLAN/SVI/gateway/VRF unchanged.</td>
+</tr>
+<tr>
+<td>Catalyst 8000V router path</td>
+<td><code>router-routed</code> and <code>router-nat</code> onboard, stage a verified image, and undeploy from their deployment records. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled.</td>
+</tr>
+<tr>
+<td>IOS-XR appmgr path</td>
+<td><code>xr-host</code> + <code>xr-appmgr</code> onboards, stages directly to <code>harddisk:</code>, reports telemetry, and converges under record-driven or repeated undeploy without touching router networking.</td>
+</tr>
+<tr>
+<td>Assignment applies</td>
+<td>Device reports each assigned image id. A newly assigned image waits for the agent's report; a second device starting does not reset the first device's completed state.</td>
+</tr>
+<tr>
+<td>Download completes</td>
+<td>Swarm state shows completed pieces.</td>
+</tr>
+<tr>
+<td>Verification passes</td>
+<td>The completed file matches the catalog SHA-256 and final size. IOS-XE places the verified file at the storage root; XR checks it in place.</td>
+</tr>
+<tr>
+<td>Existing Guest Shell image</td>
+<td>A same-name root file with matching size and native SHA-512 is adopted. A mismatch is kept and reported as a staging failure.</td>
+</tr>
+<tr>
+<td>Partial failure</td>
+<td>A current per-image hash, catalog, or RPC error stays visible while other assigned images continue.</td>
+</tr>
+<tr>
+<td>Clear assignments</td>
+<td>Torrents stop, including when the last assignment is cleared. IOS-XE keeps root copies; XR removes downloaded files but retains adopted files or files of unknown origin.</td>
+</tr>
+<tr>
+<td>Undeploy from deployment record</td>
+<td>Teardown targets only resources tracked in the deployment record; router adoption is refused and requires re-onboarding. For <code>router-nat</code>, teardown clears only translations for the deployment record's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule.</td>
+</tr>
+<tr>
+<td>Scheduled window stages and stops there</td>
+<td>A <code>once</code> schedule targeting the current Devices filter fires inside its window, its occurrence records the target it resolved, and every device it reached has a durable outcome. The staged image is verified at the storage root; no install, activation, boot-variable change, or reload happens anywhere in the window.</td>
+</tr>
+<tr>
+<td>Window closes honestly</td>
+<td>At the window end, no new work is admitted and queued jobs are cancelled with <code>window_closed</code> outcomes. Already-running jobs are allowed to finish and their terminal outcomes remain recorded.</td>
+</tr>
+<tr>
+<td>Wave gate holds and stalls visibly</td>
+<td>A schedule gated on a preceding one does not admit work until the ratios are met, and an unmet gate ends the occurrence <code>stalled</code> at its deadline carrying staged / errored / missing counts, with missing distinguished from errored.</td>
+</tr>
+<tr>
+<td>No activation occurs</td>
+<td>Boot variables, install state, and reload state remain operator-controlled.</td>
+</tr>
+</tbody>
+</table>
+<p>Automated coverage for the management-type/deployment-record behavior lives in
+<code>server/tests/test_deployment_records.py</code>, <code>server/tests/test_gui_fleet.py</code>,
+the inband command-stream assertions in
+<code>device/tests/test_device_uninstall.bats</code>, and the router install/teardown
+command streams in <code>device/tests/test_router_install.bats</code> and
+<code>device/tests/test_router_uninstall.bats</code>. See
+<a href="../management-type/">Management Type and VLAN Ownership</a>.</p>
+<h2 id="what-automated-tests-do-not-cover">What automated tests do not cover</h2>
+<p>The Console has Python tests for server projections and Node-based tests that
+execute the shipped JavaScript for device fields, status, and Swarm Map
+updates. They cover per-image state, participant identity, stale responses,
+and open-drawer updates. They do not run a browser layout engine.</p>
+<p>Check layout, keyboard behavior, and the rendered graph by hand in a browser
+when those views change. Passing the logic tests does not establish that fields
+align or graph nodes render correctly.</p>
+<p>Check these by hand when the map or its data source changes:</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>What to look for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hidden-tab pause</td>
+<td>Polling stops when the tab is hidden or the view is left, and resumes on return.</td>
+</tr>
+<tr>
+<td>Backoff</td>
+<td>While <code>/swarm</code> is unreachable the poll backs off and the header says so, rather than hammering.</td>
+</tr>
+<tr>
+<td>Keyboard</td>
+<td>Graph nodes are reachable and operable from the keyboard; the detail drawer keeps focus and closes on Escape.</td>
+</tr>
+<tr>
+<td>Reduced motion</td>
+<td>The graph respects the reduced-motion preference.</td>
+</tr>
+<tr>
+<td>Empty and error states</td>
+<td>An empty swarm, an unreachable origin RPC, and a stale device observation remain distinguishable.</td>
+</tr>
+<tr>
+<td>Live details</td>
+<td>An open peer drawer updates as polls arrive, retains focus, and shows when its participant disappears. A late response from an older poll does not replace newer data.</td>
+</tr>
+<tr>
+<td>Multiple devices and images</td>
+<td>Completed staging remains complete when another device or image begins. Shared IPs do not duplicate rates, and each image's errors appear on the matching row.</td>
+</tr>
+<tr>
+<td>Add Device</td>
+<td>Management type alone controls network fields; changing the free-text model preserves that selection. Fields and Save/Cancel stay aligned at desktop and narrow widths.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="reporting-bugs">Reporting bugs</h2>
+<p>Include platform, device software version, boot mode, server host OS, Docker
+version, image id, agent report, relevant console audit lines, and whether the
+Guest Shell, IOx, or XR appmgr path is in use.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

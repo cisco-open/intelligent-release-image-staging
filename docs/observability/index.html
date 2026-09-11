@@ -1,0 +1,3101 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../troubleshooting/">
+      
+      
+        <link rel="next" href="../telemetry-export/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Observability - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#observability" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Observability
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#always-on-surfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Always-on surfaces
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-with-telemetry-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running with telemetry off
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role-policy-status-and-privacy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Role-policy status and privacy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-evidence-and-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction evidence and custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-reports" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device reports
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unattributed-participants" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unattributed participants
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Unattributed participants">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-iris_legacy_announce_participants" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading <code>iris_legacy_announce_participants</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#event-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Event identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transfer-streaming" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Transfer streaming
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transfer streaming">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#enabling-streaming" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Enabling streaming
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-live-sample" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The live sample
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cadence-and-tuning" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cadence and tuning
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-add-on-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The add-on guarantee
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#metrics-names-operator-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Metrics names (operator contract)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#log-attributes-operator-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Log attributes (operator contract)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#transfer-lifecycle-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Transfer lifecycle events
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transfer lifecycle events">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-planned-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>planned</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-seeding_started-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>seeding_started</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-timestamp-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The timestamp shape
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-seeding_started-proves" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What <code>seeding_started</code> proves
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#delivery-and-stable-event-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Delivery and stable event identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replays-and-recovered-promotions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Replays and recovered promotions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-there-is-no-weaker-promotion-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Why there is no weaker promotion path
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#time-to-seed-as-a-query" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Time-to-seed, as a query
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#per-peer-bytes-and-what-they-do-not-cover" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Per-peer bytes (and what they do not cover)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sizing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Sizing
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sizing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#200-device-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        200-device deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-interpretation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure interpretation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#always-on-surfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Always-on surfaces
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-with-telemetry-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running with telemetry off
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role-policy-status-and-privacy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Role-policy status and privacy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-evidence-and-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction evidence and custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-reports" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device reports
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unattributed-participants" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Unattributed participants
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Unattributed participants">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-iris_legacy_announce_participants" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading <code>iris_legacy_announce_participants</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#event-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Event identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transfer-streaming" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Transfer streaming
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transfer streaming">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#enabling-streaming" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Enabling streaming
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-live-sample" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The live sample
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cadence-and-tuning" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cadence and tuning
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-add-on-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The add-on guarantee
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#metrics-names-operator-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Metrics names (operator contract)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#log-attributes-operator-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Log attributes (operator contract)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#transfer-lifecycle-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Transfer lifecycle events
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transfer lifecycle events">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-planned-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>planned</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-seeding_started-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>seeding_started</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-timestamp-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The timestamp shape
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-seeding_started-proves" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What <code>seeding_started</code> proves
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#delivery-and-stable-event-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Delivery and stable event identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replays-and-recovered-promotions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Replays and recovered promotions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-there-is-no-weaker-promotion-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Why there is no weaker promotion path
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#time-to-seed-as-a-query" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Time-to-seed, as a query
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#per-peer-bytes-and-what-they-do-not-cover" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Per-peer bytes (and what they do not cover)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sizing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Sizing
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sizing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#200-device-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        200-device deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-interpretation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Failure interpretation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="observability">Observability</h1>
+<p>IRIS reports device staging progress, tracker participation, and transfer
+measurements separately. A tracker seeder has the torrent bytes; the device's
+heartbeat reports whether verification and placement have finished.</p>
+<p>For collector configuration, Splunk indexes, and dashboard setup, see
+<a href="../splunk/">Splunk Setup</a>. The signal contracts and measurements are described
+below and in <a href="../telemetry-export/">Telemetry Export</a>.</p>
+<h2 id="always-on-surfaces">Always-on surfaces</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/healthz</code> and <code>/readyz</code> on port 9101</td>
+<td>Anonymous, non-disclosing liveness and readiness results over TLS.</td>
+</tr>
+<tr>
+<td><code>/swarm</code> on port 9101</td>
+<td>Machine-readable swarm and peer state for the management tier; always requires its bearer token.</td>
+</tr>
+<tr>
+<td><code>/status</code> on port 9101</td>
+<td>Exporter health for the management tier, protected by its bearer token.</td>
+</tr>
+<tr>
+<td>Console monitoring</td>
+<td>Human-readable network, image, and audit state.</td>
+</tr>
+</tbody>
+</table>
+<p>These stay on whenever the telemetry listener runs, regardless of the
+telemetry settings below. Keep port 9101 enabled in the shipped deployment:
+the server healthcheck uses it, and Compose waits for server health before
+starting the Console. <code>IRIS_METRICS_PORT=0</code> removes the probes and swarm
+routes and breaks that default startup. A directly launched process also
+accepts an empty value to disable the listener; Compose substitutes 9101.
+Use the export settings below to turn external telemetry off while retaining
+local health and Console data.</p>
+<h2 id="running-with-telemetry-off">Running with telemetry off</h2>
+<p>External telemetry is opt-in. With no Console override, leaving
+<code>IRIS_OBSERVABILITY</code> unset disables both the Prometheus endpoint and OTLP export.
+Set it to <code>1</code> to enable <code>/metrics</code>, and configure <code>IRIS_OTLP_ENDPOINT</code> to send
+OTLP to a collector. The Console's <strong>Settings → Telemetry</strong> can override the
+OTLP endpoint and enabled flag at runtime; it does not change the Prometheus
+startup setting.
+<a href="../reference/#telemetry-variables">Telemetry variables</a> has the exact semantics
+of that variable and of <code>IRIS_OTLP_ENDPOINT</code>.</p>
+<p>With both export paths off, <code>/metrics</code> answers 404 after authentication and
+nothing is pushed to a collector. The TLS listener on port 9101
+still provides minimal probes and management-authenticated <code>/swarm</code>; the
+Console's swarm view, image state, device reports, and audit log are
+unaffected. The startup log says which posture is in effect.</p>
+<p>A Prometheus job left scraping <code>&lt;server&gt;:9101/metrics</code> in that posture therefore
+reads the IRIS target as down. Enable <code>IRIS_OBSERVABILITY=1</code> and restart the
+server to serve those metrics, or remove the scrape job. The Console's Swarm
+tab remains available for network state.</p>
+<h2 id="role-policy-status-and-privacy">Role-policy status and privacy</h2>
+<p><code>GET /api/v1/peer-policy</code> is the operator status boundary. It is deliberately
+<strong>count-only</strong> for network enforcement: role definition/restriction/member
+counts, outbox occupancy, applied revision, desired denied-address count,
+conflict count/types, aggregate disconnect/removal effects, and origin-QoS
+target/applied counts. It never returns the raw blocklist, peer addresses,
+aria2 option dictionaries, session IDs, desired-state hashes, or the device IDs
+behind the mutual-origin preflight. Role drift is the narrow exception for
+repair: at most ten inventory device IDs are returned with <code>truncated</code>.</p>
+<p>Logging and export code must not serialize an aria2 option dictionary: tracker
+Authorization data can be present among those options. Closed state/error codes
+and aggregate counts are the supported observability vocabulary.</p>
+<p>Read these fields literally:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>roles_supported</code> / <code>roles_present</code></td>
+<td>This management binary understands roles / role state has existed in this policy. Presence is not an enforcement-success claim.</td>
+</tr>
+<tr>
+<td><code>enforcement.state</code>, <code>applied_revision</code>, <code>stale</code></td>
+<td>Tracker blocklist reconciliation result and freshness. An old <code>enforced</code> value becomes stale after five minutes.</td>
+</tr>
+<tr>
+<td><code>enforcement.mutual_origin.mode = preflight</code></td>
+<td>Issue #153 is observation only. <code>newly_denied_device_count</code> predicts a future mutual-origin block. It is <code>null</code> when unavailable, including an unknown protected seeder IPv4 address; <code>0</code> means a completed preflight found no newly denied devices. This phase does not add those devices to the applied origin blocklist.</td>
+</tr>
+<tr>
+<td><code>origin_qos.state</code>, <code>target_download_count</code>, <code>applied_download_count</code></td>
+<td>Whether the global/per-torrent origin options reached every active origin GID. These are counts, not per-role throughput.</td>
+</tr>
+<tr>
+<td><code>fleet_rollup.issued_revision</code>, <code>fleet_rollup.applied</code></td>
+<td>Nullable current issued policy revision; accepted identity counts grouped by decimal policy revision, never instruction serial. Unavailable heartbeat evidence must not be inferred as zero application.</td>
+</tr>
+<tr>
+<td><code>fleet_rollup.states.pre-instructions</code></td>
+<td>Inventory devices whose heartbeat lacks the instruction protocol capability marker; IOS software version alone is not capability evidence.</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/devices/&lt;id&gt;/effective-qos</code> <code>delivery_state = pre-instructions</code></td>
+<td>Deprecated legacy Phase 0 sentinel. The required canonical <code>instruction</code> object reports current evidence; <code>qos</code> values/sources explain compilation.</td>
+</tr>
+</tbody>
+</table>
+<p>Legacy scalar <code>qos</code> remains instruction intent. Its deprecated compatibility
+sentinel <code>delivery_state: pre-instructions</code> is not a current delivery
+observation. Use the response's canonical <code>instruction</code> object, the matching
+Devices projection and fleet rollups for reported instruction-application evidence. An explicit
+<code>tracker_qos</code> explains the selected tracker state and its sources. <code>tracker_qos</code> is tracker-only: tracker
+state never enters instruction QoS/control, telemetry, semantic hashes, role artifacts,
+stamps, serials, envelopes, heartbeat, or device configuration.</p>
+<p>Swarm participant <code>peer_policy</code> facts retain the raw explicit <code>assignment</code> and
+separately expose the compiled <code>effective_acl</code>, <code>acl_source</code>, compiled policy membership
+as <code>role</code>, <code>role_unknown</code>, and <code>role_shadowed_by</code>. That role can differ from the
+Fleet-declared role shown in Devices while <code>role_drift</code> exists. A typed device
+may also carry the boolean <code>mutual_origin_preflight</code>; this is joined by
+authenticated device ID,
+never inferred from an address. The field is omitted when preflight is
+unavailable; a completed zero-count result reports <code>false</code>. Shared NAT conflicts report the reason and
+<code>global_block_applied: false</code> without turning an aggregate count into a claim
+that a particular device was blocked.</p>
+<p>The preflight fact does not prove activation or compliance. Issue #153 remains
+open through one full release of preflight observation; only a later reviewed
+change may apply the union across current self-evaluation and mutual-origin
+evaluation for every ACL.</p>
+<h2 id="instruction-evidence-and-custody">Instruction evidence and custody</h2>
+<p><strong>violation = 0 does not mean compliant</strong>. Distinguish server-observed facts
+(durable revocation, report age and server custody/stamp status), device-authored
+reports (claims created on the device), and agent-asserted instruction facts
+(raw state, accepted identity, verification level and QoS drift). A privileged
+administrator can bypass the agent; absence of a reported violation proves
+only that the available evidence contains no violation.</p>
+<p>Tracker announce <code>uploaded</code> and <code>downloaded</code> counters are device-authored;
+they are not independent server measurements.</p>
+<p>Heartbeat <code>instr_protocol: 1</code> is the capability marker; <code>version</code> remains IOS
+software. An absent protocol marker displays <code>pre-instructions</code>; a present
+invalid or future marker displays <code>unknown</code>. Accepted identity is the complete
+<code>instr_epoch</code>, <code>instr_serial</code>,
+<code>instr_policy_revision</code> triple. <code>policy_revision</code> names server-issued intent;
+<code>instr_serial</code> plus <code>instr_epoch</code> names sealed per-device freshness.
+<code>enforcement.applied_revision</code> and <code>iris_peer_enforcement_applied_revision</code>
+are aria2 blocklist change counters unrelated to either. Never compare them as
+if they were one sequence.</p>
+<p>Raw states are <code>none</code>, <code>applied</code>, <code>lkg</code>, <code>stale_expired</code>, <code>allowlist_expired</code>,
+<code>rollback_rejected</code>, <code>floor_reset</code>, <code>audience_mismatch</code>, <code>key_rejected</code>,
+<code>tamper_rejected</code>, <code>verifier_missing</code>, <code>lkg_rejected</code>, <code>lkg_unreadable</code>,
+<code>oversize</code>, <code>reasserted</code>, <code>instr_unavailable</code>, <code>instr_pending</code>,
+<code>instr_forbidden</code>, <code>tracker-only</code>. The server separately displays <code>applied</code>,
+<code>lkg</code>, <code>stale</code>, <code>rejected</code>, <code>tracker-only</code>, <code>pre-instructions</code>, <code>unknown</code>,
+<code>unavailable</code>, <code>pending</code>, <code>forbidden</code>, <code>floor_reset</code>, <code>none</code>, <code>revoked</code>.
+See <a href="../device-agents/#instruction-failures-and-recovery">failure actions</a>.</p>
+<p>Durable <code>revoked</code> overrides an agent's LKG claim while retaining the underlying
+state and evidence. Within a supported instruction report, raw <code>stale_expired</code>
+or <code>allowlist_expired</code> remains stale by agent assertion before report-age
+classification, even when age is unknown. Other supported reports with
+missing/invalid/future report arrival time display unknown; an old valid report arrival time
+displays stale with the last reported state. <code>pointer_skew</code> reports
+the existing three-observation latch, and <code>qos_drift_count</code> is a bounded count
+of agent-reported corrections. <code>instr_stamp_missing</code> is a current
+inventory-device count, not a lifetime error total. Applied rollups use accepted
+policy revision, include retained complete identities and exclude orphan
+heartbeats. Missing/corrupt heartbeat, policy, custody or revocation evidence
+stays null/unknown; it must never become healthy zero. Server-generated string
+labels preserve exact i63 identities in the browser.</p>
+<p>Custody is <code>instruction_keys</code> on <code>/api/v1/peer-policy</code>. The Console shows
+<code>enabled</code>, <code>state</code>, certificate days to expiry, <code>certificate_renewal_due</code>,
+<code>signing_refused</code>, keylist sequence/age, <code>keylist_resign_due</code>,
+<code>roots_configured</code>, <code>roots_attested_180d</code>, <code>root_ceremony_overdue</code> and
+<code>root_quorum_degraded</code>. A 30-day online certificate is due for renewal at
+half-life; signing refuses in its last seven days. Keylists are due for
+re-signing at 90 days; ceremony warning/critical thresholds are 100/135 days.
+Fewer than two roots attested in 180 days is degraded quorum. Disabled
+custody reads not enabled; absent/invalid status is unavailable. Zero or negative
+certificate days is meaningful evidence, not a missing field.</p>
+<p>With metrics enabled, custody exposes
+<code>iris_instruction_certificate_days_to_expiry</code>,
+<code>iris_instruction_keylist_age_days</code>, <code>iris_instruction_roots_attested_180d</code>,
+<code>iris_instruction_root_ceremony_overdue</code> (0 ok, 1 warn, 2 critical), and
+<code>iris_instruction_root_quorum_degraded</code>. Unavailable fields are omitted rather
+than fabricated as zeros. These alarms measure custody evidence; they cannot
+detect the physical loss of an offline private key immediately. Use the
+<a href="../operations/#instruction-root-ceremony-and-recovery">quarterly ceremony</a>.</p>
+<h2 id="device-reports">Device reports</h2>
+<p>Device reports are useful for both current status and post-incident review. Typical data includes:</p>
+<table>
+<thead>
+<tr>
+<th>Field family</th>
+<th>Examples</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity</td>
+<td>Device id, platform, storage target.</td>
+</tr>
+<tr>
+<td>Assignment</td>
+<td>Approved image id and current staged image.</td>
+</tr>
+<tr>
+<td>Transfer</td>
+<td>Download state, progress, peer information, seeder participation.</td>
+</tr>
+<tr>
+<td>Verification</td>
+<td>Hash checks, staged-copy byte-size confirmation, failure reason.</td>
+</tr>
+<tr>
+<td>Timing</td>
+<td>Last poll, last report, and operation duration.</td>
+</tr>
+</tbody>
+</table>
+<p>Current assignments and the latest heartbeat can differ until the next agent
+poll. The Console shows an assigned image as pending until the device reports
+it. For multiple images, use <code>staged_image_ids</code> and <code>errored_image_ids</code>; the
+single <code>stage_state</code> describes the device's whole set. Current errors take
+precedence over older staged flags. The Swarm Map labels measurements by image
+and participant; an unavailable measurement is not a zero rate.</p>
+<h2 id="unattributed-participants">Unattributed participants</h2>
+<p>A peer whose credential authenticates but cannot be attributed to a device or to
+the seeder service is typed <code>legacy</code>. It announces normally, is answered, and is
+counted in participation totals — but it carries no device identity, is never
+written to the durable endpoint map, is not joined to a device row, and cannot be
+quarantined individually. The swarm view marks these rows explicitly and warns
+when any are present, because a quarantine action cannot reach them.</p>
+<p>A rotated-out seeder credential announces this way too: still valid, still
+serving, but unattributed until the peer moves to the current credential.</p>
+<h3 id="reading-iris_legacy_announce_participants">Reading <code>iris_legacy_announce_participants</code></h3>
+<p><code>iris_legacy_announce_participants</code> counts authenticated peers without an
+attributed device or seeder identity. An overlap token remains valid only for
+<code>IRIS_SEEDER_PREV_TTL</code>; after expiry, its announces are refused and its peer no
+longer appears in this gauge. A zero gauge therefore does not prove that all
+peers can authenticate.</p>
+<p>Check <code>iris_tracker_announces_refused_total</code> and
+<code>iris_tracker_announces_refused_expired_total</code> alongside it. These cumulative
+counters record refused announces and scrapes, including expired credentials.
+Compare changes during the same observation window to identify current failures.</p>
+<h2 id="event-identity">Event identity</h2>
+<p>The device creates a <code>report_id</code>; the report is frozen before its first POST.
+A retry after a crash sends the same report bytes and identifier, so the server
+stores it once. The exported <code>event.id</code> preserves that identity for downstream
+deduplication. Use the device observation timestamp for when the measurement
+was made; a report's ingest timestamp describes when the server received it.</p>
+<h2 id="transfer-streaming">Transfer streaming</h2>
+<p>Transfer streaming adds a live, fleet-scale view of in-flight transfers: which
+devices are pulling which image, how fast, from how many peers, and on what
+quality of link. It is off by default.</p>
+<p>Live samples travel in the device heartbeat over its authenticated HTTPS
+connection. See <a href="../network-ports/">Network ports</a> for that connection.</p>
+<h3 id="enabling-streaming">Enabling streaming</h3>
+<p>Streaming is controlled by the device conf key <code>telemetry_stream</code>
+(default <code>off</code>), changed only by re-deploying the agent:</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Delivery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Guest Shell / router</td>
+<td><code>TELEMETRY_STREAM=on</code> in the installer environment, or the console's <em>Telemetry streaming</em> checkbox.</td>
+</tr>
+<tr>
+<td>IOx</td>
+<td><code>IRIS_TELEMETRY_STREAM=on</code> at deploy time; a redeploy reconciles the persistent conf, so toggling takes effect.</td>
+</tr>
+<tr>
+<td>IOS-XR appmgr</td>
+<td><code>IRIS_TELEMETRY_STREAM=on</code> at deploy time, or the Console checkbox; re-onboard to apply a change.</td>
+</tr>
+</tbody>
+</table>
+<p>Parsing is fail-closed: only an explicit <code>on</code>/<code>1</code>/<code>true</code>/<code>yes</code> enables it —
+anything else, including garbage, stays off. Streaming also requires the master
+<code>telemetry</code> key (reports, default on) to be on. Console onboarding exposes both
+as checkboxes, and bulk redeploy covers site-scale enablement.</p>
+<h3 id="the-live-sample">The live sample</h3>
+<p>While a transfer is active the agent embeds one <code>telemetry_observation</code> envelope
+in its heartbeat, bounded server-side at 8 KB:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>v</code></td>
+<td>Envelope schema version (currently <code>2</code>).</td>
+</tr>
+<tr>
+<td><code>obs_state</code></td>
+<td><code>observed</code>, <code>not_due</code>, <code>paused</code>, <code>disabled</code>, <code>not_active</code>, or <code>rpc_unavailable</code>. Only <code>observed</code> carries transfer fields; the rest are state-only.</td>
+</tr>
+<tr>
+<td><code>observed_at</code></td>
+<td>Device-side observation time.</td>
+</tr>
+<tr>
+<td><code>transfer_id</code> / <code>image_id</code></td>
+<td>The transfer and the device's policy-assigned image (validated server-side).</td>
+</tr>
+<tr>
+<td><code>sample_seq</code></td>
+<td>Monotonic per-transfer sequence, checkpointed before the POST.</td>
+</tr>
+<tr>
+<td><code>sampling_class</code></td>
+<td><code>good</code> or <code>constrained</code>.</td>
+</tr>
+<tr>
+<td><code>aria</code></td>
+<td><code>receive_bps</code>, <code>send_bps</code>, <code>completed_content_bytes</code>, <code>total_content_bytes</code>, <code>connections</code>, <code>status</code>.</td>
+</tr>
+<tr>
+<td><code>peer_connections</code></td>
+<td>Up to 32 rows: <code>ip</code>, <code>port</code>, <code>send_bps</code>, <code>receive_bps</code>, <code>peer_client_name</code>, <code>progress</code>. Extra rows are truncated and flagged, not rejected.</td>
+</tr>
+</tbody>
+</table>
+<p>The agent sends <code>telemetry_observation</code> envelopes with schema <code>v == 2</code>.
+Malformed sample fields are dropped without failing the heartbeat.</p>
+<h3 id="cadence-and-tuning">Cadence and tuning</h3>
+<p>Sampling adapts to link quality automatically:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Cadence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>good</code></td>
+<td>Every tick (60 s).</td>
+</tr>
+<tr>
+<td><code>constrained</code></td>
+<td>Every 4th tick (~4 min).</td>
+</tr>
+<tr>
+<td><code>bad</code></td>
+<td>No samples (the terminal report tells the story later).</td>
+</tr>
+</tbody>
+</table>
+<p>Fleet-wide tuning without redeploys goes through the console API:
+<code>POST /api/v1/telemetry/stream</code> with <code>{"every": &lt;1..60&gt;, "pause": &lt;bool&gt;}</code>
+stretches the cadence (<code>every</code> multiplies the interval in ticks) or pauses
+sampling entirely. Directives can only reduce volume — the hard ceiling is one
+sample per device per tick, and a stale directive reverts to defaults within
+three ticks.</p>
+<h3 id="the-add-on-guarantee">The add-on guarantee</h3>
+<p>Telemetry is an add-on: no telemetry condition can affect staging. Loss is
+silent in operation but visible in the Console's <em>Telemetry export</em> badge and
+one audit entry per state transition (<code>otlp-export-degraded</code> /
+<code>otlp-export-recovered</code>). Anonymous <code>/healthz</code> deliberately exposes no export
+state.</p>
+<h3 id="metrics-names-operator-contract">Metrics names (operator contract)</h3>
+<p>The hub aggregates samples per image and exports OTLP metrics alongside the
+Prometheus exposition on <code>:9101 /metrics</code>. Point <code>IRIS_OTLP_ENDPOINT</code> at your
+collector and route it to whichever OTLP backend you run. These names
+are contract:</p>
+<table>
+<thead>
+<tr>
+<th>Prometheus family (<code>:9101</code>)</th>
+<th>OTLP metric</th>
+<th>Unit</th>
+<th>Attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris_transfer_devices</code></td>
+<td><code>iris.transfer.devices</code></td>
+<td><code>{device}</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_transfer_throughput_bytes_per_second</code></td>
+<td><code>iris.transfer.throughput</code></td>
+<td><code>By/s</code></td>
+<td>image attrs + <code>network.io.direction</code> = <code>receive</code> | <code>transmit</code></td>
+</tr>
+<tr>
+<td><code>iris_transfer_progress_ratio</code></td>
+<td><code>iris.transfer.progress</code></td>
+<td><code>1</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_transfer_zero_receive_devices</code></td>
+<td><code>iris.transfer.zero_receive_devices</code></td>
+<td><code>{device}</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_transfer_freshness_age_seconds</code></td>
+<td><code>iris.transfer.freshness_age</code></td>
+<td><code>s</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_stream_devices</code></td>
+<td><code>iris.stream.devices</code></td>
+<td><code>{device}</code></td>
+<td>image attrs + <code>sampling_class</code> = <code>good</code> | <code>constrained</code></td>
+</tr>
+<tr>
+<td><code>iris_seeder_torrent_upload_length_bytes</code></td>
+<td><code>iris.seeder.torrent.upload_length</code></td>
+<td><code>By</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_seeder_torrent_upload_bytes_per_second</code></td>
+<td><code>iris.seeder.torrent.upload_rate</code></td>
+<td><code>By/s</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_legacy_announce_participants</code></td>
+<td><code>iris.legacy.announce_participants</code></td>
+<td><code>{participant}</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_telemetry_samples_rejected_total</code></td>
+<td><code>iris.telemetry.samples.rejected</code></td>
+<td><code>{sample}</code></td>
+<td>— (counter; no <code>_total</code> on the OTLP wire)</td>
+</tr>
+<tr>
+<td><code>iris_telemetry_export_failures_total</code></td>
+<td><code>iris.telemetry.export.failures</code></td>
+<td><code>{error}</code></td>
+<td><code>signal</code> = <code>logs</code> | <code>metrics</code></td>
+</tr>
+<tr>
+<td><code>iris_telemetry_export_dropped_total</code></td>
+<td><code>iris.telemetry.export.dropped</code></td>
+<td><code>{record}</code></td>
+<td><code>signal</code> = <code>logs</code> | <code>metrics</code></td>
+</tr>
+<tr>
+<td><code>iris_telemetry_export_last_success_seconds</code></td>
+<td>— (Prometheus only; export health also available through authenticated <code>/status</code>)</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td><code>iris_peer_policy_revision</code></td>
+<td><code>iris.peer.policy.revision</code></td>
+<td><code>1</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_peer_enforcement_applied_revision</code></td>
+<td><code>iris.peer.enforcement.applied_revision</code></td>
+<td><code>1</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_peer_enforcement_desired_ips</code></td>
+<td><code>iris.peer.enforcement.desired_ips</code></td>
+<td><code>{ip}</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_peer_enforcement_health</code></td>
+<td><code>iris.peer.enforcement.health</code></td>
+<td><code>1</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_plans</code></td>
+<td><code>iris.transfer.lifecycle.plans</code></td>
+<td><code>{plan}</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_plan_cap</code></td>
+<td><code>iris.transfer.lifecycle.plan_cap</code></td>
+<td><code>{plan}</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_awaiting_report</code></td>
+<td><code>iris.transfer.lifecycle.awaiting_report</code></td>
+<td><code>{plan}</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_unconfirmed</code></td>
+<td><code>iris.transfer.lifecycle.unconfirmed</code></td>
+<td><code>{event}</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_dropped_unemitted_total</code></td>
+<td><code>iris.transfer.lifecycle.dropped_unemitted</code></td>
+<td><code>{plan}</code></td>
+<td>— (counter)</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_live_evicted_total</code></td>
+<td><code>iris.transfer.lifecycle.live_evicted</code></td>
+<td><code>{plan}</code></td>
+<td>— (counter)</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_retired_undelivered_total</code></td>
+<td><code>iris.transfer.lifecycle.retired_undelivered</code></td>
+<td><code>{event}</code></td>
+<td>— (counter)</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_promoted_recovered_total</code></td>
+<td><code>iris.transfer.lifecycle.promoted_recovered</code></td>
+<td><code>{plan}</code></td>
+<td>— (counter)</td>
+</tr>
+<tr>
+<td><code>iris_origin_sent_bytes_total</code></td>
+<td>— (Prometheus only)</td>
+<td><code>By</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_peer_attributed_bytes_total</code></td>
+<td>— (Prometheus only)</td>
+<td><code>By</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_peer_unattributed_bytes_total</code></td>
+<td>— (Prometheus only)</td>
+<td><code>By</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_attributed</code></td>
+<td>— (Prometheus only)</td>
+<td><code>{peer}</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_saturated</code></td>
+<td>— (Prometheus only)</td>
+<td><code>1</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+</tbody>
+</table>
+<p>Throughput and progress are <strong>omitted</strong> for an image with no currently fresh
+device rather than published as a zero, and the freshness age is exported so the
+omission is explainable. The <code>iris_transfer_lifecycle_*</code> block is omitted whole
+when the durable plan store is absent or unreadable, for the same reason: a
+missing store is not a store with nothing in it, and a fabricated <code>0</code> would
+read as "the bound never bit".</p>
+<p>Those eight are the durable plan store's own bookkeeping, and they answer the
+questions no other signal can. <code>plans</code> against <code>plan_cap</code> says whether the
+store is near the hard row limit; <code>dropped_unemitted</code> and <code>live_evicted</code> are
+non-zero only once it has been exceeded, which means lifecycle events are
+being discarded before they ever reach the queue — raise <code>MAX_PLANS</code>.
+<code>awaiting_report</code> counts plans this tracker has watched seed for which no
+terminal report bearing that plan's <code>transfer_id</code> has arrived. <code>unconfirmed</code> is the export backlog: a
+steady non-zero value is a collector problem, not a fleet one, and
+<code>retired_undelivered</code> is where that backlog ends up if the outage outlasts the
+retention window — records that were queued, never acknowledged, and are now
+gone. <code>promoted_recovered</code> counts promotions that rebuilt a lost store row and
+therefore replayed the durable instant rather than this tracker's own seeder
+observation, which is what explains a <code>seeding_started_at</code> a backend already
+holds a different value for.</p>
+<div class="admonition note">
+<p class="admonition-title">Which throughput number to trust</p>
+<p><code>iris.transfer.throughput</code> is reported <strong>by the devices</strong>, and a device
+samples once per 60-second agent tick. A transfer that finishes inside one
+tick is therefore never observed: the reading is a truthful instantaneous
+zero taken outside the transfer, not a broken metric. On a fast fabric a
+1 GB image lands in well under a minute, so expect this to read zero there.</p>
+<p><code>iris.seeder.torrent.upload_rate</code> is measured by the <strong>origin's own</strong> aria2
+poll, independent of any device tick, so it does see a short transfer. It is
+a <strong>lower bound</strong> on total swarm throughput: device-to-device reseed traffic
+never passes through the origin and is invisible to it.</p>
+</div>
+<p>Device- and peer-labelled measurements are exported as OTLP log records.
+Aggregate metric families are listed in the table above.</p>
+<h3 id="log-attributes-operator-contract">Log attributes (operator contract)</h3>
+<p>Terminal per-device reports, tracker lifecycle events, peer-policy operations and
+measured peer rates and byte totals flow as OTLP logs with OpenTelemetry semantic-convention
+names. Event identity is the top-level <code>eventName</code> field:
+<code>iris.device.transfer.report</code> (transfer reports), <code>iris.device.report</code>
+(report summary), <code>iris.tracker.peer</code> (tracker lifecycle), <code>iris.transfer.lifecycle</code>
+(server-side plan lifecycle), <code>iris.peer.policy</code>,
+<code>iris.swarm.peer_rate</code>, <code>iris.swarm.peer_bytes</code> (origin-side traced bytes)
+and <code>iris.device.peer_transfer_record</code> (device-side exact per-peer bytes).</p>
+<p>Key attributes per event. <code>iris.device.transfer.report</code>: <code>device.id</code>,
+<code>iris.image.id</code>, <code>iris.transfer.id</code>, <code>iris.report.event</code>,
+<code>iris.transfer.content_sha256.state</code>, <code>iris.transfer.ios_copy_verify.state</code>,
+<code>iris.transfer.completed_content_bytes</code>, <code>iris.transfer.peers_total</code>,
+<code>iris.device.observed_at</code>, and the observed peer addresses as a flat
+<code>network.peer.address</code> string array. <code>iris.device.report</code> carries a subset:
+<code>device.id</code>, <code>iris.image.id</code>, <code>iris.report.event</code>, <code>iris.transfer.peers_total</code>,
+<code>network.peer.address</code>. <code>iris.tracker.peer</code>: <code>iris.principal</code>,
+<code>iris.torrent.info_hash</code>, <code>iris.peer.role</code>, <code>network.peer.address</code>.
+<code>iris.peer.policy</code>: <code>iris.policy.revision</code>, <code>iris.policy.action</code>,
+<code>iris.enforcement.state</code>, <code>iris.enforcement.applied_revision</code>,
+<code>iris.enforcement.desired_ip_count</code>. <code>iris.swarm.peer_rate</code>: <code>iris.principal</code>,
+<code>iris.image.id</code>, <code>iris.torrent.info_hash</code>, <code>network.peer.address</code>,
+<code>network.peer.port</code>, <code>iris.transfer.peer_send_bps</code>, <code>iris.torrent.left</code>,
+<code>iris.peer.role</code>. <code>iris.transfer.lifecycle</code>: <code>event</code>, <code>iris.transfer.id</code>,
+<code>iris.plan.id</code>, <code>iris.device.id</code>, <code>device.id</code>, <code>iris.image.id</code>,
+<code>iris.torrent.info_hash</code>, <code>iris.transfer.planned_at</code>, and — on the
+<code>seeding_started</code> event only — <code>iris.transfer.seeding_started_at</code>,
+<code>iris.transfer.checksum_verified_at</code>, <code>iris.transfer.report_received_at</code>,
+<code>iris.transfer.tracker_seeder_at</code>, <code>iris.device.observed_at</code>,
+<code>iris.device.report_created_at</code> and, on a recovered promotion only,
+<code>iris.transfer.recovered_promotion</code>. That record is described in full below.</p>
+<p>Per-peer detail is carried by <code>iris.swarm.peer_rate</code> and the byte records
+below. <code>iris.transfer.peers_total</code> carries the distinct peer count, saturating
+at the device's 512-IP tracking cap; rows beyond the named cap are counted
+there, not listed.</p>
+<h3 id="transfer-lifecycle-events">Transfer lifecycle events</h3>
+<p>Every other log record on this page describes something a <em>device</em> said or
+something the tracker measured on the wire. The <code>iris.transfer.lifecycle</code>
+record is different: it is the <strong>server's own account of a transfer plan</strong>,
+from the moment an operator assigned an image to the moment the server could
+prove the device holds that image and is seeding it. It answers the one
+question the per-device reports cannot answer on their own — <em>how long did it
+take, from the decision to the device becoming a source for its neighbours</em> —
+and it answers it on a single clock, because both instants are the tracker's.</p>
+<p>A <strong>plan</strong> is the decision that one device should hold one image. It is minted
+by the server when an image id <strong>enters</strong> a device's approved set, and it
+carries two ids for the life of that transfer:</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.plan.id</code></td>
+<td>32 lowercase hex. Identifies the <em>decision</em>. Stable across both events of one plan, and distinct across two plans for the same device and image. <strong>This is the key to group on.</strong></td>
+</tr>
+<tr>
+<td><code>iris.transfer.id</code></td>
+<td>32 lowercase hex. Identifies the <em>transfer</em> the device performs for that plan, and is the same value the device stamps on its own <code>iris.device.transfer.report</code>. This is the join between the two record families.</td>
+</tr>
+</tbody>
+</table>
+<p>Re-applying an assignment that has not changed does <strong>not</strong> mint new ids — an
+in-flight transfer keeps its identity across repeated Applies. Unassigning and
+re-assigning the same image <em>does</em>, so the two attempts stay separately
+measurable. See <a href="../reference/#policy-schema">Policy schema</a> for where the ids
+live on disk.</p>
+<p>The record carries exactly two <code>event</code> values, in the only order they can
+occur:</p>
+<table>
+<thead>
+<tr>
+<th><code>event</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>planned</code></td>
+<td>The assignment was recorded. Emitted once per plan, whether or not the transfer ever completes.</td>
+</tr>
+<tr>
+<td><code>seeding_started</code></td>
+<td>The server has confirmed the device holds verified content <strong>and</strong> is announcing itself as a seeder for it. Emitted at most once per plan.</td>
+</tr>
+</tbody>
+</table>
+<p>There is deliberately no <code>downloading</code> event between them. The server has no
+honest instant for one: it learns a transfer started only from the device's
+next heartbeat, up to a minute later.</p>
+<h4 id="a-planned-event">A <code>planned</code> event</h4>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"timeUnixNano"</span><span class="p">:</span><span class="w"> </span><span class="s2">"1788352991482000128"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"eventName"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.lifecycle"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"severityNumber"</span><span class="p">:</span><span class="w"> </span><span class="mi">9</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"severityText"</span><span class="p">:</span><span class="w"> </span><span class="s2">"INFO"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"transfer lifecycle planned"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"attributes"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"otel.log.name"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.lifecycle"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.telemetry.schema.version"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"intValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"planned"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"4d1a6e0c73b94f2ea85d10c6b7f3928a"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.plan.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.3"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"device.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.3"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.image.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"cat9k_iosxe.26.01.01"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.torrent.info_hash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"c8f4e2a1b09d7635fe1428a0d5c93b7614e0af82"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.planned_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:43:11.482Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412.planned"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4 id="a-seeding_started-event">A <code>seeding_started</code> event</h4>
+<p>The same plan, ten minutes later. It repeats every attribute of the <code>planned</code>
+record — including <code>iris.transfer.planned_at</code> — so the planned-to-seeding
+duration is computable from this one record, without joining back to a
+<code>planned</code> event that a bounded queue may have dropped.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"timeUnixNano"</span><span class="p">:</span><span class="w"> </span><span class="s2">"1788353624117000192"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"eventName"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.lifecycle"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"severityNumber"</span><span class="p">:</span><span class="w"> </span><span class="mi">9</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"severityText"</span><span class="p">:</span><span class="w"> </span><span class="s2">"INFO"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"transfer lifecycle seeding_started"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"attributes"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"otel.log.name"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.lifecycle"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.telemetry.schema.version"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"intValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"seeding_started"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"4d1a6e0c73b94f2ea85d10c6b7f3928a"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.plan.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.3"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"device.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.3"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.image.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"cat9k_iosxe.26.01.01"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.torrent.info_hash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"c8f4e2a1b09d7635fe1428a0d5c93b7614e0af82"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.planned_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:43:11.482Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.seeding_started_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:53:44.117Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.checksum_verified_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:53:44.117Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.report_received_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:53:44.117Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.tracker_seeder_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:48:30.905Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.observed_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"doubleValue"</span><span class="p">:</span><span class="w"> </span><span class="mf">1788353602.0</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.report_created_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"doubleValue"</span><span class="p">:</span><span class="w"> </span><span class="mf">1788353604.4</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412.seeding_started"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>An attribute is <strong>absent when the value is not known</strong> — never defaulted, never
+an empty string. A plan minted before its torrent existed carries no
+<code>iris.torrent.info_hash</code>; a report whose measurement window was unusable
+carries no <code>iris.device.observed_at</code>. A missing attribute is honest where a
+fabricated one is not, so write queries that tolerate absence rather than
+matching on a sentinel.</p>
+<p>The device id rides <strong>twice</strong>, as <code>iris.device.id</code> and as <code>device.id</code>.
+<code>iris.device.transfer.report</code> names it <code>device.id</code> and <code>iris.swarm.peer_bytes</code>
+names it <code>iris.device.id</code>, so emitting both lets either join be written without
+a coalesce. An attribute cannot be withdrawn once it has shipped, so this is a
+permanent commitment, made knowingly, and not a transitional duplication.</p>
+<h4 id="the-timestamp-shape">The timestamp shape</h4>
+<p><code>iris.transfer.planned_at</code>, <code>iris.transfer.seeding_started_at</code>,
+<code>iris.transfer.checksum_verified_at</code>, <code>iris.transfer.report_received_at</code> and
+<code>iris.transfer.tracker_seeder_at</code> are
+RFC 3339 <strong>strings</strong> with a fixed shape, which is contract:</p>
+<div class="highlight"><pre><span></span><code>2026-09-02T12:43:11.482Z
+</code></pre></div>
+<ul>
+<li><strong>UTC</strong>, always — the value is formatted from <code>gmtime</code>, so re-zoning a host
+  cannot change what an exported instant means.</li>
+<li><strong>Exactly three fractional digits</strong>, always present. A whole-second instant
+  is still written <code>...:11.000Z</code>, never <code>...:11Z</code>, so an extraction pattern
+  never faces a missing or variable-width field.</li>
+<li><strong>A literal <code>Z</code></strong>, never <code>+00:00</code>. Splunk's <code>%Z</code> matches a zone <em>name</em> and
+  will not consume a numeric offset.</li>
+</ul>
+<p>The matching Splunk pattern is <code>%Y-%m-%dT%H:%M:%S.%N%Z</code>. These are string
+attributes by construction and need <strong>no</strong> numeric coercion — the "int64 rides
+the wire as a string" caveat that applies to the byte counters does not apply
+here.</p>
+<p><code>timeUnixNano</code> on both records is the <strong>source</strong> instant — <code>planned_at</code> for
+<code>planned</code>, <code>seeding_started_at</code> for <code>seeding_started</code> — never the emit instant.
+For <code>planned</code> that is the server's own decision instant. For <code>seeding_started</code>
+it is a server <em>observation</em>, and in the ordinary case the later of the two
+preconditions is the device's report, whose instant is when the server
+<strong>received</strong> it. So <code>timeUnixNano</code> on a <code>seeding_started</code> record can be an
+ingestion time, and <code>iris.transfer.report_received_at</code> names it as one. This is
+still the opposite choice from <code>iris.device.transfer.report</code>, which times off
+the server's marker unconditionally because the only thing it knows for certain
+about a device report is when it arrived.</p>
+<p><code>iris.device.observed_at</code> and <code>iris.device.report_created_at</code> are the odd
+attributes out. <code>iris.device.transfer.report</code> uses the same representation:
+float epochs, on the
+<strong>device's</strong> clock, being the end of the attesting report's measurement window
+and the moment that report was composed. They are a second clock. Show them,
+but never subtract either from the server instants above as though the clocks
+agreed.</p>
+<h4 id="what-seeding_started-proves">What <code>seeding_started</code> proves</h4>
+<p>Three conditions must hold before a plan is promoted, and all three are
+required:</p>
+<ol>
+<li><strong>The content is complete on the device.</strong> The agent reached a terminal
+   report only after finding the staged file at the exact catalog size with no
+   aria2 control file beside it.</li>
+<li><strong>The checksum verified.</strong> That same report carries
+   <code>content_sha256.state = verified</code>, computed by the device over the staged
+   file — and it carries <strong>this plan's</strong> <code>transfer_id</code>.</li>
+<li><strong>This tracker saw the device seeding.</strong> The device's own aria2 announced
+   <code>left = 0</code> on the image's torrent, authenticated by the personalised
+   announce token that resolves to that device's principal.</li>
+</ol>
+<p>Conditions 1 and 2 arrive together on one report and are latched as
+<code>iris.transfer.checksum_verified_at</code> — <strong>the server's ingest instant for the
+earliest attesting report</strong>, which is when the server learned the checksum had
+verified, not when the device verified it. The device reports no verification
+instant, and its clock is not the server's, so nothing is back-dated to stand
+in for one. <code>iris.transfer.report_received_at</code> carries the same ingest
+timestamp as <code>iris.transfer.checksum_verified_at</code>.</p>
+<p>Read it against <code>iris.device.report_created_at</code> — the device's own clock for
+composing that report — to see how much <strong>delivery latency</strong> a plan-to-seed
+duration is carrying. This is not a rounding error: the agent arms its terminal
+report at completion but defers the whole send on a <code>bad</code> link tier, backing
+off to about sixteen minutes, so on exactly the constrained devices IRIS exists
+for the ingest instant can sit that far behind the physical one. The two are
+different clocks, so their difference is that latency plus whatever skew stands
+between them: treat it as a magnitude worth explaining, never as an exact
+correction to subtract.</p>
+<p>Condition 3 is latched separately as <code>iris.transfer.tracker_seeder_at</code>.</p>
+<p>Neither fact is sufficient alone, which is why both are exported. aria2 begins
+announcing <code>left = 0</code> the instant the last piece lands, while the agent's
+sha256 of a ~1.2 GB image does not start until its next due staging tick and then runs for
+minutes: publishing on the tracker fact alone would announce "seeding" for
+content nobody has verified. Conversely the device can neither see nor attest
+the tracker fact — it never talks to the tracker; only its aria2 announces. The
+two attributes let an operator see <strong>which</strong> condition was the laggard:
+<code>tracker_seeder_at</code> well before <code>checksum_verified_at</code> is the ordinary case
+(the device was hashing); the reverse ordering means the swarm, not the device,
+was the wait. Neither is ever earlier than <code>iris.transfer.planned_at</code>: a peer
+row outlives the plan it was observed under, so a re-assignment of an image the
+device is already seeding would otherwise export a <code>tracker_seeder_at</code> from the
+<em>previous</em> transfer and make that comparison read as nonsense.</p>
+<p>Each condition is latched <strong>durably and independently</strong> at first observation,
+because neither is durable in itself: a peer row is pruned after 60 seconds,
+popped outright on a <code>stopped</code> announce, and has its completion instant erased
+when a re-download begins. Requiring both to be visible in the same pass would
+let a vanishing peer row block the event permanently.</p>
+<p>The per-device report ring keeps the newest five reports across all assigned
+images and report kinds. IRIS also records the attestation at <strong>ingest</strong> in
+<code>&lt;state&gt;/transfer-attestations.json</code>, one row per transfer. The promotion pass
+reads both stores, so a terminal report rotating out of the ring does not
+remove its verification evidence.</p>
+<p><code>iris.transfer.seeding_started_at</code> is then <code>max(checksum_verified_at,
+tracker_seeder_at, planned_at)</code> — the instant the <strong>last</strong> condition became
+true, floored at the plan's own creation so a dashboard can never render a
+negative duration. All three inputs are server-clock instants from the same
+container, so <code>seeded − planned</code> is a single-clock subtraction.</p>
+<p>The one exception is a <strong>recovered promotion</strong>, which uses
+<code>max(checksum_verified_at, planned_at)</code> and says so on the record — see
+<a href="#replays-and-recovered-promotions">Replays and recovered promotions</a>.</p>
+<p>It is a <strong>server observation</strong>, not a device-attested instant. The tracker
+evaluates the conditions on its sample pass (<code>IRIS_SAMPLE_INTERVAL</code>, 15 s by
+default), so the value can be up to one pass late relative to the physical
+moment. It is latched once, before any record is built, and is never
+recomputed — so a replay after a crash carries the original value rather than a
+second, disagreeing one.</p>
+<h4 id="delivery-and-stable-event-identity">Delivery and stable event identity</h4>
+<p><code>event.id</code> is derived from the plan: <code>&lt;plan_id&gt;.planned</code> and
+<code>&lt;plan_id&gt;.seeding_started</code>. Retries keep the same identity, and the export
+queue does not add a record whose id is already queued or in flight.</p>
+<p>The lifecycle store records queue acceptance in <code>emitted</code> and a successful
+send to the collector in <code>delivered</code>. With a destination configured, IRIS
+re-queues records that lack a delivery marker if they leave the bounded
+queue. A persisted delivery marker suppresses replay across server restarts.
+Collector acceptance does not prove that Splunk or another final destination
+has indexed the record.</p>
+<p>A crash after a successful send but before the delivery marker is saved can
+send the same record again. A failed marker write or recovered lifecycle
+store can also cause duplicates. Deduplicate on <code>event.id</code>; ordinary retries
+retain the latched timestamps, while a recovered promotion follows the rules
+below.</p>
+<p>Delivery is best-effort. Queue limits, lifecycle-store retention, and
+collector or backend failures can lose records. Check
+<code>iris_transfer_lifecycle_unconfirmed</code> for outstanding lifecycle events and
+<code>iris_transfer_lifecycle_retired_undelivered_total</code> for records retired without
+confirmed collector delivery. Neither a stable id nor a queue marker is an
+end-to-end delivery guarantee.</p>
+<p>Facts are latched whether or not OTLP export is switched on. Enabling a
+destination publishes retained plans and their recorded start instants.</p>
+<h4 id="replays-and-recovered-promotions">Replays and recovered promotions</h4>
+<p>Recovering a lost lifecycle row can produce a different timestamp under the
+same <code>event.id</code>.</p>
+<p>Of the three inputs to <code>seeding_started_at</code>, two are durable outside the
+lifecycle store — <code>planned_at</code> lives in the policy record and
+<code>checksum_verified_at</code> in the ingest-time attestation — and one is not.
+<code>tracker_seeder_at</code> comes from the tracker's in-memory peer registry, so a
+device re-announcing after a restart stamps a <em>fresh, later</em> instant. A row
+rebuilt from a lost store therefore cannot reproduce an original promotion
+whose instant came from the announce.</p>
+<p>Rather than replay whatever the registry happens to say now — an unbounded
+drift into the moment of the last reconnection — a promotion made on a pass
+that <strong>detected</strong> a loss takes the durable pair only,
+<code>max(checksum_verified_at, planned_at)</code>, and every later recovery reproduces
+exactly that. It also sets <code>iris.transfer.recovered_promotion</code> on the record.</p>
+<p>That flag is the honest part. If the original record's instant came from the
+announce, the pre-loss value is <strong>not recoverable</strong>, and the replay carries an
+earlier one under the same id. IRIS does not invent a value to paper over that;
+it marks the record so a backend can attribute the disagreement to a recovery
+instead of to a bug. On such a record:</p>
+<ul>
+<li><code>iris.transfer.seeding_started_at</code> is a <strong>lower bound</strong> on the original —
+  bounded below by <code>planned_at</code>, and a real server observation of that plan;</li>
+<li><code>iris.transfer.tracker_seeder_at</code> is a <strong>post-loss re-announce</strong>, not the
+  observation that produced the original promotion, so recomputing <code>max()</code> over
+  the three instants on this record does not reproduce its
+  <code>seeding_started_at</code>;</li>
+<li>a backend keeping first-write should keep the first, and this flag says which
+  of two values is the replay.</li>
+</ul>
+<p>The attribute is <strong>absent</strong>, never <code>false</code>, on an ordinary promotion, and never
+appears on a <code>planned</code> record — that instant comes from the policy row and
+replays identically regardless. The
+<code>iris.transfer.lifecycle.promoted_recovered</code> counter is the fleet-wide total of
+promotions that took this path.</p>
+<h4 id="why-there-is-no-weaker-promotion-path">Why there is no weaker promotion path</h4>
+<p>A plan is promoted only by a report bearing <strong>that plan's</strong> <code>transfer_id</code>.
+There is deliberately no fallback that promotes a plan from a report carrying
+some other transfer's id — accepting one would mean publishing "seeding" on the
+strength of a checksum computed for a different transfer, which is the one
+guarantee this event exists to make.</p>
+<p>The agent uses the assignment's <code>transfer_id</code> in its terminal report.
+<code>tools/apply-assignments.sh</code> is idempotent for an unchanged assignment.</p>
+<p>A plan also remains unconfirmed in these cases:</p>
+<ul>
+<li><strong>The assignment was withdrawn while the device was still verifying.</strong> A
+  terminal report for an image no longer in the device's approved set is
+  refused at ingest, so the checksum condition can never be met. The plan is
+  cancelled on the next pass and shows planned-never-seeded. The bytes may well
+  have landed; the server simply never received the attestation.</li>
+<li><strong>The device announces with a credential that has no device identity.</strong> Such a
+  peer is authenticated but unattributed — it resolves to a <code>legacy</code> principal
+  with no device identity (see <a href="#unattributed-participants">Unattributed participants</a>) — so
+  it can never satisfy condition 3. This is intentional: an unattributed
+  announce is not evidence about a named device.</li>
+</ul>
+<h4 id="time-to-seed-as-a-query">Time-to-seed, as a query</h4>
+<div class="highlight"><pre><span></span><code>index=iris "otel.log.name"="iris.transfer.lifecycle"
+| eval planned=strptime('iris.transfer.planned_at', "%Y-%m-%dT%H:%M:%S.%N%Z"),
+       seeded =strptime('iris.transfer.seeding_started_at', "%Y-%m-%dT%H:%M:%S.%N%Z")
+| stats min(planned) as planned, max(seeded) as seeded
+    by 'iris.transfer.id','iris.plan.id','iris.device.id','iris.image.id'
+| eval seconds_to_seed = seeded - planned
+</code></pre></div>
+<p>Grouping on <code>iris.plan.id</code> is what keeps two attempts at the same
+device-and-image pair from collapsing into one row. A plan that produced only a
+<code>planned</code> event yields a null <code>seeded</code> — that is the planned-never-seeded
+population, and it is worth alerting on directly rather than filtering away.</p>
+<p><code>seconds_to_seed</code> includes <strong>report-delivery latency</strong>, and on a constrained
+link that can be minutes. Where the report was the later precondition, <code>seeded</code>
+is the instant the server received it, not the instant the device finished.
+Compare <code>iris.transfer.report_received_at</code> against
+<code>iris.device.report_created_at</code> on the same record to see the size of it before
+reading a long tail as slow transfers.</p>
+<p>There is deliberately <strong>no</strong> <code>iris.transfer.seconds_to_seeding</code> attribute and
+no <code>*_epoch</code> duplicates of the timestamps: <code>timeUnixNano</code> already carries the
+epoch on both records, and an attribute that ships once can never be withdrawn.</p>
+<h3 id="per-peer-bytes-and-what-they-do-not-cover">Per-peer bytes (and what they do not cover)</h3>
+<p>The device's aria2 client exposes cumulative per-peer session counters through
+<code>aria2.getPeers</code> (<code>downloaded</code> and <code>uploaded</code>). IRIS exports the device capture
+and the origin sampler as separate records. They describe overlapping traffic
+from different observation points; do not sum the two record families.</p>
+<p><code>iris.device.peer_transfer_record</code> is the exact one, emitted once per peer per completed
+device transfer. An <code>--on-bt-download-complete</code> hook on the device reads the
+counters at the instant the last piece lands, before aria2 flips the download to
+seed-only and the connections drain. Attributes: <code>device.id</code> (the <em>receiving</em>
+device), <code>iris.image.id</code>, <code>iris.image.name</code> (the catalog filename),
+<code>iris.transfer.id</code>, <code>network.peer.address</code>, <code>network.peer.port</code>,
+<code>iris.transfer.session_bytes_from_peer</code> /
+<code>iris.transfer.session_bytes_to_peer</code>, <code>iris.peer.attribution</code>,
+<code>iris.peer.device.id</code>, <code>iris.peer.device_id</code> (the sender in one column: the
+device's id, <code>origin</code>, or absent for an unknown), <code>iris.peer.has_complete_file</code>
+and <code>iris.transfer_record.capture_complete</code>.</p>
+<p><code>iris.peer.attribution</code> is the attribute that makes the number mean anything.
+The origin seeder is an ordinary BitTorrent peer of every device, so it appears
+in the device's own peer list like any other sender; the device cannot tell it
+apart and does not try. The server classifies each row when the report is
+first exported, against the tracker's <code>service:seeder</code> principal and its own
+device-address map, into <code>origin</code>, <code>device</code>, or <code>unknown</code> — an address that
+resolves to neither is reported as unknown, never folded into the device
+figure — and pins that answer (<code>report-attribution.json</code>), so the copy
+re-exported under the same <code>event.id</code> after a restart is identical. The
+per-transfer rollups on <code>iris.device.transfer.report</code> follow the same split:
+<code>iris.transfer.bytes_from_all_senders_total</code> is the device's own honest total
+<strong>including the origin</strong>, and <code>iris.transfer.bytes_from_origin_total</code>,
+<code>iris.transfer.bytes_from_devices_total</code> and
+<code>iris.transfer.bytes_from_unknown_total</code> are the classified parts. A peer-assist
+ratio is <code>bytes_from_devices_total ÷ completed_content_bytes</code> — using
+<code>bytes_from_all_senders_total</code> there would report every rollout as ~100%
+peer-delivered.</p>
+<p><code>iris.swarm.peer_bytes</code> is the origin-side counterpart, and it is an estimate.
+The origin polls <code>aria2.getPeers</code> on an interval and banks each edge's growth in
+a durable ledger, because that counter is per <em>connection</em> and vanishes with the
+connection. On a 7-router pull a 3-second poll traced 73.3% of the bytes to a device the
+origin actually sent, a 2-second poll 88.1%; the residue is connections that
+opened and closed between two polls. It is kept as its own quantity
+(<code>iris_peer_unattributed_bytes_total</code>) and never spread across the peers — an
+even split would be arithmetic presented as observation.</p>
+<div class="admonition warning">
+<p class="admonition-title">The transfer record is a floor, not a census</p>
+<p>The hook reads only the peers aria2 still has a live connection to.
+<code>DefaultPeerStorage</code> erases a peer from <code>usedPeers_</code> the moment it
+disconnects, so a peer that fed the device 400 MB and then dropped before
+the last piece landed leaves <strong>no row and no bytes</strong> — its contribution is
+silently absent from every figure above, not counted as zero.
+<code>iris.transfer.bytes_from_all_senders_total</code> is therefore a lower bound on
+what the device received, and it will not reconcile with
+<code>iris.transfer.completed_content_bytes</code>. Rows the device or the server
+dropped at a cap <em>are</em> accounted for, in
+<code>iris.transfer.peer_records.rows_omitted</code> and
+<code>iris.transfer.bytes_from_all_senders_omitted</code>;
+<code>iris.transfer.peer_records.capture_complete</code> goes false when the capture
+itself was lossy. A transfer with no usable snapshot carries no peer-transfer-record
+attributes at all rather than a zeroed set.</p>
+</div>
+<h3 id="sizing">Sizing</h3>
+<p>Per device on the WAN, streaming adds ~33 bps on a good link (~250 B/min),
+~8 bps constrained, and nothing on a bad link — against the ~800 bps the
+heartbeat itself already costs.</p>
+<h4 id="200-device-deployment">200-device deployment</h4>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Need (control plane + telemetry)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server</td>
+<td>2 vCPU, 4 GB RAM ample</td>
+</tr>
+<tr>
+<td>Ingress</td>
+<td>~0.2–0.3 Mbps sustained (~3.3 heartbeats/s + announces)</td>
+</tr>
+<tr>
+<td>CPU</td>
+<td>a few % of one core (TLS-dominated)</td>
+</tr>
+<tr>
+<td>Telemetry disk</td>
+<td>≤ ~20 MB total (report rings + snapshot)</td>
+</tr>
+<tr>
+<td>OTLP egress</td>
+<td>&lt; 10 KB/s, LAN-side; per-device metrics safe to enable</td>
+</tr>
+<tr>
+<td>NIC</td>
+<td>1 GbE — sized by image seeding (~1–2 × image size per rollout wave), not telemetry</td>
+</tr>
+</tbody>
+</table>
+<p>Scale-out telemetry ingestion is on the roadmap; see
+<a href="#the-live-sample">The live sample</a> for the schema's current version gate and
+what a future bump will require.</p>
+<h2 id="failure-interpretation">Failure interpretation</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>First place to look</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Device never appears</td>
+<td>Installer output, artifact server reachability, catalog trustpoint, enrollment token expiry.</td>
+</tr>
+<tr>
+<td>Download does not start</td>
+<td>Tracker port and authentication (Bearer header for IOx/XR, query token for Guest Shell), seeder port, device route to server.</td>
+</tr>
+<tr>
+<td>Download stalls</td>
+<td>Swarm view, peer count, seeder availability, storage capacity.</td>
+</tr>
+<tr>
+<td>Verification fails</td>
+<td>Catalog hash, file name, staged-copy byte size, image integrity.</td>
+</tr>
+<tr>
+<td>Console stale</td>
+<td>Telemetry health, catalog service logs, device report interval.</td>
+</tr>
+<tr>
+<td>Prometheus target down, dashboard blank</td>
+<td><code>IRIS_OBSERVABILITY</code> — unset means <code>/metrics</code> answers 404 by design; then check reachability to port 9101.</td>
+</tr>
+<tr>
+<td><code>401</code> on <code>:9101/swarm</code></td>
+<td>Swarm data is management-tier only by design. Use the Console's Swarm tab or its authenticated <code>GET /api/v1/swarm</code>; do not expose or manually reuse the internal bearer.</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

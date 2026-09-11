@@ -1,0 +1,121 @@
+/*
+ * Copyright 2026 Cisco Systems, Inc. and its affiliates
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+html {
+  box-sizing: border-box;
+  background: #f6f8fa;
+}
+
+body {
+  margin: 0;
+}
+
+.iris-api-header {
+  align-items: center;
+  background: #172033;
+  color: #fff;
+  display: flex;
+  flex-wrap: wrap;
+  font: 15px/1.5 system-ui, sans-serif;
+  gap: 12px 24px;
+  padding: 12px 24px;
+}
+
+.iris-api-header span {
+  flex: 1 1 360px;
+}
+
+.iris-api-header nav {
+  display: flex;
+  gap: 16px;
+}
+
+.iris-api-header a {
+  color: #b9e6ff;
+}
+
+.iris-streaming-responses {
+  background: #fff;
+  border: 1px solid #d8dee4;
+  border-radius: 4px;
+  font: 14px/1.5 system-ui, sans-serif;
+  margin: 20px auto;
+  max-width: 1420px;
+  padding: 18px 24px;
+  width: calc(100% - 80px);
+}
+
+.iris-explorer-summary {
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.iris-streaming-responses[open] .iris-explorer-summary {
+  margin-bottom: 18px;
+}
+
+.iris-streaming-responses h2,
+.iris-streaming-responses h3,
+.iris-streaming-responses h4 {
+  margin: 0 0 8px;
+}
+
+.iris-streaming-responses article + article {
+  border-top: 1px solid #d8dee4;
+  margin-top: 18px;
+  padding-top: 18px;
+}
+
+.iris-streaming-responses pre {
+  background: #172033;
+  color: #f6f8fa;
+  max-height: 32rem;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.iris-streaming-responses code {
+  overflow-wrap: anywhere;
+}
+
+.iris-schema-filter {
+  display: block;
+  font-weight: 600;
+  margin: 24px 0 12px;
+}
+
+.iris-schema-filter input {
+  box-sizing: border-box;
+  display: block;
+  margin-top: 6px;
+  max-width: 560px;
+  padding: 8px;
+  width: 100%;
+}
+
+.iris-canonical-list details {
+  border-top: 1px solid #d8dee4;
+  padding: 8px 0;
+}
+
+.iris-canonical-list summary {
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.iris-json-pointer {
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+/* This public reference is deliberately read-only and does not collect credentials. */
+.swagger-ui .auth-wrapper,
+.swagger-ui .authorization__btn {
+  display: none !important;
+}
