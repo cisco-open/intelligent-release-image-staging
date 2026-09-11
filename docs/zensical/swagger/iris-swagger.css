@@ -37,11 +37,6 @@ body {
   color: #b9e6ff;
 }
 
-.iris-api-compatibility {
-  flex-basis: 100%;
-  margin: 0;
-}
-
 .iris-streaming-responses {
   background: #fff;
   border: 1px solid #d8dee4;

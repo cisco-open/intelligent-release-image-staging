@@ -96,7 +96,7 @@
     appendText(
       target,
       "p",
-      "IRIS explicitly declares the generic JSON Schema draft 2020-12 dialect. Expand an operation or component below to inspect its exact canonical JSON, including conditionals that a Swagger model preview may omit.",
+      "IRIS schemas are JSON Schema 2020-12, under the OpenAPI 3.2 default dialect. Expand an operation or component below to inspect its exact canonical JSON, including conditionals that a Swagger model preview may omit.",
     );
     const rawLink = document.createElement("a");
     rawLink.href = "../openapi.yaml";

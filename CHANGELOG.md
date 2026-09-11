@@ -25,6 +25,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   staged-file ownership, Splunk accounting, and API diagnostics.
 
 ### Fixed
+- The API reference renders without Swagger UI's `jsonSchemaDialect` warning.
+  The contract no longer declares a dialect, so OpenAPI 3.2's default applies;
+  the schemas are unchanged, use no OAS-dialect keyword, and stay JSON Schema
+  2020-12. Swagger UI 5.32.15 compares any declared value against the 3.1 base,
+  so even OpenAPI 3.2's own dialect base produced the warning.
 - A configured instruction root public key spelled with surplus base64 padding
   resolves to the same root identity on every Python 3.12 patch release. Newer
   interpreters tightened their strict base64 decoder, which turned such a file
