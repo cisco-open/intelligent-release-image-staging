@@ -94,15 +94,16 @@
   <row>
     <panel>
       <title>Measured swarm transfer rate</title>
+      <description>One-minute averages for the whole fleet; the device filter does not apply to this panel. Received and Sent device to device are reported by the devices themselves and cannot see a transfer shorter than one 60-second agent tick. Distribution Server sent is measured by the distribution server's own aria2. Received counts bytes from every source, so the gap above Distribution Server sent is the peer-to-peer share.</description>
       <chart>
         <search>
-          <query>index=iris_logs "otel.log.name"="iris.swarm.peer_rate" | eval Peer=replace('iris.principal',"^device:","") | search Peer=$dev|s$ | timechart span=5m avg("iris.transfer.peer_send_bps") as bps | eval "Average Mbps"=round(bps/1000000,2) | fields - bps</query>
+          <query>| mstats avg(_value) AS v WHERE index=iris_metrics metric_name="iris.transfer.throughput" BY "network.io.direction","iris.torrent.info_hash" span=1m | eval Series=if('network.io.direction'=="transmit","Sent device to device","Received by devices") | append [ | mstats avg(_value) AS v WHERE index=iris_metrics metric_name="iris.seeder.torrent.upload_rate" BY "iris.torrent.info_hash" span=1m | eval Series="Distribution Server sent" ] | eval MBps=v/1048576 | timechart span=1m sum(MBps) by Series</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>
-        <option name="charting.chart">area</option>
-        <option name="charting.axisTitleY.text">Mbps</option>
-        <option name="charting.legend.placement">none</option>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">MB/s (1-minute average)</option>
+        <option name="charting.legend.placement">bottom</option>
       </chart>
     </panel>
     <panel>
