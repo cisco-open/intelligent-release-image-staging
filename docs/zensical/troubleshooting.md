@@ -29,6 +29,7 @@ deployment JSON, occurrences, or receipts by hand.
 | Swagger loads without styles or scripts | Preserve the `/swagger/` prefix through any reverse proxy and check the browser network log for local `/swagger/...` asset 404s. The shipped page makes no CDN or other Internet request. |
 | Swagger shows no **Try it out** or authorization control | This is expected. The bundled reference is public, static, and read-only; use the Console or an authenticated API client to send requests. |
 | The browser reports a certificate error for Swagger | The reference uses the same HTTPS listener and certificate as the Console. Fix the Console certificate trust or hostname; Swagger has no separate TLS configuration. |
+| The Help popover shows an older version than `VERSION` | `IRIS_VERSION` is a build argument that overrides the image's `VERSION` file. Remove it from `server/.env` and the build shell, then rebuild both images; compare `docker exec iris sh -c 'echo $IRIS_VERSION'` with `docker exec iris cat /opt/iris/VERSION`. |
 
 ## Preserve evidence before retrying
 
