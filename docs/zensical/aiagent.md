@@ -6,10 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # AI-guided PoC deployment
 
-Use this guide to stage an image with an assistant helping run the deployment.
-Docker on one host is the default: the server and Console are separate
-containers on that host. Docker on separate hosts and Kubernetes are also
-supported choices. The device workflow is the same for all three.
+This page is the assistant's runbook: what to ask, what to check, what to run,
+and what to report, for Docker on one host, Docker on separate hosts, and
+Kubernetes. The device workflow is the same for all three.
+[Getting Started](getting-started.md) is the same deployment written for a
+person to read; use it for background, and use the commands here.
 
 IRIS distributes, verifies, and stages images. It never installs, activates,
 reloads, or changes boot variables. See [Guardrails](security.md#guardrails).
@@ -148,19 +149,17 @@ that the operator wants it built here.
 
 ## Supply the handed-in inputs
 
-A fresh clone deliberately lacks a few inputs, and `tools/start-compose-server.sh`
-reports every missing one in a single list before it builds anything. That is
-the project failing closed, not an incomplete checkout: neither an installer
-nor an assistant invents a seeder binary or a trust anchor. Everything else
-installs itself.
+A fresh clone lacks these inputs deliberately, and
+`tools/start-compose-server.sh` lists every missing one before it builds
+anything. Do not treat that list as a broken checkout and do not invent a
+seeder binary or a trust anchor.
 
-In a proof of concept, prepare all of it and build every device package: a
-package that was never built shows as **Needs rebuild** in Console
-**Settings -> Device packages**, and that device type cannot be onboarded. An
-assistant does every step here itself except the trust roots of step 4, which
-only the operator creates.
+Do every step below yourself except step 4, the trust roots, which only the
+operator creates. In a proof of concept prepare all of them and build every
+device package: an unbuilt package reports **Needs rebuild** in Console
+**Settings -> Device packages** and its device type cannot be onboarded.
 
-Each device type needs these:
+Supply what the device types in scope need:
 
 | What you will onboard | Supply first |
 | --- | --- |
@@ -208,31 +207,53 @@ stack up with the Compose commands under
 start the arm64 build and the package builders. An interruption then costs the
 IE-3x00 package, not the deployment.
 
-Before starting it, offer the operator the ways to make it cheaper. They are
-worth a minute of conversation against tens of minutes of emulated compiling:
+Take the cheapest option that applies, in this order. Put it to the operator
+before starting the build, not after.
 
-- **Skip it.** It is needed only for IOx on IE-3400 and other IE-3x00 devices.
-  With none in scope, neither this build nor the arm64 IOx package is needed.
-- **Build it on real arm64 hardware.** Any arm64 machine with Docker that this
-  host can reach over SSH will do, and it needs no change to the build.
-  `build.sh` passes no `--builder`, so it uses whichever buildx builder is
-  current, and the artifact is exported back to this host:
+1. **Do not build it.** It is needed only for IOx on IE-3400 and other IE-3x00
+   devices. With none in scope, skip this build and the arm64 IOx package.
+2. **Reuse a binary that already exists.** The builders take a prebuilt one
+   from `ARIA2C_BIN_ARM64`, from a staged `artifacts/iris-agent-arm.tgz`, or
+   from `deliverables/aria2c-aarch64`, checking each against
+   `tools/aria2c.sha256`. Ask whether the operator has one from an earlier
+   build or another host, and copy it in rather than rebuilding:
 
-  ```bash
-  docker context create arm64-builder --docker "host=ssh://user@arm-host"
-  docker buildx create --name iris-arm --driver docker-container \
-    --platform linux/arm64 arm64-builder
-  docker buildx use iris-arm
-  (cd tools/aria2c-build && ./build.sh aarch64)
-  docker buildx use default
-  ```
+   ```bash
+   cp /path/to/aria2c-aarch64 deliverables/aria2c-aarch64
+   ```
 
-- **Try a newer QEMU.** The emulation a distribution ships is often older than
-  the one in a reviewed `tonistiigi/binfmt` image, and emulation speed varies
-  by QEMU version. Installing the handler from a digest you reviewed, as step 3
-  describes, may be faster — measure it rather than assume it.
-- **Keep the build cache.** An interrupted build resumes far more cheaply than
-  it started, so do not prune Docker's cache between attempts.
+   `deliverables/` is git-ignored, so one that is already there survives branch
+   changes and pulls. Check before building:
+
+   ```bash
+   ls -l deliverables/aria2c-aarch64 artifacts/iris-agent-arm.tgz 2>/dev/null
+   ```
+
+3. **Reuse the build cache.** An interrupted or repeated build resumes far more
+   cheaply than a cold one. Never prune Docker's cache between attempts.
+4. **Build it emulated.** This is the slow path: tens of minutes, every core
+   busy. Take it only when 1 to 3 do not apply, and say that is what you are
+   doing.
+
+Two further options change the cost but need something the operator may not
+have. Offer them, do not assume them: a reviewed `tonistiigi/binfmt` digest
+installs a newer QEMU than a distribution ships, which may emulate faster —
+measure, do not claim it; and any arm64 machine reachable over SSH removes the
+emulation entirely, because `build.sh` passes no `--builder` and uses whichever
+buildx builder is current, exporting the artifact back here:
+
+```bash
+docker context create arm64-builder --docker "host=ssh://user@arm-host"
+docker buildx create --name iris-arm --driver docker-container \
+  --platform linux/arm64 arm64-builder
+docker buildx use iris-arm
+(cd tools/aria2c-build && ./build.sh aarch64)
+docker buildx use default
+```
+
+This ordering is the same for all three layouts. Only the host changes: the
+one Docker host, the server host of a separate-host pair, or the host that
+builds packages for Kubernetes. A cluster emulates nothing on your behalf.
 
 Start it so that it survives the session, and watch its log rather than its
 terminal. A plain `&` is not enough: the `docker buildx` client drives the
@@ -387,15 +408,14 @@ line above is what keeps a second run from leaving a third file behind. Every
 builder in this guide is passed `IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"`,
 so there is nothing further to configure.
 
-For a production deployment, run the two `ssh-keygen` commands on two separate
-custodians' machines instead, carry only the `.pub` halves to the server host,
-and place them with the same `install` pair. A private root never reaches the
-server host, an installer argument, a device, or a chat window. One person
-holding both is acceptable for a proof of concept: that produces a working
-deployment, and, as
+For production, have each custodian run one `ssh-keygen` command on their own
+machine, carry only the `.pub` halves to the server host, and place them with
+the same `install` pair. Never accept a private root: not on the server host,
+not in an installer argument, not on a device, not in chat. One person holding
+both is acceptable for a proof of concept and is not production custody or
+signing evidence — say so when reporting it, as
 [Prepare instruction trust](getting-started.md#prepare-instruction-trust)
-states, it is not production custody or signing evidence. Certificates,
-rotation and revocation are in the
+requires. Certificates, rotation and revocation are in the
 [ceremony runbook](operations.md#instruction-root-ceremony-and-recovery).
 
 ### 5. The appmgr builder — IOS-XR only
@@ -507,15 +527,14 @@ installing a package, adding a user to the docker group, or registering
 emulation handlers: those change the operator's machine. Install what they
 approve, then continue rather than handing the list back.
 
-Before starting the aarch64 aria2c build, say what it costs — emulated, tens
-of minutes, every core busy — and that it is only needed for IOx on IE-3400
-and other IE-3x00 devices. Then offer the four ways to make it cheaper that
-step 1 lists, as a question rather than a remark: skip it when no IE-3x00
-device is in scope, point a buildx builder at any arm64 machine the operator
-can reach, install a newer QEMU from a reviewed binfmt digest, or keep the
-build cache between attempts. Ask which one they want before starting, and say
-plainly that the arm64 machine is the only one that removes the emulation
-rather than tuning it.
+Before starting the aarch64 aria2c build, work down the ordered list in step 1
+of "Supply the handed-in inputs" and take the first option that applies: skip
+the build when no IE-3x00 device is in scope, reuse a prebuilt binary the
+operator already has, reuse the build cache, and only then build it emulated.
+Check deliverables/aria2c-aarch64 and artifacts/iris-agent-arm.tgz before
+deciding. State which option you took and what it costs: the emulated build
+takes tens of minutes and keeps every core busy. This ordering applies to all
+three layouts; only the host running the build changes.
 
 A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
 inputs" in this guide for the device types in scope, rather than reporting the
