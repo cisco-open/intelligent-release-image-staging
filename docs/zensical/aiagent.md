@@ -41,16 +41,24 @@ Gather these non-secret decisions:
 | Package inputs | Both architecture `aria2c` binaries, `ioxclient`, and the XR build tooling; the server must serve the packages before onboarding. `tools/start-compose-server.sh` lists every missing one before building anything. A fresh clone has none of them: see [Supply the handed-in inputs](#supply-the-handed-in-inputs). |
 | Instruction trust roots | A directory holding exactly two public root keys (`.pub`). The private halves stay with their custodians; no installer or assistant may generate them, and the operator creates them as described in [Supply the handed-in inputs](#supply-the-handed-in-inputs). Every device package embeds these roots and the build fails closed without them. |
 
-Check out the repository at the same path on every deployment host. This
-guide uses `/opt/iris/intelligent-release-image-staging`, and every command
-below runs from there unless it says otherwise:
+Decide where the deployment lives. Any directory the operator prefers works;
+this guide uses `/opt/iris/intelligent-release-image-staging`, and every
+command below runs from there unless it says otherwise. An assistant should
+ask for this one up front, then use it everywhere without asking again.
+
+Create it and clone into it — substitute the operator's directory for the
+default in the first line:
 
 ```bash
-sudo install -d -o "$USER" -g "$USER" /opt/iris
+IRIS_DIR=/opt/iris/intelligent-release-image-staging
+sudo install -d -o "$USER" -g "$USER" "$(dirname "$IRIS_DIR")"
 git clone https://github.com/cisco-open/intelligent-release-image-staging \
-  /opt/iris/intelligent-release-image-staging
-cd /opt/iris/intelligent-release-image-staging
+  "$IRIS_DIR"
+cd "$IRIS_DIR"
 ```
+
+`sudo` is needed only for a directory the operator cannot already write, such
+as one under `/opt`.
 
 Check out the same IRIS version on every deployment host. For a server already
 in use, identify its Compose project, container names, state volumes, age
@@ -310,9 +318,12 @@ A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
 inputs" in this guide for the device types in scope, rather than reporting the
 deployment as blocked and stopping. Announce which steps you are taking.
 
-Use the paths this guide fixes and do not ask the operator for them: the
-checkout is /opt/iris/intelligent-release-image-staging, and the two public
-instruction roots go in $HOME/iris-roots on the host that builds packages.
+Ask once, at the start, where the deployment should live, and use
+/opt/iris/intelligent-release-image-staging when the operator has no
+preference. Create that directory and clone into it yourself rather than
+handing the operator a step. Every later command runs from there. Do not ask for the
+other paths this guide fixes: the two public instruction roots go in
+$HOME/iris-roots on the host that builds packages, whatever the checkout is.
 
 You may run the project's own helpers yourself: tools/aria2c-build/build.sh,
 tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
