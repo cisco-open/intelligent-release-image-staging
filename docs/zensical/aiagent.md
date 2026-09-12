@@ -337,12 +337,16 @@ Git and configure `IRIS_HOST_IP`, `IRIS_AGE_KEY_FILE_HOST`, and
 `IRIS_AGE_RECIPIENTS` in `server/.env`. Give uid 10001 access to the key, image
 root, artifacts, and volumes as documented there. From the repository root:
 
+Have the inputs your device types need from
+[Supply the handed-in inputs](#supply-the-handed-in-inputs) in this checkout
+first; the commands below assume them. From the repository root:
+
 ```bash
 set -a
 . server/.env
 set +a
 tools/get-aria2c.sh amd64
-IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
+IRIS_INSTRUCTION_ROOTS_DIR=/path/to/roots tools/start-compose-server.sh
 docker compose -f server/docker-compose.yml ps
 ```
 
@@ -364,6 +368,12 @@ commands in [Getting Started](getting-started.md#start-the-server) without
 building native packages. XR requires its RPM separately.
 
 ### Docker on separate hosts
+
+The server host builds the server image and every device package, so
+[Supply the handed-in inputs](#supply-the-handed-in-inputs) applies to that
+host's checkout: `aria2c` before the image build, and `ioxclient`, ARM64
+emulation, the two roots and the appmgr builder for the device types in scope.
+The Console host needs none of them; it builds only the Console image.
 
 Follow [Docker on separate hosts](docker-hosts.md) to prepare and deliver the
 separate host bundles. The helper creates a management token, an independent
@@ -432,7 +442,9 @@ Configure IRIS:
 
 1. Build the server and Console images from their Dockerfiles, publish them to
    a registry reachable by the nodes, and pin both digests in
-   `kubernetes/kustomization.yaml`.
+   `kubernetes/kustomization.yaml`. The server image copies `bin/aria2c`, so
+   step 1 of [Supply the handed-in inputs](#supply-the-handed-in-inputs) has to
+   be done in the checkout you build from.
 2. Configure `kubernetes/iris-seed-server.env` with the reserved device-facing
    Service address, age recipients, and full `IRIS_CONSOLE_URL`. Configure
    `kubernetes/iris-console.env` with the internal management URL. The public
@@ -451,7 +463,12 @@ Configure IRIS:
    temporarily use the previous token, so readiness alone cannot confirm that
    both projections have updated.
 5. Build the needed device packages and stage them with their manifests in
-   the server's artifact storage before onboarding devices.
+   the server's artifact storage before onboarding devices. That build host
+   needs the remaining inputs for those device types — `ioxclient`, ARM64
+   emulation, the appmgr builder — and the same two public roots must also sit
+   in `/data/config/instr/roots.d` on the server PVC, readable by uid 10001, as
+   [Kubernetes](kubernetes.md) describes. Never create roots in the pod, and
+   never copy a private root there.
 
 Apply the configured manifests and wait for both Deployments:
 
