@@ -136,7 +136,28 @@ git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
 ```
 
 Run `./build.sh aarch64` as well for IOx on IE-3x00; that build needs the ARM64
-emulation of step 3. `build.sh` needs Docker, and refuses to run unless the
+emulation of step 3.
+
+**Build `x86_64` first and leave `aarch64` until the stack is up.** The arm64
+build compiles under emulation and takes far longer than the native one — tens
+of minutes on a modest host — and it prints nothing for long stretches while
+the compiler runs. `tools/start-compose-server.sh` checks for both
+architectures before it builds anything, so running it first means waiting out
+that whole build before anything works. Instead: build `x86_64`, bring the
+stack up with the Compose commands under
+[Docker on one host](#docker-on-one-host), confirm the Console, and only then
+start the arm64 build and the package builders. An interruption then costs the
+IE-3x00 package, not the deployment.
+
+The arm64 build is safe to interrupt and safe to rerun; Docker's layer cache
+picks up most of the work again. To see where an interrupted one got to:
+
+```bash
+ls -l tools/aria2c-build/out/aarch64/aria2c
+```
+
+No file, or one that fails its `sha256sum` comparison later, means rerun
+`./build.sh aarch64`. `build.sh` needs Docker, and refuses to run unless the
 checkout sits at the pinned commit and every patch in `tools/aria2c-patches/`
 applies cleanly, so a build either corresponds to the published patch set or it
 fails.
@@ -414,10 +435,24 @@ Offer the two-service Guest Shell path, which builds no packages and needs no
 roots, only when the operator asks for the quickest possible look at a staged
 image. It is not the proof-of-concept default.
 
-These builds take minutes each, and the arm64 ones run under emulation and take
-longer still. Do not describe the whole sequence and then go quiet until it
-ends. Say which step is starting, and report each one as it finishes with the
-evidence it produced:
+Order the work so the operator has something working early: build the x86_64
+aria2c, bring the stack up, confirm the Console, and only then run the arm64
+aria2c build and the package builders. Do not run
+tools/start-compose-server.sh before both architectures exist, because it
+checks for both and will not start the stack until the long emulated build has
+finished.
+
+Before starting the arm64 build, say that it runs under emulation, takes tens
+of minutes, and is silent for long stretches, so the operator does not read
+silence as a hang and stop it. While it runs, report every few minutes: the
+elapsed time, the last line of its output, and that it is still going. Running
+it with its log on disk and tailing that log is enough. If it is interrupted,
+check tools/aria2c-build/out/aarch64/aria2c, rerun ./build.sh aarch64, and say
+that the layer cache makes the rerun shorter.
+
+Do not describe the whole sequence and then go quiet until it ends. Say which
+step is starting, and report each one as it finishes with the evidence it
+produced:
 
 - the roots directory validated: the two file names and their fingerprints
 - each aria2c architecture built, with the sha256 you recorded, then installed
@@ -473,37 +508,53 @@ Git and configure `IRIS_HOST_IP`, `IRIS_AGE_KEY_FILE_HOST`, and
 `IRIS_AGE_RECIPIENTS` in `server/.env`. Give uid 10001 access to the key, image
 root, artifacts, and volumes as documented there. From the repository root:
 
-Have the inputs your device types need from
-[Supply the handed-in inputs](#supply-the-handed-in-inputs) in this checkout
-first; the commands below assume them. From the repository root:
+Do steps 1 to 4 of
+[Supply the handed-in inputs](#supply-the-handed-in-inputs) for the `x86_64`
+architecture, leaving the long `aarch64` build for later, then start the stack:
 
 ```bash
 set -a
 . server/.env
 set +a
 tools/get-aria2c.sh amd64
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/start-compose-server.sh
+docker compose -f server/docker-compose.yml build --pull
+docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml up -d
 docker compose -f server/docker-compose.yml ps
 ```
 
-The helper first reports, in one list, every handed-in input the clone is
-missing (`bin/aria2c`, `ioxclient`, per-architecture `aria2c` deliverables,
-the two root public keys) and stops before building if any is absent. It then
-grants uid 10001 the `artifacts/` directory, builds both server images,
-bootstraps a fresh encrypted store, installs the two public roots into the
-config volume, starts both services, and stages the Guest Shell bundle and
-catalog certificate (server-side), both IOx packages, and the XR RPM. An
-existing complete store is preserved. If a package build fails after the
-stack is up, the helper exits nonzero while the stack keeps running; correct
-the reported problem and rerun `tools/provision-iox-packages.sh` or
-`tools/build-xr-package.sh --out artifacts/` before onboarding those devices.
+Open `https://<server-ip>:8080/`, or the host port set by `IRIS_GUI_PUBLISH`.
+A working Console here means the deployment stands; everything that follows
+adds device packages to it.
 
-Open `https://<server-ip>:8080/`, or the host port set by
-`IRIS_GUI_PUBLISH`. The helper above builds every device package; check
-**Settings -> Device packages** and expect none of them to report needing a
-build. A Guest Shell-only deployment can instead use the manual Compose
-commands in [Getting Started](getting-started.md#start-the-server) and build no
-native packages at all, which leaves IOx and XR unavailable.
+Now finish the packages, including the `aarch64` `aria2c` build that takes tens
+of minutes under emulation:
+
+```bash
+tools/get-ioxclient.sh
+(cd tools/aria2c-build && ./build.sh aarch64)
+cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
+sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
+tools/get-aria2c.sh arm64
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+  tools/build-xr-package.sh --out artifacts/
+```
+
+Then check **Settings -> Device packages** and expect nothing to report needing
+a build.
+
+`tools/start-compose-server.sh` does all of this in one run instead — grants
+uid 10001 the `artifacts/` directory, builds the images, bootstraps the store,
+installs the two public roots into the config volume, starts both services and
+builds the Guest Shell bundle, both IOx packages and the XR RPM, preserving an
+existing complete store. It is the better path once both `aria2c` binaries
+exist, because it checks every input first and stops before building if one is
+missing. On a first deployment it also means the stack cannot start until the
+emulated arm64 build has finished, which is why the sequence above puts the
+Console first. If a package build fails after the stack is up, the helper exits
+nonzero while the stack keeps running; fix the reported problem and rerun
+`tools/provision-iox-packages.sh` or `tools/build-xr-package.sh --out artifacts/`.
 
 ### Docker on separate hosts
 
