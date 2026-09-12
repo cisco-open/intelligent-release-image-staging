@@ -302,6 +302,16 @@ cp tools/aria2c-build/out/x86_64/aria2c deliverables/aria2c-x86_64
 sha256sum deliverables/aria2c-x86_64
 ```
 
+Edit the file in place and leave it world-readable. `server/Dockerfile` copies
+`tools/aria2c.sha256` into the server image and reads it as the runtime uid, so
+a rewrite that lands as `0600` — which an atomic write through a temporary file
+does by default — breaks the build that uses it. Check after editing:
+
+```bash
+chmod 0644 tools/aria2c.sha256
+ls -l tools/aria2c.sha256
+```
+
 Replace the `x86_64` line in `tools/aria2c.sha256` with that checksum and
 record in that file what you built, then install it:
 
@@ -550,12 +560,20 @@ tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
 tools/start-compose-server.sh. Never download or substitute an aria2c binary
 from anywhere else.
 
-Build every device package, not only the ones for the device types the
-operator named: the Guest Shell bundle, both IOx packages and the XR RPM. A
-package you skip shows as "Needs rebuild" in Console Settings -> Device
-packages and blocks that device type later.
-tools/start-compose-server.sh builds all of them in one run once its inputs
-are present, so leave IRIS_SKIP_XR unset.
+Build the Guest Shell bundle, the amd64 IOx package and the XR RPM in every
+proof of concept: they need no emulation and a missing one blocks that device
+type later. Build the arm64 IOx package too whenever an IE-3400 or other
+IE-3x00 device is in scope. Only skip it when none is, because it carries the
+emulated build.
+tools/start-compose-server.sh builds all four in one run once its inputs are
+present, so leave IRIS_SKIP_XR unset; tools/stage-iox-package.sh --arch amd64
+builds one IOx package when the arm64 one is out of scope, which
+tools/provision-iox-packages.sh cannot do.
+
+Console Settings -> Device packages lists every package type, so one you
+skipped on purpose stays "Not built / absent" forever. That is the correct end
+state. Report which packages you built and which you skipped and why, and never
+present a deliberately skipped package as a failure or try to hide it.
 
 Do that preparation yourself and announce each step as you take it:
 - Build both aria2c architectures with tools/aria2c-build/build.sh, place them
@@ -563,7 +581,16 @@ Do that preparation yourself and announce each step as you take it:
   you adopted your own build, and install them with tools/get-aria2c.sh. The
   edit leaves that file locally modified, which is expected and fine: leave it,
   do not revert it, and do not commit it. Never put a checksum in that file for
-  a binary you did not build in this session.
+  a binary you did not build in this session. Leave it world-readable:
+  server/Dockerfile copies it into the image and reads it as the runtime uid,
+  so a rewrite that lands as 0600 breaks the build. Run chmod 0644 and ls -l on
+  it after editing.
+- When you start the stack without tools/start-compose-server.sh, install the
+  two public roots into the server's config volume yourself, with the compose
+  run command in the layout section, and confirm them with ls in
+  $IRIS_CONFIG/instr/roots.d. Handing the roots to the package builders is a
+  different thing and does not cover this. Nothing later fails loudly for a
+  missing root: the Guest Shell bundle simply cannot be trust-bound.
 - Run tools/get-ioxclient.sh.
 - Enable arm64 emulation for the arm64 IOx package by installing the
   distribution's static QEMU package, then confirm the registration.
@@ -605,6 +632,8 @@ step is starting, and report each one as it finishes with the evidence it
 produced:
 
 - the roots directory validated: the two file names and their fingerprints
+- the public roots installed into the server's config volume, listed back from
+  inside the container
 - each aria2c architecture built, with the sha256 you recorded, then installed
 - ioxclient fetched, with its version
 - the Guest Shell bundle staged
@@ -669,8 +698,27 @@ set +a
 tools/get-aria2c.sh amd64
 docker compose -f server/docker-compose.yml build --pull
 docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml run --rm \
+  -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
+  'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" && \
+   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'
 docker compose -f server/docker-compose.yml up -d
 docker compose -f server/docker-compose.yml ps
+```
+
+The third command is easy to miss and nothing later reports it: it installs the
+two public roots into the server's config volume, which is separate from
+handing them to the package builders. Without it the server cannot
+self-provision a trust-bound Guest Shell bundle. `tools/start-compose-server.sh`
+does this for you; this sequence does not, because it starts the stack before
+the packages exist. It runs inside the server image as the runtime uid, so
+ownership is right, mounts only the `.pub` files read-only, and is idempotent.
+
+Confirm it before moving on:
+
+```bash
+docker compose -f server/docker-compose.yml exec iris \
+  ls -l "$IRIS_CONFIG/instr/roots.d"
 ```
 
 Open `https://<server-ip>:8080/`, or the host port set by `IRIS_GUI_PUBLISH`.
@@ -682,17 +730,31 @@ of minutes under emulation:
 
 ```bash
 tools/get-ioxclient.sh
-(cd tools/aria2c-build && ./build.sh aarch64)
-cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
-sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
-tools/get-aria2c.sh arm64
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+  tools/stage-iox-package.sh --arch amd64
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/build-xr-package.sh --out artifacts/
 ```
 
-Then check **Settings -> Device packages** and expect nothing to report needing
-a build.
+Add the arm64 package only when an IE-3x00 device is in scope. It needs the
+emulated `aarch64` `aria2c` build of step 1 first, and then:
+
+```bash
+cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
+sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
+tools/get-aria2c.sh arm64
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+  tools/stage-iox-package.sh --arch arm64
+```
+
+`tools/provision-iox-packages.sh` builds both architectures in one run and is
+the right command when both are in scope; it cannot be used to build only one.
+
+Then read **Settings -> Device packages**. Every package you built must report
+as built. A package you deliberately skipped stays **Not built / absent**, and
+that is the correct end state, not a failure: say which ones you skipped and
+why, so nobody reads that screen as a broken deployment. `iris-arm64.tar` sits
+there for every deployment without an IE-3x00 device.
 
 `tools/start-compose-server.sh` does all of this in one run instead — grants
 uid 10001 the `artifacts/` directory, builds the images, bootstraps the store,
@@ -742,6 +804,11 @@ docker compose --env-file server/server.env \
 docker compose --env-file server/server.env \
   -f server/docker-compose.server.yml run --rm iris iris-bootstrap
 docker compose --env-file server/server.env \
+  -f server/docker-compose.server.yml run --rm \
+  -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
+  'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" && \
+   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'
+docker compose --env-file server/server.env \
   -f server/docker-compose.server.yml up -d
 docker compose --env-file server/server.env \
   -f server/docker-compose.server.yml ps
@@ -777,16 +844,20 @@ in the foreground of an SSH session that may end:
 
 ```bash
 tools/get-ioxclient.sh
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+  tools/stage-iox-package.sh --arch amd64
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+  tools/build-xr-package.sh --out artifacts/
+
+# only with an IE-3x00 device in scope, after the emulated build finishes:
 cd tools/aria2c-build
 setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
 cd ../..
-# when the log's size gate and out/aarch64/aria2c say it finished:
 cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
 sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
 tools/get-aria2c.sh arm64
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/build-xr-package.sh --out artifacts/
+  tools/stage-iox-package.sh --arch arm64
 ```
 
 Run only the ones your device types need. The
@@ -836,10 +907,14 @@ Configure IRIS:
    that build: it is the build host's CPU that does the emulating, not a node's:
 
    ```bash
-   IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
+   IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+     tools/stage-iox-package.sh --arch amd64
    IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
      tools/build-xr-package.sh --out artifacts/
    ```
+
+   Add `--arch arm64` only with an IE-3x00 device in scope;
+   `tools/provision-iox-packages.sh` builds both and cannot build one.
 
    The same two public roots must also sit in `/data/config/instr/roots.d` on
    the server PVC, readable by uid 10001; step 4 of

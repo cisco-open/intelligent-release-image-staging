@@ -54,7 +54,11 @@ A binary you built will not match `tools/aria2c.sha256`, and
 copy `tools/aria2c-build/out/x86_64/aria2c` to `deliverables/aria2c-x86_64`,
 put its `sha256sum` on the `x86_64` line of `tools/aria2c.sha256`, and record
 what you built. That local modification is expected; never edit the file to
-clear a mismatch on a binary you did not build.
+clear a mismatch on a binary you did not build. Leave the file world-readable:
+the server image copies it in and reads it as the runtime uid, so a rewrite
+that lands as `0600` — which an atomic write through a temporary file does by
+default — breaks the build that uses it. Run `chmod 0644 tools/aria2c.sha256`
+after editing.
 [`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
 covers the patch set and the pinned toolchain.
 
@@ -231,8 +235,19 @@ bring up the two services without native package builds:
 ```bash
 docker compose -f server/docker-compose.yml build --pull
 docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml run --rm \
+  -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
+  'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" && \
+   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'
 docker compose -f server/docker-compose.yml up -d
 ```
+
+The third command is the one `start-compose-server.sh` would have run for you:
+it installs the two public roots into the server's config volume, which is a
+different thing from handing them to the package builders. Without it the
+server cannot self-provision a trust-bound Guest Shell bundle, and nothing
+reports the omission. Confirm it with
+`docker compose -f server/docker-compose.yml exec iris ls -l "$IRIS_CONFIG/instr/roots.d"`.
 
 For IOS-XR, also run `tools/build-xr-package.sh --out artifacts/`; the startup
 helper does not build the RPM. Check the artifacts and manifests in
