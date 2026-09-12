@@ -316,7 +316,9 @@ ownership change. On an amd64 server, the arm64 build registers Docker's ARM64
 emulation handler when it is missing, using the audited `tonistiigi/binfmt`
 image digest supplied via the required `BINFMT_IMAGE_DIGEST` environment
 variable; with the digest unset the build fails closed rather than pull an
-unpinned image. The helper only builds and places artifacts; it never contacts
+unpinned image. [ARM64 emulation](getting-started.md#arm64-emulation) covers
+checking for the handler, the distribution package that avoids the digest
+entirely, and resolving a reviewed tag to one. The helper only builds and places artifacts; it never contacts
 or changes a device.
 
 After a server certificate rotation, re-onboard each deployed IOx app so the

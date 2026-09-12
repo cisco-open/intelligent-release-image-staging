@@ -32,6 +32,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   `aarch64` build costs and how to start it so a closing SSH session does not
   cancel it. It previously named both inputs as prerequisites without saying
   how to obtain either.
+- The pages that assume those inputs already exist now point at where they come
+  from: the server and separate-host build steps for `aria2c`, the Kubernetes
+  root provisioning for the keypairs, and the IOx and container pages for the
+  ARM64 emulation digest, which no page previously explained how to obtain.
 - The one-host sequence brings the Console up before the `aarch64` `aria2c`
   build, which compiles under emulation for tens of minutes. That build used to
   sit between a fresh clone and any working system, because

@@ -75,6 +75,27 @@ size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
 `out/aarch64/aria2c` exists. It is safe to rerun; the layer cache makes a
 second attempt much shorter.
 
+### ARM64 emulation
+
+The arm64 package builders need Docker's arm64 emulation on an amd64 host.
+Check for it, and prefer your distribution's static QEMU package, which needs
+no digest and no privileged container:
+
+```bash
+grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
+```
+
+Where that is unavailable, the builders register the handler themselves and
+require `BINFMT_IMAGE_DIGEST` rather than pulling a floating tag. Review the
+`tonistiigi/binfmt` tag you intend to use, resolve it to a digest, and export
+it:
+
+```bash
+docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
+  --format '{{println .Manifest.Digest}}'
+export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
+```
+
 ### The two instruction roots
 
 Every device package embeds exactly two public roots and the build fails closed

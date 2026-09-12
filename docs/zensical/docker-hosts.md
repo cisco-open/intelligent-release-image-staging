@@ -155,6 +155,12 @@ paths; the project name selects the named volumes. Skip the bootstrap command
 and preserve those volumes. Stop and remove only the old Console container
 when replacing it; server data and device assignments stay with the server.
 
+The server host needs the handed-in `aria2c` before this build, and a fresh
+clone has none.
+[Obtain the handed-in inputs](getting-started.md#obtain-the-handed-in-inputs)
+covers accepting a hand-in, building one with the published producer, and
+creating the two instruction roots the device packages embed.
+
 Use this function in the following commands:
 
 ```bash
