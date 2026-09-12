@@ -107,6 +107,7 @@ changing the host. Nothing here installs itself.
 | Encrypted server state | `command -v age age-keygen` | `age` |
 | The two roots, checksums | `command -v git curl ssh-keygen sha256sum` | normally already installed |
 | The arm64 IOx package, and building the arm64 client yourself | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
+| IOx and IOS-XR packaging | `command -v skopeo` | `skopeo` |
 
 Also report `nproc`, `free -g` and `df -h` for the disk holding
 `/var/lib/docker` and the deployment directory. Two builds and the server
@@ -269,6 +270,42 @@ already have. Cisco publishes no checksum for that artifact and `ioxclient`
 signs every package a device installs, so the helper pins the binary itself
 against `tools/ioxclient.sha256` and refuses both a mismatch and a version that
 file does not record. Linux amd64 only.
+
+### 2b. The `ioxclient` packaging profile — IOx device types only
+
+`ioxclient` refuses every command, `--help` included, until a configuration
+file exists, and it tries to create one interactively. A non-interactive run
+fails at its password prompt, so packaging stops before it signs anything. A
+host that has packaged before already has the file, which is why this does not
+show up on a machine that has done it once.
+
+Offline packaging contacts nothing, so write a local packaging-only profile
+with placeholder endpoint values:
+
+```bash
+cat > ~/.ioxclientcfg.yaml <<'YAML'
+global:
+  version: "1.0"
+  active: packaging
+  debug: false
+profiles:
+  packaging:
+    host_ip: 127.0.0.1
+    host_port: 8443
+    auth_user: root
+    auth_passwd: placeholder
+    api_prefix: /iox/api/v2/hosting/
+    url_scheme: https
+    conn_timeout: 1000
+YAML
+ioxclient profiles list
+```
+
+Those values are deliberately inert: they point at localhost and are never used
+by `ioxclient package`, which only assembles and signs a directory. Never put a
+real device address or credential in this file — the packaging step has no
+business contacting a device, and IRIS reaches devices through its own
+onboarding, not through `ioxclient`.
 
 ### 3. ARM64 emulation — for anything arm64 on an amd64 host
 
@@ -521,7 +558,9 @@ Do that preparation yourself and announce each step as you take it:
   $IRIS_CONFIG/instr/roots.d. Handing the roots to the package builders is a
   different thing and does not cover this. Nothing later fails loudly for a
   missing root: the Guest Shell bundle simply cannot be trust-bound.
-- Run tools/get-ioxclient.sh.
+- Run tools/get-ioxclient.sh, then write the packaging-only ioxclient profile
+  from step 2b if ~/.ioxclientcfg.yaml does not exist. Use the placeholder
+  values given there; never a real device address or credential.
 - Enable arm64 emulation for the arm64 IOx package by installing the
   distribution's static QEMU package, then confirm the registration.
 

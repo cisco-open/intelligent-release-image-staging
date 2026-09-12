@@ -22,6 +22,7 @@ and the required device packages are built, use the browser for image import, de
 
 | Requirement | Notes |
 | --- | --- |
+| `skopeo` | Selects each architecture's image from the canonical OCI artifact when building IOx packages and the IOS-XR RPM. `device/iox/build.sh` and `tools/build-xr-package.sh` fail closed without it. |
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | `aria2c` binary | `tools/get-aria2c.sh amd64` fetches the published deliverable, verifies it against `tools/aria2c.sha256` and installs it before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. A host with no route to the release can hand one in or build it; see [Obtain the handed-in inputs](#obtain-the-handed-in-inputs). |
@@ -86,6 +87,38 @@ size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
 second attempt much shorter.
 [`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
 covers the patch set, the pinned toolchain, and publishing a new deliverable.
+
+### The `ioxclient` packaging profile
+
+`tools/get-ioxclient.sh` installs Cisco's packaging CLI, but `ioxclient`
+refuses every command until a configuration file exists and tries to create one
+interactively, so a scripted run stops at its password prompt. A machine that
+has packaged before already has `~/.ioxclientcfg.yaml`; a fresh one does not.
+Offline packaging contacts nothing, so give it a packaging-only profile with
+placeholder endpoint values:
+
+```bash
+cat > ~/.ioxclientcfg.yaml <<'YAML'
+global:
+  version: "1.0"
+  active: packaging
+  debug: false
+profiles:
+  packaging:
+    host_ip: 127.0.0.1
+    host_port: 8443
+    auth_user: root
+    auth_passwd: placeholder
+    api_prefix: /iox/api/v2/hosting/
+    url_scheme: https
+    conn_timeout: 1000
+YAML
+ioxclient profiles list
+```
+
+Keep those values inert. `ioxclient package` only assembles and signs a
+directory; IRIS reaches devices through its own onboarding, so a real device
+address or credential has no place in this file.
 
 ### ARM64 emulation
 
