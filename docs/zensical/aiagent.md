@@ -149,15 +149,39 @@ stack up with the Compose commands under
 start the arm64 build and the package builders. An interruption then costs the
 IE-3x00 package, not the deployment.
 
-The arm64 build is safe to interrupt and safe to rerun; Docker's layer cache
-picks up most of the work again. To see where an interrupted one got to:
+Start it so that it survives the session, and watch its log rather than its
+terminal. A plain `&` is not enough: the `docker buildx` client drives the
+build, so when an SSH session ends and takes the client with it, the build is
+cancelled on the daemon — which looks exactly like a compiler failure with no
+compiler error in the log.
 
 ```bash
+cd tools/aria2c-build
+setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
+echo $! > build-aarch64.pid
+```
+
+Follow it with the pid and the log, as often as you like:
+
+```bash
+kill -0 "$(cat tools/aria2c-build/build-aarch64.pid)" 2>/dev/null \
+  && echo "still building" || echo "finished or stopped"
+tail -n 5 tools/aria2c-build/build-aarch64.log
+```
+
+A detached build has no exit status to collect, so judge it by what it left
+behind. The log ends with a verification block and a size gate, and the
+artifact appears only on success:
+
+```bash
+grep -E 'HARD FAIL|OVER TARGET|UNDER TARGET' tools/aria2c-build/build-aarch64.log
 ls -l tools/aria2c-build/out/aarch64/aria2c
 ```
 
-No file, or one that fails its `sha256sum` comparison later, means rerun
-`./build.sh aarch64`. `build.sh` needs Docker, and refuses to run unless the
+`UNDER TARGET` or `OVER TARGET` with the artifact present is a completed build;
+`HARD FAIL`, or no artifact, is not. The build is safe to interrupt and safe to
+rerun — Docker's layer cache picks up most of the work again — so when in
+doubt, rerun `./build.sh aarch64`. `build.sh` needs Docker, and refuses to run unless the
 checkout sits at the pinned commit and every patch in `tools/aria2c-patches/`
 applies cleanly, so a build either corresponds to the published patch set or it
 fails.
@@ -444,11 +468,16 @@ finished.
 
 Before starting the arm64 build, say that it runs under emulation, takes tens
 of minutes, and is silent for long stretches, so the operator does not read
-silence as a hang and stop it. While it runs, report every few minutes: the
-elapsed time, the last line of its output, and that it is still going. Running
-it with its log on disk and tailing that log is enough. If it is interrupted,
-check tools/aria2c-build/out/aarch64/aria2c, rerun ./build.sh aarch64, and say
-that the layer cache makes the rerun shorter.
+silence as a hang and stop it. Start it detached with setsid nohup, writing to
+a log, exactly as step 1 of "Supply the handed-in inputs" shows. A plain & is
+not enough: the docker buildx client drives the build, so a client that dies
+with its SSH session cancels the build on the daemon, and the log then shows a
+build that stopped with no compiler error in it. While it runs, report every
+few minutes: the elapsed time, the last line of the log, and that it is still
+going. A detached build leaves no exit status to collect, so judge it by the
+size-gate line in the log and the artifact on disk rather than a return code.
+If it stopped, say so, rerun ./build.sh aarch64, and say that the layer cache
+makes the rerun shorter.
 
 Do not describe the whole sequence and then go quiet until it ends. Say which
 step is starting, and report each one as it finishes with the evidence it
@@ -619,10 +648,20 @@ server is unavailable using its local browser identity; API requests return
 or age key belongs on the Console host.
 
 Build device packages on the server host, where the inputs live, once its
-stack is up:
+stack is up. The `aarch64` `aria2c` build belongs here too, and it is the long
+emulated one: start it detached and follow its log exactly as
+[step 1](#1-the-aria2c-client-every-deployment) shows, rather than in the
+foreground of an SSH session that may end:
 
 ```bash
 tools/get-ioxclient.sh
+cd tools/aria2c-build
+setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
+cd ../..
+# when the log's size gate and out/aarch64/aria2c say it finished:
+cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
+sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
+tools/get-aria2c.sh arm64
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/build-xr-package.sh --out artifacts/
@@ -667,7 +706,10 @@ Configure IRIS:
 5. Build the needed device packages on a host that has the inputs for those
    device types — `ioxclient`, ARM64 emulation, the appmgr builder — and stage
    them with their manifests in the server's artifact storage before
-   onboarding devices:
+   onboarding devices. That host runs the long emulated `aarch64` `aria2c`
+   build as well; start it detached and follow its log as
+   [step 1](#1-the-aria2c-client-every-deployment) shows, never in the
+   foreground of an SSH session that may end:
 
    ```bash
    IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
