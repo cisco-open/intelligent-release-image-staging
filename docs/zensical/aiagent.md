@@ -41,6 +41,17 @@ Gather these non-secret decisions:
 | Package inputs | Both architecture `aria2c` binaries, `ioxclient`, and the XR build tooling; the server must serve the packages before onboarding. `tools/start-compose-server.sh` lists every missing one before building anything. A fresh clone has none of them: see [Supply the handed-in inputs](#supply-the-handed-in-inputs). |
 | Instruction trust roots | A directory holding exactly two public root keys (`.pub`). The private halves stay with their custodians; no installer or assistant may generate them, and the operator creates them as described in [Supply the handed-in inputs](#supply-the-handed-in-inputs). Every device package embeds these roots and the build fails closed without them. |
 
+Check out the repository at the same path on every deployment host. This
+guide uses `/opt/iris/intelligent-release-image-staging`, and every command
+below runs from there unless it says otherwise:
+
+```bash
+sudo install -d -o "$USER" -g "$USER" /opt/iris
+git clone https://github.com/cisco-open/intelligent-release-image-staging \
+  /opt/iris/intelligent-release-image-staging
+cd /opt/iris/intelligent-release-image-staging
+```
+
 Check out the same IRIS version on every deployment host. For a server already
 in use, identify its Compose project, container names, state volumes, age
 identity, and artifact directory before changing anything. Preserve those
@@ -159,63 +170,64 @@ image.
 Every device package embeds exactly two public roots, and the build fails
 closed without them. They are the trust anchors devices use to judge signed
 instructions, so **no installer and no assistant creates them.** The operator
-does. The private halves belong to two custodians and never leave their
-machines; only the public halves travel.
+runs the commands below. The private halves never leave the machine that made
+them; only the two `.pub` files travel.
 
-1. On the first custodian's machine, create a keypair. Answer the passphrase
-   prompt with a real passphrase — this is a signing key, not a throwaway:
+This guide keeps them at `$HOME/iris-roots`, outside the repository, and passes
+that path to every builder. The directory must hold the two public keys and
+nothing else, so create it and fill it in one go:
 
-   ```bash
-   ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-root-a
-   ```
+```bash
+install -d -m 0700 "$HOME/iris-custody"
+ssh-keygen -t ed25519 -C iris-root-a -f "$HOME/iris-custody/root-a"
+ssh-keygen -t ed25519 -C iris-root-b -f "$HOME/iris-custody/root-b"
+rm -rf "$HOME/iris-roots"
+install -d -m 0755 "$HOME/iris-roots"
+install -m 0644 "$HOME/iris-custody/root-a.pub" "$HOME/iris-custody/root-b.pub" \
+  "$HOME/iris-roots/"
+ls -A "$HOME/iris-roots"
+```
 
-   That writes the private `~/iris-root-a`, which stays there, and the public
-   `~/iris-root-a.pub`, which you will copy out.
+Answer each passphrase prompt with a real passphrase: these are signing keys.
+The last line must print exactly `root-a.pub  root-b.pub`. The `rm -rf` is
+there so a second run cannot leave a third file behind — a directory holding
+anything but the two public keys is refused with `must hold exactly two public
+roots (*.pub)` before anything is built.
 
-2. On the second custodian's separate machine, do the same with a different
-   name:
-
-   ```bash
-   ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-root-b
-   ```
-
-3. On the deployment host, make a directory that will hold the two public
-   halves and nothing else, and copy only the `.pub` files into it:
-
-   ```bash
-   install -d -m 0755 ~/iris-roots
-   install -m 0644 /path/to/root-a.pub /path/to/root-b.pub ~/iris-roots/
-   ```
-
-4. Check what you built before using it. Two files, two distinct
-   fingerprints, no private key anywhere in the directory:
-
-   ```bash
-   ls ~/iris-roots
-   ssh-keygen -lf ~/iris-roots/iris-root-a.pub
-   ssh-keygen -lf ~/iris-roots/iris-root-b.pub
-   ```
-
-   Exactly two `.pub` files must be present. Anything else — one key, three
-   keys, a stray `README`, a private key copied in by mistake — is refused with
-   `must hold exactly two public roots (*.pub)` before anything is built.
-
-5. Point the build at that directory:
-
-   ```bash
-   IRIS_INSTRUCTION_ROOTS_DIR=~/iris-roots tools/start-compose-server.sh
-   ```
-
-   It defaults to `instr-roots/` in the repository, so you may put the two
-   files there instead and pass nothing.
-
-A private root never reaches the server host, an installer argument, a device,
-or a chat window. For a proof of concept one person may hold both as disposable
-roots: that produces a working deployment, and, as
+For a production deployment run the `ssh-keygen` line on each custodian's own
+machine, carry only the two `.pub` files to the server host, and place them
+with the same `install -d` / `install -m 0644` pair. The private
+`$HOME/iris-custody` half stays with its custodian and never reaches the server
+host, an installer argument, a device, or a chat window. One person holding
+both is acceptable for a proof of concept: that produces a working deployment,
+and, as
 [Prepare instruction trust](getting-started.md#prepare-instruction-trust)
 states, it is not production custody or signing evidence. Certificates,
 rotation and revocation are in the
 [ceremony runbook](operations.md#instruction-root-ceremony-and-recovery).
+
+Where that directory has to exist depends on the layout:
+
+| Layout | Put `$HOME/iris-roots` on | Also |
+| --- | --- | --- |
+| Docker, one host | That host | — |
+| Docker, separate hosts | The server host only | The Console host builds no packages and needs no roots |
+| Kubernetes | The host that builds device packages | Copy the same two files into the server PVC, below |
+
+On Kubernetes the server also reads the roots from its own storage, so after
+the stack is up install the same two public keys into `/data/config/instr/roots.d`:
+
+```bash
+for root in root-a root-b; do
+  kubectl -n iris exec -i deployment/iris-seed-server -c iris -- sh -c \
+    "install -d -m 0755 /data/config/instr/roots.d && \
+     cat > /data/config/instr/roots.d/$root.pub" < "$HOME/iris-roots/$root.pub"
+done
+kubectl -n iris exec deployment/iris-seed-server -c iris -- \
+  ls -A /data/config/instr/roots.d
+```
+
+Never generate roots inside the pod, and never copy a private root there.
 
 ### 5. The appmgr builder — IOS-XR only
 
@@ -298,6 +310,10 @@ A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
 inputs" in this guide for the device types in scope, rather than reporting the
 deployment as blocked and stopping. Announce which steps you are taking.
 
+Use the paths this guide fixes and do not ask the operator for them: the
+checkout is /opt/iris/intelligent-release-image-staging, and the two public
+instruction roots go in $HOME/iris-roots on the host that builds packages.
+
 You may run the project's own helpers yourself: tools/aria2c-build/build.sh,
 tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
 tools/start-compose-server.sh. Never download or substitute an aria2c binary
@@ -346,7 +362,7 @@ set -a
 . server/.env
 set +a
 tools/get-aria2c.sh amd64
-IRIS_INSTRUCTION_ROOTS_DIR=/path/to/roots tools/start-compose-server.sh
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/start-compose-server.sh
 docker compose -f server/docker-compose.yml ps
 ```
 
@@ -427,8 +443,21 @@ docker compose --env-file server/console.env \
 Open the Console host's configured HTTPS URL. The Console can start while the
 server is unavailable using its local browser identity; API requests return
 503 until the authenticated server connection works. No server data volume
-or age key belongs on the Console host. Build device packages on the server
-host using the [package steps](docker-hosts.md#start-the-server-host).
+or age key belongs on the Console host.
+
+Build device packages on the server host, where the inputs live, once its
+stack is up:
+
+```bash
+tools/get-ioxclient.sh
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
+IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+  tools/build-xr-package.sh --out artifacts/
+```
+
+Run only the ones your device types need. The
+[package steps](docker-hosts.md#start-the-server-host) cover placement and
+ownership on that host.
 
 ### Kubernetes
 
@@ -462,13 +491,22 @@ Configure IRIS:
    new current value and authenticated Console access passes. The Console can
    temporarily use the previous token, so readiness alone cannot confirm that
    both projections have updated.
-5. Build the needed device packages and stage them with their manifests in
-   the server's artifact storage before onboarding devices. That build host
-   needs the remaining inputs for those device types — `ioxclient`, ARM64
-   emulation, the appmgr builder — and the same two public roots must also sit
-   in `/data/config/instr/roots.d` on the server PVC, readable by uid 10001, as
-   [Kubernetes](kubernetes.md) describes. Never create roots in the pod, and
-   never copy a private root there.
+5. Build the needed device packages on a host that has the inputs for those
+   device types — `ioxclient`, ARM64 emulation, the appmgr builder — and stage
+   them with their manifests in the server's artifact storage before
+   onboarding devices:
+
+   ```bash
+   IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
+   IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
+     tools/build-xr-package.sh --out artifacts/
+   ```
+
+   The same two public roots must also sit in `/data/config/instr/roots.d` on
+   the server PVC, readable by uid 10001; step 4 of
+   [Supply the handed-in inputs](#supply-the-handed-in-inputs) gives the
+   `kubectl` commands. Never create roots in the pod, and never copy a private
+   root there.
 
 Apply the configured manifests and wait for both Deployments:
 
