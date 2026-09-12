@@ -208,6 +208,32 @@ stack up with the Compose commands under
 start the arm64 build and the package builders. An interruption then costs the
 IE-3x00 package, not the deployment.
 
+Before starting it, offer the operator the ways to make it cheaper. They are
+worth a minute of conversation against tens of minutes of emulated compiling:
+
+- **Skip it.** It is needed only for IOx on IE-3400 and other IE-3x00 devices.
+  With none in scope, neither this build nor the arm64 IOx package is needed.
+- **Build it on real arm64 hardware.** Any arm64 machine with Docker that this
+  host can reach over SSH will do, and it needs no change to the build.
+  `build.sh` passes no `--builder`, so it uses whichever buildx builder is
+  current, and the artifact is exported back to this host:
+
+  ```bash
+  docker context create arm64-builder --docker "host=ssh://user@arm-host"
+  docker buildx create --name iris-arm --driver docker-container \
+    --platform linux/arm64 arm64-builder
+  docker buildx use iris-arm
+  (cd tools/aria2c-build && ./build.sh aarch64)
+  docker buildx use default
+  ```
+
+- **Try a newer QEMU.** The emulation a distribution ships is often older than
+  the one in a reviewed `tonistiigi/binfmt` image, and emulation speed varies
+  by QEMU version. Installing the handler from a digest you reviewed, as step 3
+  describes, may be faster — measure it rather than assume it.
+- **Keep the build cache.** An interrupted build resumes far more cheaply than
+  it started, so do not prune Docker's cache between attempts.
+
 Start it so that it survives the session, and watch its log rather than its
 terminal. A plain `&` is not enough: the `docker buildx` client drives the
 build, so when an SSH session ends and takes the client with it, the build is
@@ -483,8 +509,13 @@ approve, then continue rather than handing the list back.
 
 Before starting the aarch64 aria2c build, say what it costs — emulated, tens
 of minutes, every core busy — and that it is only needed for IOx on IE-3400
-and other IE-3x00 devices. Skip it when none are in scope; otherwise confirm,
-and offer a native arm64 machine as the faster place to build it.
+and other IE-3x00 devices. Then offer the four ways to make it cheaper that
+step 1 lists, as a question rather than a remark: skip it when no IE-3x00
+device is in scope, point a buildx builder at any arm64 machine the operator
+can reach, install a newer QEMU from a reviewed binfmt digest, or keep the
+build cache between attempts. Ask which one they want before starting, and say
+plainly that the arm64 machine is the only one that removes the emulation
+rather than tuning it.
 
 A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
 inputs" in this guide for the device types in scope, rather than reporting the
