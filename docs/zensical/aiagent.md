@@ -29,9 +29,10 @@ deployment because it is the default:
    from.
 3. **Which device types will be onboarded** — Guest Shell, IOx on amd64
    (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
-   IOS-XR appmgr, or none yet? This decides which inputs
-   [you must supply](#supply-the-handed-in-inputs); asking after a build has
-   started wastes it.
+   IOS-XR appmgr, or none yet? This tells you what to onboard. Build every
+   package regardless: a proof of concept prepares all of them, and
+   [Supply the handed-in inputs](#supply-the-handed-in-inputs) is the
+   assistant's own work, not the operator's.
 4. **The server's device-reachable IPv4 address**, and the Console URL if it
    is not that address on port 8080.
 
@@ -98,7 +99,13 @@ the project failing closed, not an incomplete checkout: neither an installer
 nor an assistant invents a seeder binary or a trust anchor. Everything else
 installs itself.
 
-Supply what the devices you intend to onboard actually need:
+In a proof of concept, prepare all of it and build every device package: a
+package that was never built shows as **Needs rebuild** in Console
+**Settings -> Device packages**, and that device type cannot be onboarded. An
+assistant does every step here itself except the trust roots of step 4, which
+only the operator creates.
+
+Each device type needs these:
 
 | What you will onboard | Supply first |
 | --- | --- |
@@ -268,8 +275,9 @@ Never generate roots inside the pod, and never copy a private root there.
 It clones Cisco's `ios-xr/xr-appmgr-build` at a pinned commit into
 `~/.cache/iris/xr-appmgr-build` on first use, so that step needs Docker and
 network access. `tools/start-compose-server.sh` runs it for you; set
-`IRIS_SKIP_XR=1` on a deployment with no XR devices, and run it directly when
-rebuilding later:
+`IRIS_SKIP_XR=1` only on a deployment that is certain to have no XR devices;
+a proof of concept leaves it unset and builds the RPM with everything else.
+Run the builder directly when rebuilding later:
 
 ```bash
 tools/build-xr-package.sh --out artifacts/
@@ -277,9 +285,10 @@ tools/build-xr-package.sh --out artifacts/
 
 ### The shortest path to a first staged image
 
-To watch IRIS stage an image without producing any device package, bring up the
-two services directly and use Guest Shell devices. This path still needs the
-`aria2c` client of step 1, and needs no roots:
+This is the quickest possible look at a staged image, not the proof-of-concept
+default: it produces no device package, so **Settings -> Device packages** will
+report every one of them as needing a build. Take it only when that is what the
+operator asked for. It still needs the `aria2c` client of step 1, and no roots:
 
 ```bash
 docker compose -f server/docker-compose.yml build --pull
@@ -376,20 +385,32 @@ tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
 tools/start-compose-server.sh. Never download or substitute an aria2c binary
 from anywhere else.
 
-Ask the operator, and wait, for these three:
-- Adopting a self-built aria2c: show the sha256sum you produced and let the
-  operator decide before any edit to tools/aria2c.sha256. Never edit that file
-  to clear a mismatch on a binary you did not build in this session.
-- The two instruction trust roots. Never create them. Give the operator the
-  numbered ssh-keygen procedure, ask for the directory holding only the two
-  public halves, and point IRIS_INSTRUCTION_ROOTS_DIR at it. Refuse a private
-  key if one is offered.
-- Installing host emulation packages or accepting a tonistiigi/binfmt digest,
-  because both change or trust the host.
+Build every device package, not only the ones for the device types the
+operator named: the Guest Shell bundle, both IOx packages and the XR RPM. A
+package you skip shows as "Needs rebuild" in Console Settings -> Device
+packages and blocks that device type later.
+tools/start-compose-server.sh builds all of them in one run once its inputs
+are present, so leave IRIS_SKIP_XR unset.
 
-When the operator wants a demonstration rather than a production deployment,
-offer the two-service Guest Shell path, which builds no device packages and
-needs no roots.
+Do that preparation yourself and announce each step as you take it:
+- Build both aria2c architectures with tools/aria2c-build/build.sh, place them
+  in deliverables/, record their sha256sums in tools/aria2c.sha256, say that
+  you adopted your own build, and install them with tools/get-aria2c.sh. Never
+  put a checksum in that file for a binary you did not build in this session.
+- Run tools/get-ioxclient.sh.
+- Enable arm64 emulation for the arm64 IOx package by installing the
+  distribution's static QEMU package, then confirm the registration.
+
+Exactly one thing is the operator's: the two instruction trust roots. Never
+create them. Give the operator the numbered ssh-keygen block from "Supply the
+handed-in inputs", wait for $HOME/iris-roots to exist with the two public
+halves in it, and refuse a private key if one is offered. Also ask before
+accepting a tonistiigi/binfmt digest, which trusts a third-party image, rather
+than the distribution package.
+
+Offer the two-service Guest Shell path, which builds no packages and needs no
+roots, only when the operator asks for the quickest possible look at a staged
+image. It is not the proof-of-concept default.
 
 Continue work within the authorized scope. Ask for a missing value only when
 it prevents a safe next step. Obtain approval for a destructive action unless
@@ -436,9 +457,11 @@ the reported problem and rerun `tools/provision-iox-packages.sh` or
 `tools/build-xr-package.sh --out artifacts/` before onboarding those devices.
 
 Open `https://<server-ip>:8080/`, or the host port set by
-`IRIS_GUI_PUBLISH`. A Guest Shell deployment can use the manual Compose
-commands in [Getting Started](getting-started.md#start-the-server) without
-building native packages. XR requires its RPM separately.
+`IRIS_GUI_PUBLISH`. The helper above builds every device package; check
+**Settings -> Device packages** and expect none of them to report needing a
+build. A Guest Shell-only deployment can instead use the manual Compose
+commands in [Getting Started](getting-started.md#start-the-server) and build no
+native packages at all, which leaves IOx and XR unavailable.
 
 ### Docker on separate hosts
 
