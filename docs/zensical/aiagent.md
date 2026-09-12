@@ -111,6 +111,34 @@ Also report `nproc`, `free -g` and `df -h` for the disk holding
 `/var/lib/docker` and the deployment directory. Two builds and the server
 image live there, and every image staged later needs its own size again on top.
 
+Check every host the chosen layout uses, and say which host each result came
+from.
+
+**Docker on separate hosts** has two, and they need different things. The
+server host needs everything in the table above, because it holds the state
+and builds the packages. The Console host needs only Docker with the Compose
+plugin and room for its own image: no `age`, no emulation, no build inputs, no
+server volume. The host that prepares the bundles also needs `python3` for
+`tools/prepare-docker-hosts.py`, and SSH to both hosts to deliver them.
+
+**Kubernetes** splits the same way, between a cluster and the host that builds
+images and packages. That build host needs the table above, minus `age` if the
+identity is created elsewhere, plus rights to push to a registry the nodes can
+pull from. For the cluster:
+
+| Need it for | Check |
+| --- | --- |
+| Everything | `kubectl version --client` and `kubectl config current-context` |
+| Creating the namespace and workloads | `kubectl auth can-i create deployment -A` |
+| The server PVC | `kubectl get storageclass` |
+| Reaching the server and Console | that Services of type LoadBalancer get addresses on this cluster |
+| Running amd64 images | amd64 worker capacity |
+
+NetworkPolicy is the one prerequisite a command cannot settle: a cluster whose
+CNI does not enforce it accepts the manifests and silently ignores them.
+Confirm enforcement with whoever runs the cluster, and say plainly that you
+confirmed it by asking rather than by testing.
+
 The `aarch64` `aria2c` build is the one step whose cost is worth stating before
 it starts: it compiles under emulation, takes tens of minutes, and keeps every
 core busy. It is needed only for IOx on IE-3400 and other IE-3x00 devices. If
@@ -445,7 +473,10 @@ Keep credentials and secrets out of chat, command output, logs, and source
 control. Read local credentials only when a step needs them. Do not copy
 server state, the age identity, or the management private key to the Console.
 Check the host before anything else, as "Check the host first" describes, and
-report what is present and what is missing in one message. Ask before
+report what is present and what is missing in one message. Check every host
+the layout uses and name which host each result came from: on separate Docker
+hosts the Console host needs far less than the server host, and on Kubernetes
+the cluster checks and the build host's checks are different lists. Ask before
 installing a package, adding a user to the docker group, or registering
 emulation handlers: those change the operator's machine. Install what they
 approve, then continue rather than handing the list back.
