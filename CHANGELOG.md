@@ -11,15 +11,6 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
-### Added
-- `ARIA2C_RELEASE_LTO=OFF` builds the `aria2c` client without link-time
-  optimization, for a proof of concept that must build the `aarch64` client on
-  an emulated host and cannot wait for the shippable one. LTO stays on by
-  default, and the fail-closed assertion that it was not silently skipped still
-  applies to every default build. A binary built this way is larger and slower,
-  the build and its verification report say so, and it must never be recorded
-  in `tools/aria2c.sha256` as the project's own.
-
 ### Fixed
 - The AI-guided PoC deployment guide carries a reader who is not the project's
   own operator to a working deployment. It says where every handed-in input

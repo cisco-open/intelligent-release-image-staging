@@ -15,18 +15,6 @@
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS build
 
-# Link-time optimization is ON for every binary this project ships, and the
-# configure step below asserts it was not silently skipped. A proof-of-concept
-# build on an emulated aarch64 host pays for it in wall-clock time and memory,
-# with every LTO job an emulated compiler, so it can be turned off deliberately
-# for a binary that is explicitly not the shipped artifact:
-#
-#   ARIA2C_RELEASE_LTO=OFF ./build.sh aarch64
-#
-# That produces a larger, slower client. Never use it for a binary you intend
-# to publish or to record in tools/aria2c.sha256 as the project's own.
-ARG ARIA2C_RELEASE_LTO=ON
-
 # Toolchain and dependency pins verified against alpine:3.24.1 on 2026-09-03,
 # by resolving every `pkg=version` below against the v3.24 APKINDEX for both
 # x86_64 and aarch64 (server/tests/test_aria2c_build_pins.py does exactly that,
@@ -121,7 +109,7 @@ RUN set -o pipefail; cmake -S /src -B /build -G Ninja \
       -DARIA2_WITH_SQLITE3=OFF \
       -DARIA2_WITH_LIBSSH2=OFF \
       -DARIA2_RELEASE_SIZE_OPTIMIZED=ON \
-      -DARIA2_RELEASE_LTO="$ARIA2C_RELEASE_LTO" \
+      -DARIA2_RELEASE_LTO=ON \
       -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie" \
       -DCMAKE_SKIP_RPATH=ON \
       2>&1 | tee /configure.log
@@ -129,12 +117,8 @@ RUN set -o pipefail; cmake -S /src -B /build -G Ninja \
 # ARIA2_RELEASE_LTO warns and continues if IPO is unsupported
 # (cmake/modules/Targets.cmake:195-201). That is a silent downgrade, so assert
 # it did not happen.
-RUN if [ "$ARIA2C_RELEASE_LTO" = "ON" ]; then \
-      if grep -q 'ARIA2_RELEASE_LTO requested but IPO is not supported' /configure.log; then \
-        echo "FAIL: LTO was requested but silently skipped."; exit 1; \
-      fi; \
-    else \
-      echo "NOTE: built with ARIA2C_RELEASE_LTO=OFF; not a shippable artifact."; \
+RUN if grep -q 'ARIA2_RELEASE_LTO requested but IPO is not supported' /configure.log; then \
+      echo "FAIL: LTO was requested but silently skipped."; exit 1; \
     fi
 
 RUN cmake --build /build --target aria2-next -j"$(nproc)"
@@ -148,7 +132,6 @@ RUN { \
       echo; echo "=== ldd ==="; ldd /build/aria2-next 2>&1 || true; \
       echo; echo "=== size (stripped) ==="; stat -c '%s bytes' /build/aria2-next; \
       echo "=== size (unstripped) ==="; stat -c '%s bytes' /aria2-next.unstripped; \
-      echo; echo "=== lto ==="; echo "ARIA2C_RELEASE_LTO=$ARIA2C_RELEASE_LTO"; \
       echo; echo "=== --version ==="; /build/aria2-next --version 2>&1 || true; \
     } > /verification.txt 2>&1; cat /verification.txt
 
