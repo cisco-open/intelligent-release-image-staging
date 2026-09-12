@@ -14,6 +14,30 @@ supported choices. The device workflow is the same for all three.
 IRIS distributes, verifies, and stages images. It never installs, activates,
 reloads, or changes boot variables. See [Guardrails](security.md#guardrails).
 
+## If you are the assistant, start here
+
+Ask the operator these four questions in one message and wait for the answers
+before running anything. Do not guess a layout, and do not start a Docker
+deployment because it is the default:
+
+1. **Where should the deployment live?** Offer
+   `/opt/iris/intelligent-release-image-staging` as the default. You create
+   the directory and clone into it.
+2. **Which layout — Docker on one host, Docker on separate hosts, or
+   Kubernetes?** For separate hosts also ask for the Console host; for
+   Kubernetes ask for the cluster context and a registry the nodes can pull
+   from.
+3. **Which device types will be onboarded** — Guest Shell, IOx on amd64
+   (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
+   IOS-XR appmgr, or none yet? This decides which inputs
+   [you must supply](#supply-the-handed-in-inputs); asking after a build has
+   started wastes it.
+4. **The server's device-reachable IPv4 address**, and the Console URL if it
+   is not that address on port 8080.
+
+Repeat the answers back, then follow this guide within the chosen layout and
+the full [Assistant operating rules](#assistant-operating-rules).
+
 ## Before you start
 
 Prepare a local, git-ignored credential file if an assistant will connect to
@@ -27,7 +51,8 @@ chmod 600 creds/deploy.env
 Keep credentials in that file or enter them directly in the Console. Do not
 paste passwords, tokens, or private keys into a chat.
 
-Gather these non-secret decisions:
+These are the non-secret decisions a deployment needs. An assistant asks for
+them as it goes, so an operator does not have to settle them all in advance:
 
 | Decision | What to record |
 | --- | --- |
@@ -299,11 +324,32 @@ build host's shell. Tokens and private keys stay in protected files.
 
 ## Assistant operating rules
 
-Give the assistant these requirements along with the chosen layout:
+Give the assistant these requirements. It asks for the layout and the rest
+itself, so the operator does not have to decide everything in advance:
 
 ```text
 Operate IRIS as a stage-only system. Never install, activate, reload, change
 boot variables, or replace the running software on a device.
+
+Before running anything, ask the operator these four questions in one message
+and wait for the answers. Do not guess a layout, and do not start a Docker
+deployment because it is the default:
+
+1. Where should the deployment live? Offer
+   /opt/iris/intelligent-release-image-staging as the default. You create the
+   directory and clone into it.
+2. Which layout: Docker on one host, Docker on separate hosts, or Kubernetes?
+   For separate hosts also ask for the Console host, and for Kubernetes ask
+   for the cluster context and the registry the nodes can pull from.
+3. Which device types will be onboarded: Guest Shell, IOx on amd64
+   (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
+   IOS-XR appmgr, or none yet? The answer decides which handed-in inputs you
+   need; asking later wastes a build.
+4. The server's device-reachable IPv4 address, and the Console URL if it is
+   not that address on port 8080.
+
+Repeat the answers back before acting on them, then work only within the
+layout that was chosen.
 
 Read CLAUDE.md and the current docs/zensical/ guide for the selected layout.
 Use Getting Started for Docker on one host, Docker on Separate Hosts for
