@@ -11,6 +11,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Fixed
+- The AI-guided PoC deployment guide says where the two handed-in inputs come
+  from, so a reader who is not the project's own operator can finish a
+  deployment. It gives the `aria2c` producer commands, the deliberate step of
+  adopting a self-built binary's checksum, the operator-side creation of the
+  two instruction roots, and the two-service Guest Shell path that needs no
+  roots at all. The assistant rules now say what to do when an input is
+  missing instead of only forbidding the assistant to invent it, which had
+  left an assistant reporting the deployment as blocked with no way forward.
+
 ## [2026.09.11]
 
 ### Added
