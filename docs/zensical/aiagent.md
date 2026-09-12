@@ -210,64 +210,60 @@ image.
 Every device package embeds exactly two public roots, and the build fails
 closed without them. They are the trust anchors devices use to judge signed
 instructions, so **no installer and no assistant creates them.** The operator
-runs the commands below. The private halves never leave the machine that made
-them; only the two `.pub` files travel.
+pastes one line. An assistant hands over the line for the chosen layout and
+waits.
 
-This guide keeps them at `$HOME/iris-roots`, outside the repository, and passes
-that path to every builder. The directory must hold the two public keys and
-nothing else, so create it and fill it in one go:
+Each line creates both keypairs, keeps the private halves in `~/iris-custody`,
+and leaves `~/iris-roots` holding the two public keys and nothing else — which
+is what the builders require. Answer each passphrase prompt with a real
+passphrase: these are signing keys. The last command prints the directory, and
+`root-a.pub  root-b.pub` is the expected output.
+
+**Docker on one host** — run it on that host:
 
 ```bash
-install -d -m 0700 "$HOME/iris-custody"
-ssh-keygen -t ed25519 -C iris-root-a -f "$HOME/iris-custody/root-a"
-ssh-keygen -t ed25519 -C iris-root-b -f "$HOME/iris-custody/root-b"
-rm -rf "$HOME/iris-roots"
-install -d -m 0755 "$HOME/iris-roots"
-install -m 0644 "$HOME/iris-custody/root-a.pub" "$HOME/iris-custody/root-b.pub" \
-  "$HOME/iris-roots/"
-ls -A "$HOME/iris-roots"
+install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
 ```
 
-Answer each passphrase prompt with a real passphrase: these are signing keys.
-The last line must print exactly `root-a.pub  root-b.pub`. The `rm -rf` is
-there so a second run cannot leave a third file behind — a directory holding
-anything but the two public keys is refused with `must hold exactly two public
-roots (*.pub)` before anything is built.
+**Docker on separate hosts** — run the same line on the **server** host, which
+builds the packages. The Console host needs no roots at all:
 
-For a production deployment run the `ssh-keygen` line on each custodian's own
-machine, carry only the two `.pub` files to the server host, and place them
-with the same `install -d` / `install -m 0644` pair. The private
-`$HOME/iris-custody` half stays with its custodian and never reaches the server
-host, an installer argument, a device, or a chat window. One person holding
-both is acceptable for a proof of concept: that produces a working deployment,
-and, as
+```bash
+install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
+```
+
+**Kubernetes** — run it on the host that builds device packages:
+
+```bash
+install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
+```
+
+Kubernetes needs one more line, because the server reads the roots from its own
+storage as well. Run it once the server pod is up, and expect the same two
+names back:
+
+```bash
+for r in root-a root-b; do kubectl -n iris exec -i deployment/iris-seed-server -c iris -- sh -c "install -d -m 0755 /data/config/instr/roots.d && cat > /data/config/instr/roots.d/$r.pub" < ~/iris-roots/$r.pub; done && kubectl -n iris exec deployment/iris-seed-server -c iris -- ls -A /data/config/instr/roots.d
+```
+
+Never generate roots inside the pod, and never copy a private root there.
+
+A directory holding anything but the two public keys is refused with `must hold
+exactly two public roots (*.pub)` before anything is built; the `rm -rf` in the
+line above is what keeps a second run from leaving a third file behind. Every
+builder in this guide is passed `IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"`,
+so there is nothing further to configure.
+
+For a production deployment, run the two `ssh-keygen` commands on two separate
+custodians' machines instead, carry only the `.pub` halves to the server host,
+and place them with the same `install` pair. A private root never reaches the
+server host, an installer argument, a device, or a chat window. One person
+holding both is acceptable for a proof of concept: that produces a working
+deployment, and, as
 [Prepare instruction trust](getting-started.md#prepare-instruction-trust)
 states, it is not production custody or signing evidence. Certificates,
 rotation and revocation are in the
 [ceremony runbook](operations.md#instruction-root-ceremony-and-recovery).
-
-Where that directory has to exist depends on the layout:
-
-| Layout | Put `$HOME/iris-roots` on | Also |
-| --- | --- | --- |
-| Docker, one host | That host | — |
-| Docker, separate hosts | The server host only | The Console host builds no packages and needs no roots |
-| Kubernetes | The host that builds device packages | Copy the same two files into the server PVC, below |
-
-On Kubernetes the server also reads the roots from its own storage, so after
-the stack is up install the same two public keys into `/data/config/instr/roots.d`:
-
-```bash
-for root in root-a root-b; do
-  kubectl -n iris exec -i deployment/iris-seed-server -c iris -- sh -c \
-    "install -d -m 0755 /data/config/instr/roots.d && \
-     cat > /data/config/instr/roots.d/$root.pub" < "$HOME/iris-roots/$root.pub"
-done
-kubectl -n iris exec deployment/iris-seed-server -c iris -- \
-  ls -A /data/config/instr/roots.d
-```
-
-Never generate roots inside the pod, and never copy a private root there.
 
 ### 5. The appmgr builder — IOS-XR only
 
@@ -402,9 +398,10 @@ Do that preparation yourself and announce each step as you take it:
   distribution's static QEMU package, then confirm the registration.
 
 Exactly one thing is the operator's: the two instruction trust roots. Never
-create them. Give the operator the numbered ssh-keygen block from "Supply the
-handed-in inputs", wait for $HOME/iris-roots to exist with the two public
-halves in it, and refuse a private key if one is offered. Also ask before
+create them. Paste the operator the single line for the chosen layout from
+step 4 of "Supply the handed-in inputs", wait for $HOME/iris-roots to hold the
+two public halves, and refuse a private key if one is offered. On Kubernetes,
+give them the second line for the server pod once it is running. Also ask before
 accepting a tonistiigi/binfmt digest, which trusts a third-party image, rather
 than the distribution package.
 
