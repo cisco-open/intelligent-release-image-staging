@@ -161,8 +161,11 @@ tools/get-aria2c.sh amd64
 ```
 
 Repeat both steps with `aarch64` / `arm64` when you built that architecture.
-Never edit `tools/aria2c.sha256` to silence a mismatch on a binary you did not
-build yourself — there, the mismatch is the mechanism working.
+That leaves `tools/aria2c.sha256` modified in your checkout, which is the
+expected state for a self-built client: leave the modification in place, and
+do not offer it upstream, where it would replace the checksum of the binary the
+project ships. Never edit that file to silence a mismatch on a binary you did
+not build yourself — there, the mismatch is the mechanism working.
 `tools/aria2c-build/README.md` covers the patch set, the pinned toolchain, and
 what to do when an Alpine security bump withdraws a pin.
 
@@ -391,8 +394,10 @@ are present, so leave IRIS_SKIP_XR unset.
 Do that preparation yourself and announce each step as you take it:
 - Build both aria2c architectures with tools/aria2c-build/build.sh, place them
   in deliverables/, record their sha256sums in tools/aria2c.sha256, say that
-  you adopted your own build, and install them with tools/get-aria2c.sh. Never
-  put a checksum in that file for a binary you did not build in this session.
+  you adopted your own build, and install them with tools/get-aria2c.sh. The
+  edit leaves that file locally modified, which is expected and fine: leave it,
+  do not revert it, and do not commit it. Never put a checksum in that file for
+  a binary you did not build in this session.
 - Run tools/get-ioxclient.sh.
 - Enable arm64 emulation for the arm64 IOx package by installing the
   distribution's static QEMU package, then confirm the registration.
