@@ -26,6 +26,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - A proof of concept builds every device package rather than only the ones a
   device type answer names, since a package nobody builds reports **Needs
   rebuild** in the Console and blocks that device type.
+- Getting Started says where the handed-in `aria2c` and the two instruction
+  roots come from, with the producer commands, the deliberate checksum
+  adoption, the one line that creates the roots, and what the emulated
+  `aarch64` build costs and how to start it so a closing SSH session does not
+  cancel it. It previously named both inputs as prerequisites without saying
+  how to obtain either.
 - The one-host sequence brings the Console up before the `aarch64` `aria2c`
   build, which compiles under emulation for tens of minutes. That build used to
   sit between a fresh clone and any working system, because

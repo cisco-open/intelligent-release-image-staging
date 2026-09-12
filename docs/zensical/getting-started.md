@@ -24,11 +24,71 @@ and the required device packages are built, use the browser for image import, de
 | --- | --- |
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
-| Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
+| Handed-in `aria2c` binary | Not downloaded by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. A fresh clone has none; [Obtain the handed-in inputs](#obtain-the-handed-in-inputs) covers accepting a hand-in or building one with the published producer. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used by server-side device operations. IOx also needs an IOS-XE credential for agent SSH-to-self. Do not commit real credentials. |
 | Device-image build inputs | The IOx/XR builder always creates an amd64 + arm64 OCI image, so both pinned `aria2c` binaries and a builder able to run both architectures are required. On an amd64 host, the IOx staging helper can register ARM64 emulation using an audited `BINFMT_IMAGE_DIGEST`; see [IOx builds](iox.md#build-and-stage-for-console-onboarding). |
+
+## Obtain the handed-in inputs
+
+A fresh clone has neither of these, on purpose, and
+`tools/start-compose-server.sh` reports both before it builds anything.
+
+### The `aria2c` client
+
+`deliverables/` is git-ignored and a release archive carries the producer
+rather than the binary, so take a hand-in from whoever built it — put it at
+`deliverables/aria2c-x86_64` or point `ARIA2C_DELIVERABLE` at it — or build it
+yourself:
+
+```bash
+git clone https://github.com/AnInsomniacy/aria2-next \
+  tools/aria2c-build/vendor/aria2-next
+git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
+(cd tools/aria2c-build && ./build.sh x86_64)
+```
+
+A binary you built will not match `tools/aria2c.sha256`, and
+`tools/get-aria2c.sh` fails closed on that, so adopting it is deliberate:
+copy `tools/aria2c-build/out/x86_64/aria2c` to `deliverables/aria2c-x86_64`,
+put its `sha256sum` on the `x86_64` line of `tools/aria2c.sha256`, and record
+what you built. That local modification is expected; never edit the file to
+clear a mismatch on a binary you did not build.
+[`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
+covers the patch set and the pinned toolchain.
+
+The `aarch64` build, needed only for IOx on IE-3400 and other IE-3x00 devices,
+compiles under emulation: it takes tens of minutes and keeps every core busy,
+because the whole toolchain is emulated. Skip it when no such device is in
+scope, run it on a native arm64 machine when you have one, and otherwise start
+it detached rather than in an SSH session that may end, since the `buildx`
+client dying cancels the build:
+
+```bash
+cd tools/aria2c-build
+setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
+```
+
+It has no exit status to collect that way. It finished if the log ends with a
+size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
+`out/aarch64/aria2c` exists. It is safe to rerun; the layer cache makes a
+second attempt much shorter.
+
+### The two instruction roots
+
+Every device package embeds exactly two public roots and the build fails closed
+without them. Create them yourself — no installer generates trust anchors — and
+keep `~/iris-roots` holding the two public keys and nothing else:
+
+```bash
+install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
+```
+
+Use a real passphrase at each prompt; the last command must print exactly the
+two `.pub` names. In production run the two `ssh-keygen` commands on separate
+custodians' machines and carry only the public halves over. See
+[Prepare instruction trust](#prepare-instruction-trust).
 
 ## Configure the server
 
@@ -218,7 +278,10 @@ listed greyed out instead.
 ## Prepare instruction trust
 
 Before building device packages, provision exactly two distinct offline-root
-public keys through the [custody ceremony](operations.md#instruction-root-ceremony-and-recovery).
+public keys. [Obtain the handed-in inputs](#the-two-instruction-roots) has the
+commands that create them; the
+[custody ceremony](operations.md#instruction-root-ceremony-and-recovery) covers
+certificates, rotation and revocation for a production deployment.
 Keep private roots with separate custodians/sites. Point package builders at the
 public `.pub` directory with `IRIS_INSTRUCTION_ROOTS_DIR` or
 `--instruction-roots-dir DIR`; use the current pinned amd64/arm64 aria2c inputs.
