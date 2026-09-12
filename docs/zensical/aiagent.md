@@ -414,6 +414,27 @@ Offer the two-service Guest Shell path, which builds no packages and needs no
 roots, only when the operator asks for the quickest possible look at a staged
 image. It is not the proof-of-concept default.
 
+These builds take minutes each, and the arm64 ones run under emulation and take
+longer still. Do not describe the whole sequence and then go quiet until it
+ends. Say which step is starting, and report each one as it finishes with the
+evidence it produced:
+
+- the roots directory validated: the two file names and their fingerprints
+- the Compose variables written, naming the file and the age recipients used
+- each aria2c architecture built, with the sha256 you recorded, then installed
+- ioxclient fetched, with its version
+- images built, encrypted store bootstrapped, both services up and healthy
+- the Guest Shell bundle staged
+- each IOx package built, by architecture, with its provenance manifest
+- the XR RPM built
+- Console Settings -> Device packages read back, naming anything that still
+  reports needing a build
+
+If a step is still running when there is nothing new to report, say that it is
+still running rather than nothing at all. If one fails, report which one, quote
+the error, and say what is unaffected — a package build that fails after the
+stack is up leaves the stack running.
+
 Continue work within the authorized scope. Ask for a missing value only when
 it prevents a safe next step. Obtain approval for a destructive action unless
 it has already been explicitly authorized. Use the Console for ordinary
