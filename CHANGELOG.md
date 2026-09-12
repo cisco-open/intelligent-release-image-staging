@@ -35,6 +35,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- Both guides document initialising instruction custody, which every
+  deployment needs before onboarding any device and neither page carried. A
+  server that has the two public roots still refuses every onboarding with
+  `instruction bootstrap unavailable` until it has an online signing key, a
+  certificate issued by a root, and an activated producer
+  (`iris-instr-key initialize`) — the producer step being the half that no page
+  named a command for. Documented for all three layouts, with the status fields
+  a proof of concept is expected to report, and with the tmpfs trap: the
+  runtime directory cannot be read by `docker cp`, so the public half is taken
+  from the config volume instead.
 - The AI-guided PoC deployment guide carries a reader who is not the project's
   own operator to a working deployment. It says where every handed-in input
   comes from — the `aria2c` producer and the deliberate adoption of a

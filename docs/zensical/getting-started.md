@@ -348,8 +348,40 @@ certificates, rotation and revocation for a production deployment.
 Keep private roots with separate custodians/sites. Point package builders at the
 public `.pub` directory with `IRIS_INSTRUCTION_ROOTS_DIR` or
 `--instruction-roots-dir DIR`; use the current pinned amd64/arm64 aria2c inputs.
-Initialize server online certificate/keylist custody and producer authority
-before expecting a device instruction stamp. Build success with disposable
+Then initialize the server's online certificate and producer authority, once
+the stack is up and before onboarding any device. Every onboarding fails with
+`ERROR: instruction bootstrap unavailable` until this is done, because each
+device's onboarding envelope is stamped by the instruction producer:
+
+```bash
+docker exec iris iris-instructions --generate-online-key
+docker cp iris:/etc/iris/instr/signing-key.pub ~/iris-online.pub
+ssh-keygen -q -s ~/iris-custody/root-a -I iris-online -n iris-server \
+  -V +0s:+30d ~/iris-online.pub
+docker cp ~/iris-online-cert.pub iris:/etc/iris/instr/signing-key-cert.pub
+docker exec iris iris-instructions --import-certificate \
+  /etc/iris/instr/signing-key-cert.pub
+docker exec iris iris-instr-key initialize
+docker exec iris iris-instructions --status
+```
+
+Copy the public half out of the config volume as shown, not out of
+`$IRIS_RUN`: the runtime directory is a tmpfs and `docker cp` cannot read a
+tmpfs mount, so an export written there succeeds and then cannot be found from
+the host. Signing uses the **private** root and prompts for its passphrase; it
+is the one step no installer or assistant performs.
+
+`iris-instr-key initialize` activates the producer, which is the authority half
+of this: the certificate alone leaves the stamper without an activated epoch,
+and onboarding keeps failing with the same message. On a cluster, use
+`kubectl exec` and `kubectl cp` against the server pod with `/data/config` in
+place of `/etc/iris`.
+
+Onboarding is ready when `iris-instructions --status` reports `enabled: true`
+with `signing_refused: false`. A proof of concept also reports
+`state: keylist_missing` and an overdue root ceremony: the keylist is the
+device-facing revocation list and does not gate stamping, and no custodian has
+attested these roots. Both are expected until a production ceremony. Build success with disposable
 roots is not production custody or signing evidence. Guest Shell can remain
 tracker-only when its runtime verifier is absent.
 

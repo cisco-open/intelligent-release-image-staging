@@ -549,7 +549,13 @@ Do that preparation yourself and announce each step as you take it:
 - Enable arm64 emulation for the arm64 IOx package by installing the
   distribution's static QEMU package, then confirm the registration.
 
-Exactly one thing is the operator's: the two instruction trust roots. Never
+Initialise instruction custody once the stack is up and before onboarding any
+device, as "Initialise instruction custody" describes. Without it every
+onboarding fails with "instruction bootstrap unavailable" on every platform,
+and the message is deliberately fixed, so it never says which part is missing.
+The certificate signing in that sequence is the operator's, like the roots.
+
+Exactly one thing else is the operator's: the two instruction trust roots. Never
 create them. Paste the operator the single line for the chosen layout from
 step 4 of "Supply the handed-in inputs", wait for $HOME/iris-roots to hold the
 two public halves, and refuse a private key if one is offered. On Kubernetes,
@@ -584,6 +590,8 @@ produced:
 - the roots directory validated: the two file names and their fingerprints
 - the public roots installed into the server's config volume, listed back from
   inside the container
+- instruction custody initialised: the certificate imported, the producer
+  activated, and the iris-instructions --status document quoted
 - each aria2c architecture built, with the sha256 you recorded, then installed
 - ioxclient fetched, with its version
 - the Guest Shell bundle staged
@@ -874,6 +882,103 @@ kubectl -n iris rollout status deployment/iris-console
 
 Use the Console Service's browser address. It is independent of the server
 Service address used by devices.
+
+## Initialise instruction custody
+
+Do this once the stack is up and **before onboarding any device**. Until it is
+done, every onboarding fails with `ERROR: instruction bootstrap unavailable`,
+on every platform, because each device's onboarding envelope is stamped by the
+server's instruction producer. Installing the two public roots is not enough:
+the producer also needs an online signing key, a certificate issued by one of
+your roots, and an activated producer epoch.
+
+The steps are the same everywhere; only the way you reach the server container
+changes.
+
+**Copy the public half out of the config volume, never out of `$IRIS_RUN`.**
+The runtime directory is a tmpfs (`server/docker-compose.yml` mounts
+`/run/iris` that way), and `docker cp` cannot read a tmpfs mount: an export
+written there succeeds and then "cannot be found" from the host. Generation
+already writes the public half into the config volume, so use that copy.
+
+### Docker on one host
+
+```bash
+docker exec iris iris-instructions --generate-online-key
+docker cp iris:/etc/iris/instr/signing-key.pub ~/iris-online.pub
+ssh-keygen -q -s ~/iris-custody/root-a -I iris-online -n iris-server \
+  -V +0s:+30d ~/iris-online.pub
+docker cp ~/iris-online-cert.pub iris:/etc/iris/instr/signing-key-cert.pub
+docker exec iris iris-instructions --import-certificate \
+  /etc/iris/instr/signing-key-cert.pub
+docker exec iris iris-instr-key initialize
+docker exec iris iris-instructions --status
+```
+
+The `ssh-keygen` step is the operator's: it uses the **private** root from
+`~/iris-custody` and prompts for its passphrase. An assistant hands the command
+over and waits, exactly as for the roots themselves, and never takes a private
+root or a passphrase.
+
+### Docker on separate hosts
+
+Identical, on the **server** host. The Console host has no custody role. Use
+that host's container name if its Compose project names it something other than
+`iris`:
+
+```bash
+docker ps --format '{{.Names}}'
+```
+
+### Kubernetes
+
+The same sequence through `kubectl`, with the cluster's config path
+`/data/config` in place of `/etc/iris`:
+
+```bash
+kubectl -n iris exec deployment/iris-seed-server -c iris -- \
+  iris-instructions --generate-online-key
+kubectl -n iris cp iris/<server-pod>:/data/config/instr/signing-key.pub \
+  ~/iris-online.pub -c iris
+ssh-keygen -q -s ~/iris-custody/root-a -I iris-online -n iris-server \
+  -V +0s:+30d ~/iris-online.pub
+kubectl -n iris cp ~/iris-online-cert.pub \
+  iris/<server-pod>:/data/config/instr/signing-key-cert.pub -c iris
+kubectl -n iris exec deployment/iris-seed-server -c iris -- \
+  iris-instructions --import-certificate /data/config/instr/signing-key-cert.pub
+kubectl -n iris exec deployment/iris-seed-server -c iris -- \
+  iris-instr-key initialize
+kubectl -n iris exec deployment/iris-seed-server -c iris -- \
+  iris-instructions --status
+```
+
+### Reading the status
+
+A proof of concept that is ready to onboard looks like this:
+
+```json
+{"enabled":true,"signing_refused":false,"state":"keylist_missing",
+ "certificate_days_to_expiry":29,"roots_configured":2,
+ "root_ceremony_overdue":"critical","root_quorum_degraded":true,
+ "roots_attested_180d":0}
+```
+
+Report it rather than hiding the alarming-looking fields, and say what they
+mean:
+
+- `state: keylist_missing` — the signed keylist is the revocation list
+  distributed to devices. It does not gate stamping, so onboarding works
+  without it; a production deployment installs one through the
+  [ceremony runbook](operations.md#instruction-root-ceremony-and-recovery).
+- `root_ceremony_overdue: critical`, `root_quorum_degraded: true`,
+  `roots_attested_180d: 0` — all three follow from custodians never having
+  attested these roots, which a proof of concept has not done. Expected here.
+- `certificate_days_to_expiry` — signing refuses with seven days or fewer
+  remaining, so a 30-day certificate gives about three weeks before it must be
+  re-signed with the same root.
+
+`enabled: true` with `signing_refused: false` is what says onboarding will
+stamp.
 
 ## Verify the deployment
 
