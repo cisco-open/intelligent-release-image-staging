@@ -420,15 +420,34 @@ ends. Say which step is starting, and report each one as it finishes with the
 evidence it produced:
 
 - the roots directory validated: the two file names and their fingerprints
-- the Compose variables written, naming the file and the age recipients used
 - each aria2c architecture built, with the sha256 you recorded, then installed
 - ioxclient fetched, with its version
-- images built, encrypted store bootstrapped, both services up and healthy
 - the Guest Shell bundle staged
 - each IOx package built, by architecture, with its provenance manifest
 - the XR RPM built
 - Console Settings -> Device packages read back, naming anything that still
   reports needing a build
+
+On Docker on one host, also report the environment file written with the age
+recipients used, the images built, the encrypted store bootstrapped, and both
+services up and healthy.
+
+On Docker on separate hosts, report each host separately and never imply the
+Console proves the server: the host bundles prepared, each bundle delivered and
+owned by uid/gid 10001, server.env and console.env written on their own hosts,
+the server image built and its store bootstrapped, the server healthy, the
+Console image built and serving browser HTTPS, and then an authenticated
+Console request reaching the server. A Console that loads while API requests
+return 503 is not a working deployment; say so plainly rather than reporting
+the Console as up.
+
+On Kubernetes, report the images built and pushed with the digests you pinned
+in kustomization.yaml, the namespace and every Secret provisioned, the PVC
+bound, the Services and NetworkPolicy applied, each Deployment reaching ready,
+the two public roots installed into /data/config/instr/roots.d and listed back
+from the pod, and the device packages staged into the server's artifact
+storage. Pod readiness is not an authenticated Console request; report them
+separately.
 
 If a step is still running when there is nothing new to report, say that it is
 still running rather than nothing at all. If one fails, report which one, quote
