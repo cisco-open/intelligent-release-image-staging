@@ -106,7 +106,7 @@ changing the host. Nothing here installs itself.
 | Everything | `id -nG \| grep -w docker` | membership in `docker`, or every command needs `sudo` |
 | Encrypted server state | `command -v age age-keygen` | `age` |
 | The two roots, checksums | `command -v git curl ssh-keygen sha256sum` | normally already installed |
-| Building the arm64 client yourself, when the release is unreachable | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
+| The arm64 IOx package, and building the arm64 client yourself | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
 
 Also report `nproc`, `free -g` and `df -h` for the disk holding
 `/var/lib/docker` and the deployment directory. Two builds and the server
@@ -141,10 +141,12 @@ Confirm enforcement with whoever runs the cluster, and say plainly that you
 confirmed it by asking rather than by testing.
 
 Both `aria2c` architectures are fetched from a published release and verified,
-so a normal host builds nothing. Only a host that cannot reach that release
-falls back to building the client, and the `aarch64` fallback is expensive:
-emulated, tens of minutes, every core busy. If the fetch fails, say so and ask
-before falling back to that build.
+so a normal host compiles nothing. ARM64 emulation is still needed to build the
+arm64 IOx package itself, because the device image runs `apk add` and `chmod`
+steps inside the target platform, but that is a short build rather than a
+compile. Only a host that cannot reach the release falls back to building the
+client, and that fallback is the expensive one: emulated, tens of minutes,
+every core busy. If the fetch fails, say so and ask before falling back to it.
 
 ## Supply the handed-in inputs
 
@@ -268,10 +270,11 @@ signs every package a device installs, so the helper pins the binary itself
 against `tools/ioxclient.sha256` and refuses both a mismatch and a version that
 file does not record. Linux amd64 only.
 
-### 3. ARM64 emulation — only to build arm64 on an amd64 host
+### 3. ARM64 emulation — for anything arm64 on an amd64 host
 
-Needed for the `aarch64` `aria2c` build and the arm64 IOx package. Check
-whether the host already has it:
+Needed to build the arm64 IOx package, whose device image runs `apk add` and
+`chmod` steps inside the target platform, and for the `aarch64` `aria2c` build
+in the fallback case. Check whether the host already has it:
 
 ```bash
 grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready

@@ -89,7 +89,10 @@ covers the patch set, the pinned toolchain, and publishing a new deliverable.
 
 ### ARM64 emulation
 
-The arm64 package builders need Docker's arm64 emulation on an amd64 host.
+The arm64 package builders need Docker's arm64 emulation on an amd64 host: the
+device image runs `apk add` and `chmod` steps inside the target platform, so
+the package cannot be assembled without it even though the `aria2c` client
+itself is fetched rather than compiled.
 Check for it, and prefer your distribution's static QEMU package, which needs
 no digest and no privileged container:
 
