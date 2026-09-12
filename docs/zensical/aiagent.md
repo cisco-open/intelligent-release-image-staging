@@ -141,7 +141,11 @@ emulation of step 3.
 **Build `x86_64` first and leave `aarch64` until the stack is up.** The arm64
 build compiles under emulation and takes far longer than the native one — tens
 of minutes on a modest host — and it prints nothing for long stretches while
-the compiler runs. `tools/start-compose-server.sh` checks for both
+the compiler runs. It is heavy as well as slow: the compile runs one job per
+host core and the link phase runs parallel LTO jobs, with every one of them an
+emulated compiler, so expect the host to be busy throughout. Build it on a
+native arm64 machine instead when you have one; nothing else about the step
+changes. `tools/start-compose-server.sh` checks for both
 architectures before it builds anything, so running it first means waiting out
 that whole build before anything works. Instead: build `x86_64`, bring the
 stack up with the Compose commands under
