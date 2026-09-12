@@ -36,8 +36,10 @@ deployment because it is the default:
 4. **The server's device-reachable IPv4 address**, and the Console URL if it
    is not that address on port 8080.
 
-Repeat the answers back, then follow this guide within the chosen layout and
-the full [Assistant operating rules](#assistant-operating-rules).
+Repeat the answers back, then [check the host](#check-the-host-first) and say
+what it is missing before installing anything. Follow this guide within the
+chosen layout and the full
+[Assistant operating rules](#assistant-operating-rules).
 
 ## Before you start
 
@@ -90,6 +92,31 @@ Check out the same IRIS version on every deployment host. For a server already
 in use, identify its Compose project, container names, state volumes, age
 identity, and artifact directory before changing anything. Preserve those
 settings and data unless a reset is explicitly part of the task.
+
+## Check the host first
+
+Run through this before cloning anything, report what is present and what is
+missing in one message, and ask the operator before installing a package or
+changing the host. Nothing here installs itself.
+
+| Need it for | Check | Ubuntu or Debian package |
+| --- | --- | --- |
+| Everything | `docker version`, `docker compose version`, `docker buildx version` | `docker.io` plus the Compose plugin, or Docker's own repository |
+| Everything | `id -nG \| grep -w docker` | membership in `docker`, or every command needs `sudo` |
+| Encrypted server state | `command -v age age-keygen` | `age` |
+| The two roots, checksums | `command -v git curl ssh-keygen sha256sum` | normally already installed |
+| The arm64 IOx package only | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
+
+Also report `nproc`, `free -g` and `df -h` for the disk holding
+`/var/lib/docker` and the deployment directory. Two builds and the server
+image live there, and every image staged later needs its own size again on top.
+
+The `aarch64` `aria2c` build is the one step whose cost is worth stating before
+it starts: it compiles under emulation, takes tens of minutes, and keeps every
+core busy. It is needed only for IOx on IE-3400 and other IE-3x00 devices. If
+none are in scope, say so and skip both that build and the arm64 package; if
+they are, offer a native arm64 machine as the faster place to build, or confirm
+that the operator wants it built here.
 
 ## Supply the handed-in inputs
 
@@ -417,6 +444,17 @@ command. Preserve existing server state and device assignments.
 Keep credentials and secrets out of chat, command output, logs, and source
 control. Read local credentials only when a step needs them. Do not copy
 server state, the age identity, or the management private key to the Console.
+Check the host before anything else, as "Check the host first" describes, and
+report what is present and what is missing in one message. Ask before
+installing a package, adding a user to the docker group, or registering
+emulation handlers: those change the operator's machine. Install what they
+approve, then continue rather than handing the list back.
+
+Before starting the aarch64 aria2c build, say what it costs — emulated, tens
+of minutes, every core busy — and that it is only needed for IOx on IE-3400
+and other IE-3x00 devices. Skip it when none are in scope; otherwise confirm,
+and offer a native arm64 machine as the faster place to build it.
+
 A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
 inputs" in this guide for the device types in scope, rather than reporting the
 deployment as blocked and stopping. Announce which steps you are taking.
