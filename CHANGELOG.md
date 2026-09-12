@@ -11,6 +11,17 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Added
+- `tools/get-aria2c.sh` fetches the `aria2c` client from this project's own
+  published release when no local deliverable is present, verifies it against
+  `tools/aria2c.sha256` exactly as it verifies a hand-in, and keeps the
+  verified copy in `deliverables/` where the device-package builders read it. A
+  deployment no longer builds the client, including the `aarch64` one that
+  compiled under emulation for tens of minutes. `ARIA2C_NO_DOWNLOAD=1` forbids
+  the fetch, and a downloaded asset that fails the checksum is discarded rather
+  than installed. `tools/aria2c-build/README.md` documents publishing a new
+  deliverable and the GPLv2 obligation that comes with it.
+
 ### Fixed
 - The AI-guided PoC deployment guide carries a reader who is not the project's
   own operator to a working deployment. It says where every handed-in input

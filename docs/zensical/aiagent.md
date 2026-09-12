@@ -106,7 +106,7 @@ changing the host. Nothing here installs itself.
 | Everything | `id -nG \| grep -w docker` | membership in `docker`, or every command needs `sudo` |
 | Encrypted server state | `command -v age age-keygen` | `age` |
 | The two roots, checksums | `command -v git curl ssh-keygen sha256sum` | normally already installed |
-| The arm64 IOx package only | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
+| Building the arm64 client yourself, when the release is unreachable | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
 
 Also report `nproc`, `free -g` and `df -h` for the disk holding
 `/var/lib/docker` and the deployment directory. Two builds and the server
@@ -140,12 +140,11 @@ CNI does not enforce it accepts the manifests and silently ignores them.
 Confirm enforcement with whoever runs the cluster, and say plainly that you
 confirmed it by asking rather than by testing.
 
-The `aarch64` `aria2c` build is the one step whose cost is worth stating before
-it starts: it compiles under emulation, takes tens of minutes, and keeps every
-core busy. It is needed only for IOx on IE-3400 and other IE-3x00 devices. If
-none are in scope, say so and skip both that build and the arm64 package; if
-they are, offer a native arm64 machine as the faster place to build, or confirm
-that the operator wants it built here.
+Both `aria2c` architectures are fetched from a published release and verified,
+so a normal host builds nothing. Only a host that cannot reach that release
+falls back to building the client, and the `aarch64` fallback is expensive:
+emulated, tens of minutes, every core busy. If the fetch fails, say so and ask
+before falling back to that build.
 
 ## Supply the handed-in inputs
 
@@ -175,12 +174,25 @@ steps. Work through the ones your table row names, in order.
 ### 1. The `aria2c` client — every deployment
 
 `server/Dockerfile` copies `bin/aria2c` into the server image, so no stack
-builds without it. `deliverables/` is git-ignored and a release archive carries
-the producer rather than the binary, so a clone starts with nothing.
+builds without it. Install both architectures:
 
-Accept a hand-in from whoever built it — put it at `deliverables/aria2c-x86_64`,
-or point `ARIA2C_DELIVERABLE` at it — or build it from the producer this
-repository ships for exactly that purpose:
+```bash
+tools/get-aria2c.sh amd64
+tools/get-aria2c.sh arm64
+```
+
+The helper fetches this project's published deliverable, refuses anything that
+does not match `tools/aria2c.sha256`, installs it into `bin/`, and keeps a
+verified copy in `deliverables/`, where the device-package builders look. Take
+`arm64` only when an IE-3400 or other IE-3x00 device is in scope; nothing else
+uses it.
+
+That is the whole step on a normal host. The rest of this section is for a host
+that cannot reach the release, or an operator who prefers to build their own.
+
+Accept a hand-in instead — put it at `deliverables/aria2c-<cpu>` or point
+`ARIA2C_DELIVERABLE` at it — or build it from the producer this repository
+ships:
 
 ```bash
 git clone https://github.com/AnInsomniacy/aria2-next \
@@ -189,75 +201,41 @@ git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
 (cd tools/aria2c-build && ./build.sh x86_64)
 ```
 
-Run `./build.sh aarch64` as well for IOx on IE-3x00; that build needs the ARM64
-emulation of step 3.
+`build.sh` needs Docker, and refuses to run unless the checkout sits at the
+pinned commit and every patch in `tools/aria2c-patches/` applies cleanly, so a
+build either corresponds to the published patch set or it fails.
 
-**Build `x86_64` first and leave `aarch64` until the stack is up.** The arm64
-build compiles under emulation and takes far longer than the native one — tens
-of minutes on a modest host — and it prints nothing for long stretches while
-the compiler runs. It is heavy as well as slow: the compile runs one job per
-host core and the link phase runs parallel LTO jobs, with every one of them an
-emulated compiler, so expect the host to be busy throughout. Build it on a
-native arm64 machine instead when you have one; nothing else about the step
-changes. `tools/start-compose-server.sh` checks for both
-architectures before it builds anything, so running it first means waiting out
-that whole build before anything works. Instead: build `x86_64`, bring the
-stack up with the Compose commands under
-[Docker on one host](#docker-on-one-host), confirm the Console, and only then
-start the arm64 build and the package builders. An interruption then costs the
-IE-3x00 package, not the deployment.
-
-On a fresh proof-of-concept host there is no fast version of this build: the
-whole toolchain is emulated, and nothing in the repository shortens that. Work
-down this list before starting it.
-
-1. **Do not build it at all.** It is needed only for IOx on IE-3400 and other
-   IE-3x00 devices. With none in scope, skip this build and the arm64 IOx
-   package. This is the only option that removes the cost rather than trimming
-   it, and on most proofs of concept it applies.
-2. **Install a newer QEMU first.** A distribution's emulation is often older
-   than the one in a reviewed `tonistiigi/binfmt` image, and emulation speed
-   varies by QEMU version, so installing the handler from a digest the operator
-   reviewed may cut the build time. Offer it before starting, not after, since
-   switching afterwards means building twice. Measure it; do not claim a
-   figure.
-3. **Protect the build you start.** Launch it detached as shown below so a
-   closing session cannot cancel it, and never prune Docker's cache while it or
-   a retry is in progress: a resumed build is far cheaper than a cold one. An
-   aborted build is the most expensive outcome here.
-
-Then build it, and say plainly that this is the slow path: tens of minutes with
-every core busy.
-
-If the operator happens to have any arm64 machine reachable over SSH, that
-removes the emulation entirely and is worth asking about once. `build.sh`
-passes no `--builder`, so it uses whichever buildx builder is current and
-exports the artifact back here:
+**A binary you built will not match `tools/aria2c.sha256`, and that is
+expected.** A different toolchain or musl version produces different bytes, and
+`tools/get-aria2c.sh` fails closed on the mismatch. Adopting your own build is
+therefore deliberate:
 
 ```bash
-docker context create arm64-builder --docker "host=ssh://user@arm-host"
-docker buildx create --name iris-arm --driver docker-container \
-  --platform linux/arm64 arm64-builder
-docker buildx use iris-arm
-(cd tools/aria2c-build && ./build.sh aarch64)
-docker buildx use default
+cp tools/aria2c-build/out/x86_64/aria2c deliverables/aria2c-x86_64
+sha256sum deliverables/aria2c-x86_64
 ```
 
-Keep the result. `deliverables/aria2c-aarch64` is git-ignored, so it survives
-pulls and branch changes, and `tools/build-device-image.sh` also accepts a
-prebuilt client from `ARIA2C_BIN_ARM64` or a staged
-`artifacts/iris-agent-arm.tgz`. A second deployment on the same host, or
-another host the operator can copy that file to, never repeats this build.
+Edit `tools/aria2c.sha256` in place and leave it world-readable.
+`server/Dockerfile` copies it into the server image and reads it as the runtime
+uid, so a rewrite that lands as `0600` — which an atomic write through a
+temporary file does by default — breaks the build that uses it. Check after
+editing:
 
-This ordering is the same for all three layouts. Only the host changes: the one
-Docker host, the server host of a separate-host pair, or the host that builds
-packages for Kubernetes. A cluster emulates nothing on your behalf.
+```bash
+chmod 0644 tools/aria2c.sha256
+ls -l tools/aria2c.sha256
+```
 
-Start it so that it survives the session, and watch its log rather than its
-terminal. A plain `&` is not enough: the `docker buildx` client drives the
-build, so when an SSH session ends and takes the client with it, the build is
-cancelled on the daemon — which looks exactly like a compiler failure with no
-compiler error in the log.
+Then `tools/get-aria2c.sh amd64` installs it. Never edit that file to silence a
+mismatch on a binary you did not build yourself — there, the mismatch is the
+mechanism working, and a mismatch on a downloaded asset means the asset is
+wrong and must not be adopted.
+
+The `aarch64` build is the expensive one: it compiles under emulation, takes
+tens of minutes and keeps every core busy, because the whole toolchain is
+emulated. Needing it at all now means the release could not be reached, so
+prefer fixing that. If you must build it, launch it detached so a closing
+session cannot cancel the `buildx` client, and leave Docker's cache alone:
 
 ```bash
 cd tools/aria2c-build
@@ -265,66 +243,15 @@ setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
 echo $! > build-aarch64.pid
 ```
 
-Follow it with the pid and the log, as often as you like:
-
-```bash
-kill -0 "$(cat tools/aria2c-build/build-aarch64.pid)" 2>/dev/null \
-  && echo "still building" || echo "finished or stopped"
-tail -n 5 tools/aria2c-build/build-aarch64.log
-```
-
-A detached build has no exit status to collect, so judge it by what it left
-behind. The log ends with a verification block and a size gate, and the
-artifact appears only on success:
+A detached build leaves no exit status. It finished if the log ends with a size
+gate (`UNDER TARGET` or `OVER TARGET`, never `HARD FAIL`) and
+`out/aarch64/aria2c` exists:
 
 ```bash
 grep -E 'HARD FAIL|OVER TARGET|UNDER TARGET' tools/aria2c-build/build-aarch64.log
 ls -l tools/aria2c-build/out/aarch64/aria2c
 ```
 
-`UNDER TARGET` or `OVER TARGET` with the artifact present is a completed build;
-`HARD FAIL`, or no artifact, is not. The build is safe to interrupt and safe to
-rerun — Docker's layer cache picks up most of the work again — so when in
-doubt, rerun `./build.sh aarch64`. `build.sh` needs Docker, and refuses to run unless the
-checkout sits at the pinned commit and every patch in `tools/aria2c-patches/`
-applies cleanly, so a build either corresponds to the published patch set or it
-fails.
-
-**A binary you built will not match `tools/aria2c.sha256`, and that is
-expected.** A different toolchain or musl version produces different bytes, and
-`tools/get-aria2c.sh` fails closed on the mismatch. Adopting your own build is
-therefore a deliberate act. The build leaves its artifact in
-`tools/aria2c-build/out/<arch>/aria2c`, beside a `BUILD-INFO.json` describing
-it:
-
-```bash
-cp tools/aria2c-build/out/x86_64/aria2c deliverables/aria2c-x86_64
-sha256sum deliverables/aria2c-x86_64
-```
-
-Edit the file in place and leave it world-readable. `server/Dockerfile` copies
-`tools/aria2c.sha256` into the server image and reads it as the runtime uid, so
-a rewrite that lands as `0600` — which an atomic write through a temporary file
-does by default — breaks the build that uses it. Check after editing:
-
-```bash
-chmod 0644 tools/aria2c.sha256
-ls -l tools/aria2c.sha256
-```
-
-Replace the `x86_64` line in `tools/aria2c.sha256` with that checksum and
-record in that file what you built, then install it:
-
-```bash
-tools/get-aria2c.sh amd64
-```
-
-Repeat both steps with `aarch64` / `arm64` when you built that architecture.
-That leaves `tools/aria2c.sha256` modified in your checkout, which is the
-expected state for a self-built client: leave the modification in place, and
-do not offer it upstream, where it would replace the checksum of the binary the
-project ships. Never edit that file to silence a mismatch on a binary you did
-not build yourself — there, the mismatch is the mechanism working.
 `tools/aria2c-build/README.md` covers the patch set, the pinned toolchain, and
 what to do when an Alpine security bump withdraws a pin.
 
@@ -607,25 +534,21 @@ Offer the two-service Guest Shell path, which builds no packages and needs no
 roots, only when the operator asks for the quickest possible look at a staged
 image. It is not the proof-of-concept default.
 
-Order the work so the operator has something working early: build the x86_64
-aria2c, bring the stack up, confirm the Console, and only then run the arm64
-aria2c build and the package builders. Do not run
-tools/start-compose-server.sh before both architectures exist, because it
-checks for both and will not start the stack until the long emulated build has
-finished.
+Install both aria2c architectures with tools/get-aria2c.sh, which fetches the
+published deliverable and verifies it. Take arm64 only when an IE-3400 or
+other IE-3x00 device is in scope. Building aria2c from source is the fallback
+for a host that cannot reach the release, or an operator who asks for it: say
+which of the two you are doing.
 
-Before starting the arm64 build, say that it runs under emulation, takes tens
-of minutes, and is silent for long stretches, so the operator does not read
-silence as a hang and stop it. Start it detached with setsid nohup, writing to
-a log, exactly as step 1 of "Supply the handed-in inputs" shows. A plain & is
-not enough: the docker buildx client drives the build, so a client that dies
-with its SSH session cancels the build on the daemon, and the log then shows a
-build that stopped with no compiler error in it. While it runs, report every
-few minutes: the elapsed time, the last line of the log, and that it is still
-going. A detached build leaves no exit status to collect, so judge it by the
-size-gate line in the log and the artifact on disk rather than a return code.
-If it stopped, say so, rerun ./build.sh aarch64, and say that the layer cache
-makes the rerun shorter.
+When you do have to build the aarch64 client, say first that it runs under
+emulation, takes tens of minutes and is silent for long stretches, so the
+operator does not read silence as a hang and stop it. Start it detached with
+setsid nohup, writing to a log, exactly as step 1 shows: a plain & dies with
+the SSH session, the buildx client dying cancels the build on the daemon, and
+the log then shows a build that stopped with no compiler error in it. Report
+the elapsed time and the log's last line every few minutes. A detached build
+leaves no exit status, so judge it by the size-gate line and the artifact on
+disk. If it stopped, say so and rerun ./build.sh aarch64.
 
 Do not describe the whole sequence and then go quiet until it ends. Say which
 step is starting, and report each one as it finishes with the evidence it
@@ -836,11 +759,9 @@ server is unavailable using its local browser identity; API requests return
 or age key belongs on the Console host.
 
 Build device packages on the server host, where the inputs live, once its
-stack is up. The `aarch64` `aria2c` build belongs here too, and it is the long
-emulated one: put the options for making it cheaper to the operator first, then
-start it detached and follow its log, both exactly as
-[step 1](#1-the-aria2c-client-every-deployment) shows, rather than running it
-in the foreground of an SSH session that may end:
+stack is up. The `aarch64` client is fetched rather than built, like the amd64
+one; only a host that cannot reach the release falls back to
+[step 1](#1-the-aria2c-client-every-deployment)'s emulated build:
 
 ```bash
 tools/get-ioxclient.sh
@@ -849,12 +770,7 @@ IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/build-xr-package.sh --out artifacts/
 
-# only with an IE-3x00 device in scope, after the emulated build finishes:
-cd tools/aria2c-build
-setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
-cd ../..
-cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
-sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
+# only with an IE-3x00 device in scope:
 tools/get-aria2c.sh arm64
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/stage-iox-package.sh --arch arm64
@@ -899,12 +815,11 @@ Configure IRIS:
 5. Build the needed device packages on a host that has the inputs for those
    device types — `ioxclient`, ARM64 emulation, the appmgr builder — and stage
    them with their manifests in the server's artifact storage before
-   onboarding devices. That host runs the long emulated `aarch64` `aria2c`
-   build as well, so offer the operator the ways to make it cheaper, then start
-   it detached and follow its log, both as
-   [step 1](#1-the-aria2c-client-every-deployment) shows — never in the
-   foreground of an SSH session that may end. A cluster changes nothing about
-   that build: it is the build host's CPU that does the emulating, not a node's:
+   onboarding devices. That host fetches both `aria2c` architectures with
+   `tools/get-aria2c.sh`; only a host that cannot reach the release falls back
+   to [step 1](#1-the-aria2c-client-every-deployment)'s emulated build, and a
+   cluster does not help with it — the build host's own CPU does the
+   emulating, not a node's:
 
    ```bash
    IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \

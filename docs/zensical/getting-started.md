@@ -24,7 +24,7 @@ and the required device packages are built, use the browser for image import, de
 | --- | --- |
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
-| Handed-in `aria2c` binary | Not downloaded by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. A fresh clone has none; [Obtain the handed-in inputs](#obtain-the-handed-in-inputs) covers accepting a hand-in or building one with the published producer. |
+| `aria2c` binary | `tools/get-aria2c.sh amd64` fetches the published deliverable, verifies it against `tools/aria2c.sha256` and installs it before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. A host with no route to the release can hand one in or build it; see [Obtain the handed-in inputs](#obtain-the-handed-in-inputs). |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used by server-side device operations. IOx also needs an IOS-XE credential for agent SSH-to-self. Do not commit real credentials. |
@@ -37,10 +37,20 @@ A fresh clone has neither of these, on purpose, and
 
 ### The `aria2c` client
 
-`deliverables/` is git-ignored and a release archive carries the producer
-rather than the binary, so take a hand-in from whoever built it — put it at
-`deliverables/aria2c-x86_64` or point `ARIA2C_DELIVERABLE` at it — or build it
-yourself:
+Install it for both architectures you need:
+
+```bash
+tools/get-aria2c.sh amd64
+tools/get-aria2c.sh arm64
+```
+
+The helper fetches this project's published deliverable, refuses anything that
+does not match `tools/aria2c.sha256`, installs it into `bin/`, and keeps a
+verified copy in `deliverables/`, where the device-package builders look. Take
+`arm64` only for IOx on IE-3400 and other IE-3x00 devices.
+
+A host with no route to that release can take a hand-in instead — at
+`deliverables/aria2c-<cpu>`, or via `ARIA2C_DELIVERABLE` — or build one:
 
 ```bash
 git clone https://github.com/AnInsomniacy/aria2-next \
@@ -50,24 +60,20 @@ git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
 ```
 
 A binary you built will not match `tools/aria2c.sha256`, and
-`tools/get-aria2c.sh` fails closed on that, so adopting it is deliberate:
-copy `tools/aria2c-build/out/x86_64/aria2c` to `deliverables/aria2c-x86_64`,
-put its `sha256sum` on the `x86_64` line of `tools/aria2c.sha256`, and record
-what you built. That local modification is expected; never edit the file to
-clear a mismatch on a binary you did not build. Leave the file world-readable:
-the server image copies it in and reads it as the runtime uid, so a rewrite
-that lands as `0600` — which an atomic write through a temporary file does by
-default — breaks the build that uses it. Run `chmod 0644 tools/aria2c.sha256`
-after editing.
-[`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
-covers the patch set and the pinned toolchain.
+`tools/get-aria2c.sh` fails closed on that, so adopting it is deliberate: copy
+`tools/aria2c-build/out/x86_64/aria2c` to `deliverables/aria2c-x86_64`, put its
+`sha256sum` on the `x86_64` line of `tools/aria2c.sha256`, and record what you
+built. That local modification is expected; never edit the file to clear a
+mismatch on a binary you did not build, and a mismatch on the downloaded asset
+means the asset is wrong and must not be adopted. Leave the file
+world-readable: the server image copies it in and reads it as the runtime uid,
+so a rewrite that lands as `0600` — which an atomic write through a temporary
+file does by default — breaks the build that uses it. Run
+`chmod 0644 tools/aria2c.sha256` after editing.
 
-The `aarch64` build, needed only for IOx on IE-3400 and other IE-3x00 devices,
-compiles under emulation: it takes tens of minutes and keeps every core busy,
-because the whole toolchain is emulated. Skip it when no such device is in
-scope, run it on a native arm64 machine when you have one, and otherwise start
-it detached rather than in an SSH session that may end, since the `buildx`
-client dying cancels the build:
+The `aarch64` build is the expensive fallback: it compiles under emulation,
+takes tens of minutes and keeps every core busy. Start it detached so a closing
+SSH session cannot cancel the `buildx` client, and leave Docker's cache alone:
 
 ```bash
 cd tools/aria2c-build
@@ -78,6 +84,8 @@ It has no exit status to collect that way. It finished if the log ends with a
 size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
 `out/aarch64/aria2c` exists. It is safe to rerun; the layer cache makes a
 second attempt much shorter.
+[`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
+covers the patch set, the pinned toolchain, and publishing a new deliverable.
 
 ### ARM64 emulation
 
