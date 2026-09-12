@@ -207,40 +207,32 @@ stack up with the Compose commands under
 start the arm64 build and the package builders. An interruption then costs the
 IE-3x00 package, not the deployment.
 
-Take the cheapest option that applies, in this order. Put it to the operator
-before starting the build, not after.
+On a fresh proof-of-concept host there is no fast version of this build: the
+whole toolchain is emulated, and nothing in the repository shortens that. Work
+down this list before starting it.
 
-1. **Do not build it.** It is needed only for IOx on IE-3400 and other IE-3x00
-   devices. With none in scope, skip this build and the arm64 IOx package.
-2. **Reuse a binary that already exists.** The builders take a prebuilt one
-   from `ARIA2C_BIN_ARM64`, from a staged `artifacts/iris-agent-arm.tgz`, or
-   from `deliverables/aria2c-aarch64`, checking each against
-   `tools/aria2c.sha256`. Ask whether the operator has one from an earlier
-   build or another host, and copy it in rather than rebuilding:
+1. **Do not build it at all.** It is needed only for IOx on IE-3400 and other
+   IE-3x00 devices. With none in scope, skip this build and the arm64 IOx
+   package. This is the only option that removes the cost rather than trimming
+   it, and on most proofs of concept it applies.
+2. **Install a newer QEMU first.** A distribution's emulation is often older
+   than the one in a reviewed `tonistiigi/binfmt` image, and emulation speed
+   varies by QEMU version, so installing the handler from a digest the operator
+   reviewed may cut the build time. Offer it before starting, not after, since
+   switching afterwards means building twice. Measure it; do not claim a
+   figure.
+3. **Protect the build you start.** Launch it detached as shown below so a
+   closing session cannot cancel it, and never prune Docker's cache while it or
+   a retry is in progress: a resumed build is far cheaper than a cold one. An
+   aborted build is the most expensive outcome here.
 
-   ```bash
-   cp /path/to/aria2c-aarch64 deliverables/aria2c-aarch64
-   ```
+Then build it, and say plainly that this is the slow path: tens of minutes with
+every core busy.
 
-   `deliverables/` is git-ignored, so one that is already there survives branch
-   changes and pulls. Check before building:
-
-   ```bash
-   ls -l deliverables/aria2c-aarch64 artifacts/iris-agent-arm.tgz 2>/dev/null
-   ```
-
-3. **Reuse the build cache.** An interrupted or repeated build resumes far more
-   cheaply than a cold one. Never prune Docker's cache between attempts.
-4. **Build it emulated.** This is the slow path: tens of minutes, every core
-   busy. Take it only when 1 to 3 do not apply, and say that is what you are
-   doing.
-
-Two further options change the cost but need something the operator may not
-have. Offer them, do not assume them: a reviewed `tonistiigi/binfmt` digest
-installs a newer QEMU than a distribution ships, which may emulate faster —
-measure, do not claim it; and any arm64 machine reachable over SSH removes the
-emulation entirely, because `build.sh` passes no `--builder` and uses whichever
-buildx builder is current, exporting the artifact back here:
+If the operator happens to have any arm64 machine reachable over SSH, that
+removes the emulation entirely and is worth asking about once. `build.sh`
+passes no `--builder`, so it uses whichever buildx builder is current and
+exports the artifact back here:
 
 ```bash
 docker context create arm64-builder --docker "host=ssh://user@arm-host"
@@ -251,9 +243,15 @@ docker buildx use iris-arm
 docker buildx use default
 ```
 
-This ordering is the same for all three layouts. Only the host changes: the
-one Docker host, the server host of a separate-host pair, or the host that
-builds packages for Kubernetes. A cluster emulates nothing on your behalf.
+Keep the result. `deliverables/aria2c-aarch64` is git-ignored, so it survives
+pulls and branch changes, and `tools/build-device-image.sh` also accepts a
+prebuilt client from `ARIA2C_BIN_ARM64` or a staged
+`artifacts/iris-agent-arm.tgz`. A second deployment on the same host, or
+another host the operator can copy that file to, never repeats this build.
+
+This ordering is the same for all three layouts. Only the host changes: the one
+Docker host, the server host of a separate-host pair, or the host that builds
+packages for Kubernetes. A cluster emulates nothing on your behalf.
 
 Start it so that it survives the session, and watch its log rather than its
 terminal. A plain `&` is not enough: the `docker buildx` client drives the
@@ -527,14 +525,14 @@ installing a package, adding a user to the docker group, or registering
 emulation handlers: those change the operator's machine. Install what they
 approve, then continue rather than handing the list back.
 
-Before starting the aarch64 aria2c build, work down the ordered list in step 1
-of "Supply the handed-in inputs" and take the first option that applies: skip
-the build when no IE-3x00 device is in scope, reuse a prebuilt binary the
-operator already has, reuse the build cache, and only then build it emulated.
-Check deliverables/aria2c-aarch64 and artifacts/iris-agent-arm.tgz before
-deciding. State which option you took and what it costs: the emulated build
-takes tens of minutes and keeps every core busy. This ordering applies to all
-three layouts; only the host running the build changes.
+Before starting the aarch64 aria2c build, work down the list in step 1 of
+"Supply the handed-in inputs". On a fresh host that build has no fast version:
+skip it when no IE-3x00 device is in scope, offer a newer QEMU from a reviewed
+binfmt digest before starting rather than after, then launch it detached and
+leave the cache alone. State that it is the slow path and what it costs: tens
+of minutes with every core busy. Ask once whether any arm64 machine is
+reachable over SSH, since that removes the emulation. This ordering applies to
+all three layouts; only the host running the build changes.
 
 A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
 inputs" in this guide for the device types in scope, rather than reporting the
