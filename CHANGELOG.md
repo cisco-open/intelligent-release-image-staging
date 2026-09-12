@@ -12,6 +12,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- `tools/build-xr-package.sh` refuses to start without `rpmbuild`, naming the
+  `rpm` package, rather than failing later inside the vendored appmgr builder's
+  log. Both guides list it as an IOS-XR prerequisite, alongside `skopeo`.
 - IOx packaging supplies its own inert `ioxclient` profile in a scratch `HOME`
   for the packaging call. `ioxclient` refuses every command until a
   configuration file exists and creates one interactively, so packaging stopped

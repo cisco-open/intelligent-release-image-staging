@@ -23,6 +23,7 @@ and the required device packages are built, use the browser for image import, de
 | Requirement | Notes |
 | --- | --- |
 | `skopeo` | Selects each architecture's image from the canonical OCI artifact when building IOx packages and the IOS-XR RPM. `device/iox/build.sh` and `tools/build-xr-package.sh` fail closed without it. |
+| `rpmbuild` | Assembles the IOS-XR appmgr RPM. Debian and Ubuntu ship it in the `rpm` package; `tools/build-xr-package.sh` fails closed without it. Not needed when no XR device is in scope. |
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | `aria2c` binary | `tools/get-aria2c.sh amd64` fetches the published deliverable, verifies it against `tools/aria2c.sha256` and installs it before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. A host with no route to the release can hand one in or build it; see [Obtain the handed-in inputs](#obtain-the-handed-in-inputs). |

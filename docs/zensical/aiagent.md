@@ -108,6 +108,7 @@ changing the host. Nothing here installs itself.
 | The two roots, checksums | `command -v git curl ssh-keygen sha256sum` | normally already installed |
 | The arm64 IOx package, and building the arm64 client yourself | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
 | IOx and IOS-XR packaging | `command -v skopeo` | `skopeo` |
+| The IOS-XR appmgr RPM | `command -v rpmbuild` | `rpm` |
 
 Also report `nproc`, `free -g` and `df -h` for the disk holding
 `/var/lib/docker` and the deployment directory. Two builds and the server
