@@ -215,13 +215,26 @@ down this list before starting it.
    IE-3x00 devices. With none in scope, skip this build and the arm64 IOx
    package. This is the only option that removes the cost rather than trimming
    it, and on most proofs of concept it applies.
-2. **Install a newer QEMU first.** A distribution's emulation is often older
+2. **Build it without link-time optimization.** LTO is the most expensive phase
+   of this build, and under emulation every one of its jobs is an emulated
+   compiler. A proof of concept can drop it:
+
+   ```bash
+   ARIA2C_RELEASE_LTO=OFF ./build.sh aarch64
+   ```
+
+   The result is a larger, slower client that is explicitly not the artifact
+   the project ships, and the build says so. Adopt its checksum locally the
+   same way as any self-built binary, and never record it in
+   `tools/aria2c.sha256` as the project's own. Measure the difference on your
+   host rather than assuming a figure.
+3. **Install a newer QEMU first.** A distribution's emulation is often older
    than the one in a reviewed `tonistiigi/binfmt` image, and emulation speed
    varies by QEMU version, so installing the handler from a digest the operator
    reviewed may cut the build time. Offer it before starting, not after, since
    switching afterwards means building twice. Measure it; do not claim a
    figure.
-3. **Protect the build you start.** Launch it detached as shown below so a
+4. **Protect the build you start.** Launch it detached as shown below so a
    closing session cannot cancel it, and never prune Docker's cache while it or
    a retry is in progress: a resumed build is far cheaper than a cold one. An
    aborted build is the most expensive outcome here.
@@ -527,9 +540,10 @@ approve, then continue rather than handing the list back.
 
 Before starting the aarch64 aria2c build, work down the list in step 1 of
 "Supply the handed-in inputs". On a fresh host that build has no fast version:
-skip it when no IE-3x00 device is in scope, offer a newer QEMU from a reviewed
-binfmt digest before starting rather than after, then launch it detached and
-leave the cache alone. State that it is the slow path and what it costs: tens
+skip it when no IE-3x00 device is in scope, offer ARIA2C_RELEASE_LTO=OFF for a
+proof-of-concept binary, offer a newer QEMU from a reviewed binfmt digest
+before starting rather than after, then launch it detached and leave the cache
+alone. State that it is the slow path and what it costs: tens
 of minutes with every core busy. Ask once whether any arm64 machine is
 reachable over SSH, since that removes the emulation. This ordering applies to
 all three layouts; only the host running the build changes.

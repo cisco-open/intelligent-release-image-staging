@@ -70,6 +70,12 @@ cd tools/aria2c-build
 setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
 ```
 
+A proof of concept can also drop link-time optimization, the most expensive
+phase of this build, with `ARIA2C_RELEASE_LTO=OFF ./build.sh aarch64`. That
+produces a larger, slower client which is not the artifact the project ships;
+adopt its checksum locally as with any self-built binary, and never record it
+in `tools/aria2c.sha256` as the project's own.
+
 It has no exit status to collect that way. It finished if the log ends with a
 size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
 `out/aarch64/aria2c` exists. It is safe to rerun; the layer cache makes a

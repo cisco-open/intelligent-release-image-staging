@@ -42,6 +42,15 @@ PIN_SHA="d4971f0e12322e2ffcdb1721911b7d5c6206d0e5"
 # "Aria2 Next" in --version.
 BIN_NAME="aria2c"
 
+# Link-time optimization, ON for anything shippable. OFF trades a larger and
+# slower binary for a much cheaper build, which matters only on the emulated
+# aarch64 path; see the ARG in Dockerfile.
+LTO="${ARIA2C_RELEASE_LTO:-ON}"
+case "$LTO" in
+  ON|OFF) ;;
+  *) echo "FAIL: ARIA2C_RELEASE_LTO must be ON or OFF, got '$LTO'" >&2; exit 2 ;;
+esac
+
 # Size gates from CLAUDE.md: target < 10 MB, hard fail > 15 MB.
 SIZE_TARGET=$((10 * 1024 * 1024))
 SIZE_HARD_FAIL=$((15 * 1024 * 1024))
@@ -95,6 +104,8 @@ echo "pin:       $PIN_TAG / $PIN_SHA"
 echo "version:   $VERSION (read from CMakeLists.txt)"
 echo "artifact:  $BIN_NAME  (release name: $RELEASE_NAME)"
 echo "epoch:     $SOURCE_DATE_EPOCH"
+echo "lto:       $LTO"
+[ "$LTO" = "ON" ] || echo "           (not a shippable artifact)"
 echo
 
 mkdir -p "$OUT"
@@ -107,6 +118,7 @@ printf '%s\n' 'aria2-next/.git' 'aria2-next/docs/media' > "$REPO_ROOT/vendor/.do
 docker buildx build \
   --platform "$PLATFORM" \
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+  --build-arg "ARIA2C_RELEASE_LTO=$LTO" \
   --target artifact \
   --output "type=local,dest=$OUT" \
   --progress plain \
