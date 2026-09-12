@@ -271,41 +271,24 @@ signs every package a device installs, so the helper pins the binary itself
 against `tools/ioxclient.sha256` and refuses both a mismatch and a version that
 file does not record. Linux amd64 only.
 
-### 2b. The `ioxclient` packaging profile — IOx device types only
+### 2b. The `ioxclient` packaging profile — nothing to do
 
 `ioxclient` refuses every command, `--help` included, until a configuration
-file exists, and it tries to create one interactively. A non-interactive run
-fails at its password prompt, so packaging stops before it signs anything. A
-host that has packaged before already has the file, which is why this does not
-show up on a machine that has done it once.
+file exists in `HOME`, and it tries to create one interactively, so a scripted
+run dies at its password prompt before anything is packaged. `device/iox/build.sh`
+handles that itself: it writes an inert packaging profile into a scratch `HOME`
+for the length of the `ioxclient package` call.
 
-Offline packaging contacts nothing, so write a local packaging-only profile
-with placeholder endpoint values:
+That profile points at localhost with a placeholder credential and is thrown
+away with the build context. Packaging is offline — it assembles and signs a
+directory — so nothing there is ever used to reach anything. It also means an
+operator profile, which may hold a real device address and credential, is not
+in effect while packaging; IRIS reaches devices through its own onboarding, not
+through `ioxclient`.
 
-```bash
-cat > ~/.ioxclientcfg.yaml <<'YAML'
-global:
-  version: "1.0"
-  active: packaging
-  debug: false
-profiles:
-  packaging:
-    host_ip: 127.0.0.1
-    host_port: 8443
-    auth_user: root
-    auth_passwd: placeholder
-    api_prefix: /iox/api/v2/hosting/
-    url_scheme: https
-    conn_timeout: 1000
-YAML
-ioxclient profiles list
-```
-
-Those values are deliberately inert: they point at localhost and are never used
-by `ioxclient package`, which only assembles and signs a directory. Never put a
-real device address or credential in this file — the packaging step has no
-business contacting a device, and IRIS reaches devices through its own
-onboarding, not through `ioxclient`.
+Set `IOXCLIENT_HOME` to a directory holding a prepared `.ioxclientcfg.yaml`
+only when a run must use a specific profile. Do not create one for an ordinary
+deployment, and never put a real device credential in one.
 
 ### 3. ARM64 emulation — for anything arm64 on an amd64 host
 
@@ -558,9 +541,10 @@ Do that preparation yourself and announce each step as you take it:
   $IRIS_CONFIG/instr/roots.d. Handing the roots to the package builders is a
   different thing and does not cover this. Nothing later fails loudly for a
   missing root: the Guest Shell bundle simply cannot be trust-bound.
-- Run tools/get-ioxclient.sh, then write the packaging-only ioxclient profile
-  from step 2b if ~/.ioxclientcfg.yaml does not exist. Use the placeholder
-  values given there; never a real device address or credential.
+- Run tools/get-ioxclient.sh. Do not create an ioxclient profile: the builder
+  writes an inert one into a scratch HOME for the packaging call. If a run ever
+  needs a prepared profile, IOXCLIENT_HOME selects it, and it must never carry
+  a real device credential.
 - Enable arm64 emulation for the arm64 IOx package by installing the
   distribution's static QEMU package, then confirm the registration.
 

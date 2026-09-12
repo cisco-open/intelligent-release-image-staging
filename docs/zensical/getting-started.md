@@ -90,35 +90,17 @@ covers the patch set, the pinned toolchain, and publishing a new deliverable.
 
 ### The `ioxclient` packaging profile
 
-`tools/get-ioxclient.sh` installs Cisco's packaging CLI, but `ioxclient`
-refuses every command until a configuration file exists and tries to create one
-interactively, so a scripted run stops at its password prompt. A machine that
-has packaged before already has `~/.ioxclientcfg.yaml`; a fresh one does not.
-Offline packaging contacts nothing, so give it a packaging-only profile with
-placeholder endpoint values:
+Nothing to prepare. `ioxclient` refuses every command until a configuration
+file exists in `HOME` and tries to create one interactively, which stops a
+scripted run at its password prompt, so `device/iox/build.sh` writes an inert
+packaging profile into a scratch `HOME` for the length of the `ioxclient
+package` call and discards it with the build context.
 
-```bash
-cat > ~/.ioxclientcfg.yaml <<'YAML'
-global:
-  version: "1.0"
-  active: packaging
-  debug: false
-profiles:
-  packaging:
-    host_ip: 127.0.0.1
-    host_port: 8443
-    auth_user: root
-    auth_passwd: placeholder
-    api_prefix: /iox/api/v2/hosting/
-    url_scheme: https
-    conn_timeout: 1000
-YAML
-ioxclient profiles list
-```
-
-Keep those values inert. `ioxclient package` only assembles and signs a
-directory; IRIS reaches devices through its own onboarding, so a real device
-address or credential has no place in this file.
+That keeps packaging offline and hermetic, and keeps an operator profile — which
+may hold a real device address and credential — out of a step that only
+assembles and signs a directory. `IOXCLIENT_HOME` points the call at a prepared
+profile when one is genuinely needed; it must never carry a real device
+credential.
 
 ### ARM64 emulation
 

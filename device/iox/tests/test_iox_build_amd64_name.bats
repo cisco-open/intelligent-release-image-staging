@@ -85,10 +85,29 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   [ "$status" -eq 0 ]
   run grep -F 'iris-catalog.pem' "$BUILD"
   [ "$status" -ne 0 ]
-  run grep -F '( cd "$PKG" && "$IOXCLIENT" package . )' "$BUILD"
+  run grep -F '( cd "$PKG" && HOME="$IOX_HOME" "$IOXCLIENT" package . )' "$BUILD"
   [ "$status" -eq 0 ]
   run grep -F '( cd "$CTX" && "$IOXCLIENT" package . )' "$BUILD"
   [ "$status" -ne 0 ]
+}
+
+@test "build.sh packages with its own inert ioxclient profile, not the operator's" {
+  # ioxclient refuses every command until a config exists in HOME and creates
+  # one interactively, so a scripted run dies at its password prompt on a host
+  # where nobody made a profile by hand. Packaging is offline, so the build
+  # supplies a scratch HOME holding a placeholder profile -- which also keeps an
+  # operator profile, and any real device credential in it, out of the run.
+  run grep -F 'IOX_HOME="${IOXCLIENT_HOME:-}"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F 'IOX_HOME="$CTX/ioxclient-home"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F 'auth_passwd: placeholder' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F 'host_ip: 127.0.0.1' "$BUILD"
+  [ "$status" -eq 0 ]
+  # The scratch home lives in the build context, which is removed on exit.
+  run grep -F 'trap ' "$BUILD"
+  [ "$status" -eq 0 ]
 }
 
 @test "IOx wrapper atomically publishes provenance bound to the canonical OCI" {

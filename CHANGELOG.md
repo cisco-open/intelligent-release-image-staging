@@ -12,6 +12,15 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- IOx packaging supplies its own inert `ioxclient` profile in a scratch `HOME`
+  for the packaging call. `ioxclient` refuses every command until a
+  configuration file exists and creates one interactively, so packaging stopped
+  at a password prompt on any host where nobody had made a profile by hand.
+  Packaging is offline, so the generated profile points at localhost with a
+  placeholder credential and is discarded with the build context, which also
+  keeps an operator profile — and any real device credential in it — out of a
+  step that only assembles and signs a directory. `IOXCLIENT_HOME` selects a
+  prepared profile when one is genuinely needed.
 - `tools/get-aria2c.sh` fetches the `aria2c` client from this project's own
   published release when no local deliverable is present, verifies it against
   `tools/aria2c.sha256` exactly as it verifies a hand-in, and keeps the
