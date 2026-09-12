@@ -12,14 +12,26 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
-- The AI-guided PoC deployment guide says where the two handed-in inputs come
-  from, so a reader who is not the project's own operator can finish a
-  deployment. It gives the `aria2c` producer commands, the deliberate step of
-  adopting a self-built binary's checksum, the operator-side creation of the
-  two instruction roots, and the two-service Guest Shell path that needs no
-  roots at all. The assistant rules now say what to do when an input is
-  missing instead of only forbidding the assistant to invent it, which had
-  left an assistant reporting the deployment as blocked with no way forward.
+- The AI-guided PoC deployment guide carries a reader who is not the project's
+  own operator to a working deployment. It says where every handed-in input
+  comes from — the `aria2c` producer and the deliberate adoption of a
+  self-built binary's checksum, `ioxclient`, ARM64 emulation, the appmgr
+  builder, and one pasteable line per layout that creates the two instruction
+  roots — for Docker on one host, Docker on separate hosts and Kubernetes
+  alike, naming the host each input belongs on.
+- The guide opens with the questions an assistant asks before it starts: where
+  the deployment lives, which of the three layouts, which device types, and the
+  server address. They were previously buried two thirds down the page, so an
+  assistant read the operator's decision table and deployed without asking.
+- A proof of concept builds every device package rather than only the ones a
+  device type answer names, since a package nobody builds reports **Needs
+  rebuild** in the Console and blocks that device type.
+- The one-host sequence brings the Console up before the `aarch64` `aria2c`
+  build, which compiles under emulation for tens of minutes. That build used to
+  sit between a fresh clone and any working system, because
+  `tools/start-compose-server.sh` checks both architectures before it starts
+  anything. The assistant also reports progress through it, per layout, and
+  says what an interrupted build leaves behind.
 
 ## [2026.09.11]
 
