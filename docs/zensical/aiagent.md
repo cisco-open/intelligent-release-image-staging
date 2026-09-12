@@ -753,9 +753,10 @@ or age key belongs on the Console host.
 
 Build device packages on the server host, where the inputs live, once its
 stack is up. The `aarch64` `aria2c` build belongs here too, and it is the long
-emulated one: start it detached and follow its log exactly as
-[step 1](#1-the-aria2c-client-every-deployment) shows, rather than in the
-foreground of an SSH session that may end:
+emulated one: put the options for making it cheaper to the operator first, then
+start it detached and follow its log, both exactly as
+[step 1](#1-the-aria2c-client-every-deployment) shows, rather than running it
+in the foreground of an SSH session that may end:
 
 ```bash
 tools/get-ioxclient.sh
@@ -811,9 +812,11 @@ Configure IRIS:
    device types — `ioxclient`, ARM64 emulation, the appmgr builder — and stage
    them with their manifests in the server's artifact storage before
    onboarding devices. That host runs the long emulated `aarch64` `aria2c`
-   build as well; start it detached and follow its log as
-   [step 1](#1-the-aria2c-client-every-deployment) shows, never in the
-   foreground of an SSH session that may end:
+   build as well, so offer the operator the ways to make it cheaper, then start
+   it detached and follow its log, both as
+   [step 1](#1-the-aria2c-client-every-deployment) shows — never in the
+   foreground of an SSH session that may end. A cluster changes nothing about
+   that build: it is the build host's CPU that does the emulating, not a node's:
 
    ```bash
    IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" tools/provision-iox-packages.sh
