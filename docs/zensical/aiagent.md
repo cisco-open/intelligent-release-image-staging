@@ -48,22 +48,34 @@ settings and data unless a reset is explicitly part of the task.
 
 ## Supply the handed-in inputs
 
-A fresh clone deliberately lacks two inputs, and `tools/start-compose-server.sh`
-reports both, in one list, before it builds anything. This is the project
-failing closed rather than an incomplete checkout. Neither an installer nor an
-assistant invents either one. Obtain them like this, then continue with the
-chosen layout.
+A fresh clone deliberately lacks a few inputs, and `tools/start-compose-server.sh`
+reports every missing one in a single list before it builds anything. That is
+the project failing closed, not an incomplete checkout: neither an installer
+nor an assistant invents a seeder binary or a trust anchor. Everything else
+installs itself.
 
-### The `aria2c` client
+Supply what the devices you intend to onboard actually need:
 
-Every layout needs it: `server/Dockerfile` copies `bin/aria2c` into the server
-image, so no stack builds without it. `deliverables/` is git-ignored and a
-release archive carries the producer rather than the binary, so a clone starts
-with nothing.
+| What you will onboard | Supply first |
+| --- | --- |
+| Server and Console only, no devices yet | `aria2c` amd64 |
+| Guest Shell (Catalyst 9300, Catalyst 8000V) | `aria2c` amd64 |
+| IOx on amd64 (Catalyst 9300, Catalyst 8000V) | `aria2c` amd64, `ioxclient`, the two roots |
+| IOx on arm64 (IE-3400 and other IE-3x00) | the amd64 set, plus `aria2c` arm64 and ARM64 emulation |
+| IOS-XR appmgr | `aria2c` amd64, the two roots, Docker and network for the pinned appmgr builder |
+
+Every device type is reachable from a clean Ubuntu Docker host with these
+steps. Work through the ones your table row names, in order.
+
+### 1. The `aria2c` client — every deployment
+
+`server/Dockerfile` copies `bin/aria2c` into the server image, so no stack
+builds without it. `deliverables/` is git-ignored and a release archive carries
+the producer rather than the binary, so a clone starts with nothing.
 
 Accept a hand-in from whoever built it — put it at `deliverables/aria2c-x86_64`,
-or point `ARIA2C_DELIVERABLE` at it — or build it yourself from the producer
-this repository ships for exactly that purpose:
+or point `ARIA2C_DELIVERABLE` at it — or build it from the producer this
+repository ships for exactly that purpose:
 
 ```bash
 git clone https://github.com/AnInsomniacy/aria2-next \
@@ -72,10 +84,11 @@ git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
 (cd tools/aria2c-build && ./build.sh x86_64)
 ```
 
-Add `./build.sh aarch64` when IOx or IE-3x00 packages are in scope. The build
-needs Docker; `build.sh` refuses to run unless the checkout sits at the pinned
-commit and every patch in `tools/aria2c-patches/` applies cleanly, so a build
-either corresponds to the published patch set or it fails.
+Run `./build.sh aarch64` as well for IOx on IE-3x00; that build needs the ARM64
+emulation of step 3. `build.sh` needs Docker, and refuses to run unless the
+checkout sits at the pinned commit and every patch in `tools/aria2c-patches/`
+applies cleanly, so a build either corresponds to the published patch set or it
+fails.
 
 **A binary you built will not match `tools/aria2c.sha256`, and that is
 expected.** A different toolchain or musl version produces different bytes, and
@@ -96,47 +109,132 @@ record in that file what you built, then install it:
 tools/get-aria2c.sh amd64
 ```
 
+Repeat both steps with `aarch64` / `arm64` when you built that architecture.
 Never edit `tools/aria2c.sha256` to silence a mismatch on a binary you did not
 build yourself — there, the mismatch is the mechanism working.
-
 `tools/aria2c-build/README.md` covers the patch set, the pinned toolchain, and
 what to do when an Alpine security bump withdraws a pin.
 
-### The two instruction trust roots
-
-Every device package embeds exactly two public roots and the build fails closed
-without them. They are trust anchors, not fixtures, so **no installer and no
-assistant creates them.** The operator does, on machines the operator controls —
-ideally two, one per custodian:
+### 2. `ioxclient` — IOx device types only
 
 ```bash
-ssh-keygen -t ed25519 -C iris-root-a -f /secure/custodian-a/root-a
-ssh-keygen -t ed25519 -C iris-root-b -f /secure/custodian-b/root-b
+tools/get-ioxclient.sh
 ```
 
-Copy only the two `.pub` files into one directory that holds nothing else, and
-point the build at it:
+It downloads Cisco's IOx packaging CLI from its public documentation host, and
+installs it at `tools/bin/ioxclient`; set `IOXCLIENT` instead to use a copy you
+already have. Cisco publishes no checksum for that artifact and `ioxclient`
+signs every package a device installs, so the helper pins the binary itself
+against `tools/ioxclient.sha256` and refuses both a mismatch and a version that
+file does not record. Linux amd64 only.
+
+### 3. ARM64 emulation — only to build arm64 on an amd64 host
+
+Needed for the `aarch64` `aria2c` build and the arm64 IOx package. Check
+whether the host already has it:
 
 ```bash
-install -d -m 0755 ~/iris-roots
-install -m 0644 root-a.pub root-b.pub ~/iris-roots/
-IRIS_INSTRUCTION_ROOTS_DIR=~/iris-roots tools/start-compose-server.sh
+grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
 ```
 
-The private halves stay with their custodians. They never reach the server
-host, an installer argument, a device, or a chat window. For a proof of concept
-one person may create both as disposable roots: that produces a working
-deployment, and, as
+If that prints nothing, the simplest fix is your distribution's static QEMU
+package (`qemu-user-static` on Ubuntu and Debian), then run the check again.
+That needs no digest and no privileged container.
+
+Otherwise the builders register the handler themselves, and require an audited
+`tonistiigi/binfmt` digest rather than pulling a floating tag. Review the tag
+you intend to use, resolve it to a digest, and export it:
+
+```bash
+docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
+  --format '{{println .Manifest.Digest}}'
+export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
+```
+
+With the digest unset the build fails closed instead of pulling an unpinned
+image.
+
+### 4. The two instruction trust roots — every device package
+
+Every device package embeds exactly two public roots, and the build fails
+closed without them. They are the trust anchors devices use to judge signed
+instructions, so **no installer and no assistant creates them.** The operator
+does. The private halves belong to two custodians and never leave their
+machines; only the public halves travel.
+
+1. On the first custodian's machine, create a keypair. Answer the passphrase
+   prompt with a real passphrase — this is a signing key, not a throwaway:
+
+   ```bash
+   ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-root-a
+   ```
+
+   That writes the private `~/iris-root-a`, which stays there, and the public
+   `~/iris-root-a.pub`, which you will copy out.
+
+2. On the second custodian's separate machine, do the same with a different
+   name:
+
+   ```bash
+   ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-root-b
+   ```
+
+3. On the deployment host, make a directory that will hold the two public
+   halves and nothing else, and copy only the `.pub` files into it:
+
+   ```bash
+   install -d -m 0755 ~/iris-roots
+   install -m 0644 /path/to/root-a.pub /path/to/root-b.pub ~/iris-roots/
+   ```
+
+4. Check what you built before using it. Two files, two distinct
+   fingerprints, no private key anywhere in the directory:
+
+   ```bash
+   ls ~/iris-roots
+   ssh-keygen -lf ~/iris-roots/iris-root-a.pub
+   ssh-keygen -lf ~/iris-roots/iris-root-b.pub
+   ```
+
+   Exactly two `.pub` files must be present. Anything else — one key, three
+   keys, a stray `README`, a private key copied in by mistake — is refused with
+   `must hold exactly two public roots (*.pub)` before anything is built.
+
+5. Point the build at that directory:
+
+   ```bash
+   IRIS_INSTRUCTION_ROOTS_DIR=~/iris-roots tools/start-compose-server.sh
+   ```
+
+   It defaults to `instr-roots/` in the repository, so you may put the two
+   files there instead and pass nothing.
+
+A private root never reaches the server host, an installer argument, a device,
+or a chat window. For a proof of concept one person may hold both as disposable
+roots: that produces a working deployment, and, as
 [Prepare instruction trust](getting-started.md#prepare-instruction-trust)
 states, it is not production custody or signing evidence. Certificates,
 rotation and revocation are in the
 [ceremony runbook](operations.md#instruction-root-ceremony-and-recovery).
 
+### 5. The appmgr builder — IOS-XR only
+
+`tools/build-xr-package.sh` wraps the canonical device image as an appmgr RPM.
+It clones Cisco's `ios-xr/xr-appmgr-build` at a pinned commit into
+`~/.cache/iris/xr-appmgr-build` on first use, so that step needs Docker and
+network access. `tools/start-compose-server.sh` runs it for you; set
+`IRIS_SKIP_XR=1` on a deployment with no XR devices, and run it directly when
+rebuilding later:
+
+```bash
+tools/build-xr-package.sh --out artifacts/
+```
+
 ### The shortest path to a first staged image
 
 To watch IRIS stage an image without producing any device package, bring up the
 two services directly and use Guest Shell devices. This path still needs the
-`aria2c` client, and needs no instruction roots:
+`aria2c` client of step 1, and needs no roots:
 
 ```bash
 docker compose -f server/docker-compose.yml build --pull
@@ -145,8 +243,8 @@ docker compose -f server/docker-compose.yml up -d
 ```
 
 It installs no roots and builds no packages, so instruction custody is not
-configured and IOx and XR devices have nothing to onboard with. Add the roots
-and run the package builders before going past a demonstration.
+configured and IOx and XR devices have nothing to onboard with. Work through
+the steps above before going past a demonstration.
 
 ## Choose the layout
 
@@ -196,15 +294,29 @@ command. Preserve existing server state and device assignments.
 Keep credentials and secrets out of chat, command output, logs, and source
 control. Read local credentials only when a step needs them. Do not copy
 server state, the age identity, or the management private key to the Console.
-Never generate instruction trust roots, and never download or substitute an
-aria2c binary. Both are handed in deliberately. When either is missing, do not
-report the deployment as blocked and stop: give the operator the procedure in
-the AI-guided PoC deployment guide under "Supply the handed-in inputs", say
-exactly which file or directory you need back, and continue from there once it
-exists. Point IRIS_INSTRUCTION_ROOTS_DIR at the directory holding only the two
-public root keys. When the operator wants a demonstration rather than a
-production deployment, offer the two-service Guest Shell path, which builds no
-device packages and needs no roots.
+A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
+inputs" in this guide for the device types in scope, rather than reporting the
+deployment as blocked and stopping. Announce which steps you are taking.
+
+You may run the project's own helpers yourself: tools/aria2c-build/build.sh,
+tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
+tools/start-compose-server.sh. Never download or substitute an aria2c binary
+from anywhere else.
+
+Ask the operator, and wait, for these three:
+- Adopting a self-built aria2c: show the sha256sum you produced and let the
+  operator decide before any edit to tools/aria2c.sha256. Never edit that file
+  to clear a mismatch on a binary you did not build in this session.
+- The two instruction trust roots. Never create them. Give the operator the
+  numbered ssh-keygen procedure, ask for the directory holding only the two
+  public halves, and point IRIS_INSTRUCTION_ROOTS_DIR at it. Refuse a private
+  key if one is offered.
+- Installing host emulation packages or accepting a tonistiigi/binfmt digest,
+  because both change or trust the host.
+
+When the operator wants a demonstration rather than a production deployment,
+offer the two-service Guest Shell path, which builds no device packages and
+needs no roots.
 
 Continue work within the authorized scope. Ask for a missing value only when
 it prevents a safe next step. Obtain approval for a destructive action unless
