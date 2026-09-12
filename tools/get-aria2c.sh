@@ -10,15 +10,26 @@
 #   tools/get-aria2c.sh amd64        # x86_64  (Catalyst / server)
 #   tools/get-aria2c.sh arm64        # aarch64 (IE-3400, Cortex-A53)
 #
-# IRIS does not download and does not build aria2c. The binary is produced
-# elsewhere, by the aria2-next-static project, and delivered here as an
-# artifact. That project owns the source pin, the patch set, the build flags
-# and the validation; this repository is purely the consumer.
+# IRIS does not build aria2c. The binary is produced elsewhere, by the
+# aria2-next-static project, and delivered here as an artifact. That project
+# owns the source pin, the patch set, the build flags and the validation; this
+# repository is purely the consumer.
 #
-# Why not download it: the previous implementation fetched a prebuilt binary
-# from a third party (abcfy2/aria2-static-build). That published x86_64 only,
-# while device/iox/package.yaml targets aarch64 for the IE-3x00 Guest Shell,
-# and an opaque zip can be checksummed but never audited or patched.
+# Resolution order: an explicit ARIA2C_DELIVERABLE, the repository's own
+# deliverables/aria2c-<cpu>, a producer checkout beside the repository, and
+# finally this project's own published release asset. Every one of them is
+# verified against tools/aria2c.sha256 below.
+#
+# On downloading: an earlier implementation fetched a prebuilt binary from a
+# third party (abcfy2/aria2-static-build), which published x86_64 only while
+# device/iox/package.yaml targets aarch64 for the IE-3x00 Guest Shell, and
+# shipped an opaque zip that could be checksummed but never audited or patched.
+# The release asset this script fetches is different in every one of those
+# respects: it is published by this project, for both architectures, from the
+# pinned source and patch set in tools/aria2c-patches/ with the build scripts
+# in tools/aria2c-build/, and it is refused unless it matches the checksum
+# recorded here. Set ARIA2C_NO_DOWNLOAD=1 to forbid the fetch and require a
+# local deliverable.
 #
 # Why not build it here: the build carries local patches. Keeping a second copy
 # of them in this repository guarantees they drift, and a stale copy silently
@@ -53,12 +64,33 @@ esac
 # so one drop serves the server image AND every device package); else the
 # producer checkout beside the repository. Every candidate is verified
 # against tools/aria2c.sha256 below, so a stale copy fails closed either way.
+# The published deliverables live on a release of their own, tagged by the
+# aria2-next version and patch count rather than by an IRIS CalVer release:
+# the binary changes only when the build does.
+ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p7}"
+ARIA2C_RELEASE_URL="${ARIA2C_RELEASE_URL:-https://github.com/cisco-open/intelligent-release-image-staging/releases/download/$ARIA2C_RELEASE_TAG/aria2c-$ARCH}"
+
+DOWNLOADED=""
 if [ -n "${ARIA2C_DELIVERABLE:-}" ]; then
   DELIVERABLE="$ARIA2C_DELIVERABLE"
 elif [ -f "$REPO_ROOT/deliverables/aria2c-$ARCH" ]; then
   DELIVERABLE="$REPO_ROOT/deliverables/aria2c-$ARCH"
-else
+elif [ -f "$REPO_ROOT/../aria2-next-static/out/$ARCH/aria2c" ]; then
   DELIVERABLE="$REPO_ROOT/../aria2-next-static/out/$ARCH/aria2c"
+elif [ -n "${ARIA2C_NO_DOWNLOAD:-}" ]; then
+  DELIVERABLE="$REPO_ROOT/deliverables/aria2c-$ARCH"
+else
+  DOWNLOADED="$(mktemp)"
+  trap 'rm -f "$DOWNLOADED"' EXIT
+  echo ">> fetching the published aria2c deliverable for $ARCH"
+  echo "   $ARIA2C_RELEASE_URL"
+  if curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+       "$ARIA2C_RELEASE_URL" -o "$DOWNLOADED"; then
+    DELIVERABLE="$DOWNLOADED"
+  else
+    echo "!! could not fetch it; falling back to a local deliverable" >&2
+    DELIVERABLE="$REPO_ROOT/deliverables/aria2c-$ARCH"
+  fi
 fi
 
 [ -f "$SUMS" ] || { echo "missing $SUMS - cannot verify the deliverable" >&2; exit 1; }
@@ -71,7 +103,13 @@ if [ ! -f "$DELIVERABLE" ]; then
 No aria2c deliverable for $ARCH at:
   $DELIVERABLE
 
-This repository does not build aria2c. Either drop the handed-in binary at
+This repository does not build aria2c. The published deliverable could not be
+fetched from
+
+  $ARIA2C_RELEASE_URL
+
+so either that release is unreachable from this host or it does not carry this
+architecture. Drop the handed-in binary at
 deliverables/aria2c-$ARCH, set ARIA2C_DELIVERABLE to it, or build one from source:
 the upstream fork pinned in tools/aria2c.sha256 plus the patches in
 tools/aria2c-patches/ (see the README there for the recipe). Maintainers
@@ -93,6 +131,16 @@ EOF
   # all, it is the wrong architecture -- the usual result of collecting from the
   # producer's other out/ directory. Say which, rather than leaving the operator
   # to compare two hashes by eye.
+  if [ -n "$DOWNLOADED" ]; then
+    cat >&2 <<EOF
+
+That came from the published release asset, which means the asset does not
+match the checksum this checkout pins. It has been discarded, not installed.
+Either the release carries a different build than tools/aria2c.sha256 records,
+or the download was tampered with. Do not adopt it; hand in a binary you trust
+or build one from the pinned source.
+EOF
+  fi
   wrong_arch="$(awk -v h="$actual" '$1 == h { print $2 }' "$SUMS")"
   if [ -n "$wrong_arch" ]; then
     cat >&2 <<EOF
@@ -111,6 +159,16 @@ exact binary.
 EOF
   fi
   exit 1
+fi
+
+# A verified download is kept in deliverables/ as well as installed into bin/.
+# tools/build-device-image.sh resolves each architecture's client from there,
+# so keeping it means the IOx and XR package builds need no second fetch, and
+# a later run of this script finds it locally. deliverables/ is git-ignored.
+if [ -n "$DOWNLOADED" ]; then
+  mkdir -p "$REPO_ROOT/deliverables"
+  install -m 0644 "$DELIVERABLE" "$REPO_ROOT/deliverables/aria2c-$ARCH"
+  echo "Kept:      deliverables/aria2c-$ARCH"
 fi
 
 mkdir -p "$OUT_DIR"

@@ -11,6 +11,71 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Added
+- `tools/build-xr-package.sh` refuses to start without `rpmbuild`, naming the
+  `rpm` package, rather than failing later inside the vendored appmgr builder's
+  log. Both guides list it as an IOS-XR prerequisite, alongside `skopeo`.
+- IOx packaging supplies its own inert `ioxclient` profile in a scratch `HOME`
+  for the packaging call. `ioxclient` refuses every command until a
+  configuration file exists and creates one interactively, so packaging stopped
+  at a password prompt on any host where nobody had made a profile by hand.
+  Packaging is offline, so the generated profile points at localhost with a
+  placeholder credential and is discarded with the build context, which also
+  keeps an operator profile — and any real device credential in it — out of a
+  step that only assembles and signs a directory. `IOXCLIENT_HOME` selects a
+  prepared profile when one is genuinely needed.
+- `tools/get-aria2c.sh` fetches the `aria2c` client from this project's own
+  published release when no local deliverable is present, verifies it against
+  `tools/aria2c.sha256` exactly as it verifies a hand-in, and keeps the
+  verified copy in `deliverables/` where the device-package builders read it. A
+  deployment no longer builds the client, including the `aarch64` one that
+  compiled under emulation for tens of minutes. `ARIA2C_NO_DOWNLOAD=1` forbids
+  the fetch, and a downloaded asset that fails the checksum is discarded rather
+  than installed. `tools/aria2c-build/README.md` documents publishing a new
+  deliverable and the GPLv2 obligation that comes with it.
+
+### Fixed
+- Both guides document initialising instruction custody, which every
+  deployment needs before onboarding any device and neither page carried. A
+  server that has the two public roots still refuses every onboarding with
+  `instruction bootstrap unavailable` until it has an online signing key, a
+  certificate issued by a root, and an activated producer
+  (`iris-instr-key initialize`) — the producer step being the half that no page
+  named a command for. Documented for all three layouts, with the status fields
+  a proof of concept is expected to report, and with the tmpfs trap: the
+  runtime directory cannot be read by `docker cp`, so the public half is taken
+  from the config volume instead.
+- The AI-guided PoC deployment guide carries a reader who is not the project's
+  own operator to a working deployment. It says where every handed-in input
+  comes from — the `aria2c` producer and the deliberate adoption of a
+  self-built binary's checksum, `ioxclient`, ARM64 emulation, the appmgr
+  builder, and one pasteable line per layout that creates the two instruction
+  roots — for Docker on one host, Docker on separate hosts and Kubernetes
+  alike, naming the host each input belongs on.
+- The guide opens with the questions an assistant asks before it starts: where
+  the deployment lives, which of the three layouts, which device types, and the
+  server address. They were previously buried two thirds down the page, so an
+  assistant read the operator's decision table and deployed without asking.
+- A proof of concept builds every device package rather than only the ones a
+  device type answer names, since a package nobody builds reports **Needs
+  rebuild** in the Console and blocks that device type.
+- Getting Started says where the handed-in `aria2c` and the two instruction
+  roots come from, with the producer commands, the deliberate checksum
+  adoption, the one line that creates the roots, and what the emulated
+  `aarch64` build costs and how to start it so a closing SSH session does not
+  cancel it. It previously named both inputs as prerequisites without saying
+  how to obtain either.
+- The pages that assume those inputs already exist now point at where they come
+  from: the server and separate-host build steps for `aria2c`, the Kubernetes
+  root provisioning for the keypairs, and the IOx and container pages for the
+  ARM64 emulation digest, which no page previously explained how to obtain.
+- The one-host sequence brings the Console up before the `aarch64` `aria2c`
+  build, which compiles under emulation for tens of minutes. That build used to
+  sit between a fresh clone and any working system, because
+  `tools/start-compose-server.sh` checks both architectures before it starts
+  anything. The assistant also reports progress through it, per layout, and
+  says what an interrupted build leaves behind.
+
 ## [2026.09.11]
 
 ### Added

@@ -40,6 +40,30 @@ applies a stale patch set produces a binary that does not correspond to the
 patches we publish. `PATCH_DIR` overrides the location, but only for trying a
 candidate set — the default is the single home.
 
+## Publishing the deliverables
+
+The binaries this project ships are published as a release of their own, tagged
+by the aria2-next version and patch count rather than by an IRIS CalVer
+release: they change only when this build does.
+`tools/get-aria2c.sh` fetches from that tag and refuses anything that does not
+match `tools/aria2c.sha256`, so a deployment needs no local build.
+
+After adopting a new build, from a checkout at the commit that carries the
+matching `tools/aria2c.sha256`:
+
+```bash
+gh release create aria2c-<version>-p<patches> \
+  --title "aria2c <version>, <patches> patches" \
+  --notes-file <notes> \
+  deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256
+```
+
+Publishing a binary carries the GPLv2 section 3 obligation, so the notes must
+name the exact commit whose `tools/aria2c-patches/` and `tools/aria2c-build/`
+produced it, or attach that source alongside. Update the default
+`ARIA2C_RELEASE_TAG` in `tools/get-aria2c.sh` in the same change that adopts
+the new checksums, or the script will keep fetching the previous build.
+
 ## Rebuilding
 
 ```bash
