@@ -67,6 +67,14 @@ PLAN
   exit 0
 fi
 
+# appmgr_build assembles the RPM with the host's rpmbuild, at the very end of a
+# build that takes minutes. Check it here, before the first directory is
+# created or the canonical OCI is built, so a missing package costs nothing
+# instead of failing deep inside the vendored builder's log. Debian and Ubuntu
+# ship it in the "rpm" package.
+command -v rpmbuild >/dev/null 2>&1 \
+  || { echo "!! rpmbuild is required to build the XR appmgr RPM — install the 'rpm' package" >&2; exit 1; }
+
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$OUT"
@@ -107,12 +115,6 @@ fi
 
 command -v skopeo >/dev/null 2>&1 \
   || { echo "!! skopeo is required to select the XR image from the canonical OCI" >&2; exit 1; }
-# appmgr_build assembles the RPM with the host's rpmbuild. Without it the build
-# fails deep inside the vendored builder's log rather than here, so say it
-# plainly before anything is fetched or written. Debian and Ubuntu ship it in
-# the "rpm" package.
-command -v rpmbuild >/dev/null 2>&1 \
-  || { echo "!! rpmbuild is required to build the XR appmgr RPM — install the 'rpm' package" >&2; exit 1; }
 echo ">> selecting linux/amd64 from canonical OCI $OCI_INDEX"
 # iris-src is this wrapper's fixed, builder-owned input tree. A reused appmgr
 # checkout may carry inputs from an older run; clear this exact child before

@@ -43,13 +43,18 @@ Install it for both architectures you need:
 
 ```bash
 tools/get-aria2c.sh amd64
-tools/get-aria2c.sh arm64
+tools/get-aria2c.sh --no-install arm64
 ```
 
 The helper fetches this project's published deliverable, refuses anything that
-does not match `tools/aria2c.sha256`, installs it into `bin/`, and keeps a
-verified copy in `deliverables/`, where the device-package builders look. Take
-`arm64` only for IOx on IE-3400 and other IE-3x00 devices.
+does not match `tools/aria2c.sha256`, and keeps a verified copy in
+`deliverables/`, where the device-package builders look. The second line is
+only for IOx on IE-3400 and other IE-3x00 devices.
+
+`bin/` holds one client, the x86_64 one the server image copies, so
+`--no-install` collects the arm64 deliverable without replacing it. Without
+that flag the arm64 binary lands in `bin/aria2c` and the next server image
+build fails its architecture check.
 
 A host with no route to that release can take a hand-in instead — at
 `deliverables/aria2c-<cpu>`, or via `ARIA2C_DELIVERABLE` — or build one:

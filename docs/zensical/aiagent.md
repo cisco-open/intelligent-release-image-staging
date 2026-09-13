@@ -30,8 +30,10 @@ deployment because it is the default:
    from.
 3. **Which device types will be onboarded** — Guest Shell, IOx on amd64
    (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
-   IOS-XR appmgr, or none yet? This tells you what to onboard. Build every
-   package regardless: a proof of concept prepares all of them, and
+   IOS-XR appmgr, or none yet? A proof of concept builds the Guest Shell
+   bundle, the amd64 IOx package and the XR RPM whatever the answer, and adds
+   the arm64 IOx package when an IE-3x00 device is in scope — that one alone
+   carries an emulated build.
    [Supply the handed-in inputs](#supply-the-handed-in-inputs) is the
    assistant's own work, not the operator's.
 4. **The server's device-reachable IPv4 address**, and the Console URL if it
@@ -182,14 +184,20 @@ builds without it. Install both architectures:
 
 ```bash
 tools/get-aria2c.sh amd64
-tools/get-aria2c.sh arm64
+tools/get-aria2c.sh --no-install arm64
 ```
 
 The helper fetches this project's published deliverable, refuses anything that
-does not match `tools/aria2c.sha256`, installs it into `bin/`, and keeps a
-verified copy in `deliverables/`, where the device-package builders look. Take
-`arm64` only when an IE-3400 or other IE-3x00 device is in scope; nothing else
-uses it.
+does not match `tools/aria2c.sha256`, and keeps a verified copy in
+`deliverables/`, where the device-package builders look. Take the second line
+only when an IE-3400 or other IE-3x00 device is in scope; nothing else uses
+that architecture.
+
+`bin/` holds one client, the x86_64 one `server/Dockerfile` copies into the
+server image, so `--no-install` collects the arm64 deliverable without
+replacing it. Running `tools/get-aria2c.sh arm64` without that flag installs
+the arm64 binary into `bin/aria2c` and the next server image build fails on the
+architecture check.
 
 That is the whole step on a normal host. The rest of this section is for a host
 that cannot reach the release, or an operator who prefers to build their own.
@@ -700,7 +708,7 @@ emulated `aarch64` `aria2c` build of step 1 first, and then:
 ```bash
 cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
 sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
-tools/get-aria2c.sh arm64
+tools/get-aria2c.sh --no-install arm64
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/stage-iox-package.sh --arch arm64
 ```
@@ -806,7 +814,7 @@ IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/build-xr-package.sh --out artifacts/
 
 # only with an IE-3x00 device in scope:
-tools/get-aria2c.sh arm64
+tools/get-aria2c.sh --no-install arm64
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
   tools/stage-iox-package.sh --arch arm64
 ```

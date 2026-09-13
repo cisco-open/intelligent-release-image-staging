@@ -106,6 +106,14 @@ EOF
 STUB
   chmod +x "$STUBDIR/tools/build-device-image.sh"
 
+  # rpmbuild is a precondition the script checks before it writes anything.
+  # Stub it so these cases exercise their intended behaviour on a host that
+  # does not happen to have the rpm package installed.
+  cat > "$STUBDIR/bin/rpmbuild" <<'STUB'
+#!/usr/bin/env bash
+echo "RPMBUILD-STUB: $*"
+STUB
+  chmod +x "$STUBDIR/bin/rpmbuild"
   cat > "$STUBDIR/bin/skopeo" <<'STUB'
 #!/usr/bin/env bash
 echo "SKOPEO-STUB: $*"

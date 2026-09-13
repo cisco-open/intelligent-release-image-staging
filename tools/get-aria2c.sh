@@ -6,9 +6,10 @@
 
 # Installs the aria2c client that was HANDED IN to this repository.
 #
-#   tools/get-aria2c.sh              # host architecture
-#   tools/get-aria2c.sh amd64        # x86_64  (Catalyst / server)
-#   tools/get-aria2c.sh arm64        # aarch64 (IE-3400, Cortex-A53)
+#   tools/get-aria2c.sh                    # host architecture
+#   tools/get-aria2c.sh amd64              # x86_64  (Catalyst / server)
+#   tools/get-aria2c.sh arm64              # aarch64 (IE-3400, Cortex-A53)
+#   tools/get-aria2c.sh --no-install arm64 # deliverables/ only, keep bin/
 #
 # IRIS does not build aria2c. The binary is produced elsewhere, by the
 # aria2-next-static project, and delivered here as an artifact. That project
@@ -44,6 +45,17 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="$REPO_ROOT/bin"
 SUMS="$REPO_ROOT/tools/aria2c.sha256"
 
+# --no-install collects and verifies the deliverable without touching
+# bin/aria2c. bin/ holds ONE client, the x86_64 one the server image copies
+# (server/Dockerfile) and tools/make-agent-bundle.sh defaults to, so fetching
+# aarch64 for a device package must not replace it. The device builders read
+# deliverables/, which this still populates.
+INSTALL_BIN=1
+if [ "${1:-}" = "--no-install" ]; then
+  INSTALL_BIN=0
+  shift
+fi
+
 case "${1:-}" in
   amd64|x86_64)  ARCH=x86_64 ;;
   arm64|aarch64) ARCH=aarch64 ;;
@@ -54,7 +66,7 @@ case "${1:-}" in
       *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
     esac
     ;;
-  *) echo "usage: $0 [amd64|arm64]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--no-install] [amd64|arm64]" >&2; exit 2 ;;
 esac
 
 # Where the deliverable is collected from, in order: an explicit
@@ -169,6 +181,12 @@ if [ -n "$DOWNLOADED" ]; then
   mkdir -p "$REPO_ROOT/deliverables"
   install -m 0644 "$DELIVERABLE" "$REPO_ROOT/deliverables/aria2c-$ARCH"
   echo "Kept:      deliverables/aria2c-$ARCH"
+fi
+
+if [ "$INSTALL_BIN" -eq 0 ]; then
+  echo "Verified:  $ARCH deliverable (bin/aria2c left as it was)"
+  echo "  sha256: $actual (verified against tools/aria2c.sha256)"
+  exit 0
 fi
 
 mkdir -p "$OUT_DIR"
