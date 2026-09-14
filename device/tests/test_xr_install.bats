@@ -238,9 +238,20 @@ EOF
   # set -e with pipefail kills the script at the assignment when the ssh
   # session fails, so the job used to end with only an exit status: an
   # operator saw "[1/5] check device and storage" and "Job error.".
-  grep -q 'could not run .show version. on \$DEVICE_IP (ssh exit \$run_rc)' "$INSTALL"
+  grep -q "could not read 'show version' and 'dir harddisk:'" "$INSTALL"
   grep -q 'stored device credentials are wrong' "$INSTALL"
-  grep -q 'could not read .dir harddisk:. on \$DEVICE_IP' "$INSTALL"
+  grep -q 'vty pool has no free line' "$INSTALL"
+}
+
+@test "the preflight asks both questions in one session, and retries a reset" {
+  # Two sessions back to back are reset at key exchange on a router whose vty
+  # pool is busy: measured on an NCS-540, where 'show version' succeeded and
+  # the 'dir' right after it was reset. One session carries both.
+  run grep -c "printf 'show version" "$INSTALL"
+  [ "$output" -eq 1 ]
+  grep -qF 'show version\ndir harddisk: | include bytes free' "$INSTALL"
+  grep -q 'DIR_OUT="\$PREFLIGHT_OUT"' "$INSTALL"
+  grep -q 'preflight attempt \$preflight_attempt failed; retrying' "$INSTALL"
 }
 
 @test "a reset upload is retried before the installer gives up" {
@@ -298,13 +309,23 @@ cmds="$(cat)"
 if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
 fi
+# The preflight sends both of these in ONE session, so answer each that is
+# present rather than only the first that matches.
+answered=""
 case "$cmds" in
   *"show version"*)
     printf '%s\n' "${FAKE_VERSION_BANNER-Cisco IOS XR Software, Version 25.4.2 LNT}"
+    answered=1
     ;;
+esac
+case "$cmds" in
   *"dir harddisk: | include bytes free"*)
     printf '%s\n' "${FAKE_DIR_BYTES_FREE-39929724928 bytes total (39883231232 bytes free)}"
+    answered=1
     ;;
+esac
+[ -n "$answered" ] && exit 0
+case "$cmds" in
   *"show appmgr source-table"*)
     printf '%s\n' "${FAKE_SOURCE_TABLE-iris-xr  0.1.0  ThinXR_7.3.15  app_manager}"
     ;;

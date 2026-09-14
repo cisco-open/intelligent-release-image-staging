@@ -364,8 +364,9 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-# A reset upload is retried this many times, this far apart: the pool frees a
-# line when another session ends, so waiting is usually enough.
+# A reset session is retried this many times, this far apart: the vty pool
+# frees a line when another session ends, so waiting is usually enough. Used by
+# the preflight and by the upload.
 XR_SCP_ATTEMPTS="${XR_SCP_ATTEMPTS:-3}"
 XR_SCP_RETRY_SECONDS="${XR_SCP_RETRY_SECONDS:-10}"
 
@@ -379,16 +380,34 @@ echo "[1/5] check device and storage: $DEVICE_IP"
 # and had no way to tell a wrong password from an unreachable router.
 # lab/xr-run.sh redacts DEVICE_PASS from what it writes there.
 RUN_ERR="$(mktemp)"
+# Both preflight questions in ONE session. IOS-XR serves five vty lines by
+# default and every ssh session takes one, so two sessions back to back are
+# reset at key exchange on a router with an operator connected -- measured on
+# an NCS-540, where 'show version' succeeded and the 'dir' immediately after it
+# was reset. A reset is also retried, because the line another session frees is
+# usually the difference between attempts.
+PREFLIGHT_OUT=""
 run_rc=0
-VERSION_OUT="$(printf 'show version\n' | RUN 2>"$RUN_ERR")" || run_rc=$?
-if [ "$run_rc" -ne 0 ] || [ -z "$VERSION_OUT" ]; then
-  echo "ERROR: could not run 'show version' on $DEVICE_IP (ssh exit $run_rc)" >&2
+preflight_attempt=1
+while : ; do
+  run_rc=0
+  PREFLIGHT_OUT="$(printf 'show version\ndir harddisk: | include bytes free\n' \
+    | RUN 2>"$RUN_ERR")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] && [ -n "$PREFLIGHT_OUT" ] && break
+  [ "$preflight_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
+  echo "   preflight attempt $preflight_attempt failed; retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+  sleep "$XR_SCP_RETRY_SECONDS"
+  preflight_attempt=$((preflight_attempt + 1))
+done
+if [ "$run_rc" -ne 0 ] || [ -z "$PREFLIGHT_OUT" ]; then
+  echo "ERROR: could not read 'show version' and 'dir harddisk:' on $DEVICE_IP (ssh exit $run_rc, $preflight_attempt attempt(s))" >&2
   echo "       Usual causes: the stored device credentials are wrong, the router" >&2
   echo "       is unreachable from the server, or its vty pool has no free line" >&2
   echo "       ('show users' on the device shows the pool)." >&2
   tail -5 "$RUN_ERR" >&2 || true
   exit 1
 fi
+VERSION_OUT="$PREFLIGHT_OUT"
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"
 # (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md).
@@ -414,13 +433,8 @@ XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
 XR_VERSION="${XR_VERSION%% *}"
 _no_quotes_or_newlines XR_VERSION "$XR_VERSION"
 _safe_fact XR_VERSION "$XR_VERSION"
-dir_rc=0
-DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>"$RUN_ERR")" || dir_rc=$?
-if [ "$dir_rc" -ne 0 ]; then
-  echo "ERROR: could not read 'dir harddisk:' on $DEVICE_IP (ssh exit $dir_rc)" >&2
-  tail -5 "$RUN_ERR" >&2 || true
-  exit 1
-fi
+# Same buffer: the free-space line came back with the banner, in one session.
+DIR_OUT="$PREFLIGHT_OUT"
 # Cisco 8000 dir output ends "<N> kbytes total (<M> kbytes free)" -- KBYTES,
 # hardware-proven ("41968752 kbytes total (37916076 kbytes free)",
 # agentinfo/xr-support/LAB-RESULTS-2026-08-27.md); some platforms say plain
