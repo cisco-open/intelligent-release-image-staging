@@ -1,0 +1,2215 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../observability/">
+      
+      
+        <link rel="next" href="../splunk/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Telemetry Export - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#telemetry-export" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Telemetry Export
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-two-export-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The two export paths
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The two export paths">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-each-path-carries" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What each path carries
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#turning-export-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Turning export on
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-collector" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The collector
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dashboards" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Dashboards
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Dashboards">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#panel-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Panel families
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-is-measured-and-what-is-derived" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What is measured and what is derived
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Known limits
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Troubleshooting
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Troubleshooting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#an-empty-board" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        An empty board
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#other-common-faults" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Other common faults
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-two-export-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The two export paths
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The two export paths">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-each-path-carries" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What each path carries
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#turning-export-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Turning export on
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-collector" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The collector
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dashboards" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Dashboards
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Dashboards">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#panel-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Panel families
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-is-measured-and-what-is-derived" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What is measured and what is derived
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Known limits
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Troubleshooting
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Troubleshooting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#an-empty-board" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        An empty board
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#other-common-faults" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Other common faults
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="telemetry-export">Telemetry Export</h1>
+<p>IRIS does not talk to your monitoring backend directly. It publishes two
+surfaces and stops there, so the operator picks the backend: a Prometheus
+exposition endpoint to scrape, and an OpenTelemetry OTLP endpoint to push to.
+Everything on this page is about getting those two surfaces into Prometheus,
+Splunk, Grafana, or Loki.</p>
+<p>Telemetry is best-effort. The bounded queue can drop records while a
+destination is unreachable; export health reports failures and queue drops.
+Image staging continues independently of telemetry export.</p>
+<h2 id="the-two-export-paths">The two export paths</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Transport</th>
+<th>Direction</th>
+<th>Carries</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prometheus scrape</td>
+<td><code>:9101/metrics</code>, exposition text, <code>iris_*</code> names</td>
+<td>your collector pulls</td>
+<td>Fleet and per-image <strong>aggregates</strong></td>
+</tr>
+<tr>
+<td>OTLP push</td>
+<td><code>IRIS_OTLP_ENDPOINT</code>, OTLP/HTTP <strong>JSON</strong></td>
+<td>IRIS pushes</td>
+<td>Aggregates as metrics, <strong>per-device and per-peer detail as log records</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The split is not stylistic. <code>server/metrics.py:14-18</code> states the rule the
+Prometheus renderer enforces:</p>
+<blockquote>
+<p>Aggregate metrics are labelled by image only (<code>image</code> + <code>info_hash</code>) to keep
+Prometheus cardinality low; per-device detail goes to the OTLP logs pipeline,
+not here.</p>
+</blockquote>
+<p>A fleet of several hundred devices multiplied by every peer edge in a swarm
+would put six figures of label combinations into a metric store that is built
+for time series, not for facts. So the per-edge and per-device rows travel as
+<strong>log records</strong>, where high cardinality is normal and free-text search is the
+point.</p>
+<h3 id="what-each-path-carries">What each path carries</h3>
+<p><strong>Prometheus (aggregate only, labels <code>{image, info_hash}</code>):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Series</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris_origin_sent_bytes_total</code></td>
+<td>counter</td>
+<td>Bytes the origin seeder actually uploaded for this torrent</td>
+</tr>
+<tr>
+<td><code>iris_peer_attributed_bytes_total</code></td>
+<td>counter</td>
+<td>Of those, the bytes <strong>traced to a device</strong> — the ledger saw the connection that carried them</td>
+</tr>
+<tr>
+<td><code>iris_peer_unattributed_bytes_total</code></td>
+<td>gauge</td>
+<td>The honest residue: <strong>untraced</strong> — sent for certain, recipient unknown. A gauge because tracing a device late steps it <strong>down</strong>; graph the value, never <code>rate()</code> it</td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_attributed</code></td>
+<td>gauge</td>
+<td>Peer edges the ledger currently has a nonzero traced total for — a level, not an accumulation</td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_saturated</code></td>
+<td>gauge</td>
+<td><strong>A 0/1 flag, not a count.</strong> <code>1</code> means the ledger's per-torrent peer cap refused new peers, so part of the untraced residue went to peers the cap turned away rather than to connections that ended between samples</td>
+</tr>
+</tbody>
+</table>
+<p>The origin and attributed <strong>byte</strong> series are counters, deliberately: a
+finished transfer keeps its history and a panel does not blank out when the
+swarm goes idle. The other three families are gauges, and <code>rate()</code>,
+<code>increase()</code> and <code>resets()</code> mean nothing on any of them — the residue because
+it is the difference of two counters and can decrease, the two peer families
+because one is a level and the other is a flag.</p>
+<div class="admonition info">
+<p class="admonition-title">What it means to trace a byte to a device</p>
+<p>The origin seeder knows <strong>exactly</strong> how many bytes it uploaded — that total
+is never in doubt. Naming <em>which device</em> received them is a second, harder
+question. The only way to answer it is to read aria2's per-connection byte
+counters, and a connection is visible only while it is alive. So a peer
+that connects, takes bytes and disconnects between two samples cannot be
+pinned to anyone afterwards.</p>
+<ul>
+<li><strong>origin sent</strong> — exact. Measured by the seeder's own upload counter.</li>
+<li><strong>traced to a device</strong> — of those bytes, the ones whose recipient can be
+  named.</li>
+<li><strong>untraced</strong> — bytes that certainly went out to somebody, recipient
+  unknown.</li>
+</ul>
+<p>Untraced bytes are uploads counted by the origin without a sampled
+recipient. This does not establish that the receiving device completed
+its download, verification, or final placement. Use that device's staging
+report for completion. A shorter sampling interval can capture more
+connections, but cannot eliminate untraced bytes.</p>
+<p><strong>Metric names use <code>attributed</code>.</strong> The traced
+total is <code>iris_peer_attributed_bytes_total</code>; the untraced residue is
+<code>iris_peer_unattributed_bytes_total</code>; the traced-edge count is
+<code>iris_swarm_peers_attributed</code>. Boards and docs say <em>traced</em> / <em>untraced</em>,
+queries use <code>attributed</code> / <code>unattributed</code> for those quantities.</p>
+</div>
+<p><strong>OTLP logs (per-peer and per-device detail):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Record name</th>
+<th>Source</th>
+<th>Nature</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.swarm.peer_bytes</code></td>
+<td>Server-side peer ledger</td>
+<td>Origin-side <strong>sampled estimate</strong> of one edge's bytes</td>
+</tr>
+<tr>
+<td><code>iris.device.peer_transfer_record</code></td>
+<td>Device-side completion hook</td>
+<td>Device-<strong>measured exact</strong> bytes received from one peer</td>
+</tr>
+<tr>
+<td><code>iris.device.transfer.report</code></td>
+<td>Device agent</td>
+<td><strong>Terminal per-device transfer report.</strong> The record every delivery panel on both boards unwraps, via <code>iris.transfer.completed_content_bytes</code>.</td>
+</tr>
+<tr>
+<td><code>iris.device.report</code></td>
+<td>Device agent</td>
+<td>Summary projection of the report with a reduced attribute set. Use <code>iris.device.transfer.report</code> for completed bytes and verification fields.</td>
+</tr>
+<tr>
+<td><code>iris.swarm.peer_rate</code></td>
+<td>Server-side peer ledger</td>
+<td>Sampled per-connection send rate (<code>iris.transfer.peer_send_bps</code>)</td>
+</tr>
+<tr>
+<td><code>iris.tracker.peer</code></td>
+<td>Tracker</td>
+<td>Tracker peer lifecycle (announce, join, leave)</td>
+</tr>
+<tr>
+<td><code>iris.peer.policy</code></td>
+<td>Tracker</td>
+<td>Peer-policy revision applied / enforcement outcome</td>
+</tr>
+<tr>
+<td><code>iris.transfer.lifecycle</code></td>
+<td>Tracker (server-side assignment + swarm observation)</td>
+<td>Plan lifecycle: assignment recorded, seeding confirmed</td>
+</tr>
+</tbody>
+</table>
+<p>These eight are the <code>otel.log.name</code> values IRIS emits. Filter and group
+records by these names to select the measurement you need.</p>
+<p>Role enrichment does not add a ninth record family. When a peer is an
+authenticated device, existing tracker, rate, and byte records may carry
+<code>iris.device.role</code>, sourced from the loaded compiled policy membership.
+<code>iris.peer.role</code> keeps its older BitTorrent meaning (<code>seeder</code> or <code>leecher</code>), so
+do not group those two attributes as if they shared a vocabulary. The
+<code>iris.peer.policy</code> operation record remains count-only: it carries the policy
+revision/action and aggregate enforcement state/applied revision/desired IP
+count, never role membership lists, raw rules, addresses, or origin-QoS option
+values. The management policy view is the source for current preflight and
+<code>pre-instructions</code> status.</p>
+<div class="admonition danger">
+<p class="admonition-title">Never sum the two peer record names together</p>
+<p><code>iris.swarm.peer_bytes</code> and <code>iris.device.peer_transfer_record</code> describe the <em>same
+bytes</em> from opposite ends of the wire — one badly, one exactly. They carry
+different record names for exactly this reason. A backend query that sums
+both counts every transfer twice. Pick one name per panel, and prefer
+<code>iris.device.peer_transfer_record</code> where you need a number you can defend.</p>
+</div>
+<p>Key attributes on the peer records: <code>iris.image.id</code>, <code>iris.image.name</code>,
+<code>iris.torrent.info_hash</code>, <code>network.peer.address</code>, <code>device.id</code>,
+<code>iris.peer.device.id</code>, <code>iris.peer.device_id</code>, <code>iris.peer.attribution</code>,
+<code>iris.transfer.session_bytes_from_peer</code>,
+<code>iris.transfer_record.capture_complete</code>.</p>
+<p><code>iris.peer.attribution</code> is <code>origin</code> | <code>device</code> | <code>unknown</code>. The origin seeder
+is an ordinary BitTorrent peer of every device, so its bytes sit in a device's
+peer list like any other peer's. <strong>The device cannot tell which peer is the
+origin; the server can, and does.</strong> A row the server did not resolve stays
+<code>unknown</code> rather than being folded into <code>device</code> — <code>unknown</code> is a normal
+outcome (a peer that has not heartbeated, a NAT address, a non-IRIS seeder),
+not an error.</p>
+<p>On <code>iris.device.peer_transfer_record</code>, <code>iris.peer.device_id</code> names the sender
+in one column: the sending device's id for a <code>device</code> row, <code>origin</code> for the
+seeder's row, and absent for an <code>unknown</code> row. <code>iris.image.name</code> is the
+catalog filename for <code>iris.image.id</code> at export time. The classification is
+made once, when the report is first exported, and pinned in the server's
+<code>report-attribution.json</code>, so the copy re-exported under the same <code>event.id</code>
+after a server restart is identical to the first.</p>
+<p>Key attributes on <code>iris.transfer.lifecycle</code>: <code>event</code> (<code>planned</code> or
+<code>seeding_started</code>), <code>iris.plan.id</code> and <code>iris.transfer.id</code> (the plan's two
+correlation ids, both 32 lowercase hex), <code>iris.device.id</code> <strong>and</strong> <code>device.id</code>
+(the same value under both spellings, so either join can be written without a
+coalesce), <code>iris.image.id</code>, <code>iris.torrent.info_hash</code>, and
+<code>iris.transfer.planned_at</code>. The <code>seeding_started</code> event adds
+<code>iris.transfer.seeding_started_at</code> together with the two observations behind
+it, <code>iris.transfer.checksum_verified_at</code> (the same instant also ships under the
+name that says what it is, <code>iris.transfer.report_received_at</code>) and
+<code>iris.transfer.tracker_seeder_at</code>, plus the device's own clock as
+<code>iris.device.observed_at</code> and <code>iris.device.report_created_at</code>, and — only on a
+promotion that rebuilt a lost store row — <code>iris.transfer.recovered_promotion</code>.
+Group on
+<code>iris.plan.id</code>: it is stable across both events of one plan and distinct across
+two plans for the same device and image. The full contract — what
+<code>seeding_started</code> proves, how delivery and deduplication work, and what a
+missing <code>seeding_started</code> means — is in
+<a href="../observability/#transfer-lifecycle-events">Transfer lifecycle events</a>.</p>
+<div class="admonition warning">
+<p class="admonition-title">Int64 attributes ride the wire as strings</p>
+<p>Byte attributes are int64 and therefore travel as JSON <strong>strings</strong> in
+OTLP. A backend query that sums them must coerce first.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Parse lifecycle timestamps as dates</p>
+<p>Do not carry the caveat above over to <code>iris.transfer.lifecycle</code>.
+<code>iris.transfer.planned_at</code>, <code>iris.transfer.seeding_started_at</code>,
+<code>iris.transfer.checksum_verified_at</code>,
+<code>iris.transfer.report_received_at</code> and
+<code>iris.transfer.tracker_seeder_at</code> are <strong>RFC 3339 string attributes by
+construction</strong> — UTC, exactly three fractional digits, a literal trailing
+<code>Z</code> (<code>2026-09-02T12:43:11.482Z</code>, Splunk pattern
+<code>%Y-%m-%dT%H:%M:%S.%N%Z</code>). Parse them with a time function, not a numeric
+cast.</p>
+<p>The lifecycle records also time differently from the device report
+records. <code>timeUnixNano</code> on a lifecycle record is the <strong>source event
+time</strong> — the instant the plan was minted, or the instant the last seeding
+precondition became true — never the emit time. Where the device report
+records carry server <strong>ingest</strong> time in <code>timeUnixNano</code> unconditionally, a
+lifecycle record carries a server <em>observation</em>; and when the attesting
+report was the later precondition, that observation is the report's own
+ingest instant, which <code>iris.transfer.report_received_at</code> names. Both
+record kinds put the device's own clock in <code>iris.device.observed_at</code>, and
+the lifecycle records add <code>iris.device.report_created_at</code> beside it. Those
+are a second clock: never subtract either from the RFC 3339 server
+instants — read them against <code>iris.transfer.report_received_at</code> to see how
+much report-delivery latency a plan-to-seed duration is carrying.</p>
+</div>
+<h2 id="turning-export-on">Turning export on</h2>
+<p>To enable OTLP through the deployment defaults, set both values:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># server/.env on the IRIS host</span>
+<span class="nv">IRIS_OBSERVABILITY</span><span class="o">=</span><span class="m">1</span>
+<span class="nv">IRIS_OTLP_ENDPOINT</span><span class="o">=</span>https://collector.example.com:4318
+</code></pre></div>
+<p>Configure the <strong>base</strong> endpoint only. IRIS appends <code>/v1/logs</code> and
+<code>/v1/metrics</code> itself; putting a path in the variable produces
+<code>/v1/logs/v1/logs</code>.</p>
+<p>The Console's <strong>Settings → Telemetry</strong> can override both the endpoint and the
+OTLP enabled flag. These settings apply within seconds without a restart.
+An enabled flag and endpoint are both required. Prometheus <code>/metrics</code> is
+controlled separately by <code>IRIS_OBSERVABILITY</code> at server startup; changing it
+requires a restart.</p>
+<p>The <code>/metrics</code> endpoint requires authentication. Before enabling a Prometheus scrape,
+create a raw token on the IRIS host with private permissions and give Compose
+its host path. Mount the identical raw value as the collector or Prometheus
+<code>credentials_file</code> in the <a href="../splunk/#configure-the-collector">Splunk collector configuration</a>:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/iris
+openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="w"> </span>&gt;<span class="w"> </span>~/.config/iris/observability-token
+<span class="nb">export</span><span class="w"> </span><span class="nv">IRIS_OBSERVABILITY_TOKEN_FILE_HOST</span><span class="o">=</span><span class="nv">$HOME</span>/.config/iris/observability-token
+sudo<span class="w"> </span>chown<span class="w"> </span><span class="m">10001</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_OBSERVABILITY_TOKEN_FILE_HOST</span><span class="s2">"</span>
+<span class="nb">printf</span><span class="w"> </span><span class="s1">'IRIS_OBSERVABILITY_TOKEN_FILE_HOST=%s\n'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_OBSERVABILITY_TOKEN_FILE_HOST</span><span class="s2">"</span><span class="w"> </span>&gt;&gt;<span class="w"> </span>server/.env
+</code></pre></div>
+<p><code>IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST</code> optionally mounts the preceding
+raw value during a two-token rotation window; leave it unset otherwise. These
+host-side interpolation variables are distinct from <code>IRIS_OTLP_HEADERS_FILE</code>,
+which authenticates IRIS's outbound push to a collector.</p>
+<p>For an authenticated OTLP collector, create the header specification in a
+private host file and give Compose its host path. The value is read without
+placing it in the container environment, command arguments, or URL:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/iris
+<span class="nb">read</span><span class="w"> </span>-rsp<span class="w"> </span><span class="s1">'OTLP Authorization header value: '</span><span class="w"> </span>IRIS_OTLP_AUTH_VALUE<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="nb">printf</span><span class="w"> </span><span class="s1">'Authorization=%s\n'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_OTLP_AUTH_VALUE</span><span class="s2">"</span><span class="w"> </span>&gt;<span class="w"> </span>~/.config/iris/otlp-headers
+<span class="nb">unset</span><span class="w"> </span>IRIS_OTLP_AUTH_VALUE
+sudo<span class="w"> </span>chown<span class="w"> </span><span class="m">10001</span><span class="w"> </span>~/.config/iris/otlp-headers
+<span class="nb">printf</span><span class="w"> </span><span class="s1">'%s\n'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'IRIS_OTLP_HEADERS_FILE_HOST='</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">"</span><span class="s1">'/.config/iris/otlp-headers'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>&gt;&gt;<span class="w"> </span>server/.env
+</code></pre></div>
+<p>Compose mounts that file read-only at the fixed in-container
+<code>IRIS_OTLP_HEADERS_FILE=/run/secrets/iris_otlp_headers</code>. The direct
+<code>IRIS_OTLP_HEADERS="Name=Value"</code> environment form remains available for
+non-Compose integrations, but putting a bearer token in <code>server/.env</code> is not
+recommended. Header values are never logged, and IRIS refuses HTTP redirects
+so they cannot leak to a redirect target. With either form present, the OTLP
+endpoint must be HTTPS. IRIS validates the collector certificate using system
+roots and the CAs installed under <strong>Settings → TLS &amp; trust → Trusted CAs</strong>.</p>
+<div class="admonition note">
+<p class="admonition-title">Host interpolation and container variables are different</p>
+<p><code>IRIS_OBSERVABILITY_TOKEN_FILE_HOST</code>, its optional <code>PREVIOUS</code> counterpart,
+and <code>IRIS_OTLP_HEADERS_FILE_HOST</code> are host-side Compose interpolation
+variables. Compose turns them into fixed, server-only container paths; it
+does not pass the host paths into the process. See
+<a href="../reference/#environment-variables">How a variable reaches the container</a>.</p>
+</div>
+<h2 id="the-collector">The collector</h2>
+<p><a href="../splunk/">Splunk Setup</a> provides a complete Collector Contrib configuration
+with authenticated OTLP over HTTPS, a verified HTTPS scrape of IRIS, separate
+HEC exporters for events and metrics, and connection checks. It includes both
+feeds required by the shipped Splunk dashboard.</p>
+<p>For another backend, retain the receivers and IRIS filters and select its
+exporter. A Grafana/Prometheus deployment needs a Prometheus-compatible output;
+a Loki deployment needs an OTLP log output. The Splunk example exports only
+to HEC. The two transports do not carry identical metric families: the
+<code>iris_origin_sent_bytes_total</code>, attribution, and swarm families come from the
+Prometheus scrape.</p>
+<h2 id="dashboards">Dashboards</h2>
+<p>Two boards ship in this repository under
+<a href="../dashboards/"><code>docs/zensical/dashboards/</code></a>. They read the same telemetry from the
+two different stores, so you can run either backend alone:</p>
+<ul>
+<li><strong>The Splunk board</strong> reads <code>iris_metrics</code> with <code>mstats</code> and <code>iris_logs</code> with
+  <code>spath</code>, and reproduces the same panel families in SPL.</li>
+<li><strong>The Grafana board</strong> reads the Prometheus surface (aggregate series) plus
+  Loki for the per-peer log records.</li>
+</ul>
+<h3 id="panel-families">Panel families</h3>
+<p><strong>Byte accounting.</strong> The reconciliation identity, drawn as one stacked
+panel per image:</p>
+<div class="highlight"><pre><span></span><code>origin_sent = peer_attributed + peer_unattributed
+</code></pre></div>
+<p>Sourced from <code>iris_origin_sent_bytes_total</code>,
+<code>iris_peer_attributed_bytes_total</code> and <code>iris_peer_unattributed_bytes_total</code>.
+On the boards the two right-hand terms read <strong>traced to a device</strong> and
+<strong>untraced</strong> — the series behind them are the <code>attributed</code> and
+<code>unattributed</code> families named above. Because these are counters, the panel
+keeps its shape after the swarm goes idle.</p>
+<p><strong>Swarm participation.</strong> <code>iris_swarm_peers_attributed</code> against total swarm
+peers, showing how much of the swarm the ledger can trace bytes to, beside
+<code>iris_swarm_peers_saturated</code> — the 0/1 flag saying the per-torrent peer cap
+refused peers, which is what tells a residue caused by the cap apart from one
+caused by short-lived connections.</p>
+<p><strong>Per-peer edges (origin view).</strong> A table built from <code>iris.swarm.peer_bytes</code>
+log records, one row per edge, keyed on <code>network.peer.address</code> and
+<code>iris.image.id</code>. This is the origin's sampled view.</p>
+<p><strong>Per-device transfer records (device view).</strong>
+<code>iris.device.peer_transfer_record</code> is exported for every completed transfer,
+split by <code>iris.peer.attribution</code> into <code>origin</code>, <code>device</code> and <code>unknown</code>, and it
+is the exact, device-measured answer to "did this device get its image from a
+peer or from the origin?".</p>
+<div class="admonition warning">
+<p class="admonition-title">Neither shipped board charts it</p>
+<p><code>iris.device.peer_transfer_record</code> appears in <strong>neither</strong>
+<code>grafana-iris-swarm.json</code> nor <code>splunk-iris-swarm.xml</code>. Every per-device
+peer-share panel on both boards is built on <code>iris.swarm.peer_bytes</code>, the
+origin-side <strong>sampled</strong> estimate with 12–27% documented sampling loss. So
+the number you can read off a shipped board is the estimate; the number you
+can defend has to come from a panel you write yourself against the device
+record. Build it and you will have the better figure — the record is
+already reaching your collector.</p>
+</div>
+<p><strong>Offload share.</strong> Peer-sourced bytes as a percentage of the image, per device
+and per fleet.</p>
+<h3 id="what-is-measured-and-what-is-derived">What is measured and what is derived</h3>
+<p>This distinction is on the boards themselves, and it matters when someone
+quotes a number in a meeting.</p>
+<table>
+<thead>
+<tr>
+<th>Figure</th>
+<th>Status</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris_origin_sent_bytes_total</code></td>
+<td><strong>Measured</strong></td>
+<td>The origin seeder's own upload counter, banked across counter resets</td>
+</tr>
+<tr>
+<td><code>iris.device.peer_transfer_record</code> byte values</td>
+<td><strong>Measured</strong></td>
+<td>The receiving device's own cumulative per-peer counter, read once at the instant the last piece landed</td>
+</tr>
+<tr>
+<td><code>iris.peer.attribution</code> (<code>origin</code>/<code>device</code>/<code>unknown</code>)</td>
+<td><strong>Derived</strong></td>
+<td>A server-side join of peer address against the device address map — authoritative, but a join</td>
+</tr>
+<tr>
+<td><code>iris_peer_attributed_bytes_total</code> (bytes traced to a device)</td>
+<td><strong>Measured</strong></td>
+<td>An accumulation of aria2's own per-connection counters, banked into the durable ledger — not arithmetic. Both boards label it measured. Its <em>coverage</em> is what sampling limits: an edge that opened and closed between two polls is never banked, so this is a floor on what peers really carried, and the shortfall is published as the untraced residue rather than hidden</td>
+</tr>
+<tr>
+<td><code>iris_peer_unattributed_bytes_total</code> (untraced bytes)</td>
+<td><strong>Measured</strong></td>
+<td>Both boards label it measured, and it is a real published quantity rather than an error bar. It is computed as <code>max(0, origin sent − traced)</code>, so it is arithmetic on two measurements — which is exactly why it is a gauge and never <code>rate()</code>d</td>
+</tr>
+<tr>
+<td><code>iris.swarm.peer_bytes</code> byte values</td>
+<td><strong>Derived (sampled)</strong></td>
+<td>The origin-side estimate of an edge; the device transfer record is the exact form of the same bytes</td>
+</tr>
+<tr>
+<td>Offload share percentages</td>
+<td><strong>Derived</strong></td>
+<td>A ratio of the above</td>
+</tr>
+</tbody>
+</table>
+<h2 id="known-limits">Known limits</h2>
+<p>These are stated on the boards and are stated here. None of them is a bug to be
+fixed by a nicer panel.</p>
+<p><strong>Origin-side sampling is lossy.</strong> aria2's <code>getPeers</code> returns only <strong>live</strong>
+connections, and its per-peer counter is per <em>connection</em> — it disappears with
+the connection. Sampling therefore misses bytes moved by peers that came and
+went between samples. Measured coverage: <strong>73.3% of origin bytes traced to a
+device at 3-second sampling, 88.1% at 2-second sampling.</strong> The gap is not
+hidden; it is published as the untraced counter,
+<code>iris_peer_unattributed_bytes_total</code>.</p>
+<p><strong>A device transfer record is a floor, not a census.</strong> <code>DefaultPeerStorage</code> erases a
+peer on disconnect, so even the completion-instant snapshot only sees peers
+still connected at that moment. Peers that disconnected mid-download leave no
+trace in it. <code>iris.transfer_record.capture_complete = false</code> on the block is the
+flag that says so — the individual rows are still exact either way.</p>
+<p><strong>Absence of a transfer record is not zero.</strong> A device that reported no transfer records emits
+no records at all, while a genuine measured zero appears as an explicit <code>0</code>.</p>
+<p><strong><code>iris_image_size_bytes</code> is exact, not measured traffic.</strong> It republishes the
+catalog entry's own <code>size</code> field, recorded from the file itself at publish
+time. A missing series means the image has no published catalog entry, and the
+panels that need it read "no data" rather than guessing.</p>
+<p><strong><code>iris.peer.has_complete_file</code> does not identify the origin.</strong> It is aria2's
+<code>seeder</code> flag, true for any peer holding the complete file — which in a
+seven-router wave is every device that finished early. It answers "complete vs
+partial", a different question.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="an-empty-board">An empty board</h3>
+<p>An empty board has three distinct causes, and they are told apart by <em>which</em>
+half is empty.</p>
+<table>
+<thead>
+<tr>
+<th>What you see</th>
+<th>Cause</th>
+<th>Confirm with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Every panel empty, metrics and logs</td>
+<td>Nothing is exporting at all</td>
+<td>Check IRIS <code>/healthz</code> first</td>
+</tr>
+<tr>
+<td>Metric panels empty, log tables populated</td>
+<td>No scrape job, or the metrics pipeline is filtered out</td>
+<td><code>mcatalog</code> / Prometheus target list</td>
+</tr>
+<tr>
+<td>Metric panels populated, log tables empty</td>
+<td>No log export path, or the log filter drops everything</td>
+<td><code>otelcol_exporter_sent_log_records</code></td>
+</tr>
+<tr>
+<td>Counters present but flat since a past timestamp</td>
+<td>Genuinely no traffic — no transfer has run</td>
+<td>Widen the time range</td>
+</tr>
+</tbody>
+</table>
+<p>Work the hops cheapest first.</p>
+<p><strong>1. Can the IRIS telemetry listener answer?</strong></p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>--fail<span class="w"> </span>--silent<span class="w"> </span>--show-error<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cacert<span class="w"> </span>/secure/path/iris-catalog.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://203.0.113.10:9101/healthz
+</code></pre></div>
+<p><code>{"ok": true}</code> proves only that the TLS telemetry listener is answering; the
+anonymous probe deliberately reveals no export or dependency details. Check
+the Console's <em>Telemetry export</em> badge for <code>off</code> or <code>degraded</code>, then use the
+server audit trail to distinguish a disabled destination from a collector
+failure.</p>
+<p><strong>2. Is the collector receiving and forwarding?</strong></p>
+<p>Run this on the collector host; its diagnostic port is bound to loopback.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>--fail<span class="w"> </span>--silent<span class="w"> </span>--show-error<span class="w"> </span>http://127.0.0.1:8888/metrics<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>rg<span class="w"> </span><span class="s1">'otelcol_(receiver_accepted|exporter_sent|exporter_send_failed)'</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Counter pattern</th>
+<th>Diagnosis</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>accepted</code> rising, <code>sent</code> rising</td>
+<td>Healthy</td>
+</tr>
+<tr>
+<td><code>accepted</code> rising, <code>sent</code> flat</td>
+<td>The filter drops everything — check <code>service.name</code> and the <code>iris[._].*</code> regexp</td>
+</tr>
+<tr>
+<td><code>send_failed</code> rising</td>
+<td>The backend is rejecting — read the collector log</td>
+</tr>
+<tr>
+<td><code>accepted</code> flat</td>
+<td>Nothing arriving — check IRIS and the ports</td>
+</tr>
+</tbody>
+</table>
+<p><strong>3. Are the log records searchable?</strong></p>
+<div class="highlight"><pre><span></span><code>index=iris_logs earliest=-24h | stats count by sourcetype
+index=iris_logs earliest=-24h "otel.log.name"="iris.device.peer_transfer_record" | stats count by "device.id"
+</code></pre></div>
+<p>The first query separates "no log export" (zero rows) from "no traffic" (rows
+present, but none of them peer transfer records). Swarm events are edge-triggered, so
+an idle fleet produces none — search a 7-day window before concluding it is
+broken.</p>
+<p><strong>4. Are the metrics searchable?</strong></p>
+<div class="highlight"><pre><span></span><code>| mcatalog values(metric_name) WHERE index=iris_metrics earliest=-2h
+</code></pre></div>
+<p>Expect the dotted OTLP names and the underscored scrape names side by side. If
+<code>iris_origin_sent_bytes_total</code> is absent while <code>iris.transfer.*</code> is present,
+you have the OTLP push but no scrape job — the aggregate peer families are
+Prometheus-only.</p>
+<p>A first real chart:</p>
+<div class="highlight"><pre><span></span><code>| mstats avg(_value) WHERE index=iris_metrics AND metric_name="iris.transfer.throughput" span=1m BY iris.image.id
+</code></pre></div>
+<h3 id="other-common-faults">Other common faults</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>unknown type: "splunk_hec"</code></td>
+<td>Core collector image</td>
+<td>Use the contrib image</td>
+</tr>
+<tr>
+<td>Collector exits naming a config key</td>
+<td>YAML error</td>
+<td>Read the first line of the log</td>
+</tr>
+<tr>
+<td>No data at the collector</td>
+<td>Path in <code>IRIS_OTLP_ENDPOINT</code></td>
+<td>Drop the <code>/v1/…</code> suffix</td>
+</tr>
+<tr>
+<td>No data at the collector</td>
+<td>Endpoint set, flag unset</td>
+<td>Enable OTLP in Settings → Telemetry, or set <code>IRIS_OBSERVABILITY=1</code> and recreate the server</td>
+</tr>
+<tr>
+<td>HEC 400 "Incorrect index"</td>
+<td>Index missing or not in the token's allowed list</td>
+<td>Add both indexes to the token</td>
+</tr>
+<tr>
+<td>HEC TLS error</td>
+<td>Self-signed certificate</td>
+<td>Install the issuing CA and use a name in the certificate</td>
+</tr>
+<tr>
+<td>Metrics rejected, logs fine</td>
+<td><code>iris_metrics</code> created as an event index</td>
+<td>Recreate it with <code>datatype = metric</code></td>
+</tr>
+<tr>
+<td>Other tenants' series in <code>iris_metrics</code></td>
+<td>Filters added after the first start</td>
+<td>Filter from day one; a metric index does not clean easily</td>
+</tr>
+<tr>
+<td>Byte sums come out wrong by a factor</td>
+<td>Both peer record names summed together</td>
+<td>Query one record name per panel</td>
+</tr>
+<tr>
+<td>Byte sums are zero or string-concatenated</td>
+<td>int64 attributes arrive as JSON strings</td>
+<td>Coerce to number before summing</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2695 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../architecture/">
+      
+      
+        <link rel="next" href="../network-ports/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Security Model - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#security-model" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Security Model
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#guardrails" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Guardrails
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#container-runtime-privileges" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Container runtime privileges
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Container runtime privileges">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes posture
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trust-boundaries" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Trust boundaries
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Trust boundaries">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#console-and-server-are-separate-trust-zones" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console and server are separate trust zones
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#swarm-data-is-console-gated" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Swarm data is console-gated
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#typed-identity-and-peer-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Typed identity and peer policy
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Typed identity and peer policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#roles-virtual-acls-and-server-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Roles, virtual ACLs, and server enforcement
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#device-administrator-trust-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device administrator trust boundary
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#encrypted-instruction-envelope" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Encrypted instruction envelope
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#two-root-trust-and-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Two-root trust and custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iox-verification-and-guest-shell-bundle-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOx verification and Guest Shell bundle boundary
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tracker-transport-security" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tracker transport security
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#peer-policy-failure-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Peer policy failure posture
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#emergency-deny" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Emergency deny
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-no-address-is-known" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When no address is known
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#enforcement-status-is-count-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Enforcement status is count-only
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rotating-the-seeder-announce-credential" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Rotating the seeder announce credential
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#first-run-admin-claim" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        First-run admin claim
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Secrets
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-images-from-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing images from disk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cisco-bulk-hash-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cisco Bulk Hash verification
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tls-and-certificates" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        TLS and certificates
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="TLS and certificates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#console-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console sessions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-ssh-host-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device SSH host keys
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Device SSH host keys">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#server-side-sessions-console-installers-lab-transports" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Server-side sessions (console, installers, lab transports)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on-device-agent-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        On-device agent sessions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#third-party-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Third-party tools
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#guardrails" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Guardrails
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#container-runtime-privileges" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Container runtime privileges
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Container runtime privileges">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes posture
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trust-boundaries" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Trust boundaries
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Trust boundaries">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#console-and-server-are-separate-trust-zones" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console and server are separate trust zones
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#swarm-data-is-console-gated" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Swarm data is console-gated
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#typed-identity-and-peer-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Typed identity and peer policy
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Typed identity and peer policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#roles-virtual-acls-and-server-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Roles, virtual ACLs, and server enforcement
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#device-administrator-trust-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device administrator trust boundary
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#encrypted-instruction-envelope" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Encrypted instruction envelope
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#two-root-trust-and-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Two-root trust and custody
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iox-verification-and-guest-shell-bundle-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOx verification and Guest Shell bundle boundary
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tracker-transport-security" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tracker transport security
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#peer-policy-failure-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Peer policy failure posture
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#emergency-deny" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Emergency deny
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-no-address-is-known" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When no address is known
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#enforcement-status-is-count-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Enforcement status is count-only
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rotating-the-seeder-announce-credential" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Rotating the seeder announce credential
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#first-run-admin-claim" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        First-run admin claim
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Secrets
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-images-from-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing images from disk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cisco-bulk-hash-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cisco Bulk Hash verification
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tls-and-certificates" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        TLS and certificates
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="TLS and certificates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#console-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console sessions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-ssh-host-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device SSH host keys
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Device SSH host keys">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#server-side-sessions-console-installers-lab-transports" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Server-side sessions (console, installers, lab transports)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on-device-agent-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        On-device agent sessions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#third-party-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Third-party tools
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="security-model">Security Model</h1>
+<p>IRIS transfers, verifies, and stages operating-system images. Installing or
+activating a staged image remains an operator action outside IRIS.</p>
+<h2 id="guardrails">Guardrails</h2>
+<table>
+<thead>
+<tr>
+<th>Guardrail</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No operating-system install</td>
+<td>IRIS does not install or activate the staged IOS image, or commit an operating-system package change. Onboarding and undeploy manage only the IRIS application.</td>
+</tr>
+<tr>
+<td>No reload</td>
+<td>IRIS does not reload or schedule reloads.</td>
+</tr>
+<tr>
+<td>No boot mutation</td>
+<td>IRIS does not change boot variables or running software state.</td>
+</tr>
+<tr>
+<td>No inband network mutation</td>
+<td>For inband devices, IRIS never creates, changes, or removes the existing VLAN, SVI, gateway, routes, or VRF.</td>
+</tr>
+<tr>
+<td>Device-side content check</td>
+<td>Downloaded bytes are checked against catalog SHA-256. IOS-XE placement checks the final copy's exact size; XR verifies the file on its host mount. An existing Guest Shell root image is adopted only after native SHA-512 verification against the catalog.</td>
+</tr>
+<tr>
+<td>Private swarm</td>
+<td>Torrents use private metadata and authenticated announces.</td>
+</tr>
+<tr>
+<td>Unprivileged runtime</td>
+<td>Every server process runs as a fixed non-root uid with all Linux capabilities dropped.</td>
+</tr>
+</tbody>
+</table>
+<p>Deployment lifecycle state is recorded in durable, non-secret <strong>deployment
+records</strong> under <code>IRIS_STATE</code>, and a normal teardown is driven from a device's
+recorded deployment record rather than its editable inventory. The one
+exception is a <strong>forced undeploy</strong>, for a device stranded with no readable
+deployment record: it is planned from inventory,
+removes only what is identifiable by name as IRIS's own, deliberately leaves the
+operator's network (VLAN/SVI, VirtualPortGroup, NAT rules) untouched because
+nothing proves IRIS created it, and is recorded distinctly in the audit trail as
+<code>undeploy_forced</code>. Teardown is otherwise never driven from
+its editable inventory. Deployment records contain no passwords, tokens, certificate keys,
+or raw device configuration. Router deployment records additionally bind the management IP
+and processor-board identity and own only collision-free named globals and
+<code>guest-share</code> resources. See
+<a href="../management-type/#router-preflight-and-ownership">Router preflight and ownership</a>.</p>
+<h2 id="container-runtime-privileges">Container runtime privileges</h2>
+<p>The server and Console images create a system user <code>iris</code> with a <strong>fixed uid
+and gid of 10001</strong> and declare <code>USER iris</code>. Tracker (6969), catalog (8443),
+artifact server (8000), seeder/aria2c (6881), telemetry (9101), internal
+management (9443), and the separate Console (8080) run as that uid. No listener
+uses a privileged port, no service needs a raw socket, and nothing chowns
+anything at runtime. Compose pins
+the same identity and drops the remaining privilege surface; the exact settings
+are in <a href="../server/#runtime-identity">Runtime identity</a>.</p>
+<p>Decrypted copies of the server's age-encrypted secrets live on <code>/run/iris</code> tmpfs,
+which is mounted with <code>uid=</code>, <code>gid=</code>, and <code>mode=</code> options so the directory is owned by and
+private to the runtime uid. Those options require Docker Engine 23.0 or later.</p>
+<p>Because the Dockerfile cannot change ownership of host paths, uid 10001 must be
+given access to the age identity file (<code>IRIS_AGE_KEY_FILE_HOST</code>, keeping mode
+600 or 400) and the artifacts directory (<code>IRIS_ARTIFACTS_HOST_DIR</code>) on every
+deploy. Named volumes must also be writable by uid 10001. <code>cap_drop: [ALL]</code>
+applies to <code>docker compose run</code>, so permission repairs require a separate
+container with permission to change ownership. See
+<a href="../server/#volume-permissions">Volume permissions</a>.</p>
+<p>The host image tree (<code>IRIS_IMAGE_ROOT</code>, mounted read-only at <code>/opt/images</code>)
+must also be readable and traversable by uid 10001 — see
+<a href="../server/#host-image-tree-permissions">Host image tree permissions</a>.</p>
+<h3 id="kubernetes-posture">Kubernetes posture</h3>
+<p>The Kubernetes manifests match the same identity and enforce it at the
+namespace level.</p>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pod <code>securityContext</code></td>
+<td><code>runAsNonRoot: true</code>, <code>runAsUser</code>/<code>runAsGroup</code>/<code>fsGroup</code> 10001.</td>
+</tr>
+<tr>
+<td>Container and init container</td>
+<td><code>allowPrivilegeEscalation: false</code>, all capabilities dropped, <code>seccompProfile: RuntimeDefault</code>.</td>
+</tr>
+<tr>
+<td>Namespace pod-security</td>
+<td><code>pod-security.kubernetes.io/enforce: restricted</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><code>fsGroup</code> is what keeps the age-key secret readable to a non-root process, and
+whether it reaches the persistent volume is the CSI driver's decision — verify
+that against your storage class before deploying. See
+<a href="../kubernetes/#unprivileged-runtime">Unprivileged runtime</a>.</p>
+<h2 id="trust-boundaries">Trust boundaries</h2>
+<pre class="mermaid"><code>flowchart TB
+    subgraph OperatorZone["Operator zone"]
+        Images["Image files"]
+        Credentials["Stage-host and device credentials"]
+    end
+    subgraph ConsoleZone["State-free Console"]
+        BrowserApi["Browser API gateway"]
+    end
+    subgraph ServerZone["IRIS server tier"]
+        Management["Authenticated management API"]
+        Catalog["Catalog and policy"]
+        Secrets["Encrypted secret store"]
+        Artifacts["Served artifacts"]
+    end
+    subgraph DeviceZone["Device"]
+        Agent["Agent token"]
+        Flash["Staged image on storage"]
+        IOS["Plain copy, byte-size attested"]
+    end
+
+    BrowserApi --&gt;|"CA-pinned HTTPS + scoped tier token"| Management
+    Management --&gt; Catalog
+    Images --&gt; Catalog
+    Credentials --&gt; Artifacts
+    Secrets --&gt; Catalog
+    Artifacts --&gt; Agent
+    Catalog --&gt; Agent
+    Agent --&gt; Flash
+    Flash --&gt; IOS</code></pre>
+<h3 id="console-and-server-are-separate-trust-zones">Console and server are separate trust zones</h3>
+<p>The Console mounts no fleet, device credential, catalog, image, artifact, or
+audit state. It sends allowlisted <code>/api/v1</code> browser requests to the internal
+<code>/internal/v1</code> management API over CA-pinned HTTPS. A management-scoped bearer
+is read from a mounted file, re-read for rotation, and compared against current
+and previous values in constant time before route lookup or body buffering.
+The credential is valid nowhere else and never appears in an environment value,
+URL, process argument, exception, or audit entry. Browser session and CSRF
+checks remain independently required.</p>
+<p>The Console tries the current token first. Only an explicit management-tier
+authentication rejection permits one attempt with the previous token; browser
+authentication failures, TLS failures and server errors do not. A mutation
+retains the token accepted by preflight and sends its body once.</p>
+<p>The default Compose stack exposes port 9443 only on its project network.
+Across Docker hosts, bind it to the server's private management address and
+allow only the Console host through the firewall. Kubernetes uses a ClusterIP
+Service plus a NetworkPolicy that selects Console pods. These reachability
+controls supplement the credential and verified TLS.</p>
+<p>The Console also needs its own TLS serving identity. The default Compose stack
+obtains a Console-only fallback or installed custom identity through the
+authenticated management connection. Docker on separate hosts and Kubernetes
+mount an independent default certificate and key read-only into the Console;
+the server has neither that default private key nor the ability to fetch it.
+A custom identity installed through Settings crosses the protected management
+connection. The Console keeps its active copy in tmpfs.</p>
+<p>The Compose tier credential is an exception to the encrypted server store: its
+current/previous files persist in the <code>iris-tier-auth</code> volume and are readable
+by both tiers, with the Console mount read-only. Separate Docker hosts have
+local credential directories provisioned over a trusted channel; neither host
+mounts the other's storage. Restrict access to these files and their backups.
+Kubernetes supplies the credentials through Secrets. See
+<a href="../docker-hosts/">Docker on separate hosts</a> for provisioning and rotation.</p>
+<h3 id="swarm-data-is-console-gated">Swarm data is console-gated</h3>
+<p>Per-device swarm state (device IDs, IPs, models, progress, live transfer
+rates) is reserved for the authenticated management API and browser session.
+The telemetry listener authenticates credentials independently of source IP.
+Probes at <code>/healthz</code> and <code>/readyz</code> disclose no fleet state. Metrics require the
+monitoring credential, and swarm data crosses the tier-authenticated management
+hop plus browser session checks. Login and first-run setup have their own
+credential/grant checks. Static Console pages and the documented Guest Shell
+bootstrap/bundle/certificate downloads are public; short-lived installer files
+require their unguessable capability paths.</p>
+<h2 id="typed-identity-and-peer-policy">Typed identity and peer policy</h2>
+<p>Every tracker and catalog credential resolves to a <strong>typed principal</strong> — a
+<code>(type, id)</code> pair. <code>device:&lt;id&gt;</code> is an onboarded device, <code>service:seeder</code> is the
+server's own seeder, and <code>legacy</code> is a credential that authenticated but cannot
+be attributed to either. The two namespaces are distinct, so a device registered
+under the name <code>seeder</code> and the seeder service are different identities rather
+than one colliding key. The device id <code>seeder</code> is reserved and refused at
+enrollment.</p>
+<p>A <code>legacy</code> participant is visible, answered, and counted, but it carries no
+device identity: it is never written to the durable endpoint map, never joined to
+a device row, and cannot be quarantined individually. While a rotated seeder
+credential remains valid, the tracker treats an unattributed announce from an
+address that a durable endpoint
+attributes to a quarantined or revoked device as that device: it receives no
+peers and is handed to nobody. The real boundary is the credential's own expiry
+— a previous seeder token is retired automatically 30 days after the rotation
+that replaced it (see <a href="#rotating-the-seeder-announce-credential">Rotating the seeder announce
+credential</a>) — and the address rule is
+the hint that holds inside that window.</p>
+<p><strong>Duplicate credential ownership</strong> fails closed. The announce and catalog
+authorization indexes are built strictly: if two records share a credential
+value, index construction raises and every request in that lane is refused — a
+tracker 403 or a catalog authorization failure — rather than silently resolving
+to whichever record loaded last. No error message carries the offending value.</p>
+<p>Credential lookup uses fixed-size SHA-256 digest keys and checks the selected
+record's token with a constant-time comparison. Each request checks that
+record's current expiry and revocation state without scanning other devices.</p>
+<h3 id="roles-virtual-acls-and-server-enforcement">Roles, virtual ACLs, and server enforcement</h3>
+<p>A device may declare one role. Role names match
+<code>^[a-z0-9][a-z0-9._-]{0,31}$</code>; <code>default</code>, <code>quarantine</code>, <code>origin</code>, <code>seeder</code>, and
+<code>legacy</code> are reserved. A restricted role becomes one <strong>virtual role ACL</strong> in
+memory: it permits its own role, the explicitly permitted peer roles, and
+<code>service:seeder</code> when <code>origin</code> is true, then denies everything else. Restricted
+roles that communicate must name one another symmetrically. An unrestricted
+role keeps implicit open discovery.</p>
+<p>Exactly one ACL governs a principal. Fail-closed and revoked state come first,
+then an explicit stored-ACL assignment, then a restricted role's virtual ACL,
+then implicit permit. An explicit assignment therefore <strong>shadows the role</strong>;
+it is not conjoined with the role ACL. Quarantine remains the reserved explicit
+deny-all assignment and takes precedence. Use the explain route before changing
+or migrating a device that already has an explicit assignment.</p>
+<p>The tracker enforces new introductions. It <strong>does not sever existing connections</strong>
+or purge peers that aria2 already knows, and aria2 may reconnect
+to a retained peer without asking the tracker again. An applied verified
+device deny list may cooperatively disconnect matching peers. To request
+containment, unassign every image from the restricted device; torrent removal
+requires the next successful due policy poll and successful aria2 policy apply.
+Signed logical cadence and catalog/RPC failures can delay that action; it is
+not an immediate or guaranteed next-tick disconnect. No role operation installs,
+activates, reloads, changes boot variables, or otherwise changes running device
+software.</p>
+<p>Issue #153 is <strong>preflight only</strong> in this phase. The reconciler computes how many
+devices a future mutual origin ACL would newly deny, but it continues applying
+the prior self-evaluation blocklist. <code>origin: false</code> controls whether the
+tracker introduces the origin; it does not yet add that device's address to the
+origin's aria2 blocklist. The management surface exposes the preflight count,
+not the device IDs or addresses. When the protected seeder IPv4 address is
+unknown, the prospective result is unavailable (<code>null</code>), not a completed zero
+or a deny-all result. Existing ACL enforcement retains its normal behavior.</p>
+<p>Issue #153 remains open through one full release of preflight observation. A
+later, separately reviewed activation would apply the
+union of current self-evaluation and mutual-origin evaluation to <strong>all</strong> ACLs,
+including hand-written ACLs. Phase 1 does not complete that tagged-release dwell
+or authorize activation or lab/live validation of the union.</p>
+<p>When permitted and denied principals share one translated IPv4 address, a
+global origin block would affect both. IRIS records a <code>shared_permit_deny</code>
+conflict and leaves that address unblocked. This availability rule means NAT can
+weaken address-level origin isolation; use distinct addresses when that
+isolation is required.</p>
+<p>The <strong>agent-distribution exemption</strong> is an invariant: role ACLs, QoS values,
+announce cadence, candidate ceilings, and instruction policy cannot gate
+bootstrap artifacts, enrollment, token refresh, or agent packages. A restricted
+or quarantined device retains this recovery path. Recovery artifacts are
+separate from OS-image torrent staging; instruction-body fetch/verification failure stops the
+instruction step only; heartbeat/staging continue with verified fallback or
+defaults when policy apply succeeds. An aria2 RPC apply failure still sends
+heartbeat but skips staging for that tick. Tracker and origin enforcement
+remains authoritative for those server controls.</p>
+<h3 id="device-administrator-trust-boundary">Device administrator trust boundary</h3>
+<p>The encrypted instruction file is confidential against users below privilege 15, against swarm peers and network observers, against reuse on another device, and against envelope-only copies that do not include device private keys. It is not, and cannot be, confidential against the device's own administrator, who is root where the agent runs and holds every key the agent holds. Its integrity and authenticity hold against everyone including that administrator once the verification root is pinned inside the signed image; on Guest Shell, and on any platform where the package signature is not enforced, integrity is tamper-evidence rather than tamper-proofing. Role isolation, announce cadence, peer discovery and origin rates are enforced by the tracker and the origin and do not depend on any device honouring anything.</p>
+<p>An offline filesystem copy containing <code>iris-agent.conf</code>, its current/prior
+instruction keys or its <code>lkg_key</code> is not confidential from the holder of that
+copy. Mode-0600 permissions protect access on the running filesystem; they do
+not encrypt a copied filesystem. Diagnostic output such as <code>show tech</code> is
+within the envelope-only guarantee only when it excludes those private keys.</p>
+<p>A privilege-15 or IOS-XR root-lr administrator can alter the runtime or bypass
+the agent. A valid signature proves the signed instruction's origin, not that
+the administrator applied it. Device-side rates and caps remain cooperative;
+<strong>violation = 0 does not mean compliant</strong>. See <a href="../observability/#instruction-evidence-and-custody">instruction evidence</a>
+and the <a href="../device-agents/#instruction-trust-by-platform">platform comparison</a>.</p>
+<h3 id="encrypted-instruction-envelope">Encrypted instruction envelope</h3>
+<p>Phase 1 serves a bounded, per-device envelope on authenticated catalog HTTPS.
+A response over 256 KiB is rejected before parsing or cryptographic work.
+SP800-108/HMAC-SHA-256 derives separate encryption, MAC and nonce keys with
+per-device audience context; a deterministic
+16-byte nonce binds device ID, key ID, epoch and instruction serial. An
+HMAC-SHA-256 counter keystream encrypts the private device part. A separate
+HMAC authenticates the PAE-bound envelope, including header, signed role body,
+nonce and ciphertext. MAC-before-decrypt prevents unauthenticated plaintext
+from reaching the policy parser. This construction is not AES-GCM.</p>
+<p>The agent verifies the OpenSSH role signature and envelope MAC before
+decrypting or applying either part. It also checks the signer revocation list,
+device/platform audience and role binding, and applies monotonic
+<code>(epoch, instr_serial)</code> replay floors. Reusing an identity with different bytes
+is rejected. An authenticated server clock anchors expiry; a wall-clock change
+cannot silently extend validity. Signed role intent is public within the
+envelope; confidentiality protects the private per-device part. Failure never
+makes unverified instructions authoritative. See the <a href="../device-agents/#instruction-failures-and-recovery">failure table</a>.</p>
+<h3 id="two-root-trust-and-custody">Two-root trust and custody</h3>
+<p>Exactly two distinct offline-root public keys form the trust set. Keep their
+private keys with separate custodians at separate sites, never on the server.
+The unified IOx/XR image embeds <code>iris-signers.allowed_signers</code> and
+<code>iris-root.allowed_signers</code> as mode-0444 files. With a natively signed package
+and enforced platform verification, these are image-pinned roots. Guest Shell
+receives the same two public-root files in its bundle on replaceable flash:
+that is tamper-evidence, not an immutable image pin. Losing one root's private
+material leaves provisioned trust bytes unchanged; the surviving root can
+issue the next online certificate. Follow the <a href="../operations/#instruction-root-ceremony-and-recovery">root runbooks</a>.</p>
+<p>The optional online signing private key is encrypted at
+<code>$IRIS_CONFIG/instr/signing-key.age</code>; plaintext exists only at runtime as
+<code>$IRIS_RUN/instr/signing-key</code>. Public key, certificate and <code>roots.d/</code> remain
+under <code>$IRIS_CONFIG/instr/</code>. The age identity and instruction state remain on
+the server host. The Console has management token/CA files only, never server
+instruction state, the age identity, encrypted signing key, or runtime plaintext.
+Public roots are public material, not credentials.</p>
+<p>No current/prior instruction key, LKG key, online signing private key or
+offline-root private key enters IOx <code>run-opts</code>, XR <code>docker-run-opts</code>, installer
+arguments, or device platform configuration. Authenticated refresh alone
+returns the current and bounded prior instruction keys into the agent's
+mode-0600 configuration; the LKG key is created on the device. A valid LKG is
+locally re-encrypted and survives per-device instruction-key rotation.</p>
+<p>There is a bootstrap exception: the enrollment bearer remains in IOx
+<code>run-opts</code> and XR <code>docker-run-opts</code>; IOx also retains its SSH-to-self password.
+A privileged device administrator can read those bootstrap credentials,
+including in platform configuration or diagnostic output. The default
+enrollment TTL is 3,600 seconds (one hour); prompt first authenticated refresh
+replaces the agent's active credential, with a normal token overlap of 120
+seconds. Refresh does not erase the original bootstrap value from platform
+activation configuration. These values are not promised confidential from
+privilege 15/root-lr or <code>show tech-support</code>.
+The closed credential-width registry retains 128-bit bearer credentials and
+uses 256-bit cryptographic instruction keys. Missing, unsupported or mismatched
+widths fail before minting, without printing values.</p>
+<p>For a leaked key on an otherwise honest device, rotate its instruction key
+with <code>iris-instr-key rotate --no-overlap &lt;device_id&gt;</code>. For a retired or
+compromised device, use <code>iris-revoke &lt;device_id&gt;</code>; never rotate keys to spare a
+revoked device. Revocation is durable server authority and blocks its catalog
+access even when the last device report still says LKG.</p>
+<h3 id="iox-verification-and-guest-shell-bundle-boundary">IOx verification and Guest Shell bundle boundary</h3>
+<p>IOx verification is a device-global setting. A signed wrapper is preferred
+and causes no verification-state change. An unsigned wrapper uses the
+<a href="../iox/#device-global-package-verification">owned transaction</a>: initial
+<code>enabled</code> is recorded durably, disabled only for installation, and restored
+with read-back before activation/start; initial <code>disabled</code> stays disabled;
+<code>unknown</code> refuses mutation and installation. Durable obligations survive
+interruption/resume and guide uninstall recovery; an operator-changed or
+unowned state is never blindly enabled. Signature-marker presence is not
+cryptographic validation. The claim that the container never changes in the
+field requires a natively signed wrapper and verification remaining enabled.
+Current proof artifacts are unsigned and do not establish that premise.</p>
+<p>Cisco documents the global control and media restrictions in the
+<a href="https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html">IE-3x00 IOx deployment guide</a>
+and <a href="https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html">Catalyst 9000 App Hosting guide</a>.
+Platform signature refusal is preserved; the unsigned transaction is not a
+promise that every media/platform combination will accept or run the app.</p>
+<p><code>server/pack-agent-bundle.sh</code> emits Guest Shell's adjacent 64-hex SHA-256
+sidecar. This is digest validation, not a detached signature. Bootstrap collects sidecar before archive, bounds archive
+and member processing, and refuses missing, malformed or mismatched evidence
+while preserving the prior runnable bundle. Bundle and installer also bind the
+two public-root files. An administrator who can replace bootstrap, bundle and
+evidence remains inside the trusted-device-admin boundary.</p>
+<h3 id="tracker-transport-security">Tracker transport security</h3>
+<p>The tracker on TCP 6969 is <strong>HTTPS-only</strong> and presents the same server
+certificate that devices already pin for the catalog. The origin seeder and
+every device aria2 process load that public certificate as their CA and keep
+certificate verification enabled. A plaintext request fails during the TLS
+handshake and never reaches tracker authentication.</p>
+<p>The origin seeder, IOx and IOS-XR send their announce credential in an
+<code>Authorization: Bearer</code> header. Guest Shell uses a BEP-compatible query
+credential. TLS encrypts the complete request, and credentials are never
+logged. The local aria2 JSON-RPC endpoint uses HTTP on <code>127.0.0.1</code> only and
+is not exposed to the network.</p>
+<p>Seeder credentials must contain only printable ASCII characters without
+whitespace. Startup validates both the RPC secret and announce token before
+replacing the private aria2 configuration; publishing and rotation validate
+the announce token before sending it to aria2. Invalid values stop the operation
+with an error that does not include the credential.</p>
+<p>For manually generated torrents, <code>tools/make-torrent.sh</code> requires an HTTPS
+announce URL with a nonempty <code>announce_token</code> or <code>key</code> query parameter. It
+parses the query and rejects missing or ambiguous credentials before creating
+the torrent.</p>
+<h3 id="peer-policy-failure-posture">Peer policy failure posture</h3>
+<p>Peer ACLs and per-device assignments live in <code>peer-policy.json</code> under
+<code>IRIS_STATE</code>, with a last-known-good copy at <code>peer-policy.lkg.json</code> and the five
+most recent prior committed documents in <code>peer-policy.lkg.d/</code>. Every commit
+writes the current authoritative document to the LKG and ring before atomically
+replacing the authoritative file, so recovery copies are never half-written
+candidates. The durable <code>peer-policy.roles-ever</code> watermark is created before
+the first role-bearing commit and supports startup downgrade/state-loss
+warnings. On a fresh start, when neither policy file exists, both are written
+with the same base revision.</p>
+<p>Read precedence decides the posture:</p>
+<table>
+<thead>
+<tr>
+<th>State on disk</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Neither file present, no roles-ever watermark</td>
+<td>Open discovery. The validated base document is materialized to both paths; not degraded, not fail-closed.</td>
+</tr>
+<tr>
+<td>Neither file present, roles-ever watermark retained</td>
+<td>The base document is materialized and discovery is open, but the result is <code>degraded</code> because prior role state was lost. Subsequent reads remain degraded.</td>
+</tr>
+<tr>
+<td>Valid authoritative</td>
+<td>Used as-is, except that an authoritative document with no <code>roles</code> is <code>degraded</code> when <code>roles_present</code> or the roles-ever watermark proves role state previously existed.</td>
+</tr>
+<tr>
+<td>Corrupt authoritative, valid LKG</td>
+<td>The LKG is used and the policy reports <code>degraded</code>.</td>
+</tr>
+<tr>
+<td>At least one file present, neither valid</td>
+<td><code>fail_closed</code>: no announce is offered any candidate peer, and the seeder blocklist switches to the emergency deny list below.</td>
+</tr>
+</tbody>
+</table>
+<p>The first and last rows are easy to confuse and lead to opposite repairs. Both
+files <em>missing</em> is the open case, not the deny-everything case.</p>
+<p>Before recovery, preserve the authoritative policy, Fleet state, tracker and
+origin status, LKG and ring, and the roles-ever watermark. When the
+authoritative file is corrupt and the service is already using the valid LKG,
+a controlled repair may replace <code>peer-policy.json</code> with the verified LKG bytes;
+that repairs the store at the LKG revision and loses the newest policy change.
+It is a corrupt-store repair, not the normal rollback mechanism.</p>
+<p>An intentional rollback uses the policy restore primitive to copy reviewed
+historical content into a <strong>monotonic new revision</strong>. It preserves the live
+outbox, appends a <code>restore</code> event, and rotates the acknowledgement epoch. There
+is no public restore route or CLI, so do not simulate this by copying a ring
+file over a usable authoritative policy. The primitive itself requires usable
+authoritative state. Follow a reviewed maintenance procedure that invokes the
+restore primitive and then reconcile Fleet drift.</p>
+<p>Removing both files re-materializes the base policy, which drops
+every device's ACL assignment — including every quarantine assignment — every
+role and member, every QoS override, and every operator-defined ACL; only the
+reserved <code>quarantine</code> ACL is re-created. The roles-ever watermark remains, so a
+role-capable server reports the loss rather than treating it as a pristine
+install.</p>
+<p>A <strong>valid but empty</strong> policy is not the same as a broken one. The tracker applies
+an empty blocklist — a full replace, so anything previously blocked is released —
+and reports <code>enforced</code> once that call succeeds against a live seeder RPC session.</p>
+<h3 id="emergency-deny">Emergency deny</h3>
+<p>Under <code>fail_closed</code> the tracker stops consulting policy and derives an emergency
+deny list instead: every address it knows that is <strong>not</strong> attributed to a
+<code>service</code> principal is denied. Durable endpoint rows within the TTL and endpoint
+writes still queued for retry supply device addresses; the live announce registry
+supplies the rest, including legacy participants.</p>
+<p>The address configured as <code>IRIS_HOST_IP</code> is the exclusion — it is never added to
+the deny list in either mode. The emergency list additionally skips addresses it
+knows only through a <code>service</code> principal, but that skip is <strong>not</strong> a guarantee:
+the emergency list is a set of addresses with no shared-address handling, so an
+address the tracker also knows under a device principal is denied even if a
+service principal announces from it. Protecting the seeder therefore depends on
+<code>IRIS_HOST_IP</code> being set to the address it actually announces from.</p>
+<p>A fail-closed pass is recorded as <code>fail_closed</code>, never as <code>enforced</code>:
+<code>fail_closed</code> is decided before any other state, and the status writer rejects an
+<code>enforced</code> claim with no current seeder RPC session behind it.</p>
+<h3 id="when-no-address-is-known">When no address is known</h3>
+<p>If the tracker is fail-closed and knows no address to deny, the derived set is
+empty — and an empty set produced by the fail-closed path is the one desired set
+the tracker computes and <strong>deliberately does not send</strong>. Sending it would be a
+full replace that released every existing block. The state stays <code>fail_closed</code>
+and is never reported as <code>enforced</code>.</p>
+<h3 id="enforcement-status-is-count-only">Enforcement status is count-only</h3>
+<p>The tracker is the only process that writes the aria2 peer blocklist, and its
+status file <code>peer-enforcement.json</code> records the denied set as a <strong>count</strong>, not a
+list. That file therefore cannot tell you whether one particular peer is blocked.</p>
+<p>One exception is deliberate and narrow: a conflict record names the single
+address that two principals disagree about, so <code>peer-enforcement.json</code> is
+<strong>not address-free</strong>. Treat it accordingly when deciding who may read it or
+where it is backed up. The console API is the boundary — it rebuilds the payload field by
+field and reduces conflicts to a count and the reason names, so no address
+crosses into a browser.</p>
+<h3 id="rotating-the-seeder-announce-credential">Rotating the seeder announce credential</h3>
+<p>Rotating the seeder announce credential keeps the previous credential valid for
+a bounded overlap: <strong>30 days</strong> from the rotation that retired it
+(<code>IRIS_SEEDER_PREV_TTL</code>). That window exists to recover a device that did not
+receive the new token — both credentials are valid throughout it, and a device
+that missed the rotation keeps announcing on the old one meanwhile. It is not a
+second permanent key: past the window the tracker refuses the old token like any
+other expired credential, and the next rotation drops the record.</p>
+<p>The expiry is set at rotation and enforced automatically. At most two valid
+previous credentials are allowed; a rotation that would exceed that limit is
+refused. Expired credentials do not count toward the limit. There is no
+operator command for revoking a previous credential before its expiry.</p>
+<p>A device cannot be locked out inside the window, and expiry never strands one:
+the way a device receives the current announce token is a freshly personalised
+torrent from the catalog, and that request is authorised by the device's own
+catalog token, not by the announce credential being retired. Personalise device
+torrents during the overlap and nothing announces on a seeder token afterwards.</p>
+<p><strong>If a device is not re-personalised before the window closes</strong>, its next
+announce is refused with a token-free 403 and no other symptom by default:
+the operator-visible signal is <code>iris_tracker_announces_refused_expired_total</code>
+(nonzero) alongside <code>iris_legacy_announce_participants</code> reading <code>0</code> — that
+combination can indicate devices attempting to use expired credentials. See
+<a href="../observability/#reading-iris_legacy_announce_participants">Observability: reading iris_legacy_announce_participants</a>.</p>
+<h2 id="first-run-admin-claim">First-run admin claim</h2>
+<p>Before an admin account exists, the console's normal login page accepts the
+documented default credential <code>iris</code> / <code>irisisgreat!</code> and, instead of a
+session, mints a one-use, 10-minute setup grant that leads into administrator
+creation. That pair authorizes nothing else and stops receiving special
+treatment the moment a real administrator account exists; afterwards it is
+checked only against the stored administrator credentials, with failures
+rate-limited and audited like any other login. The operator may name the real
+administrator <code>iris</code> or even deliberately retain the default pair.</p>
+<p>This is a deliberate trade: whoever reaches a brand-new Console first can
+claim the administrator account. The one-host Compose stack publishes port
+8080 only on <code>IRIS_HOST_IP</code>; the standalone Console uses
+<code>IRIS_CONSOLE_BIND_IP</code>. That
+binding is not caller authorization: anyone who can reach that address can
+still race the intended operator. Restrict the port to trusted operator sources
+(or apply the equivalent policy to the Kubernetes Console LoadBalancer) and
+complete setup immediately after deploying.</p>
+<h2 id="secrets">Secrets</h2>
+<p>Catalog and device credentials, RPC secrets, and private server TLS material are
+encrypted at rest with age recipients. Their decrypted runtime copies live in
+<code>/run/iris</code>. Tier credentials use the separate file mounts described above;
+short-lived install assets under <code>staging/</code> can also contain device credentials.
+Device enrollment tokens are generated per device by the running server.</p>
+<p>Catalog-token rotation is recoverable without making a rolled token a general
+device credential. If the server commits a rotation but the response or the
+device's atomic config write is lost, that device's one previous token may ask
+only the token-refresh route to reissue the already-current secret bag. It
+cannot heartbeat or submit telemetry, its assignment-bound catalog reads end
+after the short overlap, and recovery ends at the token's original expiry.
+The normal clock-skew allowance still applies. The retry is revalidated under
+the server's secrets-store lock, so revocation or a newer successful rotation
+takes precedence.</p>
+<p>The age private key is deliberately kept outside the directory holding the
+ciphertext it opens. Co-locating them would mean any backup, snapshot, or read
+of the config directory yields both halves at once, making the at-rest
+encryption ineffective against that access. Compose enforces the separation:
+the key is mounted as a Docker secret at <code>/run/secrets/iris_age_key</code> from a host path the
+operator controls, never from the encrypted volume.</p>
+<p>Do not commit:</p>
+<ul>
+<li>Real <code>creds/</code> files.</li>
+<li><code>fleet/devices.csv</code> or <code>fleet/assignments.csv</code> with sensitive lab data.</li>
+<li>Private keys, certificates, tokens, or RPC secrets.</li>
+<li>Cisco images, patches, or generated release artifacts.</li>
+</ul>
+<h2 id="importing-images-from-disk">Importing images from disk</h2>
+<p>The Console can publish an image that is already on disk, across the uploads
+volume and the read-only import root. Both routes require an authenticated
+session, <code>POST /api/v1/images/import</code> additionally requires the CSRF header, and
+every attempt writes an <code>image_import</code> audit event, rejections included. The
+<code>POST</code> authorizes on candidate <strong>identity</strong> rather than a path prefix: the
+submitted path must be exactly one of the paths the scan currently offers, so a
+traversal that merely starts inside a root (<code>&lt;root&gt;/../outside/secret.bin</code>) is
+refused. Discovery resolves each candidate to its real path and keeps it only if
+that still lands inside the root it was found under, so a symlink cannot pull an
+outside file into the set. Publishing seeds in place from the file's own
+directory: nothing is copied, the read-only root is never written to, and the
+<code>.torrent</code> goes to the state directory rather than next to the image. A later
+catalog delete unlinks nothing outside the uploads volume.</p>
+<p>The operator walkthrough is in
+<a href="../console/#importing-images-already-on-disk">Importing images already on disk</a>,
+and the refusal reasons are in
+<a href="../reference/#import-skip-reasons">Import skip reasons</a>.</p>
+<h2 id="cisco-bulk-hash-verification">Cisco Bulk Hash verification</h2>
+<p>The catalog can check a published image's sha512 against Cisco's own Bulk
+Hash feed — the authenticity half of the trust story that the "Device-side
+content check" guardrail above does not cover: that check proves a device
+received what the catalog holds, not that the catalog holds a genuine Cisco
+file.</p>
+<p>Before the CSV rows are parsed, the feed's detached RSA/SHA-512 signature is
+verified using the public key from a Cisco certificate pinned in-repo
+(<code>server/certs/cisco_bulkhash_verify.pem</code>; the file's own header records its
+provenance and fingerprint) — never a certificate found inside the feed
+itself. Any fetch, signature, or parse failure leaves every stored
+verification verdict untouched: a broken or tampered feed can never
+quarantine an image.</p>
+<p>A sha512 mismatch quarantines the image: seeding stops and stays stopped
+across container restarts (the startup re-seed only re-seeds torrents the
+catalog holds and has not quarantined), it can no longer be newly assigned, and
+it is auto-unassigned from every device that already had it approved. Releasing
+the quarantine is what resumes seeding. <code>DEFERRAL_STATUS</code> on a matched feed row surfaces as a console
+warning and never quarantines — an image Cisco has deferred is not treated
+as tampered. See <a href="../operations/#image-verification">Image verification</a> for
+the schedule, the offline path for air-gapped servers, and how an operator
+releases a quarantine.</p>
+<h2 id="tls-and-certificates">TLS and certificates</h2>
+<p>The catalog, tracker, and artifact server use HTTPS. The generated device installer installs the catalog certificate into the device trust path so the bootstrap and catalog calls can validate the server identity.</p>
+<p>The catalog and artifact server <strong>fail closed to TLS</strong>, the same contract as
+the console below. At start each resolves <code>IRIS_CERT</code>; if it names no usable
+certificate, the process exits with a message naming the path instead of
+serving plain HTTP. The catalog answers a device bearer token on every route.
+The artifact server's v1 API uses resource-bound HTTP Basic over TLS; the
+Guest Shell installer uses high-entropy, one-install capability names under
+<code>staging/</code>. A silent plaintext fallback would expose either credential. Set
+<code>IRIS_CATALOG_ALLOW_PLAINTEXT=1</code> or <code>IRIS_ARTIFACTS_ALLOW_PLAINTEXT=1</code> to opt
+into a plaintext listener deliberately — loopback or an isolated lab network
+only. The shipped <code>docker-entrypoint.sh</code> always provisions <code>IRIS_CERT</code>, so
+this refusal is only reachable running <code>catalog.py</code> or <code>artifact_server.py</code>
+directly, outside the supported deployment.</p>
+<p>The Console's own certificate and key, imported through Settings → TLS &amp;
+trust, get the same careful handling: an encrypted private key is decrypted
+with <code>openssl pkey</code>, its passphrase piped over stdin and never passed as an
+argument or written to a log, and the key is stored age-encrypted in the
+server tier. The default Compose stack generates a Console-only fallback in
+server tmpfs. Docker on separate hosts supplies a Console-local default
+certificate and key; Kubernetes supplies an independent TLS Secret. The Console
+validates and copies its active pair into tmpfs. Custom identities and the
+single-host fallback arrive over the authenticated management connection;
+independently mounted defaults are copied locally, and their private keys stay
+on the Console host.</p>
+<p>The Console <strong>fails closed to TLS</strong>. Unless the explicit plaintext opt-in is
+set, startup fetches the active identity through the verified management hop
+or uses its independently mounted default; an unavailable or
+unusable identity makes <code>iris-console</code> exit. Set
+<code>IRIS_GUI_ALLOW_PLAINTEXT=1</code> to opt into a plaintext console deliberately —
+loopback or an isolated lab network only. With the opt-in the session
+cookie drops its <code>Secure</code> attribute (it keeps <code>HttpOnly</code> and
+<code>SameSite=Strict</code>), and a certificate uploaded through Settings is saved but does not change a plaintext listener
+to HTTPS. Remove the opt-in and restart the Console to enable TLS. The
+listener completes the TLS handshake in the per-connection worker thread, so a client that connects and never sends a
+ClientHello ties up only its own connection.</p>
+<p>The server's outbound trust store (Settings → TLS &amp; trust → Trusted CAs) accepts
+only blocks that OpenSSL parses as X.509 certificates, whether pasted or
+downloaded. One <code>CERTIFICATE</code> block that is not a certificate would make
+OpenSSL reject the whole runtime bundle — and every private CA in it — so
+such input is refused before anything is written; a store file that fails
+to load is skipped and named on stderr when the bundle is rebuilt, and a
+degraded <code>ssl_context()</code> (system roots only) is logged rather than silent.</p>
+<h3 id="console-sessions">Console sessions</h3>
+<p>Sessions live in the state-owning management process and expire on idle. The Console's
+periodic view refreshers mark themselves with <code>X-IRIS-Poll: 1</code> (GET only);
+the server validates the session for those without refreshing its idle
+clock, so a console left open on a polled view still reaches the idle
+timeout Settings advertises — only operator input and mutations count as
+activity. The break-glass reset (<code>iris-gui-admin</code>) runs in another process
+and reaches those sessions through the store: it stamps a floor into the
+admin record and the console drops every session created at or before it
+on that session's next request. The in-console password change keeps its
+caller's session and revokes the others.</p>
+<h2 id="device-ssh-host-keys">Device SSH host keys</h2>
+<h3 id="server-side-sessions-console-installers-lab-transports">Server-side sessions (console, installers, lab transports)</h3>
+<p>Every SSH session the server or an operator's installer opens -- the device
+transports <code>lab/device-run.sh</code> and <code>lab/xr-run.sh</code>, the stage-host push in
+<code>device/device-install.sh</code> / <code>device/router-install.sh</code>, and the RPM <code>scp</code> in
+<code>device/xr-install.sh</code> -- verifies the peer through one shared policy,
+<code>lab/iris-ssh-policy.sh</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Environment</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_SSH_HOST_KEY="&lt;type&gt; &lt;base64&gt;"</code></td>
+<td>Pin exactly that key for the peer (<code>StrictHostKeyChecking=yes</code> against a private temporary <code>known_hosts</code>).</td>
+</tr>
+<tr>
+<td><code>IRIS_SSH_KNOWN_HOSTS=&lt;path&gt;</code></td>
+<td>Strict verification against that file; an unreadable path refuses to connect rather than falling back.</td>
+</tr>
+<tr>
+<td>neither (default)</td>
+<td><code>StrictHostKeyChecking=accept-new</code> against a <strong>persistent</strong> <code>known_hosts</code> under <code>$IRIS_SSH_STATE_DIR</code> (default <code>$IRIS_STATE/ssh</code>, i.e. the server's state volume; <code>~/.iris/ssh</code> outside the container). First contact records the key; every later session must present the same one. <code>/dev/null</code> is never used.</td>
+</tr>
+<tr>
+<td><code>IRIS_SSH_LEGACY=1</code></td>
+<td>Opt in to the SHA-1 KEX, <code>ssh-rsa</code> and CBC-cipher additions old IOS-XE images need. Off by default.</td>
+</tr>
+</tbody>
+</table>
+<p>ssh's own diagnostics are forwarded (redacted) on stderr instead of being
+discarded, so "connection refused", "no matching key exchange method" and
+"host key changed" can be told apart. A changed key is reported with the
+<code>known_hosts</code> path and the <code>ssh-keygen -R &lt;ip&gt; -f &lt;file&gt;</code> command to clear it
+when a device was legitimately re-imaged -- and a note to treat it as a
+possible interception otherwise. The console's <strong>Forget host key</strong> action
+(<code>POST /api/v1/devices/&lt;id&gt;/forget-host-key</code>) runs the equivalent removal
+without shell access to the state volume, and is audited either way -- see
+<a href="../operations/#forgetting-a-devices-ssh-host-key">Operations → Forgetting a device's SSH host key</a>.</p>
+<h3 id="on-device-agent-sessions">On-device agent sessions</h3>
+<p>The agent's IOS control channel supports optional host-key pinning through the
+<code>device_ssh_known_hosts</code> agent config key. This is separate from catalog TLS,
+which requires a usable pinned certificate. When the key is set <strong>and</strong> the
+file exists, SSH and SCP run with <code>StrictHostKeyChecking=yes</code> against that
+<code>known_hosts</code> file. Otherwise they keep <code>StrictHostKeyChecking=no</code> with
+<code>UserKnownHostsFile=/dev/null</code>, which is the default and is tolerable only
+because this is SSH-to-self over a link that never leaves the device (the SVI
+on switches, the VirtualPortGroup on routers, the operator's SVI inband).
+Nothing in IRIS writes this key, so pinning is opt-in: set it yourself
+in the agent configuration to enable it. XR uses its host mount and does not
+use this SSH-to-self channel.</p>
+<h2 id="third-party-tools">Third-party tools</h2>
+<p>IRIS invokes tools such as <code>aria2c</code>, <code>mktorrent</code>, <code>openssl</code>, and documentation-time Mermaid as separate programs or runtime dependencies. See the repository <code>NOTICE</code> for license notes.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

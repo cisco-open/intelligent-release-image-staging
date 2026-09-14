@@ -1,0 +1,3082 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../getting-started/">
+      
+      
+        <link rel="next" href="../architecture/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>AI-guided PoC deployment - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ai-guided-poc-deployment" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              AI-guided PoC deployment
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#if-you-are-the-assistant-start-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If you are the assistant, start here
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Before you start
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#check-the-host-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Check the host first
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supply-the-handed-in-inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Supply the handed-in inputs
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supply the handed-in inputs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-the-aria2c-client-every-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1. The <code>aria2c</code> client — every deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-ioxclient-iox-device-types-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        2. <code>ioxclient</code> — IOx device types only
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2b-the-ioxclient-packaging-profile-nothing-to-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        2b. The <code>ioxclient</code> packaging profile — nothing to do
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-arm64-emulation-for-anything-arm64-on-an-amd64-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        3. ARM64 emulation — for anything arm64 on an amd64 host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-the-two-instruction-trust-roots-every-device-package" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        4. The two instruction trust roots — every device package
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-the-appmgr-builder-ios-xr-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        5. The appmgr builder — IOS-XR only
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-shortest-path-to-a-first-staged-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The shortest path to a first staged image
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choose-the-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Choose the layout
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Choose the layout">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#settings-that-stop-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Settings that stop deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#assistant-operating-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Assistant operating rules
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-selected-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start the selected deployment
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Start the selected deployment">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-one-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on one host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-separate-hosts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on separate hosts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialise-instruction-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Initialise instruction custody
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Initialise instruction custody">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-one-host_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on one host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-separate-hosts_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on separate hosts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reading-the-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading the status
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify-the-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verify the deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stage-an-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Stage an image
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maintenance-and-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Maintenance and cleanup
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#completion-record" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Completion record
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#if-you-are-the-assistant-start-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If you are the assistant, start here
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Before you start
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#check-the-host-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Check the host first
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supply-the-handed-in-inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Supply the handed-in inputs
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supply the handed-in inputs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-the-aria2c-client-every-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1. The <code>aria2c</code> client — every deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-ioxclient-iox-device-types-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        2. <code>ioxclient</code> — IOx device types only
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2b-the-ioxclient-packaging-profile-nothing-to-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        2b. The <code>ioxclient</code> packaging profile — nothing to do
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-arm64-emulation-for-anything-arm64-on-an-amd64-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        3. ARM64 emulation — for anything arm64 on an amd64 host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-the-two-instruction-trust-roots-every-device-package" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        4. The two instruction trust roots — every device package
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-the-appmgr-builder-ios-xr-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        5. The appmgr builder — IOS-XR only
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-shortest-path-to-a-first-staged-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The shortest path to a first staged image
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choose-the-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Choose the layout
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Choose the layout">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#settings-that-stop-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Settings that stop deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#assistant-operating-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Assistant operating rules
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-selected-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start the selected deployment
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Start the selected deployment">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-one-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on one host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-separate-hosts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on separate hosts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialise-instruction-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Initialise instruction custody
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Initialise instruction custody">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-one-host_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on one host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-separate-hosts_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on separate hosts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reading-the-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading the status
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify-the-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verify the deployment
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stage-an-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Stage an image
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maintenance-and-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Maintenance and cleanup
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#completion-record" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Completion record
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="ai-guided-poc-deployment">AI-guided PoC deployment</h1>
+<p>This page is the assistant's runbook: what to ask, what to check, what to run,
+and what to report, for Docker on one host, Docker on separate hosts, and
+Kubernetes. The device workflow is the same for all three.
+<a href="../getting-started/">Getting Started</a> is the same deployment written for a
+person to read; use it for background, and use the commands here.</p>
+<p>IRIS distributes, verifies, and stages images. It never installs, activates,
+reloads, or changes boot variables. See <a href="../security/#guardrails">Guardrails</a>.</p>
+<h2 id="if-you-are-the-assistant-start-here">If you are the assistant, start here</h2>
+<p>Ask the operator these four questions in one message and wait for the answers
+before running anything. Do not guess a layout, and do not start a Docker
+deployment because it is the default:</p>
+<ol>
+<li><strong>Where should the deployment live?</strong> Offer
+   <code>/opt/iris/intelligent-release-image-staging</code> as the default. You create
+   the directory and clone into it.</li>
+<li><strong>Which layout — Docker on one host, Docker on separate hosts, or
+   Kubernetes?</strong> For separate hosts also ask for the Console host; for
+   Kubernetes ask for the cluster context and a registry the nodes can pull
+   from.</li>
+<li><strong>Which device types will be onboarded</strong> — Guest Shell, IOx on amd64
+   (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
+   IOS-XR appmgr, or none yet? A proof of concept builds the Guest Shell
+   bundle, the amd64 IOx package and the XR RPM whatever the answer, and adds
+   the arm64 IOx package when an IE-3x00 device is in scope — that one alone
+   carries an emulated build.
+   <a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a> is the
+   assistant's own work, not the operator's.</li>
+<li><strong>The server's device-reachable IPv4 address</strong>, and the Console URL if it
+   is not that address on port 8080.</li>
+</ol>
+<p>Repeat the answers back, then <a href="#check-the-host-first">check the host</a> and say
+what it is missing before installing anything. Follow this guide within the
+chosen layout and the full
+<a href="#assistant-operating-rules">Assistant operating rules</a>.</p>
+<h2 id="before-you-start">Before you start</h2>
+<p>Prepare a local, git-ignored credential file if an assistant will connect to
+the server or devices:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>creds/deploy.env.example<span class="w"> </span>creds/deploy.env
+chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span>creds/deploy.env
+</code></pre></div>
+<p>Keep credentials in that file or enter them directly in the Console. Do not
+paste passwords, tokens, or private keys into a chat.</p>
+<p>These are the non-secret decisions a deployment needs. An assistant asks for
+them as it goes, so an operator does not have to settle them all in advance:</p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>What to record</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Deployment layout</td>
+<td>One Docker host, separate Docker hosts, or Kubernetes.</td>
+</tr>
+<tr>
+<td>Server address</td>
+<td>Stable device-reachable IPv4 address for the catalog, tracker, artifacts, and origin seeder.</td>
+</tr>
+<tr>
+<td>Console address</td>
+<td>Browser HTTPS URL and published port. On one Docker host it normally uses the server address on 8080; a separate Console has its own address.</td>
+</tr>
+<tr>
+<td>Private management connection</td>
+<td>For separate Docker hosts, the server's private bind address and the HTTPS hostname or IP the Console will use on 9443.</td>
+</tr>
+<tr>
+<td>Image source</td>
+<td>A server-host path or upload source for a Cisco <code>.bin</code>, <code>.iso</code>, <code>.tar</code>, or <code>.rpm</code> file.</td>
+</tr>
+<tr>
+<td>Device inventory</td>
+<td>Management IP, management type, network fields, and optional model for every device. See <a href="../management-type/">Management type</a>.</td>
+</tr>
+<tr>
+<td>Device agent</td>
+<td>Guest Shell, IOx, or XR appmgr. A Catalyst 9300 can use Guest Shell or IOx with supported app-hosting storage.</td>
+</tr>
+<tr>
+<td>Package inputs</td>
+<td>Both architecture <code>aria2c</code> binaries, <code>ioxclient</code>, and the XR build tooling; the server must serve the packages before onboarding. <code>tools/start-compose-server.sh</code> lists every missing one before building anything. A fresh clone has none of them: see <a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a>.</td>
+</tr>
+<tr>
+<td>Instruction trust roots</td>
+<td>A directory holding exactly two public root keys (<code>.pub</code>). The private halves stay with their custodians; no installer or assistant may generate them, and the operator creates them as described in <a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a>. Every device package embeds these roots and the build fails closed without them.</td>
+</tr>
+</tbody>
+</table>
+<p>Decide where the deployment lives. Any directory the operator prefers works;
+this guide uses <code>/opt/iris/intelligent-release-image-staging</code>, and every
+command below runs from there unless it says otherwise. An assistant should
+ask for this one up front, then use it everywhere without asking again.</p>
+<p>Create it and clone into it — substitute the operator's directory for the
+default in the first line:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">IRIS_DIR</span><span class="o">=</span>/opt/iris/intelligent-release-image-staging
+sudo<span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-o<span class="w"> </span><span class="s2">"</span><span class="nv">$USER</span><span class="s2">"</span><span class="w"> </span>-g<span class="w"> </span><span class="s2">"</span><span class="nv">$USER</span><span class="s2">"</span><span class="w"> </span><span class="s2">"</span><span class="k">$(</span>dirname<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_DIR</span><span class="s2">"</span><span class="k">)</span><span class="s2">"</span>
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/cisco-open/intelligent-release-image-staging<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_DIR</span><span class="s2">"</span>
+<span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_DIR</span><span class="s2">"</span>
+</code></pre></div>
+<p><code>sudo</code> is needed only for a directory the operator cannot already write, such
+as one under <code>/opt</code>.</p>
+<p>Check out the same IRIS version on every deployment host. For a server already
+in use, identify its Compose project, container names, state volumes, age
+identity, and artifact directory before changing anything. Preserve those
+settings and data unless a reset is explicitly part of the task.</p>
+<h2 id="check-the-host-first">Check the host first</h2>
+<p>Run through this before cloning anything, report what is present and what is
+missing in one message, and ask the operator before installing a package or
+changing the host. Nothing here installs itself.</p>
+<table>
+<thead>
+<tr>
+<th>Need it for</th>
+<th>Check</th>
+<th>Ubuntu or Debian package</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Everything</td>
+<td><code>docker version</code>, <code>docker compose version</code>, <code>docker buildx version</code></td>
+<td><code>docker.io</code> plus the Compose plugin, or Docker's own repository</td>
+</tr>
+<tr>
+<td>Everything</td>
+<td><code>id -nG \| grep -w docker</code></td>
+<td>membership in <code>docker</code>, or every command needs <code>sudo</code></td>
+</tr>
+<tr>
+<td>Encrypted server state</td>
+<td><code>command -v age age-keygen</code></td>
+<td><code>age</code></td>
+</tr>
+<tr>
+<td>The two roots, checksums</td>
+<td><code>command -v git curl ssh-keygen sha256sum</code></td>
+<td>normally already installed</td>
+</tr>
+<tr>
+<td>The arm64 IOx package, and building the arm64 client yourself</td>
+<td><code>grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 &amp;&amp; echo ready</code></td>
+<td><code>qemu-user-static</code></td>
+</tr>
+<tr>
+<td>IOx and IOS-XR packaging</td>
+<td><code>command -v skopeo</code></td>
+<td><code>skopeo</code></td>
+</tr>
+<tr>
+<td>The IOS-XR appmgr RPM</td>
+<td><code>command -v rpmbuild</code></td>
+<td><code>rpm</code></td>
+</tr>
+</tbody>
+</table>
+<p>Also report <code>nproc</code>, <code>free -g</code> and <code>df -h</code> for the disk holding
+<code>/var/lib/docker</code> and the deployment directory. Two builds and the server
+image live there, and every image staged later needs its own size again on top.</p>
+<p>Check every host the chosen layout uses, and say which host each result came
+from.</p>
+<p><strong>Docker on separate hosts</strong> has two, and they need different things. The
+server host needs everything in the table above, because it holds the state
+and builds the packages. The Console host needs only Docker with the Compose
+plugin and room for its own image: no <code>age</code>, no emulation, no build inputs, no
+server volume. The host that prepares the bundles also needs <code>python3</code> for
+<code>tools/prepare-docker-hosts.py</code>, and SSH to both hosts to deliver them.</p>
+<p><strong>Kubernetes</strong> splits the same way, between a cluster and the host that builds
+images and packages. That build host needs the table above, minus <code>age</code> if the
+identity is created elsewhere, plus rights to push to a registry the nodes can
+pull from. For the cluster:</p>
+<table>
+<thead>
+<tr>
+<th>Need it for</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Everything</td>
+<td><code>kubectl version --client</code> and <code>kubectl config current-context</code></td>
+</tr>
+<tr>
+<td>Creating the namespace and workloads</td>
+<td><code>kubectl auth can-i create deployment -A</code></td>
+</tr>
+<tr>
+<td>The server PVC</td>
+<td><code>kubectl get storageclass</code></td>
+</tr>
+<tr>
+<td>Reaching the server and Console</td>
+<td>that Services of type LoadBalancer get addresses on this cluster</td>
+</tr>
+<tr>
+<td>Running amd64 images</td>
+<td>amd64 worker capacity</td>
+</tr>
+</tbody>
+</table>
+<p>NetworkPolicy is the one prerequisite a command cannot settle: a cluster whose
+CNI does not enforce it accepts the manifests and silently ignores them.
+Confirm enforcement with whoever runs the cluster, and say plainly that you
+confirmed it by asking rather than by testing.</p>
+<p>Both <code>aria2c</code> architectures are fetched from a published release and verified,
+so a normal host compiles nothing. ARM64 emulation is still needed to build the
+arm64 IOx package itself, because the device image runs <code>apk add</code> and <code>chmod</code>
+steps inside the target platform, but that is a short build rather than a
+compile. Only a host that cannot reach the release falls back to building the
+client, and that fallback is the expensive one: emulated, tens of minutes,
+every core busy. If the fetch fails, say so and ask before falling back to it.</p>
+<h2 id="supply-the-handed-in-inputs">Supply the handed-in inputs</h2>
+<p>A fresh clone lacks these inputs deliberately, and
+<code>tools/start-compose-server.sh</code> lists every missing one before it builds
+anything. Do not treat that list as a broken checkout and do not invent a
+seeder binary or a trust anchor.</p>
+<p>Do every step below yourself except step 4, the trust roots, which only the
+operator creates. In a proof of concept prepare all of them and build every
+device package: an unbuilt package reports <strong>Needs rebuild</strong> in Console
+<strong>Settings -&gt; Device packages</strong> and its device type cannot be onboarded.</p>
+<p>Supply what the device types in scope need:</p>
+<table>
+<thead>
+<tr>
+<th>What you will onboard</th>
+<th>Supply first</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server and Console only, no devices yet</td>
+<td><code>aria2c</code> amd64</td>
+</tr>
+<tr>
+<td>Guest Shell (Catalyst 9300, Catalyst 8000V)</td>
+<td><code>aria2c</code> amd64</td>
+</tr>
+<tr>
+<td>IOx on amd64 (Catalyst 9300, Catalyst 8000V)</td>
+<td><code>aria2c</code> amd64, <code>ioxclient</code>, the two roots</td>
+</tr>
+<tr>
+<td>IOx on arm64 (IE-3400 and other IE-3x00)</td>
+<td>the amd64 set, plus <code>aria2c</code> arm64 and ARM64 emulation</td>
+</tr>
+<tr>
+<td>IOS-XR appmgr</td>
+<td><code>aria2c</code> amd64, the two roots, Docker and network for the pinned appmgr builder</td>
+</tr>
+</tbody>
+</table>
+<p>Every device type is reachable from a clean Ubuntu Docker host with these
+steps. Work through the ones your table row names, in order.</p>
+<h3 id="1-the-aria2c-client-every-deployment">1. The <code>aria2c</code> client — every deployment</h3>
+<p><code>server/Dockerfile</code> copies <code>bin/aria2c</code> into the server image, so no stack
+builds without it. Install both architectures:</p>
+<div class="highlight"><pre><span></span><code>tools/get-aria2c.sh<span class="w"> </span>amd64
+tools/get-aria2c.sh<span class="w"> </span>--no-install<span class="w"> </span>arm64
+</code></pre></div>
+<p>The helper fetches this project's published deliverable, refuses anything that
+does not match <code>tools/aria2c.sha256</code>, and keeps a verified copy in
+<code>deliverables/</code>, where the device-package builders look. Take the second line
+only when an IE-3400 or other IE-3x00 device is in scope; nothing else uses
+that architecture.</p>
+<p><code>bin/</code> holds one client, the x86_64 one <code>server/Dockerfile</code> copies into the
+server image, so <code>--no-install</code> collects the arm64 deliverable without
+replacing it. Running <code>tools/get-aria2c.sh arm64</code> without that flag installs
+the arm64 binary into <code>bin/aria2c</code> and the next server image build fails on the
+architecture check.</p>
+<p>That is the whole step on a normal host. The rest of this section is for a host
+that cannot reach the release, or an operator who prefers to build their own.</p>
+<p>Accept a hand-in instead — put it at <code>deliverables/aria2c-&lt;cpu&gt;</code> or point
+<code>ARIA2C_DELIVERABLE</code> at it — or build it from the producer this repository
+ships:</p>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>tools/aria2c-build/vendor
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/AnInsomniacy/aria2-next<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/aria2c-build/vendor/aria2-next
+git<span class="w"> </span>-C<span class="w"> </span>tools/aria2c-build/vendor/aria2-next<span class="w"> </span>checkout<span class="w"> </span>v2.5.6
+<span class="o">(</span><span class="nb">cd</span><span class="w"> </span>tools/aria2c-build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>./build.sh<span class="w"> </span>x86_64<span class="o">)</span>
+</code></pre></div>
+<p><code>build.sh</code> needs Docker, and refuses to run unless the checkout sits at the
+pinned commit and every patch in <code>tools/aria2c-patches/</code> applies cleanly, so a
+build either corresponds to the published patch set or it fails.</p>
+<p><strong>A binary you built will not match <code>tools/aria2c.sha256</code>, and that is
+expected.</strong> A different toolchain or musl version produces different bytes, and
+<code>tools/get-aria2c.sh</code> fails closed on the mismatch. Adopting your own build is
+therefore deliberate:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>tools/aria2c-build/out/x86_64/aria2c<span class="w"> </span>deliverables/aria2c-x86_64
+sha256sum<span class="w"> </span>deliverables/aria2c-x86_64
+</code></pre></div>
+<p>Edit <code>tools/aria2c.sha256</code> in place and leave it world-readable.
+<code>server/Dockerfile</code> copies it into the server image and reads it as the runtime
+uid, so a rewrite that lands as <code>0600</code> — which an atomic write through a
+temporary file does by default — breaks the build that uses it. Check after
+editing:</p>
+<div class="highlight"><pre><span></span><code>chmod<span class="w"> </span><span class="m">0644</span><span class="w"> </span>tools/aria2c.sha256
+ls<span class="w"> </span>-l<span class="w"> </span>tools/aria2c.sha256
+</code></pre></div>
+<p>Then <code>tools/get-aria2c.sh amd64</code> installs it. Never edit that file to silence a
+mismatch on a binary you did not build yourself — there, the mismatch is the
+mechanism working, and a mismatch on a downloaded asset means the asset is
+wrong and must not be adopted.</p>
+<p>The <code>aarch64</code> build is the expensive one: it compiles under emulation, takes
+tens of minutes and keeps every core busy, because the whole toolchain is
+emulated. Needing it at all now means the release could not be reached, so
+prefer fixing that. If you must build it, launch it detached so a closing
+session cannot cancel the <code>buildx</code> client, and leave Docker's cache alone:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>tools/aria2c-build
+setsid<span class="w"> </span>nohup<span class="w"> </span>./build.sh<span class="w"> </span>aarch64<span class="w"> </span>&gt;<span class="w"> </span>build-aarch64.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span>&lt;<span class="w"> </span>/dev/null<span class="w"> </span><span class="p">&amp;</span>
+<span class="nb">echo</span><span class="w"> </span><span class="nv">$!</span><span class="w"> </span>&gt;<span class="w"> </span>build-aarch64.pid
+</code></pre></div>
+<p>A detached build leaves no exit status. It finished if the log ends with a size
+gate (<code>UNDER TARGET</code> or <code>OVER TARGET</code>, never <code>HARD FAIL</code>) and
+<code>out/aarch64/aria2c</code> exists:</p>
+<div class="highlight"><pre><span></span><code>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'HARD FAIL|OVER TARGET|UNDER TARGET'</span><span class="w"> </span>tools/aria2c-build/build-aarch64.log
+ls<span class="w"> </span>-l<span class="w"> </span>tools/aria2c-build/out/aarch64/aria2c
+</code></pre></div>
+<p><code>tools/aria2c-build/README.md</code> covers the patch set, the pinned toolchain, and
+what to do when an Alpine security bump withdraws a pin.</p>
+<h3 id="2-ioxclient-iox-device-types-only">2. <code>ioxclient</code> — IOx device types only</h3>
+<div class="highlight"><pre><span></span><code>tools/get-ioxclient.sh
+</code></pre></div>
+<p>It downloads Cisco's IOx packaging CLI from its public documentation host, and
+installs it at <code>tools/bin/ioxclient</code>; set <code>IOXCLIENT</code> instead to use a copy you
+already have. Cisco publishes no checksum for that artifact and <code>ioxclient</code>
+signs every package a device installs, so the helper pins the binary itself
+against <code>tools/ioxclient.sha256</code> and refuses both a mismatch and a version that
+file does not record. Linux amd64 only.</p>
+<h3 id="2b-the-ioxclient-packaging-profile-nothing-to-do">2b. The <code>ioxclient</code> packaging profile — nothing to do</h3>
+<p><code>ioxclient</code> refuses every command, <code>--help</code> included, until a configuration
+file exists in <code>HOME</code>, and it tries to create one interactively, so a scripted
+run dies at its password prompt before anything is packaged. <code>device/iox/build.sh</code>
+handles that itself: it writes an inert packaging profile into a scratch <code>HOME</code>
+for the length of the <code>ioxclient package</code> call.</p>
+<p>That profile points at localhost with a placeholder credential and is thrown
+away with the build context. Packaging is offline — it assembles and signs a
+directory — so nothing there is ever used to reach anything. It also means an
+operator profile, which may hold a real device address and credential, is not
+in effect while packaging; IRIS reaches devices through its own onboarding, not
+through <code>ioxclient</code>.</p>
+<p>Set <code>IOXCLIENT_HOME</code> to a directory holding a prepared <code>.ioxclientcfg.yaml</code>
+only when a run must use a specific profile. Do not create one for an ordinary
+deployment, and never put a real device credential in one.</p>
+<h3 id="3-arm64-emulation-for-anything-arm64-on-an-amd64-host">3. ARM64 emulation — for anything arm64 on an amd64 host</h3>
+<p>Needed to build the arm64 IOx package, whose device image runs <code>apk add</code> and
+<code>chmod</code> steps inside the target platform, and for the <code>aarch64</code> <code>aria2c</code> build
+in the fallback case. Check whether the host already has it:</p>
+<div class="highlight"><pre><span></span><code>grep<span class="w"> </span>-q<span class="w"> </span><span class="s1">'^enabled'</span><span class="w"> </span>/proc/sys/fs/binfmt_misc/qemu-aarch64<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>ready
+</code></pre></div>
+<p>If that prints nothing, the simplest fix is your distribution's static QEMU
+package (<code>qemu-user-static</code> on Ubuntu and Debian), then run the check again.
+That needs no digest and no privileged container.</p>
+<p>Otherwise the builders register the handler themselves, and require an audited
+<code>tonistiigi/binfmt</code> digest rather than pulling a floating tag. Review the tag
+you intend to use, resolve it to a digest, and export it:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>buildx<span class="w"> </span>imagetools<span class="w"> </span>inspect<span class="w"> </span>tonistiigi/binfmt:&lt;reviewed-tag&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--format<span class="w"> </span><span class="s1">'{{println .Manifest.Digest}}'</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">BINFMT_IMAGE_DIGEST</span><span class="o">=</span>sha256:&lt;the<span class="w"> </span>digest<span class="w"> </span>printed<span class="w"> </span>above&gt;
+</code></pre></div>
+<p>With the digest unset the build fails closed instead of pulling an unpinned
+image.</p>
+<h3 id="4-the-two-instruction-trust-roots-every-device-package">4. The two instruction trust roots — every device package</h3>
+<p>Every device package embeds exactly two public roots, and the build fails
+closed without them. They are the trust anchors devices use to judge signed
+instructions, so <strong>no installer and no assistant creates them.</strong> The operator
+pastes one line. An assistant hands over the line for the chosen layout and
+waits.</p>
+<p>Each line creates both keypairs, keeps the private halves in <code>~/iris-custody</code>,
+and leaves <code>~/iris-roots</code> holding the two public keys and nothing else — which
+is what the builders require. Answer each passphrase prompt with a real
+passphrase: these are signing keys. The last command prints the directory, and
+<code>root-a.pub  root-b.pub</code> is the expected output.</p>
+<p><strong>Docker on one host</strong> — run it on that host:</p>
+<div class="highlight"><pre><span></span><code>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0700</span><span class="w"> </span>~/iris-custody<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ssh-keygen<span class="w"> </span>-t<span class="w"> </span>ed25519<span class="w"> </span>-C<span class="w"> </span>iris-root-a<span class="w"> </span>-f<span class="w"> </span>~/iris-custody/root-a<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ssh-keygen<span class="w"> </span>-t<span class="w"> </span>ed25519<span class="w"> </span>-C<span class="w"> </span>iris-root-b<span class="w"> </span>-f<span class="w"> </span>~/iris-custody/root-b<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>~/iris-roots<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0755</span><span class="w"> </span>~/iris-roots<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>install<span class="w"> </span>-m<span class="w"> </span><span class="m">0644</span><span class="w"> </span>~/iris-custody/root-a.pub<span class="w"> </span>~/iris-custody/root-b.pub<span class="w"> </span>~/iris-roots/<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ls<span class="w"> </span>-A<span class="w"> </span>~/iris-roots
+</code></pre></div>
+<p><strong>Docker on separate hosts</strong> — run the same line on the <strong>server</strong> host, which
+builds the packages. The Console host needs no roots at all:</p>
+<div class="highlight"><pre><span></span><code>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0700</span><span class="w"> </span>~/iris-custody<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ssh-keygen<span class="w"> </span>-t<span class="w"> </span>ed25519<span class="w"> </span>-C<span class="w"> </span>iris-root-a<span class="w"> </span>-f<span class="w"> </span>~/iris-custody/root-a<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ssh-keygen<span class="w"> </span>-t<span class="w"> </span>ed25519<span class="w"> </span>-C<span class="w"> </span>iris-root-b<span class="w"> </span>-f<span class="w"> </span>~/iris-custody/root-b<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>~/iris-roots<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0755</span><span class="w"> </span>~/iris-roots<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>install<span class="w"> </span>-m<span class="w"> </span><span class="m">0644</span><span class="w"> </span>~/iris-custody/root-a.pub<span class="w"> </span>~/iris-custody/root-b.pub<span class="w"> </span>~/iris-roots/<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ls<span class="w"> </span>-A<span class="w"> </span>~/iris-roots
+</code></pre></div>
+<p><strong>Kubernetes</strong> — run it on the host that builds device packages:</p>
+<div class="highlight"><pre><span></span><code>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0700</span><span class="w"> </span>~/iris-custody<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ssh-keygen<span class="w"> </span>-t<span class="w"> </span>ed25519<span class="w"> </span>-C<span class="w"> </span>iris-root-a<span class="w"> </span>-f<span class="w"> </span>~/iris-custody/root-a<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ssh-keygen<span class="w"> </span>-t<span class="w"> </span>ed25519<span class="w"> </span>-C<span class="w"> </span>iris-root-b<span class="w"> </span>-f<span class="w"> </span>~/iris-custody/root-b<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>~/iris-roots<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0755</span><span class="w"> </span>~/iris-roots<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>install<span class="w"> </span>-m<span class="w"> </span><span class="m">0644</span><span class="w"> </span>~/iris-custody/root-a.pub<span class="w"> </span>~/iris-custody/root-b.pub<span class="w"> </span>~/iris-roots/<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ls<span class="w"> </span>-A<span class="w"> </span>~/iris-roots
+</code></pre></div>
+<p>Kubernetes needs one more line, because the server reads the roots from its own
+storage as well. Run it once the server pod is up, and expect the same two
+names back:</p>
+<div class="highlight"><pre><span></span><code><span class="k">for</span><span class="w"> </span>r<span class="w"> </span><span class="k">in</span><span class="w"> </span>root-a<span class="w"> </span>root-b<span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="s2">"install -d -m 0755 /data/config/instr/roots.d &amp;&amp; cat &gt; /data/config/instr/roots.d/</span><span class="nv">$r</span><span class="s2">.pub"</span><span class="w"> </span>&lt;<span class="w"> </span>~/iris-roots/<span class="nv">$r</span>.pub<span class="p">;</span><span class="w"> </span><span class="k">done</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span>ls<span class="w"> </span>-A<span class="w"> </span>/data/config/instr/roots.d
+</code></pre></div>
+<p>Never generate roots inside the pod, and never copy a private root there.</p>
+<p>A directory holding anything but the two public keys is refused with <code>must hold
+exactly two public roots (*.pub)</code> before anything is built; the <code>rm -rf</code> in the
+line above is what keeps a second run from leaving a third file behind. Every
+builder in this guide is passed <code>IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"</code>,
+so there is nothing further to configure.</p>
+<p>For production, have each custodian run one <code>ssh-keygen</code> command on their own
+machine, carry only the <code>.pub</code> halves to the server host, and place them with
+the same <code>install</code> pair. Never accept a private root: not on the server host,
+not in an installer argument, not on a device, not in chat. One person holding
+both is acceptable for a proof of concept and is not production custody or
+signing evidence — say so when reporting it, as
+<a href="../getting-started/#prepare-instruction-trust">Prepare instruction trust</a>
+requires. Certificates, rotation and revocation are in the
+<a href="../operations/#instruction-root-ceremony-and-recovery">ceremony runbook</a>.</p>
+<h3 id="5-the-appmgr-builder-ios-xr-only">5. The appmgr builder — IOS-XR only</h3>
+<p><code>tools/build-xr-package.sh</code> wraps the canonical device image as an appmgr RPM.
+It clones Cisco's <code>ios-xr/xr-appmgr-build</code> at a pinned commit into
+<code>~/.cache/iris/xr-appmgr-build</code> on first use, so that step needs Docker and
+network access. <code>tools/start-compose-server.sh</code> runs it for you; set
+<code>IRIS_SKIP_XR=1</code> only on a deployment that is certain to have no XR devices;
+a proof of concept leaves it unset and builds the RPM with everything else.
+Run the builder directly when rebuilding later:</p>
+<div class="highlight"><pre><span></span><code>tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>artifacts/
+</code></pre></div>
+<h3 id="the-shortest-path-to-a-first-staged-image">The shortest path to a first staged image</h3>
+<p>This is the quickest possible look at a staged image, not the proof-of-concept
+default: it produces no device package, so <strong>Settings -&gt; Device packages</strong> will
+report every one of them as needing a build. Take it only when that is what the
+operator asked for. It still needs the <code>aria2c</code> client of step 1, and no roots:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>build<span class="w"> </span>--pull
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>iris<span class="w"> </span>iris-bootstrap
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>up<span class="w"> </span>-d
+</code></pre></div>
+<p>It installs no roots and builds no packages, so instruction custody is not
+configured and IOx and XR devices have nothing to onboard with. Work through
+the steps above before going past a demonstration.</p>
+<h2 id="choose-the-layout">Choose the layout</h2>
+<table>
+<thead>
+<tr>
+<th>Layout</th>
+<th>Deployment files</th>
+<th>Connection between containers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Docker on one host — default</td>
+<td><code>server/docker-compose.yml</code>, configured by <code>server/.env</code> or exported variables</td>
+<td>Docker DNS resolves <code>iris</code>; the Console calls <code>https://iris:9443</code>. Port 9443 stays unpublished.</td>
+</tr>
+<tr>
+<td>Docker on separate hosts</td>
+<td><code>server/docker-compose.server.yml</code> with <code>server/server.env</code>; <code>server/docker-compose.console.yml</code> with <code>server/console.env</code></td>
+<td>Private HTTPS 9443, a scoped file-mounted token, and verified management TLS. Each host has its own local files.</td>
+</tr>
+<tr>
+<td>Kubernetes</td>
+<td><code>kubernetes/</code> manifests and environment examples</td>
+<td>Internal management Service on 9443, restricted by NetworkPolicy; credentials and certificates come from Secrets.</td>
+</tr>
+</tbody>
+</table>
+<p>All layouts have one server and one Console instance. Separating the Console
+from the server does not cluster the tracker, catalog, or seeder.</p>
+<p>Review <a href="../network-ports/">Network ports and flows</a>. Devices contact the server
+and each other for swarm traffic. The server drives onboarding over SSH/SCP.
+Operators contact the Console; they do not need direct management API access.</p>
+<h3 id="settings-that-stop-deployment">Settings that stop deployment</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Console exits before serving HTTPS</td>
+<td>Its browser certificate and key must be readable and form a matching pair. The one-host stack fetches its default through the management API; separate-host Docker and Kubernetes mount their own default identity.</td>
+</tr>
+<tr>
+<td>Console loads but API requests return 503</td>
+<td>Server health, the private management route and DNS, the management certificate and CA, and matching scoped token files. Local Console readiness alone does not prove server access.</td>
+</tr>
+<tr>
+<td>Device SSH reports unsupported algorithms</td>
+<td>Set <code>IRIS_SSH_LEGACY=1</code> only when the device cannot offer stronger algorithms.</td>
+</tr>
+<tr>
+<td>Device SSH host key differs from the saved key</td>
+<td>Confirm the device identity before using <strong>Forget SSH host key</strong> in its Console drawer.</td>
+</tr>
+<tr>
+<td>Routed Guest Shell needs IS-IS on its new interface</td>
+<td>Set the device's <code>svi_igp=isis</code>, or the server's <code>SVI_IGP=isis</code> default, when that matches the fabric.</td>
+</tr>
+<tr>
+<td>IOx staging requests an emulation image digest</td>
+<td>Export the audited <code>BINFMT_IMAGE_DIGEST</code> on the package-build host, or configure ARM64 emulation there beforehand.</td>
+</tr>
+</tbody>
+</table>
+<p>Put server runtime settings such as <code>IRIS_SSH_LEGACY</code> and <code>SVI_IGP</code> in the
+selected server environment file. For Kubernetes, use
+<code>kubernetes/iris-seed-server.env</code>. Package-build variables belong in the
+build host's shell. Tokens and private keys stay in protected files.</p>
+<h2 id="assistant-operating-rules">Assistant operating rules</h2>
+<p>Give the assistant these requirements. It asks for the layout and the rest
+itself, so the operator does not have to decide everything in advance:</p>
+<div class="highlight"><pre><span></span><code>Operate IRIS as a stage-only system. Never install, activate, reload, change
+boot variables, or replace the running software on a device.
+
+Before running anything, ask the operator these four questions in one message
+and wait for the answers. Do not guess a layout, and do not start a Docker
+deployment because it is the default:
+
+1. Where should the deployment live? Offer
+   /opt/iris/intelligent-release-image-staging as the default. You create the
+   directory and clone into it.
+2. Which layout: Docker on one host, Docker on separate hosts, or Kubernetes?
+   For separate hosts also ask for the Console host, and for Kubernetes ask
+   for the cluster context and the registry the nodes can pull from.
+3. Which device types will be onboarded: Guest Shell, IOx on amd64
+   (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
+   IOS-XR appmgr, or none yet? The answer decides which handed-in inputs you
+   need; asking later wastes a build.
+4. The server's device-reachable IPv4 address, and the Console URL if it is
+   not that address on port 8080.
+
+Repeat the answers back before acting on them, then work only within the
+layout that was chosen.
+
+Read CLAUDE.md and the current docs/zensical/ guide for the selected layout.
+Use Getting Started for Docker on one host, Docker on Separate Hosts for
+independent Docker hosts, or Kubernetes for the cluster manifests. Keep the
+same layout, Compose project, environment files, and container names in every
+command. Preserve existing server state and device assignments.
+
+Keep credentials and secrets out of chat, command output, logs, and source
+control. Read local credentials only when a step needs them. Do not copy
+server state, the age identity, or the management private key to the Console.
+Check the host before anything else, as "Check the host first" describes, and
+report what is present and what is missing in one message. Check every host
+the layout uses and name which host each result came from: on separate Docker
+hosts the Console host needs far less than the server host, and on Kubernetes
+the cluster checks and the build host's checks are different lists. Ask before
+installing a package, adding a user to the docker group, or registering
+emulation handlers: those change the operator's machine. Install what they
+approve, then continue rather than handing the list back.
+
+Before starting the aarch64 aria2c build, work down the list in step 1 of
+"Supply the handed-in inputs". On a fresh host that build has no fast version:
+skip it when no IE-3x00 device is in scope, offer a newer QEMU from a reviewed
+binfmt digest before starting rather than after, then launch it detached and
+leave the cache alone. State that it is the slow path and what it costs: tens
+of minutes with every core busy. Ask once whether any arm64 machine is
+reachable over SSH, since that removes the emulation. This ordering applies to
+all three layouts; only the host running the build changes.
+
+A fresh clone is missing inputs on purpose. Work through "Supply the handed-in
+inputs" in this guide for the device types in scope, rather than reporting the
+deployment as blocked and stopping. Announce which steps you are taking.
+
+Ask once, at the start, where the deployment should live, and use
+/opt/iris/intelligent-release-image-staging when the operator has no
+preference. Create that directory and clone into it yourself rather than
+handing the operator a step. Every later command runs from there. Do not ask for the
+other paths this guide fixes: the two public instruction roots go in
+$HOME/iris-roots on the host that builds packages, whatever the checkout is.
+
+You may run the project's own helpers yourself: tools/aria2c-build/build.sh,
+tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
+tools/start-compose-server.sh. Never download or substitute an aria2c binary
+from anywhere else.
+
+Build the Guest Shell bundle, the amd64 IOx package and the XR RPM in every
+proof of concept: they need no emulation and a missing one blocks that device
+type later. Build the arm64 IOx package too whenever an IE-3400 or other
+IE-3x00 device is in scope. Only skip it when none is, because it carries the
+emulated build.
+tools/start-compose-server.sh builds all four in one run once its inputs are
+present, so leave IRIS_SKIP_XR unset; tools/stage-iox-package.sh --arch amd64
+builds one IOx package when the arm64 one is out of scope, which
+tools/provision-iox-packages.sh cannot do.
+
+Console Settings -&gt; Device packages lists every package type, so one you
+skipped on purpose stays "Not built / absent" forever. That is the correct end
+state. Report which packages you built and which you skipped and why, and never
+present a deliberately skipped package as a failure or try to hide it.
+
+Do that preparation yourself and announce each step as you take it:
+
+- Fetch the verified amd64 release with tools/get-aria2c.sh amd64. When an
+  IE-3x00 device is in scope, fetch arm64 with tools/get-aria2c.sh arm64
+  --no-install, keeping bin/aria2c suitable for the server image. Use the
+  documented hand-in or source-build fallback only when the release cannot
+  be reached or the operator explicitly chooses it. For a source build,
+  place its outputs in deliverables/, record their sha256sums in
+  tools/aria2c.sha256, and say that you adopted your own build. Leave that
+  local checksum edit uncommitted; never record a checksum for a binary you
+  did not build in this session. Leave the checksum file world-readable:
+  server/Dockerfile copies it into the image and reads it as the runtime uid,
+  so a rewrite that lands as 0600 breaks the build. Run chmod 0644 and ls -l on
+  it after editing.
+- When you start the stack without tools/start-compose-server.sh, install the
+  two public roots into the server's config volume yourself, with the compose
+  run command in the layout section, and confirm them with ls in
+  $IRIS_CONFIG/instr/roots.d. Handing the roots to the package builders is a
+  different thing and does not cover this. Nothing later fails loudly for a
+  missing root: the Guest Shell bundle simply cannot be trust-bound.
+- Run tools/get-ioxclient.sh. Do not create an ioxclient profile: the builder
+  writes an inert one into a scratch HOME for the packaging call. If a run ever
+  needs a prepared profile, IOXCLIENT_HOME selects it, and it must never carry
+  a real device credential.
+- Enable arm64 emulation for the arm64 IOx package by installing the
+  distribution's static QEMU package, then confirm the registration.
+
+Initialise instruction custody once the stack is up and before onboarding any
+device, as "Initialise instruction custody" describes. Never hand the operator
+a command before the file it reads exists: generate and export the online
+public key, show that ~/iris-online.pub holds an ssh-ed25519 line, and only
+then give them the signing command. The same rule holds anywhere else you ask
+someone to run something — produce its inputs first, or say plainly that you
+are asking them to create them. Without it every
+onboarding fails with "instruction bootstrap unavailable" on every platform,
+and the message is deliberately fixed, so it never says which part is missing.
+The certificate signing in that sequence is the operator's, like the roots.
+
+Exactly one thing else is the operator's: the two instruction trust roots. Never
+create them. Paste the operator the single line for the chosen layout from
+step 4 of "Supply the handed-in inputs", wait for $HOME/iris-roots to hold the
+two public halves, and refuse a private key if one is offered. On Kubernetes,
+give them the second line for the server pod once it is running. Also ask before
+accepting a tonistiigi/binfmt digest, which trusts a third-party image, rather
+than the distribution package.
+
+Offer the two-service Guest Shell path, which builds no packages and needs no
+roots, only when the operator asks for the quickest possible look at a staged
+image. It is not the proof-of-concept default.
+
+Install both aria2c architectures with tools/get-aria2c.sh, which fetches the
+published deliverable and verifies it. Take arm64 only when an IE-3400 or
+other IE-3x00 device is in scope. Building aria2c from source is the fallback
+for a host that cannot reach the release, or an operator who asks for it: say
+which of the two you are doing.
+
+When you do have to build the aarch64 client, say first that it runs under
+emulation, takes tens of minutes and is silent for long stretches, so the
+operator does not read silence as a hang and stop it. Start it detached with
+setsid nohup, writing to a log, exactly as step 1 shows: a plain &amp; dies with
+the SSH session, the buildx client dying cancels the build on the daemon, and
+the log then shows a build that stopped with no compiler error in it. Report
+the elapsed time and the log's last line every few minutes. A detached build
+leaves no exit status, so judge it by the size-gate line and the artifact on
+disk. If it stopped, say so and rerun ./build.sh aarch64.
+
+Do not describe the whole sequence and then go quiet until it ends. Say which
+step is starting, and report each one as it finishes with the evidence it
+produced:
+
+- the roots directory validated: the two file names and their fingerprints
+- the public roots installed into the server's config volume, listed back from
+  inside the container
+- instruction custody initialised: the certificate imported, the producer
+  activated, and the iris-instructions --status document quoted
+- each aria2c architecture built, with the sha256 you recorded, then installed
+- ioxclient fetched, with its version
+- the Guest Shell bundle staged
+- each IOx package built, by architecture, with its provenance manifest
+- the XR RPM built
+- Console Settings -&gt; Device packages read back, naming anything that still
+  reports needing a build
+
+On Docker on one host, also report the environment file written with the age
+recipients used, the images built, the encrypted store bootstrapped, and both
+services up and healthy.
+
+On Docker on separate hosts, report each host separately and never imply the
+Console proves the server: the host bundles prepared, each bundle delivered and
+owned by uid/gid 10001, server.env and console.env written on their own hosts,
+the server image built and its store bootstrapped, the server healthy, the
+Console image built and serving browser HTTPS, and then an authenticated
+Console request reaching the server. A Console that loads while API requests
+return 503 is not a working deployment; say so plainly rather than reporting
+the Console as up.
+
+On Kubernetes, report the images built and pushed with the digests you pinned
+in kustomization.yaml, the namespace and every Secret provisioned, the PVC
+bound, the Services and NetworkPolicy applied, each Deployment reaching ready,
+the two public roots installed into /data/config/instr/roots.d and listed back
+from the pod, and the device packages staged into the server's artifact
+storage. Pod readiness is not an authenticated Console request; report them
+separately.
+
+If a step is still running when there is nothing new to report, say that it is
+still running rather than nothing at all. If one fails, report which one, quote
+the error, and say what is unaffected — a package build that fails after the
+stack is up leaves the stack running.
+
+Continue work within the authorized scope. Ask for a missing value only when
+it prevents a safe next step. Obtain approval for a destructive action unless
+it has already been explicitly authorized. Use the Console for ordinary
+inventory, image, onboarding, assignment, and monitoring work.
+
+Verify the chosen layout and report observed results. Distinguish container
+health from an authenticated Console request, and distinguish torrent seeding
+from verified staging. Record any untested behavior without claiming success.
+</code></pre></div>
+<h2 id="start-the-selected-deployment">Start the selected deployment</h2>
+<h3 id="docker-on-one-host">Docker on one host</h3>
+<p>Follow <a href="../getting-started/">Getting Started</a> to create the age identity outside
+Git and configure <code>IRIS_HOST_IP</code>, <code>IRIS_AGE_KEY_FILE_HOST</code>, and
+<code>IRIS_AGE_RECIPIENTS</code> in <code>server/.env</code>. Set it to the public half of the
+identity you just created and nothing else. Do not ask the operator for a
+second recovery key and do not create one: a second key is only useful when
+someone keeps it somewhere else, which is a production arrangement, and
+<code>iris-bootstrap --rekey</code> adds it later without redoing any of this. Give uid
+10001 access to the key, image
+root, artifacts, and volumes as documented there. From the repository root:</p>
+<p>Do steps 1 to 4 of
+<a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a> for the <code>x86_64</code>
+architecture, leaving the long <code>aarch64</code> build for later, then start the stack:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-a
+.<span class="w"> </span>server/.env
+<span class="nb">set</span><span class="w"> </span>+a
+tools/get-aria2c.sh<span class="w"> </span>amd64
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>build<span class="w"> </span>--pull
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>iris<span class="w"> </span>iris-bootstrap
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots:/pub:ro"</span><span class="w"> </span>--entrypoint<span class="w"> </span>sh<span class="w"> </span>iris<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" &amp;&amp; \</span>
+<span class="s1">   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'</span>
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>up<span class="w"> </span>-d
+docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>ps
+</code></pre></div>
+<p>The third command is easy to miss and nothing later reports it: it installs the
+two public roots into the server's config volume, which is separate from
+handing them to the package builders. Without it the server cannot
+self-provision a trust-bound Guest Shell bundle. <code>tools/start-compose-server.sh</code>
+does this for you; this sequence does not, because it starts the stack before
+the packages exist. It runs inside the server image as the runtime uid, so
+ownership is right, mounts only the <code>.pub</code> files read-only, and is idempotent.</p>
+<p>Confirm it before moving on:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>iris<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>ls<span class="w"> </span>-l<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_CONFIG</span><span class="s2">/instr/roots.d"</span>
+</code></pre></div>
+<p>Open <code>https://&lt;server-ip&gt;:8080/</code>, or the host port set by <code>IRIS_GUI_PUBLISH</code>.
+A working Console here means the deployment stands; everything that follows
+adds device packages to it.</p>
+<p>Now finish the packages, including the <code>aarch64</code> <code>aria2c</code> build that takes tens
+of minutes under emulation:</p>
+<div class="highlight"><pre><span></span><code>tools/get-ioxclient.sh
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>amd64
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>artifacts/
+</code></pre></div>
+<p>Add the arm64 package only when an IE-3x00 device is in scope. It needs the
+emulated <code>aarch64</code> <code>aria2c</code> build of step 1 first, and then:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>tools/aria2c-build/out/aarch64/aria2c<span class="w"> </span>deliverables/aria2c-aarch64
+sha256sum<span class="w"> </span>deliverables/aria2c-aarch64<span class="w">     </span><span class="c1"># record it in tools/aria2c.sha256</span>
+tools/get-aria2c.sh<span class="w"> </span>--no-install<span class="w"> </span>arm64
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>arm64
+</code></pre></div>
+<p><code>tools/provision-iox-packages.sh</code> builds both architectures in one run and is
+the right command when both are in scope; it cannot be used to build only one.</p>
+<p>Then read <strong>Settings -&gt; Device packages</strong>. Every package you built must report
+as built. A package you deliberately skipped stays <strong>Not built / absent</strong>, and
+that is the correct end state, not a failure: say which ones you skipped and
+why, so nobody reads that screen as a broken deployment. <code>iris-arm64.tar</code> sits
+there for every deployment without an IE-3x00 device.</p>
+<p><code>tools/start-compose-server.sh</code> does all of this in one run instead — grants
+uid 10001 the <code>artifacts/</code> directory, builds the images, bootstraps the store,
+installs the two public roots into the config volume, starts both services and
+builds the Guest Shell bundle, both IOx packages and the XR RPM, preserving an
+existing complete store. It is the better path once both <code>aria2c</code> binaries
+exist, because it checks every input first and stops before building if one is
+missing. On a first deployment it also means the stack cannot start until the
+emulated arm64 build has finished, which is why the sequence above puts the
+Console first. If a package build fails after the stack is up, the helper exits
+nonzero while the stack keeps running; fix the reported problem and rerun
+<code>tools/provision-iox-packages.sh</code> or <code>tools/build-xr-package.sh --out artifacts/</code>.</p>
+<h3 id="docker-on-separate-hosts">Docker on separate hosts</h3>
+<p>The server host builds the server image and every device package, so
+<a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a> applies to that
+host's checkout: <code>aria2c</code> before the image build, and <code>ioxclient</code>, ARM64
+emulation, the two roots and the appmgr builder for the device types in scope.
+The Console host needs none of them; it builds only the Console image.</p>
+<p>Follow <a href="../docker-hosts/">Docker on separate hosts</a> to prepare and deliver the
+separate host bundles. The helper creates a management token, an independent
+management certificate, and an independent browser certificate:</p>
+<div class="highlight"><pre><span></span><code>python3<span class="w"> </span>tools/prepare-docker-hosts.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--out<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/iris/docker-hosts"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--management-host<span class="w"> </span>iris-mgmt.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--console-host<span class="w"> </span>console.example.com
+</code></pre></div>
+<p>Use your actual hostnames and a new output directory whose parent exists.
+Deliver only each host's bundle through verified SSH and set its ownership to
+uid/gid 10001. The full guide covers host paths, certificate trust, and file
+permissions.</p>
+<p>On the server host, copy <code>server/server.env.example</code> to <code>server/server.env</code>
+and set the device-facing server IP, private management bind IP, full Console
+URL, age identity and recipients, and local storage paths. From the repository
+root, for a fresh server:</p>
+<div class="highlight"><pre><span></span><code>tools/get-aria2c.sh<span class="w"> </span>amd64
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span>build<span class="w"> </span>--pull
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>iris<span class="w"> </span>iris-bootstrap
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots:/pub:ro"</span><span class="w"> </span>--entrypoint<span class="w"> </span>sh<span class="w"> </span>iris<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" &amp;&amp; \</span>
+<span class="s1">   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'</span>
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span>up<span class="w"> </span>-d
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span>ps
+</code></pre></div>
+<p>For an existing server, preserve its project name, volumes, identity, and
+paths; skip bootstrap. The standalone server file does not launch a Console.</p>
+<p>On the Console host, copy <code>server/console.env.example</code> to
+<code>server/console.env</code>. Set its browser bind address and port, the management
+HTTPS URL, and its three local credential/certificate directories. Then:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/console.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.console.yml<span class="w"> </span>build<span class="w"> </span>--pull
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/console.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.console.yml<span class="w"> </span>up<span class="w"> </span>-d
+docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/console.env<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/docker-compose.console.yml<span class="w"> </span>ps
+</code></pre></div>
+<p>Open the Console host's configured HTTPS URL. The Console can start while the
+server is unavailable using its local browser identity; API requests return
+503 until the authenticated server connection works. No server data volume
+or age key belongs on the Console host.</p>
+<p>Build device packages on the server host, where the inputs live, once its
+stack is up. The <code>aarch64</code> client is fetched rather than built, like the amd64
+one; only a host that cannot reach the release falls back to
+<a href="#1-the-aria2c-client-every-deployment">step 1</a>'s emulated build:</p>
+<div class="highlight"><pre><span></span><code>tools/get-ioxclient.sh
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>amd64
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>artifacts/
+
+<span class="c1"># only with an IE-3x00 device in scope:</span>
+tools/get-aria2c.sh<span class="w"> </span>--no-install<span class="w"> </span>arm64
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>arm64
+</code></pre></div>
+<p>Run only the ones your device types need. The
+<a href="../docker-hosts/#start-the-server-host">package steps</a> cover placement and
+ownership on that host.</p>
+<h3 id="kubernetes">Kubernetes</h3>
+<p>Use a cluster with amd64 worker capacity, a suitable storage class,
+LoadBalancer support, and enforced NetworkPolicy. Follow
+<a href="../kubernetes/">Kubernetes</a> for the complete configuration. For a small lab,
+use the <a href="../kubernetes/#small-lab-with-k3s">K3s setup choices</a>; Docker can remain
+on the same host with separate service addresses.</p>
+<p>Configure IRIS:</p>
+<ol>
+<li>Build the server and Console images from their Dockerfiles, publish them to
+   a registry reachable by the nodes, and pin both digests in
+   <code>kubernetes/kustomization.yaml</code>. The server image copies <code>bin/aria2c</code>, so
+   step 1 of <a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a> has to
+   be done in the checkout you build from.</li>
+<li>Configure <code>kubernetes/iris-seed-server.env</code> with the reserved device-facing
+   Service address, age recipients, and full <code>IRIS_CONSOLE_URL</code>. Configure
+   <code>kubernetes/iris-console.env</code> with the internal management URL. The public
+   server and Console Services have independent addresses.</li>
+<li>Configure the server PVC and Service exposure. Preserve device source IPs
+   on the server Service and restrict the Console Service to operators.
+   Keep management 9443 on its internal Service.</li>
+<li>Provision the namespace, age identity, management and observability token
+   pairs, management certificate, public management CA, and Console
+   certificate using <a href="../kubernetes/#secrets-and-storage">Secrets and storage</a>.
+   The management certificate covers the internal Service names; the browser
+   certificate covers the external Console URL. Neither private key belongs
+   in a ConfigMap or image.
+   During token rotation, retain the previous value until both pods have the
+   new current value and authenticated Console access passes. The Console can
+   temporarily use the previous token, so readiness alone cannot confirm that
+   both projections have updated.</li>
+<li>Build the needed device packages on a host that has the inputs for those
+   device types — <code>ioxclient</code>, ARM64 emulation, the appmgr builder — and stage
+   them with their manifests in the server's artifact storage before
+   onboarding devices. That host fetches both <code>aria2c</code> architectures with
+   <code>tools/get-aria2c.sh</code>; only a host that cannot reach the release falls back
+   to <a href="#1-the-aria2c-client-every-deployment">step 1</a>'s emulated build, and a
+   cluster does not help with it — the build host's own CPU does the
+   emulating, not a node's:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>amd64
+<span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>artifacts/
+</code></pre></div>
+<p>Add <code>--arch arm64</code> only with an IE-3x00 device in scope;
+   <code>tools/provision-iox-packages.sh</code> builds both and cannot build one.</p>
+<p>The same two public roots must also sit in <code>/data/config/instr/roots.d</code> on
+   the server PVC, readable by uid 10001; step 4 of
+   <a href="#supply-the-handed-in-inputs">Supply the handed-in inputs</a> gives the
+   <code>kubectl</code> commands. Never create roots in the pod, and never copy a private
+   root there.</p>
+<p>Apply the configured manifests and wait for both Deployments:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>apply<span class="w"> </span>-k<span class="w"> </span>kubernetes
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/iris-seed-server
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/iris-console
+</code></pre></div>
+<p>Use the Console Service's browser address. It is independent of the server
+Service address used by devices.</p>
+<h2 id="initialise-instruction-custody">Initialise instruction custody</h2>
+<p>Do this once the stack is up and <strong>before onboarding any device</strong>. Until it is
+done, every onboarding fails with <code>ERROR: instruction bootstrap unavailable</code>,
+on every platform, because each device's onboarding envelope is stamped by the
+server's instruction producer. Installing the two public roots is not enough:
+the producer also needs an online signing key, a certificate issued by one of
+your roots, and an activated producer epoch.</p>
+<p>The steps are the same everywhere; only the way you reach the server container
+changes.</p>
+<p><strong>Copy the public half out of the config volume, never out of <code>$IRIS_RUN</code>.</strong>
+The runtime directory is a tmpfs (<code>server/docker-compose.yml</code> mounts
+<code>/run/iris</code> that way), and <code>docker cp</code> cannot read a tmpfs mount: an export
+written there succeeds and then "cannot be found" from the host. Generation
+already writes the public half into the config volume, so use that copy.</p>
+<h3 id="docker-on-one-host_1">Docker on one host</h3>
+<p>Run these two first. They produce the file the operator's command signs:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>iris<span class="w"> </span>iris-instructions<span class="w"> </span>--generate-online-key
+docker<span class="w"> </span>cp<span class="w"> </span>iris:/etc/iris/instr/signing-key.pub<span class="w"> </span>~/iris-online.pub
+</code></pre></div>
+<p>Check the file before going further. It must exist and hold one
+<code>ssh-ed25519 …</code> line:</p>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>~/iris-online.pub
+</code></pre></div>
+<p>Only now hand the operator the signing command, because it reads that file and
+fails without it:</p>
+<div class="highlight"><pre><span></span><code>ssh-keygen<span class="w"> </span>-q<span class="w"> </span>-s<span class="w"> </span>~/iris-custody/root-a<span class="w"> </span>-I<span class="w"> </span>iris-online<span class="w"> </span>-n<span class="w"> </span>iris-server<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-V<span class="w"> </span>+0s:+30d<span class="w"> </span>~/iris-online.pub
+</code></pre></div>
+<p>It uses the <strong>private</strong> root from <code>~/iris-custody</code> and prompts for its
+passphrase, so it is the operator's to run: an assistant hands it over and
+waits, exactly as for the roots themselves, and never takes a private root or a
+passphrase. It writes <code>~/iris-online-cert.pub</code>.</p>
+<p>Then finish:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>cp<span class="w"> </span>~/iris-online-cert.pub<span class="w"> </span>iris:/etc/iris/instr/signing-key-cert.pub
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>iris<span class="w"> </span>iris-instructions<span class="w"> </span>--import-certificate<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>/etc/iris/instr/signing-key-cert.pub
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>iris<span class="w"> </span>iris-instr-key<span class="w"> </span>initialize
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>iris<span class="w"> </span>iris-instructions<span class="w"> </span>--status
+</code></pre></div>
+<h3 id="docker-on-separate-hosts_1">Docker on separate hosts</h3>
+<p>Identical, on the <strong>server</strong> host. The Console host has no custody role. Use
+that host's container name if its Compose project names it something other than
+<code>iris</code>:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>ps<span class="w"> </span>--format<span class="w"> </span><span class="s1">'{{.Names}}'</span>
+</code></pre></div>
+<h3 id="kubernetes_1">Kubernetes</h3>
+<p>The same sequence through <code>kubectl</code>, with the cluster's config path
+<code>/data/config</code> in place of <code>/etc/iris</code>:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>iris-instructions<span class="w"> </span>--generate-online-key
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>cp<span class="w"> </span>iris/&lt;server-pod&gt;:/data/config/instr/signing-key.pub<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>~/iris-online.pub<span class="w"> </span>-c<span class="w"> </span>iris
+ssh-keygen<span class="w"> </span>-q<span class="w"> </span>-s<span class="w"> </span>~/iris-custody/root-a<span class="w"> </span>-I<span class="w"> </span>iris-online<span class="w"> </span>-n<span class="w"> </span>iris-server<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-V<span class="w"> </span>+0s:+30d<span class="w"> </span>~/iris-online.pub
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>cp<span class="w"> </span>~/iris-online-cert.pub<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>iris/&lt;server-pod&gt;:/data/config/instr/signing-key-cert.pub<span class="w"> </span>-c<span class="w"> </span>iris
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>iris-instructions<span class="w"> </span>--import-certificate<span class="w"> </span>/data/config/instr/signing-key-cert.pub
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>iris-instr-key<span class="w"> </span>initialize
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>deployment/iris-seed-server<span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>iris-instructions<span class="w"> </span>--status
+</code></pre></div>
+<h3 id="reading-the-status">Reading the status</h3>
+<p>A proof of concept that is ready to onboard looks like this:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"enabled"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">"signing_refused"</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span><span class="nt">"state"</span><span class="p">:</span><span class="s2">"keylist_missing"</span><span class="p">,</span>
+<span class="w"> </span><span class="nt">"certificate_days_to_expiry"</span><span class="p">:</span><span class="mi">29</span><span class="p">,</span><span class="nt">"roots_configured"</span><span class="p">:</span><span class="mi">2</span><span class="p">,</span>
+<span class="w"> </span><span class="nt">"root_ceremony_overdue"</span><span class="p">:</span><span class="s2">"critical"</span><span class="p">,</span><span class="nt">"root_quorum_degraded"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span>
+<span class="w"> </span><span class="nt">"roots_attested_180d"</span><span class="p">:</span><span class="mi">0</span><span class="p">}</span>
+</code></pre></div>
+<p>Report it rather than hiding the alarming-looking fields, and say what they
+mean:</p>
+<ul>
+<li><code>state: keylist_missing</code> — the signed keylist is the revocation list
+  distributed to devices. It does not gate stamping, so onboarding works
+  without it; a production deployment installs one through the
+  <a href="../operations/#instruction-root-ceremony-and-recovery">ceremony runbook</a>.</li>
+<li><code>root_ceremony_overdue: critical</code>, <code>root_quorum_degraded: true</code>,
+  <code>roots_attested_180d: 0</code> — all three follow from custodians never having
+  attested these roots, which a proof of concept has not done. Expected here.</li>
+<li><code>certificate_days_to_expiry</code> — signing refuses with seven days or fewer
+  remaining, so a 30-day certificate gives about three weeks before it must be
+  re-signed with the same root.</li>
+</ul>
+<p><code>enabled: true</code> with <code>signing_refused: false</code> is what says onboarding will
+stamp.</p>
+<h2 id="verify-the-deployment">Verify the deployment</h2>
+<p>Run these checks for the selected layout before onboarding. When verifying
+both Docker options, use separate projects and data for each test, with
+nonconflicting container names and host ports. See
+<a href="../server/#running-a-second-stack-on-the-same-host">Running a second stack</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Docker on one host</th>
+<th>Docker on separate hosts</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Containers</td>
+<td>Both services are healthy in the same Compose project.</td>
+<td>Server and Console are healthy in their respective projects.</td>
+</tr>
+<tr>
+<td>Management route</td>
+<td>Console reaches <code>https://iris:9443</code> through its Docker network; no host port publishes 9443.</td>
+<td>Console reaches the configured private HTTPS endpoint, with hostname and CA verification and matching token files.</td>
+</tr>
+<tr>
+<td>Browser and API</td>
+<td>Login, inventory, Settings, image import/upload, and job logs work through the published Console URL.</td>
+<td>The same operations work through the Console host's URL.</td>
+</tr>
+<tr>
+<td>Addresses and certificate</td>
+<td>Settings shows the intended server IP, Console URL, and certificate actually served to the browser.</td>
+<td>Settings distinguishes the device-facing server address from the Console URL and reports the Console's own browser certificate.</td>
+</tr>
+<tr>
+<td>Server restart</td>
+<td>The running Console remains locally ready and API requests recover when the server returns.</td>
+<td>Also check that the Console starts with its local identity while the server is stopped, then recovers API access when it returns.</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>Only the server mounts state, images, artifacts, and encrypted configuration.</td>
+<td>The Console host has only its scoped credential, public management trust, and default browser identity.</td>
+</tr>
+</tbody>
+</table>
+<p>Use an isolated test deployment for server outage checks when device work is
+active. Check readiness and one authenticated API request after each restart.
+For Kubernetes, use the corresponding checks in
+<a href="../kubernetes/#health-and-operation">Health and operation</a>.</p>
+<h2 id="stage-an-image">Stage an image</h2>
+<ol>
+<li><strong>Create the administrator.</strong> Open the configured Console URL from a trusted
+   management network. Verify the expected browser certificate, then sign in
+   with the first-run credential <code>iris</code> / <code>irisisgreat!</code> and create the admin.
+   That first login returns a one-use setup grant valid for ten minutes; it
+   does not create a session. The administrator account is stored on the
+   server and ends first-run setup. See <a href="../console/#first-run">Console first run</a>.</li>
+<li><strong>Complete setup.</strong> Configure telemetry and image verification, and check
+   <strong>Settings → Device packages</strong>. A verification schedule alone does not prove
+   a successful verification run. Refresh Cisco's Bulk Hash feed or import a
+   feed file for an offline deployment. See <a href="../validation/">Validation</a>.</li>
+<li><strong>Publish an image.</strong> Upload through the Console or use <strong>Import from disk</strong>
+   for a file already on the server. Publishing hashes the file and creates
+   catalog and torrent metadata; it does not change a device.</li>
+<li><strong>Add devices.</strong> Management type controls the network fields. Model is
+   optional free text; a recognized model narrows installer choices without
+   changing management type. Choose Guest Shell, IOx, or XR appmgr as
+   appropriate. XR uses <code>xr-host</code> and the router's network, with app, VLAN/SVI,
+   VPG, and NAT fields empty. See <a href="../management-type/">Management type</a>.</li>
+<li><strong>Confirm packages.</strong> IE-3400 IOx needs <code>iris-arm64.tar</code>; Catalyst 9300 IOx
+   needs <code>iris-amd64.tar</code> and supported app-hosting storage. XR needs
+   <code>iris-xr.rpm</code>. Serve each package with its matching provenance manifest.
+   See <a href="../iox/">IOx App</a> and
+   <a href="../development/#embedded-agent-packages">Embedded agent packages</a>.</li>
+<li><strong>Onboard.</strong> Start one-click onboarding and watch each job to completion.
+   Inspect failures before retrying. IRIS app/container lifecycle operations
+   do not install or activate the staged operating-system image.</li>
+<li><strong>Assign and observe.</strong> Assign the image, then watch download, hash
+   verification, final staging, and seeding. A tracker seeder can still be
+   verifying or placing its file; confirm the device's final per-image staged
+   state. Use <a href="../telemetry-export/">Telemetry export</a> for origin/peer traffic
+   measurements and their limits.</li>
+<li><strong>Stop at staged.</strong> Installation, activation, reload, and boot management
+   belong to the operator's normal device-management process outside IRIS.</li>
+</ol>
+<p>Device packages contain no deployment certificate. Onboarding supplies public
+server trust separately; a device certificate rotation needs re-onboarding,
+not a package rebuild. A shared-agent source change requires rebuilding the
+Guest Shell bundle, both IOx packages, and the XR RPM before rollout. Package
+readiness checks wrapper bytes and provenance; it does not prove those bytes
+match newer source or validate a native signature.</p>
+<h2 id="maintenance-and-cleanup">Maintenance and cleanup</h2>
+<p>Use the same deployment files, environment files, project names, and volume
+paths for maintenance. Retain server data when rebuilding containers. Rebuild
+and redeploy device agents when their source changes; see
+<a href="../operations/#redeploying-agents-after-an-artifact-rebuild">Redeploying agents</a>.</p>
+<p>Back up server state, encrypted configuration, uploaded images, and host
+artifacts as described in <a href="../operations/#backups">Backups</a>. Keep the age
+identity separately. A one-host stack also has local tier-token and management
+CA volumes. Separate hosts have independent credential/TLS directories; back
+up each on its owning host. Restoring only a certificate does not restore
+device credentials or assignments.</p>
+<p>A reset requires explicit authorization because it removes inventory,
+assignments, deployment records, settings, and credentials. Undeploy agents
+while their records and credentials are available, then back up before
+removing any selected server data. Use the chosen topology's fresh-bootstrap
+steps for the replacement. A Console relocation by itself does not require
+resetting server state or onboarding devices again.</p>
+<h2 id="completion-record">Completion record</h2>
+<p>Record the IRIS version, deployment layout, each host's role and address,
+Console URL, management endpoint, Compose projects or Kubernetes namespace,
+and checks actually performed. For device work, include image ID,
+model/agent choice, staging target, job result, and final per-image state.
+List anything not verified. Keep credentials and tokens out of the record.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

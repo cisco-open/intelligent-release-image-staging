@@ -1,0 +1,214 @@
+<form version="1.1" theme="dark">
+  <!--
+    Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+    SPDX-License-Identifier: Apache-2.0
+  -->
+  <label>IRIS — Tracker &amp; Transfer Health</label>
+  <description>Tracker and transfer health with measured device peer captures. The device filter selects receivers in transfer panels and the named peer in tracker panels. All searches use the selected window; active tiles additionally require observations within the last 15 minutes from now. Telemetry last seen covers the full index. The peer chart groups cumulative captures by capture hour, not throughput. Missing captures are unavailable; incomplete captures give partial totals and a percentage with unknown bias.</description>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="tr">
+      <label>Time window</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="dev">
+      <label>Device / receiver (* = all; wildcards allowed)</label>
+      <default>*</default>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Active seeders</title>
+      <single>
+        <search>
+          <query>index=iris_logs "iris.peer.role"=* | eval Peer=replace('iris.principal',"^device:","") | search Peer=$dev|s$ | stats latest("iris.peer.role") as Role latest(_time) as Seen by Peer "iris.torrent.info_hash" | where Seen&gt;=relative_time(now(),"-15m") AND Role="seeder" | stats dc(Peer) as Seeders</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="rangeColors">["0x53a051","0x53a051"]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Active leechers</title>
+      <single>
+        <search>
+          <query>index=iris_logs "iris.peer.role"=* | eval Peer=replace('iris.principal',"^device:","") | search Peer=$dev|s$ | stats latest("iris.peer.role") as Role latest(_time) as Seen by Peer "iris.torrent.info_hash" | where Seen&gt;=relative_time(now(),"-15m") AND Role="leecher" | stats dc(Peer) as Leechers</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="rangeValues">[0]</option>
+        <option name="rangeColors">["0x53a051","0xf8be34"]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Average leecher → seeder</title>
+      <single>
+        <search>
+          <query>index=iris_logs "iris.peer.role"=* | eval Peer=replace('iris.principal',"^device:","") | search Peer=$dev|s$ | stats earliest(eval(if('iris.peer.role'="leecher",_time,null()))) as Started earliest(eval(if('iris.peer.role'="seeder",_time,null()))) as Seeded by Peer "iris.torrent.info_hash" | where isnotnull(Started) AND isnotnull(Seeded) AND Seeded&gt;=Started | eval Minutes=round((Seeded-Started)/60,1) | stats avg(Minutes) as "Average minutes" | eval "Average minutes"=round('Average minutes',1)</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit"> min</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Telemetry last seen</title>
+      <single>
+        <search>
+          <query>index=iris_logs | stats latest(_time) as Last | eval "Seconds ago"=round(now()-Last,0) | fields "Seconds ago"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit"> sec ago</option>
+        <option name="colorBy">value</option>
+        <option name="rangeValues">[60,300]</option>
+        <option name="rangeColors">["0x53a051","0xf8be34","0xdc4e41"]</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Seeds and leechers over time</title>
+      <chart>
+        <search>
+          <query>index=iris_logs "iris.peer.role"=* | eval Peer=replace('iris.principal',"^device:","") | search Peer=$dev|s$ | bin _time span=5m | stats latest("iris.peer.role") as Role by _time Peer "iris.torrent.info_hash" | chart dc(Peer) over _time by Role</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">devices</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.fieldColors">{"seeder":0x53A051,"leecher":0xF8BE34}</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Measured swarm transfer rate</title>
+      <description>One-minute averages for the whole fleet; the device filter does not apply to this panel. Received and Sent device to device are reported by the devices themselves and cannot see a transfer shorter than one 60-second agent tick. Distribution Server sent is measured by the distribution server's own aria2. Received counts bytes from every source, so the gap above Distribution Server sent is the peer-to-peer share.</description>
+      <chart>
+        <search>
+          <query>| mstats avg(_value) AS v WHERE index=iris_metrics metric_name="iris.transfer.throughput" BY "network.io.direction","iris.torrent.info_hash" span=1m | eval Series=if('network.io.direction'=="transmit","Sent device to device","Received by devices") | append [ | mstats avg(_value) AS v WHERE index=iris_metrics metric_name="iris.seeder.torrent.upload_rate" BY "iris.torrent.info_hash" span=1m | eval Series="Distribution Server sent" ] | eval MBps=v/1048576 | timechart span=1m sum(MBps) by Series</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">MB/s (1-minute average)</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Received data by source</title>
+      <chart>
+        <search>
+          <query>index=iris_logs "otel.log.name"="iris.device.transfer.report" | search "device.id"=$dev|s$ | stats latest("iris.transfer.bytes_from_devices_total") as Devices latest("iris.transfer.bytes_from_origin_total") as Origin latest("iris.transfer.bytes_from_unknown_total") as Unknown latest("iris.transfer.bytes_unattributed_omitted") as Omitted by "iris.transfer.id" | stats sum(Devices) as Devices sum(Origin) as Origin sum(Unknown) as Unknown sum(Omitted) as "Untraced capped rows" | transpose 0 header_field=column | rename "row 1" as Bytes, column as Source | eval "Received GB"=round(Bytes/1024/1024/1024,2) | fields Source "Received GB"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.axisTitleX.text">GB</option>
+        <option name="charting.legend.placement">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Time to seed by device</title>
+      <table>
+        <search>
+          <query>index=iris_logs "iris.peer.role"=* | eval Device=replace('iris.principal',"^device:","") | search Device=$dev|s$ | stats earliest(eval(if('iris.peer.role'="leecher",_time,null()))) as Started earliest(eval(if('iris.peer.role'="seeder",_time,null()))) as Seeded by Device "iris.torrent.info_hash" | where isnotnull(Started) AND isnotnull(Seeded) AND Seeded&gt;=Started | eval "Minutes to seed"=round((Seeded-Started)/60,1), Started=strftime(Started,"%F %T"), Seeded=strftime(Seeded,"%F %T") | rename "iris.torrent.info_hash" as Torrent | table Device Torrent Started Seeded "Minutes to seed" | sort - "Minutes to seed"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Transfer verification issues</title>
+      <table>
+        <search>
+          <query>index=iris_logs "otel.log.name"="iris.device.transfer.report" | search "device.id"=$dev|s$ | where 'iris.transfer.content_sha256.state'!="verified" OR 'iris.transfer.ios_copy_verify.state'!="ok" | stats latest(_time) as Seen latest("iris.report.event") as Stage latest("iris.image.id") as Image latest("iris.transfer.content_sha256.state") as Checksum latest("iris.transfer.ios_copy_verify.state") as "Copy verify" by "device.id" | eval Seen=strftime(Seen,"%F %T") | rename "device.id" as Device | table Seen Device Image Stage Checksum "Copy verify" | sort - Seen</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Active seeds and leechers by device type</title>
+      <chart>
+        <search>
+          <query>index=iris_logs ("iris.peer.role"=* OR "iris.image.id"=*) | eval Device=coalesce('device.id',replace('iris.principal',"^device:","")) | search Device=$dev|s$ | rename "iris.peer.role" as PeerRole, "iris.image.id" as ImageId | stats latest(PeerRole) as Role latest(eval(if(isnotnull(PeerRole),_time,null()))) as RoleSeen latest(ImageId) as Image by Device | where RoleSeen&gt;=relative_time(now(),"-15m") | eval "Device type"=case(like(Image,"c8000v%"),"Catalyst 8000V",like(Image,"8000-%"),"Cisco 8000 / IOS XR",like(Image,"cat9k%"),"Catalyst 9000",like(Image,"ie3x00%"),"IE 3000",true(),"Unclassified") | chart dc(Device) over "Device type" by Role</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleX.text">active devices</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.fieldColors">{"seeder":0x53A051,"leecher":0xF8BE34}</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel id="peer_bytes">
+      <title>Bytes received, by source</title>
+      <description>Cumulative bytes each device reported receiving, grouped by the selected capture's hour and stacked by who sent them: origin (the seeder), peer device (another IRIS device), unknown (a peer the server could not name — a normal outcome, not an error). A visible "peer device" band is the direct evidence that peer-to-peer distribution carried load. Report pulls do not add bytes. These capture totals are not an hourly traffic rate, and an empty bucket is not proof of zero traffic.</description>
+      <chart>
+        <search>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | search "device.id"=$dev|s$ | eval source=case('iris.peer.attribution'=="origin","origin",'iris.peer.attribution'=="device","peer device",1==1,"unknown") | eval MiB=received_bytes/1048576 | timechart span=1h sum(MiB) BY source</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">MiB received, by capture hour</option>
+        <option name="charting.chart.nullValueMode">zero</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+    <panel id="peer_share">
+      <title>Share of bytes from peer devices</title>
+      <single>
+        <search>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | search "device.id"=$dev|s$ | eval b=received_bytes | stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes, sum(b) AS all_bytes | eval pct=if(isnull(all_bytes) OR all_bytes&lt;=0,null(),round(100*coalesce(peer_bytes,0)/all_bytes,1)) | fields pct</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit">%</option>
+        <option name="underLabel">Captured peer bytes ÷ all captured bytes (origin and unknown included)</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel id="peer_transfers">
+      <title>Peer-to-peer transfers (measured, device-reported)</title>
+      <description>Receiving-device filter; Sender names the other device. Capture time is when the cumulative counters were read, not when every byte arrived. A false completeness flag means peers may be missing.</description>
+      <table>
+        <search>
+          <query>index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | where 'iris.peer.attribution'=="device" | search "device.id"=$dev|s$ | eval "Bytes from this peer"=received_bytes | eval "MiB from this peer"=round(received_bytes/1048576,1) | eval Image=coalesce('iris.image.name','iris.image.id') | rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver, "iris.transfer_record.capture_complete" AS "Capture complete" | table _time, Sender, Receiver, Image, "Bytes from this peer", "MiB from this peer", "Capture complete" | sort - _time | head 100 | appendpipe [ stats count AS n | where n==0 | eval Sender="— no device-to-device peer transfer records in this window (none captured, which is not the same as none happened) —" | fields Sender ]</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">25</option>
+      </table>
+    </panel>
+  </row>
+</form>
