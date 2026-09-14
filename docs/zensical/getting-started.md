@@ -159,8 +159,22 @@ age-keygen -y ~/.config/iris/age.txt
 
 export IRIS_HOST_IP=<server-ip>
 export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
+export IRIS_AGE_RECIPIENTS=<primary-age-public-key>
+```
+
+One recipient is a complete, working configuration: the list must contain the
+public half of the identity in `IRIS_AGE_KEY_FILE_HOST`, and bootstrap refuses
+if it does not. A production deployment adds a second, break-glass recipient
+whose private half is held somewhere else entirely, so the encrypted store can
+still be opened when the primary identity is lost:
+
+```bash
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
+
+Do not invent a break-glass key to satisfy the example. A second recipient
+whose private half sits beside the first protects nothing, and one can be added
+later without re-bootstrapping — see `--rekey` below.
 
 Compose publishes the Console only on `IRIS_HOST_IP`, rather than on every
 interface of a multi-homed host. Choose the intended IRIS-facing address and
