@@ -260,7 +260,10 @@ EOF
   # failing the onboard outright.
   grep -q 'XR_SCP_ATTEMPTS="\${XR_SCP_ATTEMPTS:-3}"' "$INSTALL"
   grep -q 'XR_SCP_RETRY_SECONDS="\${XR_SCP_RETRY_SECONDS:-10}"' "$INSTALL"
-  grep -q 'upload attempt \$scp_attempt failed; retrying' "$INSTALL"
+  grep -q 'upload attempt \$scp_attempt failed:' "$INSTALL"
+  grep -q 'retrying in \${XR_SCP_RETRY_SECONDS}s' "$INSTALL"
+  # The failure shows scp's own words, not only a guess about the vty pool.
+  grep -q 'tail -5 "\$RUN_ERR"' "$INSTALL"
   # The failure names the vty pool, which is what the operator has to check.
   grep -q 'no free vty line resets the connection here' "$INSTALL"
 }
