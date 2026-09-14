@@ -60,6 +60,7 @@ A host with no route to that release can take a hand-in instead — at
 `deliverables/aria2c-<cpu>`, or via `ARIA2C_DELIVERABLE` — or build one:
 
 ```bash
+mkdir -p tools/aria2c-build/vendor
 git clone https://github.com/AnInsomniacy/aria2-next \
   tools/aria2c-build/vendor/aria2-next
 git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6

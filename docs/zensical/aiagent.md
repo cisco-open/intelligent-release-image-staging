@@ -207,6 +207,7 @@ Accept a hand-in instead — put it at `deliverables/aria2c-<cpu>` or point
 ships:
 
 ```bash
+mkdir -p tools/aria2c-build/vendor
 git clone https://github.com/AnInsomniacy/aria2-next \
   tools/aria2c-build/vendor/aria2-next
 git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
@@ -535,12 +536,16 @@ state. Report which packages you built and which you skipped and why, and never
 present a deliberately skipped package as a failure or try to hide it.
 
 Do that preparation yourself and announce each step as you take it:
-- Build both aria2c architectures with tools/aria2c-build/build.sh, place them
-  in deliverables/, record their sha256sums in tools/aria2c.sha256, say that
-  you adopted your own build, and install them with tools/get-aria2c.sh. The
-  edit leaves that file locally modified, which is expected and fine: leave it,
-  do not revert it, and do not commit it. Never put a checksum in that file for
-  a binary you did not build in this session. Leave it world-readable:
+
+- Fetch the verified amd64 release with tools/get-aria2c.sh amd64. When an
+  IE-3x00 device is in scope, fetch arm64 with tools/get-aria2c.sh arm64
+  --no-install, keeping bin/aria2c suitable for the server image. Use the
+  documented hand-in or source-build fallback only when the release cannot
+  be reached or the operator explicitly chooses it. For a source build,
+  place its outputs in deliverables/, record their sha256sums in
+  tools/aria2c.sha256, and say that you adopted your own build. Leave that
+  local checksum edit uncommitted; never record a checksum for a binary you
+  did not build in this session. Leave the checksum file world-readable:
   server/Dockerfile copies it into the image and reads it as the runtime uid,
   so a rewrite that lands as 0600 breaks the build. Run chmod 0644 and ls -l on
   it after editing.
