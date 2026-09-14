@@ -25,7 +25,7 @@ deployment JSON, occurrences, or receipts by hand.
 | A cumulative ledger tile changes with the time picker | It shows the latest sample inside the selected window, not a delta. A window with no sample is unavailable; **Seeder RPC** uses a fixed 15-minute window. |
 | An API request returns Problem Details | Match `type` or `code` in the [Problem type registry](problems.md). Schedule receipt reasons are durable outcomes, not HTTP problem types. |
 | Set role, bulk role, or devices CSV import is refused with `incomparable_role_change` or `mixed_role_direction` | Moves between two roles whose permitted sets do not nest must be previewed and applied as separate steps, and one bulk must be all tightening or all relaxing. A device policy places in no role can always enter a restricted role and be cleared back. |
-| IOS-XR onboarding fails at `XR package/catalog/bootstrap upload failed` | The router had no free vty line. IOS-XR serves five by default and every ssh or scp session takes one, so an operator session plus another tool is enough to have the upload reset at key exchange. Run `show users` on the device; the installer already sends all three files in one session and retries, and `XR_SCP_ATTEMPTS` / `XR_SCP_RETRY_SECONDS` widen that. A larger `vty-pool` on the router removes the contention. |
+| IOS-XR onboarding fails at `XR package/catalog/bootstrap upload failed` | Check the failing destination, exit code, and transport error. The installer pushes the RPM, public certificate, and instruction bootstrap in three separate SCP sessions, retrying each with `XR_SCP_ATTEMPTS` / `XR_SCP_RETRY_SECONDS`. Older installers use OpenSSH's default SFTP: on NCS-540 / IOS XR 25.2.2 the file can transfer but the SSH session ends with status 255, causing a blank upload error. Use the updated installer with explicit `scp -O`, transfer-verified on NCS-540 and Cisco 8201; force undeploy does not resolve this protocol failure. For connection resets, use `show users` to check VTY contention. Authentication, permissions, and storage failures need their own diagnosis. |
 | `/swagger/` or `/openapi.yaml` returns 404 | Use the browser-facing Console HTTPS port, normally 8080, not management port 9443 or a device-facing listener. Keep the leading slash and use exact `/swagger/` or `/openapi.yaml`, not a path below `/api/v1`. If the path is still absent, the Console container is running an older image; rebuild or pull the current release and recreate that container. |
 | Swagger loads without styles or scripts | Preserve the `/swagger/` prefix through any reverse proxy and check the browser network log for local `/swagger/...` asset 404s. The shipped page makes no CDN or other Internet request. |
 | Swagger shows no **Try it out** or authorization control | This is expected. The bundled reference is public, static, and read-only; use the Console or an authenticated API client to send requests. |
@@ -33,6 +33,17 @@ deployment JSON, occurrences, or receipts by hand.
 | The Help popover shows an older version than `VERSION` | `IRIS_VERSION` is a build argument that overrides the image's `VERSION` file. Remove it from `server/.env` and the build shell, then rebuild both images; compare `docker exec iris sh -c 'echo $IRIS_VERSION'` with `docker exec iris cat /opt/iris/VERSION`. |
 
 ## Preserve evidence before retrying
+
+For XR SSH resets, also check `show logging` for
+`Incoming SSH session rate limit exceeded`. Free VTY lines do not rule out
+connection rate limiting. The installer spaces connections with
+`XR_SSH_CONNECT_DELAY` (default 2 seconds, configurable from 0 to 60), and
+retries registration transport failures using `XR_SCP_ATTEMPTS` and
+`XR_SCP_RETRY_SECONDS`. It checks the source table before repeating an
+interrupted registration and includes the SSH error in the job log. Package
+registration and its confirming query share a session. A package rejection
+with a successful transport is reported for diagnosis rather than retried
+as a connection failure.
 
 Record the affected device id, registration identity, image id, occurrence id,
 receipt revision, job id, and selected dashboard time bounds as applicable. Keep

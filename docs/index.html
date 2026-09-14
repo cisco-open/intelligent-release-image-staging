@@ -184,6 +184,9 @@ SPDX-License-Identifier: Apache-2.0
             IOx and IOS-XR appmgr use one device-agent container build for arm64 and amd64. Each platform has its own package and storage handling. Guest Shell runs the same agent code from a bundle.
           </p>
           <p>
+            Cisco 8201 lifecycle testing is complete. NCS-540 package transfer and app startup are verified; heartbeat and staging validation remain pending a working catalog network path. See <a href="docs/validation/">platform validation</a> for tested models and coverage.
+          </p>
+          <p>
             The server and web Console run in separate containers on one Docker host, <a href="docs/docker-hosts/">separate Docker hosts</a>, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
           </p>
           <p>

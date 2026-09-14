@@ -35,6 +35,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- Successful XR command sessions omit the routine SSH connection-closed
+  notice from job logs; failed sessions retain their diagnostics.
+- XR source verification accepts the numbered NCS appmgr table as well as
+  tables with the source name first, while still requiring an exact name.
+- XR onboarding spaces SSH/SCP connections and retries registration transport
+  failures after checking whether the source was registered. Registration
+  output and SSH errors are retained, so an SSH rate-limit reset is no longer
+  reported only as a missing appmgr source.
+- XR onboarding explicitly uses `scp -O` for package, certificate, and bootstrap
+  delivery. NCS-540 / IOS XR 25.2.2 returned a failing SSH status after SFTP
+  uploads; SCP transfer and SHA-256 were verified on both NCS-540 and Cisco
+  8201 / IOS XR 25.4.2. Upload failures now name the destination and exit code.
+  Documentation and website platform coverage distinguish NCS transfer checks
+  from pending full lifecycle validation.
 - IOS-XR onboarding uploads the RPM, the runtime certificate and the
   instruction bootstrap in one scp session instead of three. IOS-XR serves five
   vty lines by default and every ssh or scp session takes one, so on a router

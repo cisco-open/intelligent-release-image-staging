@@ -348,9 +348,9 @@ if [ "$DRY" -eq 1 ]; then
   echo "show version"
   echo "dir harddisk: | include bytes free"
   echo "[2/5] upload package, certificate, and bootstrap to harddisk:"
-  printf 'scp %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
-  printf 'scp <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
-  printf 'scp <instruction-envelope> <user>@%s:/harddisk:/iris-instructions.bootstrap\n' "$DEVICE_IP"
+  printf 'scp -O %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
+  printf 'scp -O <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
+  printf 'scp -O <instruction-envelope> <user>@%s:/harddisk:/iris-instructions.bootstrap\n' "$DEVICE_IP"
   echo "[3/5] register package"
   echo "appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
   echo "show appmgr source-table"
@@ -368,8 +368,14 @@ fi
 # the preflight and by the upload.
 XR_SCP_ATTEMPTS="${XR_SCP_ATTEMPTS:-3}"
 XR_SCP_RETRY_SECONDS="${XR_SCP_RETRY_SECONDS:-10}"
+XR_SSH_CONNECT_DELAY="${XR_SSH_CONNECT_DELAY:-2}"
+_uint_between XR_SSH_CONNECT_DELAY "$XR_SSH_CONNECT_DELAY" 0 60
 
-RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
+RUN() {
+  # NCS-540 can reject bursts of sessions even with free VTY lines.
+  sleep "$XR_SSH_CONNECT_DELAY"
+  "$HERE/../lab/xr-run.sh" "$DEVICE_IP"
+}   # XR commands on stdin
 
 echo "[1/5] check device and storage: $DEVICE_IP"
 # Capture the transport's own stderr instead of discarding it. Under
@@ -464,25 +470,28 @@ echo "[2/5] upload package, certificate, and bootstrap"
 # shellcheck source=lab/iris-ssh-policy.sh
 . "$HERE/../lab/iris-ssh-policy.sh" || { echo "ERROR: cannot load lab/iris-ssh-policy.sh" >&2; exit 1; }
 iris_ssh_policy "$DEVICE_IP" || exit 1
-# The Cisco 8000 procedure, unchanged: one push per file, in this order. Each
-# is retried on a transport failure, because IOS-XR serves a small vty pool --
-# five lines by default -- and a reset here usually means another session held
-# the line this one needed. scp's stderr is captured so a failure says what
-# went wrong instead of leaving it to be guessed.
+# One push per file. Select the SCP protocol explicitly: modern OpenSSH
+# defaults to SFTP, and NCS-540 / XR 25.2.2 returns SSH status 255 after an
+# otherwise completed SFTP upload. SCP (-O) is transfer-verified on that router
+# and Cisco 8201 / XR 25.4.2. This does not enable legacy SSH algorithms.
+# Retry transport failures and retain the destination and exit code even
+# when the client produces no error text.
 _xr_push() {
   local src="$1" dest="$2" attempt=1 rc=0
   while : ; do
     rc=0
-    SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+    sleep "$XR_SSH_CONNECT_DELAY"
+    SSHPASS="$DEVICE_PASS" sshpass -e scp -O -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
           "$src" "${DEVICE_USER}@${DEVICE_IP}:$dest" 2>"$RUN_ERR" || rc=$?
     [ "$rc" -eq 0 ] && return 0
     [ "$attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
-    echo "   upload attempt $attempt failed: $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
+    echo "   upload attempt $attempt failed: $dest (scp/sshpass exit $rc): $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
     echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
     sleep "$XR_SCP_RETRY_SECONDS"
     attempt=$((attempt + 1))
   done
   scp_attempt="$attempt"
+  scp_failed_dest="$dest"
   return "$rc"
 }
 
@@ -498,9 +507,9 @@ if [ "$scp_rc" -eq 0 ]; then
 fi
 iris_ssh_cleanup
 if [ "$scp_rc" -ne 0 ]; then
-  echo "ERROR: XR package/catalog/bootstrap upload failed after $scp_attempt attempt(s)" >&2
-  echo "       A router with no free vty line resets the connection here; 'show users'" >&2
-  echo "       on the device shows whether its pool (five lines by default) is full." >&2
+  echo "ERROR: XR package/catalog/bootstrap upload failed after $scp_attempt attempt(s): $scp_failed_dest (scp/sshpass exit $scp_rc)" >&2
+  echo "       Check the transport error, credentials, destination permissions, and storage." >&2
+  echo "       For connection resets, check 'show users' for VTY contention." >&2
   # scp's own words, which are the difference between guessing and knowing.
   # iris_ssh_explain adds host-key hints; neither prints a credential.
   tail -5 "$RUN_ERR" >&2 || true
@@ -509,9 +518,39 @@ if [ "$scp_rc" -ne 0 ]; then
 fi
 
 echo "[3/5] register package: $SOURCE_NAME"
-printf 'appmgr package install rpm /harddisk:/%s.rpm\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
-SRC_OUT="$(printf 'show appmgr source-table\n' | RUN 2>/dev/null || true)"
-if ! printf '%s\n' "$SRC_OUT" | grep -q "$SOURCE_NAME"; then
+source_registered() {
+  # Match a table row, not the echoed install command or an error mentioning
+  # the RPM filename.
+  printf '%s\n' "$SRC_OUT" | awk -v source="$SOURCE_NAME" \
+    '($1 == source && NF > 1) || ($1 ~ /^[0-9]+$/ && $2 == source && NF > 2) { found=1 }
+     END { exit !found }'
+}
+register_attempt=1
+while : ; do
+  run_rc=0
+  # Check first so a transport failure after registration does not cause a
+  # blind repeat. Registration and its confirming query share one session.
+  SRC_OUT=""
+  if [ "$register_attempt" -gt 1 ]; then
+    SRC_OUT="$(printf 'show appmgr source-table\n' | RUN 2>"$RUN_ERR")" || run_rc=$?
+  fi
+  if [ "$run_rc" -eq 0 ] && ! source_registered; then
+    SRC_OUT="$(printf 'appmgr package install rpm /harddisk:/%s.rpm\nshow appmgr source-table\n' \
+      "$SOURCE_NAME" | RUN 2>"$RUN_ERR")" || run_rc=$?
+  fi
+  [ "$run_rc" -eq 0 ] && break
+  echo "   registration attempt $register_attempt failed (ssh exit $run_rc)" >&2
+  tail -5 "$RUN_ERR" >&2 || true
+  [ "$register_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
+  echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+  sleep "$XR_SCP_RETRY_SECONDS"
+  register_attempt=$((register_attempt + 1))
+done
+if [ "$run_rc" -ne 0 ]; then
+  echo "ERROR: could not register or verify '$SOURCE_NAME' after $register_attempt attempt(s) (ssh exit $run_rc)" >&2
+  exit 1
+fi
+if ! source_registered; then
   echo "ERROR: '$SOURCE_NAME' does not appear in 'show appmgr source-table' after install:" >&2
   printf '%s\n' "$SRC_OUT" >&2
   exit 1

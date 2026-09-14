@@ -140,7 +140,9 @@ IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried with Onboard; see
 `device/xr-install.sh` deploys the agent to an IOS-XR router — a Cisco 8000
 series or an NCS — running
 IOS-XR as an **appmgr Docker application**. It pushes the pre-built
-`iris-xr.rpm` and current public catalog certificate to `harddisk:` over scp,
+`iris-xr.rpm`, the current public catalog certificate (`iris-catalog.pem`),
+and the per-device instruction envelope (`iris-instructions.bootstrap`) to
+`harddisk:` in separate `scp -O` transfers,
 registers the agent RPM (`appmgr package install rpm`), and starts its appmgr
 application in config mode with host networking and the `/misc/disk1:/hostmount` bind mount.
 `/misc/disk1` **is** `harddisk:`, so the container

@@ -11,6 +11,7 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../xr-install.sh"
   export DEVICE_IP=192.0.2.10 DEVICE_ID=8010-r1 \
     CATALOG_URL=https://192.0.2.20:8443 CATALOG_TOKEN=deadbeefcafe
+  export XR_SSH_CONNECT_DELAY=0 XR_SCP_RETRY_SECONDS=0
 }
 
 # ---------------------------------------------------------------------------
@@ -94,8 +95,8 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
-  [[ "$output" == *"scp <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
-  [[ "$output" == *"scp <instruction-envelope> <user>@192.0.2.10:/harddisk:/iris-instructions.bootstrap"* ]]
+  [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
+  [[ "$output" == *"scp -O <instruction-envelope> <user>@192.0.2.10:/harddisk:/iris-instructions.bootstrap"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -257,15 +258,14 @@ EOF
   grep -q 'retrying in \${XR_SCP_RETRY_SECONDS}s' "$INSTALL"
   # The failure shows scp's own words, not only a guess about the vty pool.
   grep -q 'tail -5 "\$RUN_ERR"' "$INSTALL"
-  # The failure names the vty pool, which is what the operator has to check.
-  grep -q 'no free vty line resets the connection here' "$INSTALL"
+  # VTY contention is a possible explanation for resets, not every failure.
+  grep -q "For connection resets, check 'show users'" "$INSTALL"
 }
 
-@test "the installer opens no SSH session of its own other than the one scp push" {
-  # That push carries the RPM, runtime certificate, and bootstrap envelope
-  # together. Every other device interaction goes through RUN(), which wraps
-  # lab/xr-run.sh.
-  count="$(grep -c 'sshpass' "$INSTALL")"
+@test "the installer opens no SSH session of its own other than the scp helper" {
+  # Each file uses this helper. Other device interactions go through RUN(),
+  # which wraps lab/xr-run.sh. Count commands, not diagnostic text.
+  count="$(grep -c 'sshpass -e scp' "$INSTALL")"
   [ "$count" -eq 1 ]
   grep -q 'sshpass -e scp' "$INSTALL"
 }
@@ -304,6 +304,18 @@ _xr_install_stub_setup() {
 cmds="$(cat)"
 if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
+fi
+# Simulate an SSH rate-limit reset during registration, then recovery.
+if [[ "$cmds" == *"appmgr package install rpm"* ]] && [ -n "${FAKE_REGISTER_RESET:-}" ]; then
+  if [ ! -e "$FAKE_STATE_DIR/register_reset" ]; then
+    touch "$FAKE_STATE_DIR/register_reset"
+    echo 'Connection reset by peer' >&2
+    exit 255
+  fi
+fi
+if [ -n "${FAKE_REGISTER_RESET:-}" ] && [ "$cmds" = 'show appmgr source-table' ]; then
+  # The failed install never registered a source; the retry must install it.
+  exit 0
 fi
 # The preflight sends both of these in ONE session, so answer each that is
 # present rather than only the first that matches.
@@ -405,6 +417,8 @@ _xr_install_run_live() {
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
   rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  # All three actual invocations must select SCP, not OpenSSH's default SFTP.
+  [ "$(grep -c '=== SCP: -e scp -O ' "$FAKE_COMMAND_LOG")" -eq 3 ]
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   instruction_line="$(grep -n '/harddisk:/iris-instructions.bootstrap' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   register_line="$(grep -n 'appmgr package install rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
@@ -441,6 +455,7 @@ _xr_install_run_live() {
   FAKE_SCP_FAIL_MATCH=iris-instructions.bootstrap run _xr_install_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"XR package/catalog/bootstrap upload failed"* ]]
+  [[ "$output" == *"/harddisk:/iris-instructions.bootstrap (scp/sshpass exit 1)"* ]]
   ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
   ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
 }
@@ -503,6 +518,36 @@ _xr_install_run_live() {
   FAKE_SOURCE_TABLE="" run _xr_install_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"does not appear in 'show appmgr source-table'"* ]]
+}
+
+@test "live: registration recovers from an SSH reset and reports it" {
+  _xr_install_stub_setup
+  FAKE_REGISTER_RESET=1 run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"registration attempt 1 failed (ssh exit 255)"* ]]
+  [[ "$output" == *"Connection reset by peer"* ]]
+  [ "$(grep -c '^appmgr package install rpm' "$FAKE_COMMAND_LOG")" -eq 2 ]
+}
+
+@test "live: echoed registration command is not proof of an installed source" {
+  _xr_install_stub_setup
+  FAKE_SOURCE_TABLE='RP/0/RP0/CPU0:router#appmgr package install rpm /harddisk:/iris-xr.rpm' run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: accepts the numbered NCS source table" {
+  _xr_install_stub_setup
+  FAKE_SOURCE_TABLE=$'Sno Name              File                 Installed By\n--- ----------------- -------------------- --------------------\n1   iris-xr           iris-xr.tar.gz       APP_MANAGER' run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"onboard complete:"* ]]
+}
+
+@test "live: numbered source table requires an exact source name" {
+  _xr_install_stub_setup
+  FAKE_SOURCE_TABLE='1 iris-xr-old iris-xr.tar.gz APP_MANAGER' run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: fails, with the table output, when the app never reaches Up" {

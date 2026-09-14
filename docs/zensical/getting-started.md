@@ -459,10 +459,15 @@ interface, which adds static TCP PAT on port 6881. Both router modes stage to
 designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-For a Cisco 8000-series IOS-XR router, use `management_type=xr-host` and
+For a Cisco 8000-series or NCS IOS-XR router, use `management_type=xr-host` and
 `platform=xr-appmgr`; leave every VLAN, SVI, app-address, VPG, and NAT field
 empty. XR uses the router's host network, so no app IP is needed. Build
 `artifacts/iris-xr.rpm` and its manifest before onboarding.
+See [platform validation](validation.md) for the tested models and lifecycle
+coverage; NCS-540 package transfer and app startup are verified, while
+heartbeat and staging validation remain pending a working catalog network path.
+The app's network must reach the catalog; router management access alone
+does not establish that connectivity, and this recipe does not select a VRF.
 
 Onboard through the **Console** or API. The server creates a durable deployment
 record, delivers enrollment credentials and certificate trust, and uses the
