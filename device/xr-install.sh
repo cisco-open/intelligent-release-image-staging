@@ -496,10 +496,11 @@ while : ; do
         "$PUSH_DIR/$SOURCE_NAME.rpm" \
         "$PUSH_DIR/iris-catalog.pem" \
         "$PUSH_DIR/iris-instructions.bootstrap" \
-        "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/" || scp_rc=$?
+        "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/" 2>"$RUN_ERR" || scp_rc=$?
   [ "$scp_rc" -eq 0 ] && break
   [ "$scp_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
-  echo "   upload attempt $scp_attempt failed; retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+  echo "   upload attempt $scp_attempt failed: $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
+  echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
   sleep "$XR_SCP_RETRY_SECONDS"
   scp_attempt=$((scp_attempt + 1))
 done
@@ -508,6 +509,10 @@ if [ "$scp_rc" -ne 0 ]; then
   echo "ERROR: XR package/catalog/bootstrap upload failed after $scp_attempt attempt(s)" >&2
   echo "       A router with no free vty line resets the connection here; 'show users'" >&2
   echo "       on the device shows whether its pool (five lines by default) is full." >&2
+  # scp's own words, which are the difference between guessing and knowing.
+  # iris_ssh_explain adds host-key hints; neither prints a credential.
+  tail -5 "$RUN_ERR" >&2 || true
+  iris_ssh_explain "$RUN_ERR" "$DEVICE_IP" 2>/dev/null || true
   exit 1
 fi
 
