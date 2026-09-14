@@ -20,8 +20,10 @@ are the units of deployment.
 
 The server image includes the device installers and SSH helper used by Console
 onboarding. The browser application is built separately into the Console image.
-`aria2c` is handed in, not downloaded or built — run `tools/get-aria2c.sh amd64` first, or the
-Dockerfile's `COPY bin/aria2c` step fails. Build both images from the repository
+`aria2c` is handed in, not downloaded — run `tools/get-aria2c.sh amd64` first, or the
+Dockerfile's `COPY bin/aria2c` step fails. A fresh clone has no such binary;
+[Obtain the handed-in inputs](getting-started.md#obtain-the-handed-in-inputs)
+covers accepting a hand-in and building one with the published producer. Build both images from the repository
 root; Compose selects `linux/amd64`:
 
 ```bash

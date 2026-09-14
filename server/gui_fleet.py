@@ -397,7 +397,8 @@ def validate_record(record, allow_legacy=False):
             # and device/xr-install.sh speaks appmgr and IOS-XR config mode.
             raise ValueError(
                 "platform xr-appmgr is the IOS-XR agent; %s needs an IOS-XR "
-                "model (e.g. 8201) or a device already classified os_family=xr"
+                "model (e.g. 8201, NCS-540, or NCS) or a device already "
+                "classified os_family=xr"
                 % (("model %s" % model) if model else "a device with no model"))
         if allowed is not None and platform not in allowed:
             raise ValueError("model %s cannot run %s; allowed: %s"

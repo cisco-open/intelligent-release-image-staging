@@ -22,13 +22,131 @@ and the required device packages are built, use the browser for image import, de
 
 | Requirement | Notes |
 | --- | --- |
+| `skopeo` | Selects each architecture's image from the canonical OCI artifact when building IOx packages and the IOS-XR RPM. `device/iox/build.sh` and `tools/build-xr-package.sh` fail closed without it. |
+| `rpmbuild` | Assembles the IOS-XR appmgr RPM. Debian and Ubuntu ship it in the `rpm` package; `tools/build-xr-package.sh` fails closed without it. Not needed when no XR device is in scope. |
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
-| Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
+| `aria2c` binary | `tools/get-aria2c.sh amd64` fetches the published deliverable, verifies it against `tools/aria2c.sha256` and installs it before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. A host with no route to the release can hand one in or build it; see [Obtain the handed-in inputs](#obtain-the-handed-in-inputs). |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used by server-side device operations. IOx also needs an IOS-XE credential for agent SSH-to-self. Do not commit real credentials. |
 | Device-image build inputs | The IOx/XR builder always creates an amd64 + arm64 OCI image, so both pinned `aria2c` binaries and a builder able to run both architectures are required. On an amd64 host, the IOx staging helper can register ARM64 emulation using an audited `BINFMT_IMAGE_DIGEST`; see [IOx builds](iox.md#build-and-stage-for-console-onboarding). |
+
+## Obtain the handed-in inputs
+
+A fresh clone has neither of these, on purpose, and
+`tools/start-compose-server.sh` reports both before it builds anything.
+
+### The `aria2c` client
+
+Install it for both architectures you need:
+
+```bash
+tools/get-aria2c.sh amd64
+tools/get-aria2c.sh --no-install arm64
+```
+
+The helper fetches this project's published deliverable, refuses anything that
+does not match `tools/aria2c.sha256`, and keeps a verified copy in
+`deliverables/`, where the device-package builders look. The second line is
+only for IOx on IE-3400 and other IE-3x00 devices.
+
+`bin/` holds one client, the x86_64 one the server image copies, so
+`--no-install` collects the arm64 deliverable without replacing it. Without
+that flag the arm64 binary lands in `bin/aria2c` and the next server image
+build fails its architecture check.
+
+A host with no route to that release can take a hand-in instead — at
+`deliverables/aria2c-<cpu>`, or via `ARIA2C_DELIVERABLE` — or build one:
+
+```bash
+mkdir -p tools/aria2c-build/vendor
+git clone https://github.com/AnInsomniacy/aria2-next \
+  tools/aria2c-build/vendor/aria2-next
+git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
+(cd tools/aria2c-build && ./build.sh x86_64)
+```
+
+A binary you built will not match `tools/aria2c.sha256`, and
+`tools/get-aria2c.sh` fails closed on that, so adopting it is deliberate: copy
+`tools/aria2c-build/out/x86_64/aria2c` to `deliverables/aria2c-x86_64`, put its
+`sha256sum` on the `x86_64` line of `tools/aria2c.sha256`, and record what you
+built. That local modification is expected; never edit the file to clear a
+mismatch on a binary you did not build, and a mismatch on the downloaded asset
+means the asset is wrong and must not be adopted. Leave the file
+world-readable: the server image copies it in and reads it as the runtime uid,
+so a rewrite that lands as `0600` — which an atomic write through a temporary
+file does by default — breaks the build that uses it. Run
+`chmod 0644 tools/aria2c.sha256` after editing.
+
+The `aarch64` build is the expensive fallback: it compiles under emulation,
+takes tens of minutes and keeps every core busy. Start it detached so a closing
+SSH session cannot cancel the `buildx` client, and leave Docker's cache alone:
+
+```bash
+cd tools/aria2c-build
+setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
+```
+
+It has no exit status to collect that way. It finished if the log ends with a
+size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
+`out/aarch64/aria2c` exists. It is safe to rerun; the layer cache makes a
+second attempt much shorter.
+[`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
+covers the patch set, the pinned toolchain, and publishing a new deliverable.
+
+### The `ioxclient` packaging profile
+
+Nothing to prepare. `ioxclient` refuses every command until a configuration
+file exists in `HOME` and tries to create one interactively, which stops a
+scripted run at its password prompt, so `device/iox/build.sh` writes an inert
+packaging profile into a scratch `HOME` for the length of the `ioxclient
+package` call and discards it with the build context.
+
+That keeps packaging offline and hermetic, and keeps an operator profile — which
+may hold a real device address and credential — out of a step that only
+assembles and signs a directory. `IOXCLIENT_HOME` points the call at a prepared
+profile when one is genuinely needed; it must never carry a real device
+credential.
+
+### ARM64 emulation
+
+The arm64 package builders need Docker's arm64 emulation on an amd64 host: the
+device image runs `apk add` and `chmod` steps inside the target platform, so
+the package cannot be assembled without it even though the `aria2c` client
+itself is fetched rather than compiled.
+Check for it, and prefer your distribution's static QEMU package, which needs
+no digest and no privileged container:
+
+```bash
+grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
+```
+
+Where that is unavailable, the builders register the handler themselves and
+require `BINFMT_IMAGE_DIGEST` rather than pulling a floating tag. Review the
+`tonistiigi/binfmt` tag you intend to use, resolve it to a digest, and export
+it:
+
+```bash
+docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
+  --format '{{println .Manifest.Digest}}'
+export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
+```
+
+### The two instruction roots
+
+Every device package embeds exactly two public roots and the build fails closed
+without them. Create them yourself — no installer generates trust anchors — and
+keep `~/iris-roots` holding the two public keys and nothing else:
+
+```bash
+install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
+```
+
+Use a real passphrase at each prompt; the last command must print exactly the
+two `.pub` names. In production run the two `ssh-keygen` commands on separate
+custodians' machines and carry only the public halves over. See
+[Prepare instruction trust](#prepare-instruction-trust).
 
 ## Configure the server
 
@@ -42,8 +160,24 @@ age-keygen -y ~/.config/iris/age.txt
 
 export IRIS_HOST_IP=<server-ip>
 export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
-export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
+export IRIS_AGE_RECIPIENTS=<primary-age-public-key>
 ```
+
+That one key is a complete configuration. The list has to contain the public
+half of the key in `IRIS_AGE_KEY_FILE_HOST`, and bootstrap refuses if it does
+not.
+
+A production deployment usually lists a second key as well, kept by someone
+else and stored somewhere else, so the encrypted state can still be opened if
+the first key is lost:
+
+```bash
+export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<second-age-public-key>
+```
+
+There is no need to create a second key now. One stored next to the first
+protects nothing, and `--rekey` below adds one at any time without redoing the
+deployment.
 
 Compose publishes the Console only on `IRIS_HOST_IP`, rather than on every
 interface of a multi-homed host. Choose the intended IRIS-facing address and
@@ -150,8 +284,19 @@ bring up the two services without native package builds:
 ```bash
 docker compose -f server/docker-compose.yml build --pull
 docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml run --rm \
+  -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
+  'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" && \
+   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'
 docker compose -f server/docker-compose.yml up -d
 ```
+
+The third command is the one `start-compose-server.sh` would have run for you:
+it installs the two public roots into the server's config volume, which is a
+different thing from handing them to the package builders. Without it the
+server cannot self-provision a trust-bound Guest Shell bundle, and nothing
+reports the omission. Confirm it with
+`docker compose -f server/docker-compose.yml exec iris ls -l "$IRIS_CONFIG/instr/roots.d"`.
 
 For IOS-XR, also run `tools/build-xr-package.sh --out artifacts/`; the startup
 helper does not build the RPM. Check the artifacts and manifests in
@@ -218,12 +363,47 @@ listed greyed out instead.
 ## Prepare instruction trust
 
 Before building device packages, provision exactly two distinct offline-root
-public keys through the [custody ceremony](operations.md#instruction-root-ceremony-and-recovery).
+public keys. [Obtain the handed-in inputs](#the-two-instruction-roots) has the
+commands that create them; the
+[custody ceremony](operations.md#instruction-root-ceremony-and-recovery) covers
+certificates, rotation and revocation for a production deployment.
 Keep private roots with separate custodians/sites. Point package builders at the
 public `.pub` directory with `IRIS_INSTRUCTION_ROOTS_DIR` or
 `--instruction-roots-dir DIR`; use the current pinned amd64/arm64 aria2c inputs.
-Initialize server online certificate/keylist custody and producer authority
-before expecting a device instruction stamp. Build success with disposable
+Then initialize the server's online certificate and producer authority, once
+the stack is up and before onboarding any device. Every onboarding fails with
+`ERROR: instruction bootstrap unavailable` until this is done, because each
+device's onboarding envelope is stamped by the instruction producer:
+
+```bash
+docker exec iris iris-instructions --generate-online-key
+docker cp iris:/etc/iris/instr/signing-key.pub ~/iris-online.pub
+ssh-keygen -q -s ~/iris-custody/root-a -I iris-online -n iris-server \
+  -V +0s:+30d ~/iris-online.pub
+docker cp ~/iris-online-cert.pub iris:/etc/iris/instr/signing-key-cert.pub
+docker exec iris iris-instructions --import-certificate \
+  /etc/iris/instr/signing-key-cert.pub
+docker exec iris iris-instr-key initialize
+docker exec iris iris-instructions --status
+```
+
+Copy the public half out of the config volume as shown, not out of
+`$IRIS_RUN`: the runtime directory is a tmpfs and `docker cp` cannot read a
+tmpfs mount, so an export written there succeeds and then cannot be found from
+the host. Signing uses the **private** root and prompts for its passphrase; it
+is the one step no installer or assistant performs.
+
+`iris-instr-key initialize` activates the producer, which is the authority half
+of this: the certificate alone leaves the stamper without an activated epoch,
+and onboarding keeps failing with the same message. On a cluster, use
+`kubectl exec` and `kubectl cp` against the server pod with `/data/config` in
+place of `/etc/iris`.
+
+Onboarding is ready when `iris-instructions --status` reports `enabled: true`
+with `signing_refused: false`. A proof of concept also reports
+`state: keylist_missing` and an overdue root ceremony: the keylist is the
+device-facing revocation list and does not gate stamping, and no custodian has
+attested these roots. Both are expected until a production ceremony. Build success with disposable
 roots is not production custody or signing evidence. Guest Shell can remain
 tracker-only when its runtime verifier is absent.
 
@@ -280,10 +460,15 @@ interface, which adds static TCP PAT on port 6881. Both router modes stage to
 designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-For a Cisco 8000-series IOS-XR router, use `management_type=xr-host` and
+For a Cisco 8000-series or NCS IOS-XR router, use `management_type=xr-host` and
 `platform=xr-appmgr`; leave every VLAN, SVI, app-address, VPG, and NAT field
 empty. XR uses the router's host network, so no app IP is needed. Build
 `artifacts/iris-xr.rpm` and its manifest before onboarding.
+See [platform validation](validation.md) for the tested models and lifecycle
+coverage; NCS-540 package transfer and app startup are verified, while
+heartbeat and staging validation remain pending a working catalog network path.
+The app's network must reach the catalog; router management access alone
+does not establish that connectivity, and this recipe does not select a VRF.
 
 Onboard through the **Console** or API. The server creates a durable deployment
 record, delivers enrollment credentials and certificate trust, and uses the

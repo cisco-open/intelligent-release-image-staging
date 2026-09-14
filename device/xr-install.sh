@@ -204,7 +204,17 @@ cleanup_instruction_snapshot() {
     INSTRUCTION_SNAPSHOT_FILE=""
   fi
 }
-trap cleanup_instruction_snapshot EXIT
+
+# Everything this script has to remove on the way out goes here. bash keeps one
+# EXIT trap, so a second `trap ... EXIT` anywhere below would silently replace
+# this one -- and the first thing it would stop removing is the decrypted
+# instruction bootstrap.
+cleanup_all() {
+  cleanup_instruction_snapshot
+  [ -n "${RUN_ERR:-}" ] && rm -f -- "$RUN_ERR"
+  return 0
+}
+trap cleanup_all EXIT
 
 snapshot_instruction_bootstrap() {
   [ -n "$INSTRUCTION_BOOTSTRAP_FILE" ] || return 1
@@ -353,10 +363,56 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
+# A reset session is retried this many times, this far apart: the vty pool
+# frees a line when another session ends, so waiting is usually enough. Used by
+# the preflight and by the upload.
+XR_SCP_ATTEMPTS="${XR_SCP_ATTEMPTS:-3}"
+XR_SCP_RETRY_SECONDS="${XR_SCP_RETRY_SECONDS:-10}"
+XR_SSH_CONNECT_DELAY="${XR_SSH_CONNECT_DELAY:-2}"
+_uint_between XR_SSH_CONNECT_DELAY "$XR_SSH_CONNECT_DELAY" 0 60
+
+RUN() {
+  # NCS-540 can reject bursts of sessions even with free VTY lines.
+  sleep "$XR_SSH_CONNECT_DELAY"
+  "$HERE/../lab/xr-run.sh" "$DEVICE_IP"
+}   # XR commands on stdin
 
 echo "[1/5] check device and storage: $DEVICE_IP"
-VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
+# Capture the transport's own stderr instead of discarding it. Under
+# 'set -e -o pipefail' a failed session kills the script AT THE ASSIGNMENT,
+# before any check below runs, so the job used to end with nothing but an exit
+# status -- an operator saw "[1/5] check device and storage" and "Job error."
+# and had no way to tell a wrong password from an unreachable router.
+# lab/xr-run.sh redacts DEVICE_PASS from what it writes there.
+RUN_ERR="$(mktemp)"
+# Both preflight questions in ONE session. IOS-XR serves five vty lines by
+# default and every ssh session takes one, so two sessions back to back are
+# reset at key exchange on a router with an operator connected -- measured on
+# an NCS-540, where 'show version' succeeded and the 'dir' immediately after it
+# was reset. A reset is also retried, because the line another session frees is
+# usually the difference between attempts.
+PREFLIGHT_OUT=""
+run_rc=0
+preflight_attempt=1
+while : ; do
+  run_rc=0
+  PREFLIGHT_OUT="$(printf 'show version\ndir harddisk: | include bytes free\n' \
+    | RUN 2>"$RUN_ERR")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] && [ -n "$PREFLIGHT_OUT" ] && break
+  [ "$preflight_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
+  echo "   preflight attempt $preflight_attempt failed; retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+  sleep "$XR_SCP_RETRY_SECONDS"
+  preflight_attempt=$((preflight_attempt + 1))
+done
+if [ "$run_rc" -ne 0 ] || [ -z "$PREFLIGHT_OUT" ]; then
+  echo "ERROR: could not read 'show version' and 'dir harddisk:' on $DEVICE_IP (ssh exit $run_rc, $preflight_attempt attempt(s))" >&2
+  echo "       Usual causes: the stored device credentials are wrong, the router" >&2
+  echo "       is unreachable from the server, or its vty pool has no free line" >&2
+  echo "       ('show users' on the device shows the pool)." >&2
+  tail -5 "$RUN_ERR" >&2 || true
+  exit 1
+fi
+VERSION_OUT="$PREFLIGHT_OUT"
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"
 # (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md).
@@ -382,7 +438,8 @@ XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
 XR_VERSION="${XR_VERSION%% *}"
 _no_quotes_or_newlines XR_VERSION "$XR_VERSION"
 _safe_fact XR_VERSION "$XR_VERSION"
-DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>/dev/null)"
+# Same buffer: the free-space line came back with the banner, in one session.
+DIR_OUT="$PREFLIGHT_OUT"
 # Cisco 8000 dir output ends "<N> kbytes total (<M> kbytes free)" -- KBYTES,
 # hardware-proven ("41968752 kbytes total (37916076 kbytes free)",
 # agentinfo/xr-support/LAB-RESULTS-2026-08-27.md); some platforms say plain
@@ -413,29 +470,87 @@ echo "[2/5] upload package, certificate, and bootstrap"
 # shellcheck source=lab/iris-ssh-policy.sh
 . "$HERE/../lab/iris-ssh-policy.sh" || { echo "ERROR: cannot load lab/iris-ssh-policy.sh" >&2; exit 1; }
 iris_ssh_policy "$DEVICE_IP" || exit 1
+# One push per file. Select the SCP protocol explicitly: modern OpenSSH
+# defaults to SFTP, and NCS-540 / XR 25.2.2 returns SSH status 255 after an
+# otherwise completed SFTP upload. SCP (-O) is transfer-verified on that router
+# and Cisco 8201 / XR 25.4.2. This does not enable legacy SSH algorithms.
+# Retry transport failures and retain the destination and exit code even
+# when the client produces no error text.
+_xr_push() {
+  local src="$1" dest="$2" attempt=1 rc=0
+  while : ; do
+    rc=0
+    sleep "$XR_SSH_CONNECT_DELAY"
+    SSHPASS="$DEVICE_PASS" sshpass -e scp -O -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+          "$src" "${DEVICE_USER}@${DEVICE_IP}:$dest" 2>"$RUN_ERR" || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
+    echo "   upload attempt $attempt failed: $dest (scp/sshpass exit $rc): $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
+    echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+    sleep "$XR_SCP_RETRY_SECONDS"
+    attempt=$((attempt + 1))
+  done
+  scp_attempt="$attempt"
+  scp_failed_dest="$dest"
+  return "$rc"
+}
+
 scp_rc=0
-SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
-      "$XR_RPM_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
+scp_attempt=1
+_xr_push "$XR_RPM_FILE" "/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
 if [ "$scp_rc" -eq 0 ]; then
-  SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
-        "$CATALOG_CA_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/iris-catalog.pem" || scp_rc=$?
+  _xr_push "$CATALOG_CA_FILE" "/harddisk:/iris-catalog.pem" || scp_rc=$?
 fi
 if [ "$scp_rc" -eq 0 ]; then
-  SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
-        "$INSTRUCTION_SNAPSHOT_FILE" \
-        "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/iris-instructions.bootstrap" \
-        || scp_rc=$?
+  _xr_push "$INSTRUCTION_SNAPSHOT_FILE" "/harddisk:/iris-instructions.bootstrap" \
+    || scp_rc=$?
 fi
 iris_ssh_cleanup
 if [ "$scp_rc" -ne 0 ]; then
-  echo "ERROR: XR package/catalog/bootstrap upload failed" >&2
+  echo "ERROR: XR package/catalog/bootstrap upload failed after $scp_attempt attempt(s): $scp_failed_dest (scp/sshpass exit $scp_rc)" >&2
+  echo "       Check the transport error, credentials, destination permissions, and storage." >&2
+  echo "       For connection resets, check 'show users' for VTY contention." >&2
+  # scp's own words, which are the difference between guessing and knowing.
+  # iris_ssh_explain adds host-key hints; neither prints a credential.
+  tail -5 "$RUN_ERR" >&2 || true
+  iris_ssh_explain "$RUN_ERR" "$DEVICE_IP" 2>/dev/null || true
   exit 1
 fi
 
 echo "[3/5] register package: $SOURCE_NAME"
-printf 'appmgr package install rpm /harddisk:/%s.rpm\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
-SRC_OUT="$(printf 'show appmgr source-table\n' | RUN 2>/dev/null || true)"
-if ! printf '%s\n' "$SRC_OUT" | grep -q "$SOURCE_NAME"; then
+source_registered() {
+  # Match a table row, not the echoed install command or an error mentioning
+  # the RPM filename.
+  printf '%s\n' "$SRC_OUT" | awk -v source="$SOURCE_NAME" \
+    '($1 == source && NF > 1) || ($1 ~ /^[0-9]+$/ && $2 == source && NF > 2) { found=1 }
+     END { exit !found }'
+}
+register_attempt=1
+while : ; do
+  run_rc=0
+  # Check first so a transport failure after registration does not cause a
+  # blind repeat. Registration and its confirming query share one session.
+  SRC_OUT=""
+  if [ "$register_attempt" -gt 1 ]; then
+    SRC_OUT="$(printf 'show appmgr source-table\n' | RUN 2>"$RUN_ERR")" || run_rc=$?
+  fi
+  if [ "$run_rc" -eq 0 ] && ! source_registered; then
+    SRC_OUT="$(printf 'appmgr package install rpm /harddisk:/%s.rpm\nshow appmgr source-table\n' \
+      "$SOURCE_NAME" | RUN 2>"$RUN_ERR")" || run_rc=$?
+  fi
+  [ "$run_rc" -eq 0 ] && break
+  echo "   registration attempt $register_attempt failed (ssh exit $run_rc)" >&2
+  tail -5 "$RUN_ERR" >&2 || true
+  [ "$register_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
+  echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+  sleep "$XR_SCP_RETRY_SECONDS"
+  register_attempt=$((register_attempt + 1))
+done
+if [ "$run_rc" -ne 0 ]; then
+  echo "ERROR: could not register or verify '$SOURCE_NAME' after $register_attempt attempt(s) (ssh exit $run_rc)" >&2
+  exit 1
+fi
+if ! source_registered; then
   echo "ERROR: '$SOURCE_NAME' does not appear in 'show appmgr source-table' after install:" >&2
   printf '%s\n' "$SRC_OUT" >&2
   exit 1

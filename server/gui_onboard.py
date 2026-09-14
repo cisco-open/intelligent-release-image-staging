@@ -185,6 +185,31 @@ _FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
 # os_family was never probed -- the incident this closes: an 8201 offered iox
 # and dying on an XE-flavoured arch error.
 _XR_MODEL_RE = re.compile(r"^8[0-9]{2,3}(-SYS)?$")
+# The other IOS-XR family IRIS stages to: NCS-540, NCS-5500, NCS-55A1,
+# NCS-57B1 and their siblings. They run the same appmgr recipe as a Cisco
+# 8000 -- the platform value, the RPM and device/xr-install.sh are identical --
+# but their model strings share no shape with the bare 8xxx numbers, so a
+# second pattern is the honest way to recognise them. Hyphen optional because
+# both spellings are reported in the wild ("NCS-540", "NCS540").
+# Two digits minimum where a series number is given, because it is followed by
+# letters as often as by more digits: NCS-540, NCS-5500, NCS-55A1-24H,
+# NCS-57B1-5DSE. The bare family name is accepted too: an operator adding a
+# device by hand types what they call the box, and "NCS" identifies IOS-XR as
+# unambiguously as the full string does -- the model only selects the recipe,
+# and every NCS takes the same one.
+_NCS_MODEL_RE = re.compile(r"^NCS(-?[0-9]{2,4}[A-Za-z0-9-]*)?$", re.IGNORECASE)
+
+
+def _is_xr_model(model):
+    """True for a model string that can only be IOS-XR.
+
+    Every caller that used to test the 8000 pattern alone asks this instead, so
+    a new XR family is recognised everywhere at once: auto-resolution, the
+    explicit-platform guard, and the IOx arch refusal.
+    """
+    model = (model or "").strip()
+    return bool(re.match(_XR_MODEL_RE.pattern, model, re.IGNORECASE)
+                or _NCS_MODEL_RE.match(model))
 # The one platform value that is IOS-XR rather than IOS-XE.
 _XR_PLATFORM = "xr-appmgr"
 # Some contexts report the '-SYS' suffix on that same model number
@@ -210,6 +235,8 @@ def family(model):
     model = (model or "").strip()
     if _XR_MODEL_RE.match(model):
         return "XR8000"
+    if _NCS_MODEL_RE.match(model):
+        return "NCS"
     for (pattern, _options), name in zip(
             _MODEL_INSTALL_TABLE, _MODEL_FAMILY_NAMES):
         if re.match(pattern, model, re.IGNORECASE):
@@ -267,10 +294,10 @@ def install_options_for(model, os_family=None):
     rejection sites in sync."""
     model = (model or "").strip()
     if (os_family or "") == "xr":
-        if not model or _XR_MODEL_RE.match(model):
+        if not model or _is_xr_model(model):
             return [_XR_PLATFORM]
         return []
-    if model and _XR_MODEL_RE.match(model):
+    if _is_xr_model(model):
         return [_XR_PLATFORM]
     if not model:
         return None
@@ -331,7 +358,7 @@ def _iox_arch_env(device_id, model):
     had run yet to catch it) and died on an XE-flavoured "needs a
     recognized device model" arch error that never named IOS-XR."""
     model = (model or "").strip()
-    if model and re.match(_XR_MODEL_RE.pattern, model, re.IGNORECASE):
+    if _is_xr_model(model):
         _refuse_xr(device_id)
     if model and re.match(_C9K_MODEL, model, re.IGNORECASE):
         return dict(_C9K_IOX_ENV)

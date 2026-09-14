@@ -924,6 +924,16 @@ def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
     ("ISR4451", "ISR/ASR/CSR"),
     ("ASR1001-X", "ISR/ASR/CSR"),
     ("8201-SYS", "XR8000"),
+    # The other IOS-XR family: same appmgr recipe, unrelated model shape.
+    ("NCS-540", "NCS"),
+    ("NCS540", "NCS"),
+    ("NCS-5500", "NCS"),
+    ("NCS-55A1-24H", "NCS"),
+    ("NCS-57B1-5DSE", "NCS"),
+    ("ncs-540", "NCS"),
+    # The bare family name is what an operator types when adding a device.
+    ("NCS", "NCS"),
+    ("ncs", "NCS"),
     ("N9K-C93180YC-EX", "unknown"),
     ("", "unknown"),
 ])
@@ -931,17 +941,32 @@ def test_family_reuses_the_install_model_taxonomy(model, expected):
     assert gui_onboard.family(model) == expected
 
 
-def test_install_options_for_xr_os_family_refuses_non_8000_models():
-    # v1 is validated on the Cisco 8000 series only (agentinfo plan scope:
-    # "8000-series first, capability-gated"). os_family is still
-    # authoritative -- neither of these falls through to an IOS-XE recipe
-    # (ASR-9906 matches the ISR/ASR/CSR prefix, C9300-48UXM matches the C9k
-    # prefix, and both would otherwise misroute exactly the way the 8201
-    # incident did) -- but a non-8000 XR device is refused outright ([]),
-    # never left as "no opinion" (None) for validate_record to wave through.
+@pytest.mark.parametrize("model", [
+    "NCS-540", "NCS540", "NCS-5500", "NCS-55A1-24H", "NCS-57B1-5DSE",
+    "NCS", "ncs"])
+def test_ncs_models_resolve_to_xr_appmgr_and_refuse_iox(model):
+    # An NCS runs IOS-XR, so it takes the appmgr platform on model alone, the
+    # same as a Cisco 8000, and must never be offered the IOx recipe: that
+    # path dies on an XE-flavoured architecture error that never names XR.
+    assert gui_onboard.install_options_for(model) == ["xr-appmgr"]
+    assert gui_onboard.install_options_for(model, os_family="xr") == [
+        "xr-appmgr"]
+    with pytest.raises(ValueError):
+        gui_onboard._iox_arch_env("device-1", model)
+
+
+def test_install_options_for_xr_os_family_refuses_unrecognised_models():
+    # The appmgr recipe covers the Cisco 8000 and NCS families. os_family
+    # stays authoritative for everything else: neither of these falls through
+    # to an IOS-XE recipe (ASR-9906 matches the ISR/ASR/CSR prefix,
+    # C9300-48UXM matches the C9k prefix, and both would otherwise misroute
+    # exactly the way the 8201 incident did), and an XR device IRIS does not
+    # recognise is refused outright ([]), never left as "no opinion" (None)
+    # for validate_record to wave through.
     assert gui_onboard.install_options_for("ASR-9906", "xr") == []
     assert gui_onboard.install_options_for("C9300-48UXM", "xr") == []
-    assert gui_onboard.install_options_for("NCS-5501", "xr") == []
+    # An NCS is recognised now; it was refused while v1 was 8000-only.
+    assert gui_onboard.install_options_for("NCS-5501", "xr") == ["xr-appmgr"]
 
 
 def test_install_options_for_8xxx_model_offers_xr_even_without_os_family():

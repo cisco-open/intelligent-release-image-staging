@@ -11,6 +11,7 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../xr-install.sh"
   export DEVICE_IP=192.0.2.10 DEVICE_ID=8010-r1 \
     CATALOG_URL=https://192.0.2.20:8443 CATALOG_TOKEN=deadbeefcafe
+  export XR_SSH_CONNECT_DELAY=0 XR_SCP_RETRY_SECONDS=0
 }
 
 # ---------------------------------------------------------------------------
@@ -203,11 +204,69 @@ EOF
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the installer opens no SSH session of its own other than the three scp pushes" {
-  # The pushes carry the RPM, runtime certificate, and bootstrap envelope. Every
-  # other device interaction goes through RUN(), which wraps lab/xr-run.sh.
-  count="$(grep -c 'sshpass' "$INSTALL")"
-  [ "$count" -eq 3 ]
+@test "the upload pushes each file to its own fixed harddisk path" {
+  # One push per file, the order and the destinations the Cisco 8000 has
+  # always used. Every push goes through the same helper, so the retry and the
+  # captured stderr apply to all three.
+  run grep -c 'sshpass -e scp ' "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+  grep -q '_xr_push "\$XR_RPM_FILE" "/harddisk:/\$SOURCE_NAME.rpm"' "$INSTALL"
+  grep -q '_xr_push "\$CATALOG_CA_FILE" "/harddisk:/iris-catalog.pem"' "$INSTALL"
+  grep -q '_xr_push "\$INSTRUCTION_SNAPSHOT_FILE" "/harddisk:/iris-instructions.bootstrap"' "$INSTALL"
+}
+
+@test "one EXIT trap removes everything, including the decrypted bootstrap" {
+  # bash keeps a single EXIT trap. The installer grew two more cleanups after
+  # the instruction-snapshot one, and a second 'trap ... EXIT' would have
+  # silently replaced it, leaving the decrypted bootstrap on disk.
+  [ "$(grep -c '^trap .* EXIT$' "$INSTALL")" -eq 1 ]
+  grep -q '^trap cleanup_all EXIT$' "$INSTALL"
+  # cleanup_all covers all three.
+  run sed -n '/^cleanup_all() {/,/^}/p' "$INSTALL"
+  [[ "$output" == *cleanup_instruction_snapshot* ]]
+  [[ "$output" == *RUN_ERR* ]]
+}
+
+@test "a step-1 transport failure says so instead of exiting silently" {
+  # set -e with pipefail kills the script at the assignment when the ssh
+  # session fails, so the job used to end with only an exit status: an
+  # operator saw "[1/5] check device and storage" and "Job error.".
+  grep -q "could not read 'show version' and 'dir harddisk:'" "$INSTALL"
+  grep -q 'stored device credentials are wrong' "$INSTALL"
+  grep -q 'vty pool has no free line' "$INSTALL"
+}
+
+@test "the preflight asks both questions in one session, and retries a reset" {
+  # Two sessions back to back are reset at key exchange on a router whose vty
+  # pool is busy: measured on an NCS-540, where 'show version' succeeded and
+  # the 'dir' right after it was reset. One session carries both.
+  run grep -c "printf 'show version" "$INSTALL"
+  [ "$output" -eq 1 ]
+  grep -qF 'show version\ndir harddisk: | include bytes free' "$INSTALL"
+  grep -q 'DIR_OUT="\$PREFLIGHT_OUT"' "$INSTALL"
+  grep -q 'preflight attempt \$preflight_attempt failed; retrying' "$INSTALL"
+}
+
+@test "a reset upload is retried before the installer gives up" {
+  # A line freed by another session ending is the usual difference between a
+  # failed attempt and a successful one, so the push is retried rather than
+  # failing the onboard outright.
+  grep -q 'XR_SCP_ATTEMPTS="\${XR_SCP_ATTEMPTS:-3}"' "$INSTALL"
+  grep -q 'XR_SCP_RETRY_SECONDS="\${XR_SCP_RETRY_SECONDS:-10}"' "$INSTALL"
+  grep -q 'upload attempt \$attempt failed:' "$INSTALL"
+  grep -q 'retrying in \${XR_SCP_RETRY_SECONDS}s' "$INSTALL"
+  # The failure shows scp's own words, not only a guess about the vty pool.
+  grep -q 'tail -5 "\$RUN_ERR"' "$INSTALL"
+  # VTY contention is a possible explanation for resets, not every failure.
+  grep -q "For connection resets, check 'show users'" "$INSTALL"
+}
+
+@test "the installer opens no SSH session of its own other than the scp helper" {
+  # Each file uses this helper. Other device interactions go through RUN(),
+  # which wraps lab/xr-run.sh. Count commands, not diagnostic text.
+  count="$(grep -c 'sshpass -e scp' "$INSTALL")"
+  [ "$count" -eq 1 ]
   grep -q 'sshpass -e scp' "$INSTALL"
 }
 
@@ -246,13 +305,35 @@ cmds="$(cat)"
 if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
 fi
+# Simulate an SSH rate-limit reset during registration, then recovery.
+if [[ "$cmds" == *"appmgr package install rpm"* ]] && [ -n "${FAKE_REGISTER_RESET:-}" ]; then
+  if [ ! -e "$FAKE_STATE_DIR/register_reset" ]; then
+    touch "$FAKE_STATE_DIR/register_reset"
+    echo 'Connection reset by peer' >&2
+    exit 255
+  fi
+fi
+if [ -n "${FAKE_REGISTER_RESET:-}" ] && [ "$cmds" = 'show appmgr source-table' ]; then
+  # The failed install never registered a source; the retry must install it.
+  exit 0
+fi
+# The preflight sends both of these in ONE session, so answer each that is
+# present rather than only the first that matches.
+answered=""
 case "$cmds" in
   *"show version"*)
     printf '%s\n' "${FAKE_VERSION_BANNER-Cisco IOS XR Software, Version 25.4.2 LNT}"
+    answered=1
     ;;
+esac
+case "$cmds" in
   *"dir harddisk: | include bytes free"*)
     printf '%s\n' "${FAKE_DIR_BYTES_FREE-39929724928 bytes total (39883231232 bytes free)}"
+    answered=1
     ;;
+esac
+[ -n "$answered" ] && exit 0
+case "$cmds" in
   *"show appmgr source-table"*)
     printf '%s\n' "${FAKE_SOURCE_TABLE-iris-xr  0.1.0  ThinXR_7.3.15  app_manager}"
     ;;
@@ -336,6 +417,8 @@ _xr_install_run_live() {
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
   rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  # All three actual invocations must select SCP, not OpenSSH's default SFTP.
+  [ "$(grep -c '=== SCP: -e scp -O ' "$FAKE_COMMAND_LOG")" -eq 3 ]
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   instruction_line="$(grep -n '/harddisk:/iris-instructions.bootstrap' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   register_line="$(grep -n 'appmgr package install rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
@@ -372,6 +455,7 @@ _xr_install_run_live() {
   FAKE_SCP_FAIL_MATCH=iris-instructions.bootstrap run _xr_install_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"XR package/catalog/bootstrap upload failed"* ]]
+  [[ "$output" == *"/harddisk:/iris-instructions.bootstrap (scp/sshpass exit 1)"* ]]
   ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
   ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
 }
@@ -434,6 +518,36 @@ _xr_install_run_live() {
   FAKE_SOURCE_TABLE="" run _xr_install_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"does not appear in 'show appmgr source-table'"* ]]
+}
+
+@test "live: registration recovers from an SSH reset and reports it" {
+  _xr_install_stub_setup
+  FAKE_REGISTER_RESET=1 run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"registration attempt 1 failed (ssh exit 255)"* ]]
+  [[ "$output" == *"Connection reset by peer"* ]]
+  [ "$(grep -c '^appmgr package install rpm' "$FAKE_COMMAND_LOG")" -eq 2 ]
+}
+
+@test "live: echoed registration command is not proof of an installed source" {
+  _xr_install_stub_setup
+  FAKE_SOURCE_TABLE='RP/0/RP0/CPU0:router#appmgr package install rpm /harddisk:/iris-xr.rpm' run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: accepts the numbered NCS source table" {
+  _xr_install_stub_setup
+  FAKE_SOURCE_TABLE=$'Sno Name              File                 Installed By\n--- ----------------- -------------------- --------------------\n1   iris-xr           iris-xr.tar.gz       APP_MANAGER' run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"onboard complete:"* ]]
+}
+
+@test "live: numbered source table requires an exact source name" {
+  _xr_install_stub_setup
+  FAKE_SOURCE_TABLE='1 iris-xr-old iris-xr.tar.gz APP_MANAGER' run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: fails, with the table output, when the app never reaches Up" {

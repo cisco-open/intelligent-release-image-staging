@@ -253,13 +253,16 @@ run_bounded_ssh() {
     '
 RUN_STATUS=$?
 iris_ssh_cleanup
-# ssh's own diagnostics, redacted, on OUR stderr -- never discarded.
+# Keep SSH diagnostics, but omit its routine closure notice after success.
 if [ -s "$ERR_COPY" ]; then
-  perl -pe '
+  IRIS_XR_LOG_STATUS="$RUN_STATUS" IRIS_XR_LOG_HOST="$HOST" perl -ne '
       s/\r//g;
+      next if $ENV{IRIS_XR_LOG_STATUS} eq "0"
+        && $_ eq "Connection to $ENV{IRIS_XR_LOG_HOST} closed.\n";
       for my $secret (grep { defined && length } $ENV{DEVICE_PASS}) {
         s/\Q$secret\E/[REDACTED]/g;
       }
+      print;
     ' "$ERR_COPY" | sed 's/^/ssh: /' >&2
   iris_ssh_explain "$ERR_COPY" "$HOST"
 fi

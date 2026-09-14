@@ -61,7 +61,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
   8000 family and is lab-tested on Catalyst 8000V; see
   [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
-- **xr-host** — use `platform=xr-appmgr` on supported Cisco 8000-series IOS-XR
+- **xr-host** — use `platform=xr-appmgr` on supported IOS-XR routers, Cisco 8000-series and NCS,
   routers and leave every addressing, VPG, and NAT field empty. Onboarding
   requires a current `artifacts/iris-xr.rpm`.
 

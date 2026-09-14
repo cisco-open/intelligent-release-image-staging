@@ -248,6 +248,9 @@ one package. Building the arm64 package on an amd64 host needs Docker's arm64
 emulation; if it is not already enabled, `stage-iox-package.sh` requires
 `BINFMT_IMAGE_DIGEST` — an audited `tonistiigi/binfmt` sha256 digest — and
 fails closed without it.
+[ARM64 emulation](getting-started.md#arm64-emulation) covers checking for the
+handler, the distribution package that avoids the digest entirely, and
+resolving a reviewed tag to one.
 
 ### Package footprint
 

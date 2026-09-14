@@ -75,7 +75,11 @@ Before publishing fresh bundles, provision exactly two distinct approved public
 instruction roots as `.pub` files under `/data/config/instr/roots.d`, readable
 by the server's UID 10001. Use the same approved pair when building every
 device package; never generate replacement roots in the pod or copy offline
-private keys there. Follow the [instruction-root ceremony](operations.md#instruction-root-ceremony-and-recovery).
+private keys there.
+[Obtain the handed-in inputs](getting-started.md#the-two-instruction-roots) has
+the commands that create the pair; the
+[instruction-root ceremony](operations.md#instruction-root-ceremony-and-recovery)
+covers certificates, rotation and revocation.
 Missing or invalid roots leave bundle publication unavailable even when the
 pod's listeners are ready. Check package readiness in Console Setup after rollout.
 

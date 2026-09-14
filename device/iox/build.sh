@@ -110,7 +110,37 @@ PKG="$CTX/pkg"
 mkdir -p "$PKG"
 mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"
 cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"
-( cd "$PKG" && "$IOXCLIENT" package . )
+# ioxclient refuses every command until a configuration file exists in HOME,
+# and creates one interactively, so a scripted packaging run dies at its
+# password prompt on any machine where nobody has made a profile by hand.
+# Packaging is offline -- it assembles and signs a directory and contacts
+# nothing -- so give it a scratch HOME holding an inert profile for the length
+# of this one call. That also keeps an operator profile out of the run: one may
+# carry a real device address and credential, which have no business here, and
+# IRIS reaches devices through its own onboarding rather than through
+# ioxclient. IOXCLIENT_HOME overrides it for a run that must use a prepared
+# profile.
+IOX_HOME="${IOXCLIENT_HOME:-}"
+if [ -z "$IOX_HOME" ]; then
+  IOX_HOME="$CTX/ioxclient-home"
+  mkdir -p "$IOX_HOME"
+  cat > "$IOX_HOME/.ioxclientcfg.yaml" <<'IOXCFG'
+global:
+  version: "1.0"
+  active: packaging
+  debug: false
+profiles:
+  packaging:
+    host_ip: 127.0.0.1
+    host_port: 8443
+    auth_user: root
+    auth_passwd: placeholder
+    api_prefix: /iox/api/v2/hosting/
+    url_scheme: https
+    conn_timeout: 1000
+IOXCFG
+fi
+( cd "$PKG" && HOME="$IOX_HOME" "$IOXCLIENT" package . )
 artifact_tmp="$(mktemp "$OUT/.${PACKAGE_NAME}.XXXXXX")"
 manifest_tmp="$(mktemp "$OUT/.${PACKAGE_NAME}.manifest.XXXXXX")"
 trap 'rm -rf "$CTX"; rm -f "$artifact_tmp" "$manifest_tmp"' EXIT

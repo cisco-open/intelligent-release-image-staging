@@ -13022,6 +13022,7 @@
                 "C8xxx",
                 "ISR/ASR/CSR",
                 "XR8000",
+                "NCS",
                 "unknown"
               ]
             },
@@ -13740,6 +13741,7 @@
                 "C8xxx",
                 "ISR/ASR/CSR",
                 "XR8000",
+                "NCS",
                 "unknown"
               ]
             },
@@ -42657,6 +42659,7 @@
                 "C8xxx",
                 "ISR/ASR/CSR",
                 "XR8000",
+                "NCS",
                 "unknown"
               ]
             },
@@ -43325,6 +43328,7 @@
                 "C8xxx",
                 "ISR/ASR/CSR",
                 "XR8000",
+                "NCS",
                 "unknown"
               ]
             },

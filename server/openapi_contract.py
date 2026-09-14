@@ -1492,7 +1492,7 @@ def _query_parameters(route):
             "role": ({"type": "string"}, "boat"),
             "model_family": ({"type": "string", "enum": [
                 "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
-                "XR8000", "unknown"]}, "C9xxx"),
+                "XR8000", "NCS", "unknown"]}, "C9xxx"),
             "os_family": ({"type": "string", "enum": ["xe", "xr"]},
                           "xe"),
             "status": ({"type": "string", "enum": [

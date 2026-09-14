@@ -137,9 +137,12 @@ IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried with Onboard; see
 
 ### IOS-XR: what the installer pushes
 
-`device/xr-install.sh` deploys the agent to a Cisco 8000-series router running
+`device/xr-install.sh` deploys the agent to an IOS-XR router — a Cisco 8000
+series or an NCS — running
 IOS-XR as an **appmgr Docker application**. It pushes the pre-built
-`iris-xr.rpm` and current public catalog certificate to `harddisk:` over scp,
+`iris-xr.rpm`, the current public catalog certificate (`iris-catalog.pem`),
+and the per-device instruction envelope (`iris-instructions.bootstrap`) to
+`harddisk:` in separate `scp -O` transfers,
 registers the agent RPM (`appmgr package install rpm`), and starts its appmgr
 application in config mode with host networking and the `/misc/disk1:/hostmount` bind mount.
 `/misc/disk1` **is** `harddisk:`, so the container
@@ -633,7 +636,7 @@ selection shown below.
 | IE-3400 IOx | `iox` | Live writable-media policy, normally `sdflash:` | Common device container and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | n/a | `bootflash:` | Guest Shell through a VirtualPortGroup. |
 | Catalyst 8000 IOx | `iox` | `bootflash:` | The IOx app (amd64 package) through the same VirtualPortGroup; see [IOx](iox.md#catalyst-8000-routers). |
-| Cisco 8000 series (IOS-XR) | `xr-appmgr` | Fixed `harddisk:` | Common device container with a verified direct bind mount and no SSH path. |
+| Cisco 8000 series and NCS (IOS-XR) | `xr-appmgr` | Fixed `harddisk:` | Common device container with a verified direct bind mount and no SSH path. One package and one recipe serve both families. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).

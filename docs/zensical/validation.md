@@ -156,6 +156,19 @@ including both architectures of the shared IOx/XR image.
 | Catalyst 8000V | IOx (router, VirtualPortGroup, amd64, `bootflash:`) | Lab-validated onboard and record-backed undeploy 2026-09-10; app runs on the IRIS-owned VirtualPortGroup |
 | IE-3400 | IOx | Lab-validated |
 | Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
+| NCS-540 (IOS-XR 25.2.2) | appmgr recipe targeting `harddisk:` | Package transfer, matching downloaded RPM SHA-256, registration, and app startup (`Up`) verified on 2026-09-14. Heartbeats are blocked by catalog reachability in the app's VRF; image staging, telemetry delivery, and undeploy validation remain pending. Other NCS models are not established by this test. |
+
+On 2026-09-14, `scp -O` package transfer and downloaded-copy SHA-256 were
+also verified on Cisco 8201 / IOS-XR 25.4.2. On NCS-540 / IOS-XR 25.2.2,
+OpenSSH's default SFTP upload transferred the RPM but ended with SSH status
+255 and client failure. The installer now selects SCP explicitly for both
+families. These transfer checks do not constitute a full lifecycle test.
+
+The NCS lab app had telemetry enabled but could not reach the catalog through
+its default-VRF path. A separate diagnostic through the management VRF with
+an explicit management source address reached the catalog. The current XR
+recipe uses `--net=host` without selecting a VRF or source address; appmgr
+`Up` alone does not prove catalog connectivity or heartbeat delivery.
 
 IOS-XR validation checks the full agent lifecycle: build `iris-xr.rpm`,
 onboard through the Console, stage directly through the `harddisk:` bind
