@@ -558,7 +558,12 @@ Do that preparation yourself and announce each step as you take it:
   distribution's static QEMU package, then confirm the registration.
 
 Initialise instruction custody once the stack is up and before onboarding any
-device, as "Initialise instruction custody" describes. Without it every
+device, as "Initialise instruction custody" describes. Never hand the operator
+a command before the file it reads exists: generate and export the online
+public key, show that ~/iris-online.pub holds an ssh-ed25519 line, and only
+then give them the signing command. The same rule holds anywhere else you ask
+someone to run something — produce its inputs first, or say plainly that you
+are asking them to create them. Without it every
 onboarding fails with "instruction bootstrap unavailable" on every platform,
 and the message is deliberately fixed, so it never says which part is missing.
 The certificate signing in that sequence is the operator's, like the roots.
@@ -916,22 +921,42 @@ already writes the public half into the config volume, so use that copy.
 
 ### Docker on one host
 
+Run these two first. They produce the file the operator's command signs:
+
 ```bash
 docker exec iris iris-instructions --generate-online-key
 docker cp iris:/etc/iris/instr/signing-key.pub ~/iris-online.pub
+```
+
+Check the file before going further. It must exist and hold one
+`ssh-ed25519 …` line:
+
+```bash
+cat ~/iris-online.pub
+```
+
+Only now hand the operator the signing command, because it reads that file and
+fails without it:
+
+```bash
 ssh-keygen -q -s ~/iris-custody/root-a -I iris-online -n iris-server \
   -V +0s:+30d ~/iris-online.pub
+```
+
+It uses the **private** root from `~/iris-custody` and prompts for its
+passphrase, so it is the operator's to run: an assistant hands it over and
+waits, exactly as for the roots themselves, and never takes a private root or a
+passphrase. It writes `~/iris-online-cert.pub`.
+
+Then finish:
+
+```bash
 docker cp ~/iris-online-cert.pub iris:/etc/iris/instr/signing-key-cert.pub
 docker exec iris iris-instructions --import-certificate \
   /etc/iris/instr/signing-key-cert.pub
 docker exec iris iris-instr-key initialize
 docker exec iris iris-instructions --status
 ```
-
-The `ssh-keygen` step is the operator's: it uses the **private** root from
-`~/iris-custody` and prompts for its passphrase. An assistant hands the command
-over and waits, exactly as for the roots themselves, and never takes a private
-root or a passphrase.
 
 ### Docker on separate hosts
 
