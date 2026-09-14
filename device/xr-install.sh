@@ -212,7 +212,6 @@ cleanup_instruction_snapshot() {
 cleanup_all() {
   cleanup_instruction_snapshot
   [ -n "${RUN_ERR:-}" ] && rm -f -- "$RUN_ERR"
-  [ -n "${PUSH_DIR:-}" ] && rm -rf -- "$PUSH_DIR"
   return 0
 }
 trap cleanup_all EXIT
@@ -349,9 +348,9 @@ if [ "$DRY" -eq 1 ]; then
   echo "show version"
   echo "dir harddisk: | include bytes free"
   echo "[2/5] upload package, certificate, and bootstrap to harddisk:"
-  echo "      (one scp session: IOS-XR's vty pool is five lines by default)"
-  printf 'scp <%s.rpm> <public-certificate> <instruction-envelope> <user>@%s:/harddisk:/\n' \
-    "$SOURCE_NAME" "$DEVICE_IP"
+  printf 'scp %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
+  printf 'scp <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
+  printf 'scp <instruction-envelope> <user>@%s:/harddisk:/iris-instructions.bootstrap\n' "$DEVICE_IP"
   echo "[3/5] register package"
   echo "appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
   echo "show appmgr source-table"
@@ -465,45 +464,38 @@ echo "[2/5] upload package, certificate, and bootstrap"
 # shellcheck source=lab/iris-ssh-policy.sh
 . "$HERE/../lab/iris-ssh-policy.sh" || { echo "ERROR: cannot load lab/iris-ssh-policy.sh" >&2; exit 1; }
 iris_ssh_policy "$DEVICE_IP" || exit 1
-# One scp session carrying all three files, not three sessions carrying one
-# each. IOS-XR serves a small vty pool -- five lines by default -- and every
-# ssh or scp session takes one. This installer already spends two on the
-# preflight, so three more in a burst exhausts the pool on a router that has
-# an operator or another tool connected: the later connections are reset at
-# key exchange and the upload fails with no indication that the device simply
-# had no line free. Hardware-proven on an NCS-540 (2026-09-14) with four of
-# five lines busy: three separate pushes failed on the second and third, one
-# push of three files succeeded. A transient failure is retried, because a
-# line freed by someone logging out is the usual difference between attempts.
-#
-# Names, not paths, decide where each file lands: scp writes into the
-# directory under the name it read, so the sources are linked into a staging
-# directory under the exact names the router must end up with.
-PUSH_DIR="$(mktemp -d)"
-_stage_push() {
-  ln "$1" "$PUSH_DIR/$2" 2>/dev/null || cp "$1" "$PUSH_DIR/$2" || {
-    echo "ERROR: cannot stage $2 for upload" >&2; exit 1; }
+# The Cisco 8000 procedure, unchanged: one push per file, in this order. Each
+# is retried on a transport failure, because IOS-XR serves a small vty pool --
+# five lines by default -- and a reset here usually means another session held
+# the line this one needed. scp's stderr is captured so a failure says what
+# went wrong instead of leaving it to be guessed.
+_xr_push() {
+  local src="$1" dest="$2" attempt=1 rc=0
+  while : ; do
+    rc=0
+    SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+          "$src" "${DEVICE_USER}@${DEVICE_IP}:$dest" 2>"$RUN_ERR" || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
+    echo "   upload attempt $attempt failed: $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
+    echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
+    sleep "$XR_SCP_RETRY_SECONDS"
+    attempt=$((attempt + 1))
+  done
+  scp_attempt="$attempt"
+  return "$rc"
 }
-_stage_push "$XR_RPM_FILE" "$SOURCE_NAME.rpm"
-_stage_push "$CATALOG_CA_FILE" "iris-catalog.pem"
-_stage_push "$INSTRUCTION_SNAPSHOT_FILE" "iris-instructions.bootstrap"
 
 scp_rc=0
 scp_attempt=1
-while : ; do
-  scp_rc=0
-  SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
-        "$PUSH_DIR/$SOURCE_NAME.rpm" \
-        "$PUSH_DIR/iris-catalog.pem" \
-        "$PUSH_DIR/iris-instructions.bootstrap" \
-        "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/" 2>"$RUN_ERR" || scp_rc=$?
-  [ "$scp_rc" -eq 0 ] && break
-  [ "$scp_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
-  echo "   upload attempt $scp_attempt failed: $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
-  echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
-  sleep "$XR_SCP_RETRY_SECONDS"
-  scp_attempt=$((scp_attempt + 1))
-done
+_xr_push "$XR_RPM_FILE" "/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
+if [ "$scp_rc" -eq 0 ]; then
+  _xr_push "$CATALOG_CA_FILE" "/harddisk:/iris-catalog.pem" || scp_rc=$?
+fi
+if [ "$scp_rc" -eq 0 ]; then
+  _xr_push "$INSTRUCTION_SNAPSHOT_FILE" "/harddisk:/iris-instructions.bootstrap" \
+    || scp_rc=$?
+fi
 iris_ssh_cleanup
 if [ "$scp_rc" -ne 0 ]; then
   echo "ERROR: XR package/catalog/bootstrap upload failed after $scp_attempt attempt(s)" >&2
