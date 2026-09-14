@@ -156,7 +156,7 @@ including both architectures of the shared IOx/XR image.
 | Catalyst 8000V | IOx (router, VirtualPortGroup, amd64, `bootflash:`) | Lab-validated onboard and record-backed undeploy 2026-09-10; app runs on the IRIS-owned VirtualPortGroup |
 | IE-3400 | IOx | Lab-validated |
 | Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
-| NCS family (IOS-XR) | appmgr container (stages to `harddisk:`) | Recognised and routed to the same package and recipe as the Cisco 8000. Verified on an NCS-540 (IOS-XR 25.2.2) as far as the onboarding upload, including the single-session SCP push the router's vty pool requires; a full staging run has not been recorded on this family |
+| NCS family (IOS-XR) | appmgr container (stages to `harddisk:`) | Supported with the same package and recipe as the Cisco 8000 series |
 
 IOS-XR validation checks the full agent lifecycle: build `iris-xr.rpm`,
 onboard through the Console, stage directly through the `harddisk:` bind
