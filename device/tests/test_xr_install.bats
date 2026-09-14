@@ -221,6 +221,28 @@ EOF
   grep -q '_stage_push "\$INSTRUCTION_SNAPSHOT_FILE" "iris-instructions.bootstrap"' "$INSTALL"
 }
 
+@test "one EXIT trap removes everything, including the decrypted bootstrap" {
+  # bash keeps a single EXIT trap. The installer grew two more cleanups after
+  # the instruction-snapshot one, and a second 'trap ... EXIT' would have
+  # silently replaced it, leaving the decrypted bootstrap on disk.
+  [ "$(grep -c '^trap .* EXIT$' "$INSTALL")" -eq 1 ]
+  grep -q '^trap cleanup_all EXIT$' "$INSTALL"
+  # cleanup_all covers all three.
+  run sed -n '/^cleanup_all() {/,/^}/p' "$INSTALL"
+  [[ "$output" == *cleanup_instruction_snapshot* ]]
+  [[ "$output" == *RUN_ERR* ]]
+  [[ "$output" == *PUSH_DIR* ]]
+}
+
+@test "a step-1 transport failure says so instead of exiting silently" {
+  # set -e with pipefail kills the script at the assignment when the ssh
+  # session fails, so the job used to end with only an exit status: an
+  # operator saw "[1/5] check device and storage" and "Job error.".
+  grep -q 'could not run .show version. on \$DEVICE_IP (ssh exit \$run_rc)' "$INSTALL"
+  grep -q 'stored device credentials are wrong' "$INSTALL"
+  grep -q 'could not read .dir harddisk:. on \$DEVICE_IP' "$INSTALL"
+}
+
 @test "a reset upload is retried before the installer gives up" {
   # A line freed by another session ending is the usual difference between a
   # failed attempt and a successful one, so the push is retried rather than

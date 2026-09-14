@@ -204,7 +204,18 @@ cleanup_instruction_snapshot() {
     INSTRUCTION_SNAPSHOT_FILE=""
   fi
 }
-trap cleanup_instruction_snapshot EXIT
+
+# Everything this script has to remove on the way out goes here. bash keeps one
+# EXIT trap, so a second `trap ... EXIT` anywhere below would silently replace
+# this one -- and the first thing it would stop removing is the decrypted
+# instruction bootstrap.
+cleanup_all() {
+  cleanup_instruction_snapshot
+  [ -n "${RUN_ERR:-}" ] && rm -f -- "$RUN_ERR"
+  [ -n "${PUSH_DIR:-}" ] && rm -rf -- "$PUSH_DIR"
+  return 0
+}
+trap cleanup_all EXIT
 
 snapshot_instruction_bootstrap() {
   [ -n "$INSTRUCTION_BOOTSTRAP_FILE" ] || return 1
@@ -361,7 +372,23 @@ XR_SCP_RETRY_SECONDS="${XR_SCP_RETRY_SECONDS:-10}"
 RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 
 echo "[1/5] check device and storage: $DEVICE_IP"
-VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
+# Capture the transport's own stderr instead of discarding it. Under
+# 'set -e -o pipefail' a failed session kills the script AT THE ASSIGNMENT,
+# before any check below runs, so the job used to end with nothing but an exit
+# status -- an operator saw "[1/5] check device and storage" and "Job error."
+# and had no way to tell a wrong password from an unreachable router.
+# lab/xr-run.sh redacts DEVICE_PASS from what it writes there.
+RUN_ERR="$(mktemp)"
+run_rc=0
+VERSION_OUT="$(printf 'show version\n' | RUN 2>"$RUN_ERR")" || run_rc=$?
+if [ "$run_rc" -ne 0 ] || [ -z "$VERSION_OUT" ]; then
+  echo "ERROR: could not run 'show version' on $DEVICE_IP (ssh exit $run_rc)" >&2
+  echo "       Usual causes: the stored device credentials are wrong, the router" >&2
+  echo "       is unreachable from the server, or its vty pool has no free line" >&2
+  echo "       ('show users' on the device shows the pool)." >&2
+  tail -5 "$RUN_ERR" >&2 || true
+  exit 1
+fi
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"
 # (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md).
@@ -387,7 +414,13 @@ XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
 XR_VERSION="${XR_VERSION%% *}"
 _no_quotes_or_newlines XR_VERSION "$XR_VERSION"
 _safe_fact XR_VERSION "$XR_VERSION"
-DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>/dev/null)"
+dir_rc=0
+DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>"$RUN_ERR")" || dir_rc=$?
+if [ "$dir_rc" -ne 0 ]; then
+  echo "ERROR: could not read 'dir harddisk:' on $DEVICE_IP (ssh exit $dir_rc)" >&2
+  tail -5 "$RUN_ERR" >&2 || true
+  exit 1
+fi
 # Cisco 8000 dir output ends "<N> kbytes total (<M> kbytes free)" -- KBYTES,
 # hardware-proven ("41968752 kbytes total (37916076 kbytes free)",
 # agentinfo/xr-support/LAB-RESULTS-2026-08-27.md); some platforms say plain
@@ -433,7 +466,6 @@ iris_ssh_policy "$DEVICE_IP" || exit 1
 # directory under the name it read, so the sources are linked into a staging
 # directory under the exact names the router must end up with.
 PUSH_DIR="$(mktemp -d)"
-trap 'rm -rf "$PUSH_DIR"' EXIT
 _stage_push() {
   ln "$1" "$PUSH_DIR/$2" 2>/dev/null || cp "$1" "$PUSH_DIR/$2" || {
     echo "ERROR: cannot stage $2 for upload" >&2; exit 1; }
