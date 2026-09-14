@@ -191,9 +191,13 @@ _XR_MODEL_RE = re.compile(r"^8[0-9]{2,3}(-SYS)?$")
 # but their model strings share no shape with the bare 8xxx numbers, so a
 # second pattern is the honest way to recognise them. Hyphen optional because
 # both spellings are reported in the wild ("NCS-540", "NCS540").
-# Two digits minimum, because the series number is followed by letters as
-# often as by more digits: NCS-540, NCS-5500, NCS-55A1-24H, NCS-57B1-5DSE.
-_NCS_MODEL_RE = re.compile(r"^NCS-?[0-9]{2,4}[A-Za-z0-9-]*$", re.IGNORECASE)
+# Two digits minimum where a series number is given, because it is followed by
+# letters as often as by more digits: NCS-540, NCS-5500, NCS-55A1-24H,
+# NCS-57B1-5DSE. The bare family name is accepted too: an operator adding a
+# device by hand types what they call the box, and "NCS" identifies IOS-XR as
+# unambiguously as the full string does -- the model only selects the recipe,
+# and every NCS takes the same one.
+_NCS_MODEL_RE = re.compile(r"^NCS(-?[0-9]{2,4}[A-Za-z0-9-]*)?$", re.IGNORECASE)
 
 
 def _is_xr_model(model):

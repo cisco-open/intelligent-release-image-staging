@@ -931,7 +931,9 @@ def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
     ("NCS-55A1-24H", "NCS"),
     ("NCS-57B1-5DSE", "NCS"),
     ("ncs-540", "NCS"),
-    ("NCS", "unknown"),
+    # The bare family name is what an operator types when adding a device.
+    ("NCS", "NCS"),
+    ("ncs", "NCS"),
     ("N9K-C93180YC-EX", "unknown"),
     ("", "unknown"),
 ])
@@ -940,7 +942,8 @@ def test_family_reuses_the_install_model_taxonomy(model, expected):
 
 
 @pytest.mark.parametrize("model", [
-    "NCS-540", "NCS540", "NCS-5500", "NCS-55A1-24H", "NCS-57B1-5DSE"])
+    "NCS-540", "NCS540", "NCS-5500", "NCS-55A1-24H", "NCS-57B1-5DSE",
+    "NCS", "ncs"])
 def test_ncs_models_resolve_to_xr_appmgr_and_refuse_iox(model):
     # An NCS runs IOS-XR, so it takes the appmgr platform on model alone, the
     # same as a Cisco 8000, and must never be offered the IOx recipe: that
