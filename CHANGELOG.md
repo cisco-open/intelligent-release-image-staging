@@ -35,6 +35,17 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- IOS-XR onboarding uploads the RPM, the runtime certificate and the
+  instruction bootstrap in one scp session instead of three. IOS-XR serves five
+  vty lines by default and every ssh or scp session takes one, so on a router
+  with an operator connected the second and third pushes were reset at key
+  exchange and the onboard failed with `XR package/catalog/bootstrap upload
+  failed`. The upload is now retried (`XR_SCP_ATTEMPTS`,
+  `XR_SCP_RETRY_SECONDS`) and its failure names the vty pool.
+- IOS-XR onboarding recognises the NCS family — NCS-540, NCS-5500, NCS-55A1,
+  NCS-57B1 and siblings — which runs the same appmgr recipe as a Cisco 8000.
+  They resolve to `xr-appmgr` on the model alone, are refused the IOx recipe,
+  and report the new `NCS` value of `model_family`.
 - Both guides document initialising instruction custody, which every
   deployment needs before onboarding any device and neither page carried. A
   server that has the two public roots still refuses every onboarding with

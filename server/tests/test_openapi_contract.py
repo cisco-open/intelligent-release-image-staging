@@ -70,7 +70,7 @@ def test_devices_target_expression_and_projection_are_public_contracts():
         assert {"role", "model_family", "os_family"} <= set(parameters)
         assert parameters["model_family"]["schema"]["enum"] == [
             "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
-            "XR8000", "unknown"]
+            "XR8000", "NCS", "unknown"]
         assert parameters["os_family"]["schema"]["enum"] == ["xe", "xr"]
         response = operation["responses"]["200"]["content"][
             "application/json"]["schema"]

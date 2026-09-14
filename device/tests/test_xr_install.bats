@@ -94,8 +94,9 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
-  [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
-  [[ "$output" == *"scp -O <instruction-envelope> <user>@192.0.2.10:/harddisk:/iris-instructions.bootstrap"* ]]
+  [[ "$output" == *"<public-certificate> <instruction-envelope> <user>@192.0.2.10:/harddisk:/"* ]]
+  # One session, so the plan shows one scp line, not one per file.
+  [ "$(printf '%s\n' "$output" | grep -c '^scp ')" -eq 1 ]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -203,11 +204,40 @@ EOF
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the installer opens no SSH session of its own other than the three scp pushes" {
-  # The pushes carry the RPM, runtime certificate, and bootstrap envelope. Every
-  # other device interaction goes through RUN(), which wraps lab/xr-run.sh.
+@test "the upload spends one ssh session, not three" {
+  # IOS-XR serves five vty lines by default and every ssh or scp session takes
+  # one. Three separate pushes exhaust the pool on a router that has an
+  # operator connected: measured on an NCS-540 with four of five lines busy,
+  # the second and third were reset at key exchange while a single push of all
+  # three files succeeded (2026-09-14). One invocation, three sources, one
+  # destination directory.
+  run grep -c 'sshpass -e scp ' "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+  grep -q '"\${DEVICE_USER}@\${DEVICE_IP}:/harddisk:/"' "$INSTALL"
+  # Files are renamed by staging, because scp keeps the source name.
+  grep -q '_stage_push "\$XR_RPM_FILE" "\$SOURCE_NAME.rpm"' "$INSTALL"
+  grep -q '_stage_push "\$CATALOG_CA_FILE" "iris-catalog.pem"' "$INSTALL"
+  grep -q '_stage_push "\$INSTRUCTION_SNAPSHOT_FILE" "iris-instructions.bootstrap"' "$INSTALL"
+}
+
+@test "a reset upload is retried before the installer gives up" {
+  # A line freed by another session ending is the usual difference between a
+  # failed attempt and a successful one, so the push is retried rather than
+  # failing the onboard outright.
+  grep -q 'XR_SCP_ATTEMPTS="\${XR_SCP_ATTEMPTS:-3}"' "$INSTALL"
+  grep -q 'XR_SCP_RETRY_SECONDS="\${XR_SCP_RETRY_SECONDS:-10}"' "$INSTALL"
+  grep -q 'upload attempt \$scp_attempt failed; retrying' "$INSTALL"
+  # The failure names the vty pool, which is what the operator has to check.
+  grep -q 'no free vty line resets the connection here' "$INSTALL"
+}
+
+@test "the installer opens no SSH session of its own other than the one scp push" {
+  # That push carries the RPM, runtime certificate, and bootstrap envelope
+  # together. Every other device interaction goes through RUN(), which wraps
+  # lab/xr-run.sh.
   count="$(grep -c 'sshpass' "$INSTALL")"
-  [ "$count" -eq 3 ]
+  [ "$count" -eq 1 ]
   grep -q 'sshpass -e scp' "$INSTALL"
 }
 
@@ -324,8 +354,11 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  grep -q "${CRTFILE} admin@192.0.2.10:/harddisk:/iris-catalog.pem" "$FAKE_COMMAND_LOG"
-  cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  # The certificate travels under its final name in the single push; the
+  # source is a staged link, so match the name and the destination directory.
+  grep -q 'iris-catalog.pem' "$FAKE_COMMAND_LOG"
+  grep -q 'admin@192.0.2.10:/harddisk:/' "$FAKE_COMMAND_LOG"
+  cert_line="$(grep -n 'iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   activate_line="$(grep -n 'appmgr application iris activate' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   [ -n "$cert_line" ] && [ -n "$activate_line" ]
   [ "$cert_line" -lt "$activate_line" ]
@@ -335,15 +368,13 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
-  cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
-  instruction_line="$(grep -n '/harddisk:/iris-instructions.bootstrap' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  # All three ride one scp invocation, in this order, before registration.
+  push_line="$(grep -n 'admin@192.0.2.10:/harddisk:/' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   register_line="$(grep -n 'appmgr package install rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
-  [ -n "$rpm_line" ] && [ -n "$cert_line" ] && \
-    [ -n "$instruction_line" ] && [ -n "$register_line" ]
-  [ "$rpm_line" -lt "$cert_line" ]
-  [ "$cert_line" -lt "$instruction_line" ]
-  [ "$instruction_line" -lt "$register_line" ]
+  [ -n "$push_line" ] && [ -n "$register_line" ]
+  push_text="$(sed -n "${push_line}p" "$FAKE_COMMAND_LOG")"
+  [[ "$push_text" == *iris-xr.rpm*iris-catalog.pem*iris-instructions.bootstrap* ]]
+  [ "$push_line" -lt "$register_line" ]
   ! grep -q 'private-bootstrap-ciphertext' "$FAKE_COMMAND_LOG"
 }
 
