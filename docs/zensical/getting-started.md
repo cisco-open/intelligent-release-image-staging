@@ -162,19 +162,21 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>
 ```
 
-One recipient is a complete, working configuration: the list must contain the
-public half of the identity in `IRIS_AGE_KEY_FILE_HOST`, and bootstrap refuses
-if it does not. A production deployment adds a second, break-glass recipient
-whose private half is held somewhere else entirely, so the encrypted store can
-still be opened when the primary identity is lost:
+That one key is a complete configuration. The list has to contain the public
+half of the key in `IRIS_AGE_KEY_FILE_HOST`, and bootstrap refuses if it does
+not.
+
+A production deployment usually lists a second key as well, kept by someone
+else and stored somewhere else, so the encrypted state can still be opened if
+the first key is lost:
 
 ```bash
-export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
+export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<second-age-public-key>
 ```
 
-Do not invent a break-glass key to satisfy the example. A second recipient
-whose private half sits beside the first protects nothing, and one can be added
-later without re-bootstrapping — see `--rekey` below.
+There is no need to create a second key now. One stored next to the first
+protects nothing, and `--rekey` below adds one at any time without redoing the
+deployment.
 
 Compose publishes the Console only on `IRIS_HOST_IP`, rather than on every
 interface of a multi-homed host. Choose the intended IRIS-facing address and

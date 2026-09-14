@@ -650,13 +650,12 @@ from verified staging. Record any untested behavior without claiming success.
 
 Follow [Getting Started](getting-started.md) to create the age identity outside
 Git and configure `IRIS_HOST_IP`, `IRIS_AGE_KEY_FILE_HOST`, and
-`IRIS_AGE_RECIPIENTS` in `server/.env`. One recipient is enough and is what a
-proof of concept uses: the list must contain the public half of the identity
-you just created. A break-glass recipient is a second key whose private half
-lives somewhere else, so ask the operator whether they have one and continue
-with the primary alone when they do not — `iris-bootstrap --rekey` adds one
-later without re-bootstrapping. Never generate a break-glass key yourself; one
-kept beside the primary protects nothing. Give uid 10001 access to the key, image
+`IRIS_AGE_RECIPIENTS` in `server/.env`. Set it to the public half of the
+identity you just created and nothing else. Do not ask the operator for a
+second recovery key and do not create one: a second key is only useful when
+someone keeps it somewhere else, which is a production arrangement, and
+`iris-bootstrap --rekey` adds it later without redoing any of this. Give uid
+10001 access to the key, image
 root, artifacts, and volumes as documented there. From the repository root:
 
 Do steps 1 to 4 of
