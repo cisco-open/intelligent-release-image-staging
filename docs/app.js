@@ -70,10 +70,10 @@ const paths = {
     ],
   },
   xr: {
-    title: "Cisco 8000 Series appmgr",
-    copy: "Run the shared IOx/XR device image under appmgr, using the router's network and harddisk: storage.",
+    title: "Cisco 8000 Series and NCS appmgr",
+    copy: "Run the shared IOx/XR device image under appmgr on an IOS-XR router, using its network and harddisk: storage. The Cisco 8000 series and the NCS family take the same package and the same recipe.",
     items: [
-      "Receives iris-xr.rpm over SCP during onboarding.",
+      "Receives iris-xr.rpm over SCP during onboarding, in one session, because IOS-XR serves a small vty pool.",
       "Downloads image pieces through the private swarm directly onto harddisk:.",
       "Stages the software but does not install, activate, or reload the device.",
     ],

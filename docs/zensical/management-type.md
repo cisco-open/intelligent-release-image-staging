@@ -80,7 +80,7 @@ The supported management-type cells:
 | `router-routed` | static | IOx (Catalyst 8000) | supported; the app attaches through the same VirtualPortGroup |
 | `router-nat` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
 | `router-nat` | static | IOx (Catalyst 8000) | supported; the app attaches through the same VirtualPortGroup and NAT footprint |
-| `xr-host` | none | XR appmgr container (Cisco 8000 series, IOS-XR) | supported |
+| `xr-host` | none | XR appmgr container (Cisco 8000 series and NCS, IOS-XR) | supported |
 
 Inband install and teardown command streams never contain `vlan`,
 `interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, or
@@ -180,7 +180,7 @@ rollout at a time.
 
 ## XR host — the router's own network stack
 
-`xr-host` is for Cisco 8000 series (IOS-XR) routers, where the agent runs as
+`xr-host` is for IOS-XR routers — Cisco 8000 series and NCS — where the agent runs as
 an appmgr Docker container on the router's own network stack: there is no
 VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface, and IRIS never touches
 the router's networking configuration. `xr-host` and platform `xr-appmgr` are
