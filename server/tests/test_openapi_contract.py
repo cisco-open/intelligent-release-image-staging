@@ -62,6 +62,19 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     assert doc == openapi_contract.build_document()
 
 
+def test_audit_export_password_documents_conditional_recovery_requirement():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        schema = document["paths"][prefix + "/settings/audit-export"]["post"][
+            "requestBody"]["content"]["application/json"]["schema"]
+        password = schema["properties"]["password"]
+        assert password["writeOnly"] is True
+        assert "first configuration" in password["description"]
+        assert "interrupted save/clear" in password["description"]
+        assert "only when the existing configuration is valid" in password["description"]
+        assert "password" not in schema["required"]  # retained-secret edits remain valid
+
+
 def test_devices_target_expression_and_projection_are_public_contracts():
     document = openapi_contract.build_document()
     for prefix in ("/api/v1", "/internal/v1"):

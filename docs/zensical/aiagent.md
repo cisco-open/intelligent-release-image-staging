@@ -92,19 +92,47 @@ default in the first line:
 
 ```bash
 IRIS_DIR=/opt/iris/intelligent-release-image-staging
-sudo install -d -o "$USER" -g "$USER" "$(dirname "$IRIS_DIR")"
-git clone https://github.com/cisco-open/intelligent-release-image-staging \
-  "$IRIS_DIR"
-cd "$IRIS_DIR"
+(
+  set -eu
+  if [ -e "$IRIS_DIR" ] || [ -L "$IRIS_DIR" ]; then
+    echo "Checkout path already exists; inspect and reuse it instead of cloning." >&2
+    exit 1
+  fi
+  sudo install -d -o "$(id -un)" -g "$(id -gn)" "$IRIS_DIR" &&
+    git clone https://github.com/cisco-open/intelligent-release-image-staging \
+      "$IRIS_DIR"
+) && cd "$IRIS_DIR"
 ```
 
 `sudo` is needed only for a directory the operator cannot already write, such
-as one under `/opt`.
+as one under `/opt`. Create only the selected checkout; never change ownership
+of its parent directory. Stop on a failed clone before continuing.
 
 Check out the same IRIS version on every deployment host. For a server already
 in use, identify its Compose project, container names, state volumes, age
 identity, and artifact directory before changing anything. Preserve those
 settings and data unless a reset is explicitly part of the task.
+
+To update an existing single-host deployment to already-built images, keep its
+Compose project and environment files and select both exact image tags with
+`server/docker-compose.images.yml`. First inspect the resolved configuration;
+then recreate only the two services. Do not run bootstrap, `down`, or remove
+volumes during an update:
+
+```bash
+export IRIS_SERVER_IMAGE=iris:approved-server-tag
+export IRIS_CONSOLE_IMAGE=iris-console:approved-console-tag
+docker compose -p server --env-file server/.env --env-file server/validation.env \
+  -f server/docker-compose.yml -f server/docker-compose.images.yml config --quiet
+docker compose -p server --env-file server/.env --env-file server/validation.env \
+  -f server/docker-compose.yml -f server/docker-compose.images.yml \
+  up -d --no-build --force-recreate iris console
+```
+
+Use the deployment's actual project and env-file paths; omit a file only if
+that installation does not use it. Confirm both running image IDs and health
+before proceeding. This overlay changes image selection only; it does not
+reset state or publish device packages.
 
 ## Check the host first
 
@@ -308,9 +336,11 @@ prefer fixing that. If you must build it, launch it detached so a closing
 session cannot cancel the `buildx` client, and leave Docker's cache alone:
 
 ```bash
-cd tools/aria2c-build
-setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
-echo $! > build-aarch64.pid
+(
+  cd tools/aria2c-build || exit 1
+  setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
+  echo $! > build-aarch64.pid
+)
 ```
 
 A detached build leaves no exit status. It finished if the log ends with a size
@@ -454,10 +484,9 @@ requires. Certificates, rotation and revocation are in the
 `tools/build-xr-package.sh` wraps the canonical device image as an appmgr RPM.
 It clones Cisco's `ios-xr/xr-appmgr-build` at a pinned commit into
 `~/.cache/iris/xr-appmgr-build` on first use, so that step needs Docker and
-network access. The helper leaves that checkout unchanged: it runs a private
-per-build copy of the pinned entry point, including its release configuration,
-and directs RPM output logs into that build's temporary directory rather than
-the builder's shared `/tmp/rpmbuild.log`. `tools/start-compose-server.sh` runs it for you; set
+network access. Each build uses a private working directory and log, leaving
+the cached builder unchanged. Operator-supplied build commands keep their
+configured working directory. `tools/start-compose-server.sh` runs it for you; set
 `IRIS_SKIP_XR=1` only on a deployment that is certain to have no XR devices;
 a proof of concept leaves it unset and builds the RPM with everything else.
 Run the builder directly when rebuilding later:
@@ -1273,8 +1302,11 @@ mean:
   remaining, so a 30-day certificate gives about three weeks before it must be
   re-signed with the same root.
 
-`enabled: true` with `signing_refused: false` is what says onboarding will
-stamp.
+Do not treat `enabled: true` and `signing_refused: false` alone as readiness:
+`state: invalid` or `state: error` still requires investigation. Read the whole
+status, confirm the producer is initialized, and verify a fresh onboard job.
+The example's missing keylist and degraded custody are PoC limitations, not
+production trust readiness.
 
 ## Verify the deployment
 

@@ -323,6 +323,43 @@ def test_post_activation_admission_requires_both_frozen_times(tmp_path):
                            _record(created_at=created))
 
 
+def test_active_admission_readd_preserves_epoch_and_serial_history(tmp_path):
+    paths, fleet, cat, producer, marker, *_ = _setup(tmp_path)
+    producer.stamp_device("device-1")
+    first = _raw_stamp(cat)
+    new_registration = NOW + 100
+    fleet.rows["device-1"] = dict(
+        fleet.get_device("device-1"), registered_at=new_registration)
+    new_key = _record("02" * 32, created_at=NOW + 101)
+    secrets = secrets_store.load(paths.secrets)
+    secrets["devices"]["device-1"]["instr_key"] = new_key
+    secrets_store.save(secrets, paths.secrets)
+    history_before = stamper._history(paths).get("device-1")
+
+    producer.now = lambda: NOW + 102
+    assert producer.stamp_device("device-1") == "updated"
+
+    current = _raw_stamp(cat)
+    assert current["epoch"] == marker["epoch"]
+    assert current["instr_serial"] == first["instr_serial"] + 1
+    assert current["key_id"] == new_key["key_id"]
+    assert stamper._history(paths).get("device-1")["high_water"] == \
+        history_before["high_water"] + 1
+
+
+def test_active_admission_allows_key_rotation_for_same_registration(tmp_path):
+    paths, fleet, _cat, _producer, marker, *_ = _setup(tmp_path)
+    new_key = _record("02" * 32, created_at=NOW + 1)
+    before = stamper._read_admissions(paths)
+    history_before = stamper._history(paths).get("device-1")
+
+    stamper._admit(paths, marker, "device-1", fleet.get_device("device-1"),
+                   new_key)
+
+    assert stamper._read_admissions(paths) == before
+    assert stamper._history(paths).get("device-1") == history_before
+
+
 def test_initialize_refuses_active_and_recover_advances_epoch(tmp_path):
     paths, fleet, _cat, _producer, marker, *_ = _setup(tmp_path)
     with pytest.raises(stamper.StamperError, match="activation_invalid"):

@@ -28506,7 +28506,8 @@
                   "password": {
                     "type": "string",
                     "format": "password",
-                    "writeOnly": true
+                    "writeOnly": true,
+                    "description": "Required for first configuration or recovery after an interrupted save/clear leaves the destination unconfigured. An absent or empty password keeps the stored secret only when the existing configuration is valid."
                   }
                 },
                 "required": [
@@ -58399,7 +58400,8 @@
                   "password": {
                     "type": "string",
                     "format": "password",
-                    "writeOnly": true
+                    "writeOnly": true,
+                    "description": "Required for first configuration or recovery after an interrupted save/clear leaves the destination unconfigured. An absent or empty password keeps the stored secret only when the existing configuration is valid."
                   }
                 },
                 "required": [

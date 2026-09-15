@@ -60,8 +60,8 @@ setup() {
 }
 
 @test "stale RPMS cannot satisfy a failed appmgr build" {
-  grep -q 'rm -rf "\$APPMGR_BUILD_DIR/RPMS"' "$HELPER"
-  grep -q "find .*RPMS.*-name '\*.rpm'" "$HELPER"
+  grep -q 'rm -rf -- "\$RPM_OUTPUT_DIR"' "$HELPER"
+  grep -q 'find "\$RPM_OUTPUT_DIR" -type f -name' "$HELPER"
   grep -q 'did not produce an RPM' "$HELPER"
 }
 
@@ -237,6 +237,11 @@ STUB
 
 @test "behavior: pinned appmgr gets a private RPM log without modifying the cached builder" {
   _xr_stub_setup
+  mkdir -p "$APPMGR_DIR/iris-src/config" "$APPMGR_DIR/RPMS"
+  printf 'cached build config\n' > "$APPMGR_DIR/build.yaml"
+  printf 'cached source\n' > "$APPMGR_DIR/iris-src/config/keep.conf"
+  printf 'cached rpm\n' > "$APPMGR_DIR/RPMS/keep.rpm"
+  printf 'cached log\n' > "$APPMGR_DIR/.iris-appmgr-build.log"
   cat > "$APPMGR_DIR/appmgr_build" <<'STUB'
 #!/usr/bin/env python3
 from pathlib import Path
@@ -265,6 +270,8 @@ def main():
 main()
 STUB
   chmod +x "$APPMGR_DIR/appmgr_build"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPMGR_DIR/build_rpm.sh"
+  chmod +x "$APPMGR_DIR/build_rpm.sh"
   before="$(sha256sum "$APPMGR_DIR/appmgr_build" | awk '{print $1}')"
   private_tmp="$BATS_TEST_TMPDIR/tmp with 'quote"
   mkdir -p "$private_tmp"
@@ -274,6 +281,105 @@ STUB
   [[ "$output" != *"/tmp/rpmbuild.log"* ]]
   [ "$(sha256sum "$APPMGR_DIR/appmgr_build" | awk '{print $1}')" = "$before" ]
   [ "$(cat "$OUT_DIR/iris-xr.rpm")" = "private-log-test-rpm" ]
+  [ "$(cat "$APPMGR_DIR/build.yaml")" = "cached build config" ]
+  [ "$(cat "$APPMGR_DIR/iris-src/config/keep.conf")" = "cached source" ]
+  [ "$(cat "$APPMGR_DIR/RPMS/keep.rpm")" = "cached rpm" ]
+  [ "$(cat "$APPMGR_DIR/.iris-appmgr-build.log")" = "cached log" ]
+}
+
+@test "behavior: private pinned appmgr runs where its spec and build_rpm paths resolve" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'STUB'
+#!/usr/bin/env python3
+from pathlib import Path
+import subprocess
+
+def main():
+    root = Path(__file__).resolve().parent
+    spec = root / "build" / "specs" / "iris-xr.spec"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text("test spec\n")
+    command = [
+        "./build_rpm.sh",
+        "--spec-file", "./build/specs/iris-xr.spec",
+        "--source-dir", "build/archives/SOURCES",
+        "--rpm-dir", "build/archives/RPMS",
+        "--output-dir", "RPMS",
+        "--verbose",
+    ]
+    print("APP-MGR-CWD=" + str(Path.cwd()) + " ROOT=" + str(root))
+    if Path.cwd() != root:
+        raise SystemExit("APP-MGR-CWD-MISMATCH")
+    subprocess.run(command, check=True)
+
+main()
+STUB
+  cat > "$APPMGR_DIR/build_rpm.sh" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+spec=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--spec-file" ]; then spec="$2"; shift 2; else shift; fi
+done
+[ -f "$spec" ] || { echo "SPEC-MISSING:$PWD/$spec" >&2; exit 44; }
+mkdir -p RPMS
+printf 'cwd-bound rpm bytes\n' > RPMS/iris-xr-cwd-test.rpm
+echo "SPEC-OK:$PWD/$spec"
+STUB
+  chmod +x "$APPMGR_DIR/appmgr_build" "$APPMGR_DIR/build_rpm.sh"
+
+  _run_real_default
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"APP-MGR-CWD="*" ROOT="* ]]
+  [[ "$output" != *"APP-MGR-CWD-MISMATCH"* ]]
+  [[ "$output" == *"SPEC-OK:"*"/build/specs/iris-xr.spec"* ]]
+  [ "$(cat "$OUT_DIR/iris-xr.rpm")" = "cwd-bound rpm bytes" ]
+}
+
+@test "behavior: pinned appmgr failure prints its private detailed RPM log" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'STUB'
+#!/usr/bin/env python3
+from pathlib import Path
+import subprocess
+
+def main():
+    root = Path(__file__).resolve().parent
+    spec = root / "build" / "specs" / "iris-xr.spec"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text("test spec\n")
+    command = [
+        "./build_rpm.sh",
+        "--spec-file", "./build/specs/iris-xr.spec",
+        "--source-dir", "build/archives/SOURCES",
+        "--rpm-dir", "build/archives/RPMS",
+        "--output-dir", "RPMS",
+        "--verbose",
+    ]
+    subprocess.run(command)
+    print("Done building package iris-xr")
+
+main()
+STUB
+  cat > "$APPMGR_DIR/build_rpm.sh" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+log=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--log-file" ]; then log="$2"; shift 2; else shift; fi
+done
+printf 'RPBUILD-DETAIL: expected synthetic failure\n' > "$log"
+exit 1
+STUB
+  chmod +x "$APPMGR_DIR/appmgr_build" "$APPMGR_DIR/build_rpm.sh"
+
+  _run_real_default
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"did not produce an RPM"* ]]
+  [[ "$output" == *"RPBUILD-DETAIL: expected synthetic failure"* ]]
+  [ ! -e "$OUT_DIR/iris-xr.rpm" ]
 }
 
 @test "behavior: nonempty APPMGR_BUILD_DIR without a builder is preserved and refused" {

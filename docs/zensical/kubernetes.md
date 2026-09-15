@@ -381,6 +381,7 @@ a valid credential file, and the presence of its management CA file, not
 server availability; the independent
 `iris-console-tls` identity lets it start while the server is cold. API
 requests arriving while server is down get a redacted 503 with `Retry-After`.
+Silent transport failures can wait for the Console's 60-second upstream timeout.
 
 After a rollout, verify an authenticated Console API request before starting
 device jobs. Allow Service routing and the server connection to settle; pod

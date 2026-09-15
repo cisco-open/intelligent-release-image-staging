@@ -5456,6 +5456,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             env_enabled = telemetry.observability_enabled()
             override = (dest["endpoint"] is not None
                         or dest["enabled"] is not None)
+            audit_cfg, audit_secret = audit_export.read_configuration(
+                audit_export.settings_path(state_dir),
+                creds.audit_export_secrets if creds is not None else None)
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),
@@ -5472,11 +5475,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                              "idle_ttl_minutes": app.idle_ttl_minutes()},
                 # settings file verbatim (it holds no secret) + password_set —
                 # the SCP password itself never leaves the encrypted store
-                "audit_export": dict(
-                    audit_export.read_settings(
-                        audit_export.settings_path(state_dir)),
-                    password_set=(creds.audit_export_secrets() is not None
-                                  if creds is not None else False)),
+                "audit_export": dict(audit_cfg, password_set=audit_secret is not None),
                 # console cert metadata only — key material is never echoed
                 "gui_cert": gui_tls.active_info(),
                 # installed root CAs: name/subject/expiry/fingerprint/source
@@ -6397,9 +6396,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if creds is None:
                     self._json(404, {"error": "not found"}); return
                 state = os.environ.get("IRIS_STATE", "/var/lib/iris")
-                cfg = audit_export.read_settings(
-                    audit_export.settings_path(state))
-                secret = creds.audit_export_secrets()
+                cfg, secret = audit_export.read_configuration(
+                    audit_export.settings_path(state), creds.audit_export_secrets)
                 if audit_export.validate_settings(cfg) is not None \
                         or secret is None:
                     self._json(409, {"error": "audit export not configured"})
@@ -6448,22 +6446,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
                 try:
-                    # the settings lock covers the whole read-modify-write:
-                    # an export finishing mid-save (_record_result) must not
-                    # clobber this edit, nor this edit its result
-                    with audit_export.SETTINGS_LOCK:
-                        prev = audit_export.read_settings(spath)
-                        # the destination changed, not the run history: keep it
-                        candidate["last_run_ts"] = prev["last_run_ts"]
-                        candidate["last_result"] = prev["last_result"]
-                        audit_export.write_settings(spath, candidate)
-                    if password:    # absent/empty keeps the stored password
-                        creds.set_audit_export_secret(password)
-                except Exception as exc:
+                    prev = audit_export.save_configuration(
+                        spath, candidate, password, creds.set_audit_export_secret)
+                except audit_export.ConfigurationPasswordRequired as exc:
+                    self._json(400, {"error": str(exc)}); return
+                except audit_export.ConfigurationSaveError as exc:
                     self._audit("audit_export_config", "settings", action="set",
                                target="audit-export", actor=actor, result="fail",
-                               detail="persist failed: %s" % exc.__class__.__name__)
-                    self._json(500, {"error": "settings save failed"}); return
+                               detail="persist failed; export %s" %
+                                      ("disabled" if exc.disabled else "state must be checked"))
+                    message = ("settings save failed; audit export is disabled. "
+                               "Reload settings, re-enter the destination and password, "
+                               "then save again" if exc.disabled else
+                               "settings save failed; reload settings before retrying")
+                    # The generic 5xx adapter deliberately redacts error text;
+                    # this fixed, non-secret recovery detail is safe to retain.
+                    self._json(500, {"error": "settings save failed", "detail": message}); return
                 # destination coordinates are non-secret; the password only
                 # ever audits as a flag
                 self._audit("audit_export_config", "settings", action="set",
@@ -7289,11 +7287,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
                 # under the settings lock so an export finishing mid-delete
                 # (_record_result) cannot resurrect the file we just removed
-                with audit_export.SETTINGS_LOCK:
-                    prev = audit_export.read_settings(spath)
-                    existed = os.path.exists(spath)
-                    audit_export.clear_settings(spath)
-                deleted = creds.clear_audit_export_secret() or existed
+                disabled = False
+                try:
+                    with audit_export.SETTINGS_LOCK:
+                        prev = audit_export.read_settings(spath)
+                        existed = os.path.exists(spath)
+                        audit_export.clear_settings(spath)
+                        disabled = True
+                        deleted = creds.clear_audit_export_secret() or existed
+                except Exception:
+                    message = ("audit export is disabled, but stored password cleanup "
+                               "failed. Reload settings and retry clearing the configuration"
+                               if disabled else
+                               "settings clear failed; reload settings before retrying")
+                    self._audit("audit_export_config", "settings", action="clear",
+                               target="audit-export", actor=actor, result="fail",
+                               detail=message)
+                    self._json(500, {"error": "settings clear failed", "detail": message})
+                    return
                 self._audit("audit_export_config", "settings", action="clear",
                            target="audit-export", actor=actor,
                            detail=(("cleared (was %s@%s:%s)"

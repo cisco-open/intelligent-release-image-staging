@@ -1859,6 +1859,12 @@ def _request_body(route):
         schema["properties"]["endpoint"]["format"] = "uri"
     elif suffix == "/settings/ca-trust":
         schema["properties"]["url"]["format"] = "uri"
+    elif suffix == "/settings/audit-export":
+        schema["properties"]["password"]["description"] = (
+            "Required for first configuration or recovery after an interrupted "
+            "save/clear leaves the destination unconfigured. An absent or empty "
+            "password keeps the stored secret only when the existing "
+            "configuration is valid.")
     elif suffix == "/devices/{device_id}/assign":
         singular = {"image_id": "image-01", "expect_image_ids": []}
         schema["properties"]["image_id"] = {"type": ["string", "null"]}

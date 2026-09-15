@@ -249,7 +249,8 @@ iris_console ps
 The Console can start before the server. It validates and loads its local
 browser certificate when the server is unavailable. API requests return a
 redacted `503` with `Retry-After` while the management connection is down;
-Console readiness checks its own listener and required local files. A TLS
+silent transport failures can wait for the Console's 60-second upstream
+timeout. Console readiness checks its own listener and required local files. A TLS
 verification failure, rejected credential, or malformed management response
 is not permission to bypass authentication.
 

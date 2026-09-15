@@ -365,7 +365,7 @@ catalog token cannot call management operations.
 | `GET /api/v1/settings/ca-trust/refresh/<id>` | `{state, detail, certs}` — `running`, `done`, or `failed`. |
 | `POST /api/v1/settings/telemetry-destination` | `{endpoint, enabled}` — telemetry destination override, hot-applied by the hub. The endpoint must be an `http`/`https` URL with a host, no query or fragment; a trailing slash is stripped. |
 | `DELETE /api/v1/settings/telemetry-destination` | Removes the override — telemetry reverts to the deployment env defaults. |
-| `POST /api/v1/settings/audit-export` | `{host, port, user, path, age_recipient, auto, password}` — validates and stores the audit-export destination; 400 on any invalid field. An absent or empty `password` keeps the stored one. |
+| `POST /api/v1/settings/audit-export` | `{host, port, user, path, age_recipient, auto, password}` — validates and stores the audit-export destination; 400 on any invalid field. A password is required for first configuration or recovery from an interrupted save/clear. An absent or empty `password` keeps the stored one only when the existing configuration is valid. |
 | `DELETE /api/v1/settings/audit-export` | `{deleted: <bool>}` — clears the destination and the stored password. |
 | `POST /api/v1/settings/audit-export/run` | Starts one export job; returns `{job_id}`. 409 when the export is not fully configured (invalid or absent destination, or no stored password). |
 | `GET /api/v1/settings/audit-export/run/<id>` | `{state, detail}` — `running`, `done`, or `error`; `detail` is the uploaded filename or the failure reason. Jobs are in-memory, so a restart forgets them (404). |

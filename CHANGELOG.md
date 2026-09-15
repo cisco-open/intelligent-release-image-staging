@@ -13,8 +13,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ### Added
 - Reject incomplete Bulk Hash downloads before replacing a cached file when
-  the body disagrees with its declared size. Isolate the pinned XR RPM
-  builder's log per invocation, avoiding collisions with another user's build.
+  the body disagrees with its declared size. Build XR RPMs in a private directory
+  to prevent log collisions and missing specification files.
 - API quality checks cover shared-admission HTTP 429 responses in the generated
   OpenAPI contract. The reusable API harness rejects credential-bearing or
   ambiguous base URLs before requests or report generation, and ships with
@@ -119,6 +119,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- Reject a login if administrator credentials change during password verification.
+- Keep audit-export destinations and passwords consistent during saves.
+  Interrupted updates disable exports until a complete retry; an unconfigured
+  destination requires the password to be entered again.
+- Refuse symlinked, non-regular or changing local instruction-cache and keylist
+  files without blocking the agent on a FIFO.
+- Correct AI-guide checkout ownership, detached-build paths and custody-readiness
+  guidance; add concise recovery steps for interrupted audit-export saves.
 - IOx checks recognized device UTC/GMT clocks against artifact-certificate
   validity before replacing its trustpoint, with an actionable clock/renewal
   error instead of a later opaque IOS certificate-import failure.

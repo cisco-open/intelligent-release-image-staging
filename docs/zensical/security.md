@@ -290,7 +290,8 @@ per-device audience context; a deterministic
 HMAC-SHA-256 counter keystream encrypts the private device part. A separate
 HMAC authenticates the PAE-bound envelope, including header, signed role body,
 nonce and ciphertext. MAC-before-decrypt prevents unauthenticated plaintext
-from reaching the policy parser. This construction is not AES-GCM.
+from reaching the policy parser. This construction is not AES-GCM. Functional
+tests do not replace an independent review of the cryptography and key lifecycle.
 
 The agent verifies the OpenSSH role signature and envelope MAC before
 decrypting or applying either part. It also checks the signer revocation list,
