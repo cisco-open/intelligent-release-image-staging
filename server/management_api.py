@@ -29,7 +29,6 @@ import tempfile
 import threading
 import time
 import traceback
-import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, parse_qs, urlsplit
@@ -3544,8 +3543,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 raise ValueError("unknown management type")
             platform = gui_onboard.resolve_platform(device)
             router_management_type = management_type in ("router-routed", "router-nat")
-            if device.get("model") and re.match(
-                    r"^C8[0-9]{3}", device["model"], re.IGNORECASE) \
+            if device.get("model") and gui_onboard.family(device["model"]) == "C8xxx" \
                     and not router_management_type:
                 raise ValueError("Catalyst 8000 models require management_type "
                                  "router-routed or router-nat")
@@ -3558,8 +3556,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if router_management_type and platform not in ("router", "iox"):
                 raise ValueError("management_type %s requires platform router "
                                  "or iox" % management_type)
-            if platform == "router" and device.get("model") and not re.match(
-                    r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
+            if platform == "router" and device.get("model") and gui_onboard.family(device["model"]) != "C8xxx":
                 raise ValueError("router modes support the Catalyst 8000 family only; "
                                  "%s is not yet supported" % device["model"])
             # xr-host <-> xr-appmgr is mutually required (gui_fleet.validate_record
@@ -6075,7 +6072,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="rejected: %s" % exc)
                 self._json(400, {"error": str(exc)})
                 return
-            except (TimeoutError, ConnectionError) as exc:
+            except (TimeoutError, ConnectionError):
                 self._json(408, {"error": "upload timed out or connection dropped"})
                 return
             job_id = images.start_publish(image_path)

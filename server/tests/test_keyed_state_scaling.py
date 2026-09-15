@@ -1077,6 +1077,39 @@ def test_opt_in_snapshot_cache_returns_defensive_copies(tmp_path):
     assert store.snapshot() == {"edge-a": {"nested": {"value": [1, 2]}}}
 
 
+def test_flat_snapshot_cache_copies_both_dict_levels_without_deepcopy(
+        tmp_path, monkeypatch):
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"),
+                                   cache_snapshots=True)
+    expected = {"model": "NCS", "count": 7, "rate": 1.5,
+                "ready": False, "optional": None}
+    store.put("edge-a", expected)
+
+    def unexpected_deepcopy(*args, **kwargs):
+        pytest.fail("Flat JSON snapshot should not recursively copy scalars")
+
+    monkeypatch.setattr(keyed_state.copy, "deepcopy", unexpected_deepcopy)
+    cold = store.snapshot()
+    cold["edge-a"]["model"] = "changed-cold"
+    warm = store.snapshot()
+    assert warm == {"edge-a": expected}
+    warm["edge-a"]["count"] = -1
+    warm["extra"] = {}
+    assert store.snapshot() == {"edge-a": expected}
+
+
+def test_snapshot_copy_falls_back_for_nested_and_non_json_values():
+    shared = {"values": [1, {"two": 2}]}
+    rows = {"a": shared, "b": shared, "c": {"set": {3}}}
+    copied = keyed_state._copy_snapshot_rows(rows)
+    assert copied == rows
+    assert copied["a"] is copied["b"]
+    copied["a"]["values"][1]["two"] = 9
+    copied["c"]["set"].add(4)
+    assert rows["a"]["values"][1]["two"] == 2
+    assert rows["c"]["set"] == {3}
+
+
 def test_opt_in_snapshot_cache_invalidates_on_chmod_and_fails_closed_on_corruption(
         tmp_path, monkeypatch):
     path = str(tmp_path / "fleet.json")
@@ -1132,6 +1165,34 @@ def test_opt_in_snapshot_cache_tracks_shard_deletion_and_recreation(tmp_path):
     assert first.snapshot() == {"edge-a": {"value": 2}}
 
 
+@pytest.mark.parametrize("replacement", ["2", "x"])
+def test_snapshot_cache_checks_content_when_all_stat_fields_collide(
+        tmp_path, monkeypatch, replacement):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    shard = Path(store._shard_path(keyed_state.bucket_of("edge-a")))
+    frozen = shard.stat()
+    original_stat = keyed_state.os.stat
+    original_text = shard.read_text()
+    updated = original_text.replace('"value": 1', '"value": ' + replacement)
+    assert len(updated) == len(original_text)
+    shard.write_text(updated)
+
+    def colliding_stat(filename, *args, **kwargs):
+        if os.fspath(filename) == os.fspath(shard):
+            return frozen
+        return original_stat(filename, *args, **kwargs)
+
+    monkeypatch.setattr(keyed_state.os, "stat", colliding_stat)
+    if replacement == "x":
+        with pytest.raises(keyed_state.KeyedStateError):
+            store.snapshot()
+    else:
+        assert store.snapshot() == {"edge-a": {"value": 2}}
+
+
 def test_opt_in_snapshot_cache_is_safe_under_concurrent_reads_and_updates(
         tmp_path):
     from concurrent.futures import ThreadPoolExecutor
@@ -1157,6 +1218,31 @@ def test_opt_in_snapshot_cache_is_safe_under_concurrent_reads_and_updates(
         for future in futures:
             future.result()
     assert reader.snapshot() == {"edge-a": {"nested": {"value": 30}}}
+
+
+def test_snapshot_cache_reopens_current_content_and_refuses_lost_read_access(
+        tmp_path, monkeypatch):
+    import builtins
+
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"),
+                                   cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    bucket = keyed_state.bucket_of("edge-a")
+    shard = store._shard_path(bucket)
+    original_open = builtins.open
+
+    def denied(filename, *args, **kwargs):
+        if os.fspath(filename) == shard:
+            raise PermissionError("fixture denies the cached shard")
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", denied)
+        with pytest.raises(keyed_state.KeyedStateError):
+            store.snapshot()
+    assert bucket not in store._snapshot_cache
+    assert store.snapshot() == {"edge-a": {"value": 1}}
 
 
 def test_snapshot_cache_is_disabled_by_default(tmp_path, monkeypatch):

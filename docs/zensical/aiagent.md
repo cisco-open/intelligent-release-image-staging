@@ -17,9 +17,10 @@ reloads, or changes boot variables. See [Guardrails](security.md#guardrails).
 
 ## If you are the assistant, start here
 
-Ask the operator these four questions in one message and wait for the answers
-before running anything. Do not guess a layout, and do not start a Docker
-deployment because it is the default:
+Confirm these four decisions. Reuse answers already supplied and verified
+deployment settings; ask only for missing information, in one message, before
+changing the installation. Do not guess a layout or choose Docker just because
+it is the default:
 
 1. **Where should the deployment live?** Offer
    `/opt/iris/intelligent-release-image-staging` as the default. You create
@@ -29,13 +30,17 @@ deployment because it is the default:
    Kubernetes ask for the cluster context and a registry the nodes can pull
    from.
 3. **Which device types will be onboarded** — Guest Shell, IOx on amd64
-   (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
-   IOS-XR appmgr, or none yet? A proof of concept builds the Guest Shell
+   (Catalyst Switches, Catalyst Routers), IOx on arm64 (IE Switches / IR Routers),
+   IOS-XR appmgr, or none yet? A device-onboarding proof of concept builds the Guest Shell
    bundle, the amd64 IOx package and the XR RPM whatever the answer, and adds
-   the arm64 IOx package when an IE-3x00 device is in scope — that one alone
-   carries an emulated build.
+   the arm64 IOx package when an ARM device or package is requested. Respect
+   an explicit request to skip an architecture. Use the
+   [ARM64 package procedure](#build-and-publish-the-arm64-iox-package) below;
+   do not confuse packaging with compiling the ARM transfer binary.
    [Supply the handed-in inputs](#supply-the-handed-in-inputs) is the
    assistant's own work, not the operator's.
+   For API or infrastructure-only validation, skip device-package builds and
+   onboarding; report those checks as not performed.
 4. **The server's device-reachable IPv4 address**, and the Console URL if it
    is not that address on port 8080.
 
@@ -43,6 +48,11 @@ Repeat the answers back, then [check the host](#check-the-host-first) and say
 what it is missing before installing anything. Follow this guide within the
 chosen layout and the full
 [Assistant operating rules](#assistant-operating-rules).
+
+When validating an existing installation, retain its Compose project, volumes,
+age identity, approved instruction roots and configured administrator. An old
+Kubernetes PVC can have a different administrator from a Docker installation;
+use that deployment's protected credential record, not repeated password guesses.
 
 ## Before you start
 
@@ -107,7 +117,7 @@ changing the host. Nothing here installs itself.
 | Everything | `docker version`, `docker compose version`, `docker buildx version` | `docker.io` plus the Compose plugin, or Docker's own repository |
 | Everything | `id -nG \| grep -w docker` | membership in `docker`, or every command needs `sudo` |
 | Encrypted server state | `command -v age age-keygen` | `age` |
-| The two roots, checksums | `command -v git curl ssh-keygen sha256sum` | normally already installed |
+| Package tools and checksums | `command -v git curl ssh-keygen sha256sum file python3 tar` | `git`, `curl`, `openssh-client`, `coreutils`, `file`, `python3`, `tar` |
 | The arm64 IOx package, and building the arm64 client yourself | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
 | IOx and IOS-XR packaging | `command -v skopeo` | `skopeo` |
 | The IOS-XR appmgr RPM | `command -v rpmbuild` | `rpm` |
@@ -152,6 +162,40 @@ compile. Only a host that cannot reach the release falls back to building the
 client, and that fallback is the expensive one: emulated, tens of minutes,
 every core busy. If the fetch fails, say so and ask before falling back to it.
 
+## Verify time before deployment
+
+Run `bash tools/check-host-time.sh` **on each Docker host** (both hosts for a
+split deployment) and **every Kubernetes node eligible to run either IRIS pod**.
+Stop if it fails. Configure the host's approved NTP service outside IRIS, then
+verify its selected peer with `chronyc tracking` / `chronyc sources -v`, or
+`timedatectl timesync-status`. An enabled service is not proof of synchronization.
+The Compose startup helper runs this check; direct Compose and Kubernetes
+deployment require this explicit operator check before starting services.
+
+Linux containers share their node's wall clock; setting a timezone does not
+synchronize it. Do not run NTP inside IRIS or grant `SYS_TIME` / privileged mode.
+After startup, compare `date -u +%s` on the node and inside each container/pod;
+allow for command latency. Matching times prove inheritance, **not** NTP health.
+Recheck nodes after rescheduling and monitor host synchronization continuously;
+a passing preflight is not a permanent time-accuracy guarantee.
+
+All switches and routers must report a synchronized external NTP reference in
+`show ntp status` before onboarding. A configured server, manually set clock,
+local NTP master, or unsynchronized stratum 16 does not pass. Onboarding checks
+this read-only before changing the IRIS app or trust. IRIS never selects or
+configures a time server; keep site-specific addresses out of IRIS configuration.
+See [time troubleshooting](troubleshooting.md#time-synchronization).
+
+A host NTP relay requires explicit operator approval. Keep it outside the IRIS
+containers, restrict its client access, and verify upstream and device
+synchronization separately. Never silently turn the IRIS host into a time server.
+
+The single-host default Console identity now persists encrypted in the server's
+config volume; ordinary restarts keep the same certificate. An upgrade from
+the former ephemeral default changes it once. Pin its public certificate through
+a trusted channel, or provision an operator certificate in Settings. Never copy
+the encrypted identity, age key, or server config volume to a split Console host.
+
 ## Supply the handed-in inputs
 
 A fresh clone lacks these inputs deliberately, and
@@ -159,39 +203,52 @@ A fresh clone lacks these inputs deliberately, and
 anything. Do not treat that list as a broken checkout and do not invent a
 seeder binary or a trust anchor.
 
-Do every step below yourself except step 4, the trust roots, which only the
-operator creates. In a proof of concept prepare all of them and build every
-device package: an unbuilt package reports **Needs rebuild** in Console
-**Settings -> Device packages** and its device type cannot be onboarded.
+Do the applicable steps yourself except step 4, the trust roots, which only
+the operator creates. Reuse existing approved roots for an existing deployment.
+An unbuilt package prevents onboarding its device type; a package explicitly
+excluded by the operator is not a failed deployment.
 
 Supply what the device types in scope need:
 
 | What you will onboard | Supply first |
 | --- | --- |
 | Server and Console only, no devices yet | `aria2c` amd64 |
-| Guest Shell (Catalyst 9300, Catalyst 8000V) | `aria2c` amd64 |
-| IOx on amd64 (Catalyst 9300, Catalyst 8000V) | `aria2c` amd64, `ioxclient`, the two roots |
-| IOx on arm64 (IE-3400 and other IE-3x00) | the amd64 set, plus `aria2c` arm64 and ARM64 emulation |
+| Guest Shell (Catalyst Switches / Catalyst Routers) | `aria2c` amd64, the two roots |
+| IOx on amd64 (Catalyst Switches / Catalyst Routers) | `aria2c` amd64, `ioxclient`, the two roots; select amd64-only platforms if excluding ARM |
+| IOx on arm64 (IE Switches / IR Routers) | the amd64 set, plus `aria2c` arm64 and ARM64 emulation |
 | IOS-XR appmgr | `aria2c` amd64, the two roots, Docker and network for the pinned appmgr builder |
 
-Every device type is reachable from a clean Ubuntu Docker host with these
-steps. Work through the ones your table row names, in order.
+The default canonical image includes both architectures, including for an XR
+wrapper. Supply both clients and ARM emulation unless explicitly selecting
+`IRIS_DEVICE_PLATFORMS=linux/amd64` in step 1. These series labels group
+supported targets; they do not claim every model supports every installer.
 
 ### 1. The `aria2c` client — every deployment
 
-`server/Dockerfile` copies `bin/aria2c` into the server image, so no stack
-builds without it. Install both architectures:
+`server/Dockerfile` copies the amd64 `bin/aria2c` into the server image. For
+ARM IOx or a full package set, run:
 
 ```bash
+export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
 tools/get-aria2c.sh amd64
 tools/get-aria2c.sh --no-install arm64
 ```
 
 The helper fetches this project's published deliverable, refuses anything that
 does not match `tools/aria2c.sha256`, and keeps a verified copy in
-`deliverables/`, where the device-package builders look. Take the second line
-only when an IE-3400 or other IE-3x00 device is in scope; nothing else uses
-that architecture.
+`deliverables/`, where the device-package builders look. Both binaries are
+needed by the default shared OCI build, even if the requested wrapper is only
+amd64. **`--arch` selects the wrapper; `IRIS_DEVICE_PLATFORMS` selects which
+images are built.** For an explicitly amd64-only package set, instead use:
+
+```bash
+export IRIS_DEVICE_PLATFORMS=linux/amd64
+tools/get-aria2c.sh amd64
+```
+
+Build variables belong in the package-build shell, not just a Compose env file
+or Kubernetes ConfigMap. An amd64-only canonical archive cannot produce an ARM
+wrapper. The server and Console images remain amd64 in either case.
 
 `bin/` holds one client, the x86_64 one `server/Dockerfile` copies into the
 server image, so `--no-install` collects the arm64 deliverable without
@@ -312,7 +369,12 @@ grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
 
 If that prints nothing, the simplest fix is your distribution's static QEMU
 package (`qemu-user-static` on Ubuntu and Debian), then run the check again.
-That needs no digest and no privileged container.
+Installation alone is not proof that a handler was registered. Inspect the
+handler and require `enabled` and an `F` flag; see Docker's
+[emulation prerequisites](https://docs.docker.com/build/building/multi-platform/#install-qemu-manually).
+The staging helper checks the host handler even when BuildKit has its own
+emulator. Run these checks on the host where the Docker daemon builds packages,
+not on the Console host or a Kubernetes worker selected at random.
 
 Otherwise the builders register the handler themselves, and require an audited
 `tonistiigi/binfmt` digest rather than pulling a floating tag. Review the tag
@@ -327,6 +389,20 @@ export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
 With the digest unset the build fails closed instead of pulling an unpinned
 image.
 
+Use a Buildx builder supporting multi-platform OCI export. Reuse an approved
+one, or, after approval, create a dedicated `docker-container` builder:
+
+```bash
+docker buildx create --name iris-device-builder --driver docker-container
+export BUILDX_BUILDER=iris-device-builder
+docker buildx inspect --bootstrap "$BUILDX_BUILDER"
+```
+
+If that name already exists, inspect it rather than recreating it. Confirm its
+platform list includes `linux/amd64` and `linux/arm64`. IRIS exports an OCI
+archive; do not substitute `--load` or assume the default Docker driver can
+export it. See [OCI exporters](https://docs.docker.com/build/exporters/oci-docker/).
+
 ### 4. The two instruction trust roots — every device package
 
 Every device package embeds exactly two public roots, and the build fails
@@ -335,30 +411,17 @@ instructions, so **no installer and no assistant creates them.** The operator
 pastes one line. An assistant hands over the line for the chosen layout and
 waits.
 
-Each line creates both keypairs, keeps the private halves in `~/iris-custody`,
-and leaves `~/iris-roots` holding the two public keys and nothing else — which
-is what the builders require. Answer each passphrase prompt with a real
-passphrase: these are signing keys. The last command prints the directory, and
-`root-a.pub  root-b.pub` is the expected output.
+For an existing installation, obtain the **existing approved public pair**
+from its custodian. Do not generate new roots, overwrite custody files, or
+clear a roots directory to repair a build. Put exactly those two `.pub` files
+in `$HOME/iris-roots` on the package build host: the single Docker host, the
+split deployment's **server** host, or the Kubernetes build host. The Console
+host needs no instruction roots.
 
-**Docker on one host** — run it on that host:
-
-```bash
-install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
-```
-
-**Docker on separate hosts** — run the same line on the **server** host, which
-builds the packages. The Console host needs no roots at all:
-
-```bash
-install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
-```
-
-**Kubernetes** — run it on the host that builds device packages:
-
-```bash
-install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
-```
+For a new proof of concept only, have the operator use [Prepare instruction
+trust](getting-started.md#prepare-instruction-trust) to create and supply the
+public pair. Private signing keys remain with the operator. Confirm the two
+file names and fingerprints before building; never substitute a different pair.
 
 Kubernetes needs one more line, because the server reads the roots from its own
 storage as well. Run it once the server pod is up, and expect the same two
@@ -371,8 +434,8 @@ for r in root-a root-b; do kubectl -n iris exec -i deployment/iris-seed-server -
 Never generate roots inside the pod, and never copy a private root there.
 
 A directory holding anything but the two public keys is refused with `must hold
-exactly two public roots (*.pub)` before anything is built; the `rm -rf` in the
-line above is what keeps a second run from leaving a third file behind. Every
+exactly two public roots (*.pub)` before anything is built. Stop and ask the
+custodian to resolve extra files rather than deleting them. Every
 builder in this guide is passed `IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"`,
 so there is nothing further to configure.
 
@@ -391,7 +454,10 @@ requires. Certificates, rotation and revocation are in the
 `tools/build-xr-package.sh` wraps the canonical device image as an appmgr RPM.
 It clones Cisco's `ios-xr/xr-appmgr-build` at a pinned commit into
 `~/.cache/iris/xr-appmgr-build` on first use, so that step needs Docker and
-network access. `tools/start-compose-server.sh` runs it for you; set
+network access. The helper leaves that checkout unchanged: it runs a private
+per-build copy of the pinned entry point, including its release configuration,
+and directs RPM output logs into that build's temporary directory rather than
+the builder's shared `/tmp/rpmbuild.log`. `tools/start-compose-server.sh` runs it for you; set
 `IRIS_SKIP_XR=1` only on a deployment that is certain to have no XR devices;
 a proof of concept leaves it unset and builds the RPM with everything else.
 Run the builder directly when rebuilding later:
@@ -400,12 +466,12 @@ Run the builder directly when rebuilding later:
 tools/build-xr-package.sh --out artifacts/
 ```
 
-### The shortest path to a first staged image
+### Infrastructure-only preview
 
-This is the quickest possible look at a staged image, not the proof-of-concept
-default: it produces no device package, so **Settings -> Device packages** will
-report every one of them as needing a build. Take it only when that is what the
-operator asked for. It still needs the `aria2c` client of step 1, and no roots:
+This starts the server and Console without device onboarding, not a staged
+image demonstration. Device packages remain absent until the preparation
+above is complete. Use it only when the operator requests an infrastructure
+preview. It still needs the amd64 `aria2c` client of step 1:
 
 ```bash
 docker compose -f server/docker-compose.yml build --pull
@@ -414,8 +480,186 @@ docker compose -f server/docker-compose.yml up -d
 ```
 
 It installs no roots and builds no packages, so instruction custody is not
-configured and IOx and XR devices have nothing to onboard with. Work through
-the steps above before going past a demonstration.
+configured. Guest Shell, IOx and XR onboarding all require the remaining
+package and instruction-custody steps.
+
+## Build and publish the ARM64 IOx package
+
+Use this procedure whenever `iris-arm64.tar` is requested, including IE
+Switches and supported IR Routers. The build is identical for all layouts;
+only the destination changes. It creates an **IRIS agent package**, not a Cisco
+operating-system image, and does not contact or onboard a device.
+
+| Layout | Build here | Publish here |
+| --- | --- | --- |
+| Single Docker host | Server host checkout | That Compose project's server container, `/srv/artifacts` |
+| Separate Docker hosts | Server host checkout, never the Console host | Server container's `/srv/artifacts` bind mount |
+| Kubernetes | Approved amd64 Docker build host, outside the pods | Server pod's PVC at `/data/artifacts`, never the Console pod |
+
+### Build once on the package host
+
+Complete the [host checks](#check-the-host-first),
+[emulation and builder setup](#3-arm64-emulation-for-anything-arm64-on-an-amd64-host),
+and [public-root preparation](#4-the-two-instruction-trust-roots-every-device-package)
+first. Keep the operator's existing roots; never regenerate them to repair a
+package build. Run from the selected IRIS checkout, in the same shell:
+
+```bash
+tools/get-aria2c.sh amd64
+tools/get-aria2c.sh --no-install arm64
+tools/get-ioxclient.sh
+file bin/aria2c deliverables/aria2c-aarch64
+
+export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
+export IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"
+export ARIA2C_BIN_AMD64="$PWD/bin/aria2c"
+export ARIA2C_BIN_ARM64="$PWD/deliverables/aria2c-aarch64"
+IRIS_ARM_BUILD_DIR="$(mktemp -d)"
+export IRIS_DEVICE_IMAGE_OCI="$IRIS_ARM_BUILD_DIR/iris-device.oci.tar"
+
+tools/stage-iox-package.sh --arch arm64 \
+  --artifacts-dir "$IRIS_ARM_BUILD_DIR"
+```
+
+Use the approved public-roots path if it differs. `file` must show x86-64 for
+`bin/aria2c` and ARM aarch64 for the second file. If using a verified hand-in
+outside `deliverables/`, point the corresponding `ARIA2C_BIN_*` at that file.
+The helpers still enforce the repository checksum pins. `--no-install` must
+come **before** `arm64`; misplaced or extra arguments are rejected. Older
+checkouts silently ignored a trailing flag and could replace the server binary.
+
+The private build directory avoids writing into a root-owned bind mount and
+avoids overwriting an older canonical OCI. Keep its path in the completion
+record and retain the OCI archive and provenance in approved build storage.
+When building other wrappers in the same run, keep the same roots, platform
+list and `IRIS_DEVICE_IMAGE_OCI` so they select from this exact OCI archive.
+`--arch arm64` produces one IOx wrapper even though the shared OCI contains
+both architectures. `tools/provision-iox-packages.sh` produces both wrappers;
+do not use it when only one was requested.
+
+Require a successful command exit and both output files; do not infer success
+from an image in Docker's cache. Verify the wrapper's bytes and platform:
+
+```bash
+PYTHONPATH="$PWD/server" python3 - "$IRIS_ARM_BUILD_DIR" <<'PY'
+import json, os, sys
+from setup_status import package_readiness
+name = "iris-arm64.tar"
+result = package_readiness(os.path.join(sys.argv[1], name), name,
+                           "iox", "linux/arm64", "rebuild ARM64 IOx")
+print(json.dumps(result))
+sys.exit(0 if result["state"] == "ok" else 1)
+PY
+sha256sum "$IRIS_ARM_BUILD_DIR/iris-arm64.tar" \
+  "$IRIS_ARM_BUILD_DIR/iris-arm64.tar.manifest"
+```
+
+This verifies wrapper/provenance consistency, not a native signature or a live
+device installation. Stop on failure and use the troubleshooting table below.
+
+For a requested full package set, build the other wrappers in the **same
+shell**, keeping that canonical archive and writable output directory:
+
+```bash
+tools/stage-iox-package.sh --arch amd64 --artifacts-dir "$IRIS_ARM_BUILD_DIR"
+tools/build-xr-package.sh --out "$IRIS_ARM_BUILD_DIR"
+```
+
+Publish `iris-amd64.tar` and `iris-xr.rpm`, each with its matching `.manifest`,
+using the same selected-layout procedure below with the filename substituted.
+Do not build directly into an unwritable server-owned artifact directory.
+
+### Publish to either Docker layout
+
+Wait until the selected stack is healthy and no onboarding is fetching this
+package. Resolve the **server** container from the actual project; keep any
+existing `-p`/`--project-name` option. Run only the matching line:
+
+```bash
+# One host, from that host's checkout:
+IRIS_CONTAINER="$(docker compose --env-file server/.env -f server/docker-compose.yml ps -q iris)"
+# Separate hosts, from the SERVER host's checkout:
+IRIS_CONTAINER="$(docker compose --env-file server/server.env -f server/docker-compose.server.yml ps -q iris)"
+```
+
+Confirm the container and served bind mount before publishing. Copy through
+the server container so custom host paths are respected; uid 10001 must be
+able to read the files and write the destination directory.
+The staging helper does **not** load `server.env` to discover those paths.
+
+```bash
+test -n "$IRIS_CONTAINER"
+docker inspect "$IRIS_CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/srv/artifacts"}}{{.Source}}{{end}}{{end}}'
+docker cp "$IRIS_ARM_BUILD_DIR/iris-arm64.tar" "$IRIS_CONTAINER:/srv/artifacts/.iris-arm64.tar.tmp"
+docker cp "$IRIS_ARM_BUILD_DIR/iris-arm64.tar.manifest" "$IRIS_CONTAINER:/srv/artifacts/.iris-arm64.tar.manifest.tmp"
+docker exec "$IRIS_CONTAINER" sh -ec '
+  cd /srv/artifacts
+  test -r .iris-arm64.tar.tmp && test -r .iris-arm64.tar.manifest.tmp
+  rm -f iris-arm64.tar.manifest
+  mv -f .iris-arm64.tar.tmp iris-arm64.tar
+  mv -f .iris-arm64.tar.manifest.tmp iris-arm64.tar.manifest
+  sha256sum iris-arm64.tar iris-arm64.tar.manifest'
+```
+
+The builder produces world-readable, read-only package files (mode `0444`);
+the runtime user verifies readability before publishing. Copied ownership
+can differ from the runtime uid, and does not need changing for these
+immutable, non-secret artifacts. Do not use `docker exec --user 0 chown`:
+the hardened container drops `CAP_CHOWN`, even for uid 0. The runtime user
+renames the files using its write access to the artifact directory. If the
+readability check fails, correct only the two source package files on the
+build host, copy them again, and recheck; do not widen state or secret modes.
+The printed hashes must equal
+the build-host hashes. Removing the old sidecar
+before renaming prevents a new wrapper from being paired with old provenance.
+Only these two package files are replaced; no restart, bootstrap, inventory
+reset, or Console-host copy is needed.
+
+### Publish to Kubernetes
+
+Apply the configured manifests and wait for the server Deployment first. Use
+the chosen context and namespace; the example uses namespace `iris`. Confirm
+there is exactly one ready server pod before assigning its name:
+
+```bash
+kubectl -n iris rollout status deployment/iris-seed-server
+kubectl -n iris get pods -l app.kubernetes.io/name=iris-seed-server
+IRIS_SERVER_POD="$(kubectl -n iris get pods -l app.kubernetes.io/name=iris-seed-server -o jsonpath='{.items[0].metadata.name}')"
+test -n "$IRIS_SERVER_POD"
+kubectl -n iris exec "$IRIS_SERVER_POD" -c iris -- test -w /data/artifacts
+kubectl -n iris cp --no-preserve "$IRIS_ARM_BUILD_DIR/iris-arm64.tar" "$IRIS_SERVER_POD:/data/artifacts/.iris-arm64.tar.tmp" -c iris
+kubectl -n iris cp --no-preserve "$IRIS_ARM_BUILD_DIR/iris-arm64.tar.manifest" "$IRIS_SERVER_POD:/data/artifacts/.iris-arm64.tar.manifest.tmp" -c iris
+kubectl -n iris exec "$IRIS_SERVER_POD" -c iris -- sh -ec '
+  cd /data/artifacts
+  rm -f iris-arm64.tar.manifest
+  mv -f .iris-arm64.tar.tmp iris-arm64.tar
+  mv -f .iris-arm64.tar.manifest.tmp iris-arm64.tar.manifest
+  sha256sum iris-arm64.tar iris-arm64.tar.manifest'
+```
+
+Match both hashes against the build host. Use
+[`kubectl cp --no-preserve`](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cp/)
+so host ownership is not imposed on the non-root pod; it requires `tar` in the
+container. The PVC, not the container image or a ConfigMap, holds the served
+package. Do not build inside the pod or copy a private instruction root there.
+
+### Finish or report the precise blocker
+
+Read **Settings → Device packages** through the selected Console and confirm
+`iris-arm64.tar` is ready. Keep build success, published hash verification,
+package readiness, and live device onboarding as separate results. Do not start
+a device job unless requested.
+
+| Failure | What the assistant should do |
+| --- | --- |
+| Missing `aarch64` client or checksum mismatch | Run the correctly ordered download command. Keep checksum enforcement; never replace a pin to accept an untrusted download. Request a verified hand-in if download is unavailable. Source compilation is an explicitly approved fallback, not part of normal packaging. |
+| Server build says `bin/aria2c` is ARM | Restore it with `tools/get-aria2c.sh amd64`; collect ARM with `--no-install arm64`. |
+| `exec format error`, missing handler, or binfmt digest required | Complete the emulation checks on the build host. Get approval before registering a handler or using a reviewed digest; do not pull an unpinned privileged image. |
+| OCI exporter unsupported or ARM manifest missing | Inspect the selected Buildx builder and set `IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64`. Do not reuse an amd64-only archive. |
+| Existing canonical OCI differs from source | Use the new build directory above; retain the previous archive. Do not blindly force-overwrite it. |
+| Public roots unavailable | Obtain the existing two approved public roots. Do not generate replacements. |
+| Artifact directory not writable or package absent in Console | Build into the private output directory, then publish to the actual server mount/PVC above. Do not change ownership of the entire state tree or copy to the Console. |
+| Package still not ready | Check both published files and hashes, platform `linux/arm64`, and the reported provenance reason. A healthy server alone does not prove package readiness. |
 
 ## Choose the layout
 
@@ -429,7 +673,9 @@ All layouts have one server and one Console instance. Separating the Console
 from the server does not cluster the tracker, catalog, or seeder.
 
 Review [Network ports and flows](network-ports.md). Devices contact the server
-and each other for swarm traffic. The server drives onboarding over SSH/SCP.
+and each other for swarm traffic. The server controls onboarding over SSH;
+devices fetch packages over HTTPS. Some platform-specific image placement
+still uses SCP, as described in [Device agents](device-agents.md).
 Operators contact the Console; they do not need direct management API access.
 
 ### Settings that stop deployment
@@ -442,6 +688,7 @@ Operators contact the Console; they do not need direct management API access.
 | Device SSH host key differs from the saved key | Confirm the device identity before using **Forget SSH host key** in its Console drawer. |
 | Routed Guest Shell needs IS-IS on its new interface | Set the device's `svi_igp=isis`, or the server's `SVI_IGP=isis` default, when that matches the fabric. |
 | IOx staging requests an emulation image digest | Export the audited `BINFMT_IMAGE_DIGEST` on the package-build host, or configure ARM64 emulation there beforehand. |
+| A newly issued artifact certificate is rejected by IOS | Check `show clock detail` against the certificate's validity interval. A device clock only a few minutes behind can precede a new certificate's start date. Use an approved time source or retry when valid; never bypass TLS verification. |
 
 Put server runtime settings such as `IRIS_SSH_LEGACY` and `SVI_IGP` in the
 selected server environment file. For Kubernetes, use
@@ -457,8 +704,9 @@ itself, so the operator does not have to decide everything in advance:
 Operate IRIS as a stage-only system. Never install, activate, reload, change
 boot variables, or replace the running software on a device.
 
-Before running anything, ask the operator these four questions in one message
-and wait for the answers. Do not guess a layout, and do not start a Docker
+Confirm these four decisions using answers already supplied and verified
+settings. Ask only unanswered questions, together, and wait when they block
+safe progress. Do not guess a layout, and do not start a Docker
 deployment because it is the default:
 
 1. Where should the deployment live? Offer
@@ -468,7 +716,7 @@ deployment because it is the default:
    For separate hosts also ask for the Console host, and for Kubernetes ask
    for the cluster context and the registry the nodes can pull from.
 3. Which device types will be onboarded: Guest Shell, IOx on amd64
-   (Catalyst 9300, Catalyst 8000V), IOx on arm64 (IE-3400 and other IE-3x00),
+   (Catalyst Switches / Catalyst Routers), IOx on arm64 (IE Switches / IR Routers),
    IOS-XR appmgr, or none yet? The answer decides which handed-in inputs you
    need; asking later wastes a build.
 4. The server's device-reachable IPv4 address, and the Console URL if it is
@@ -497,7 +745,7 @@ approve, then continue rather than handing the list back.
 
 Before starting the aarch64 aria2c build, work down the list in step 1 of
 "Supply the handed-in inputs". On a fresh host that build has no fast version:
-skip it when no IE-3x00 device is in scope, offer a newer QEMU from a reviewed
+skip it when no ARM device or package is in scope, offer a newer QEMU from a reviewed
 binfmt digest before starting rather than after, then launch it detached and
 leave the cache alone. State that it is the slow path and what it costs: tens
 of minutes with every core busy. Ask once whether any arm64 machine is
@@ -520,15 +768,17 @@ tools/get-aria2c.sh, tools/get-ioxclient.sh, tools/build-xr-package.sh, and
 tools/start-compose-server.sh. Never download or substitute an aria2c binary
 from anywhere else.
 
-Build the Guest Shell bundle, the amd64 IOx package and the XR RPM in every
-proof of concept: they need no emulation and a missing one blocks that device
-type later. Build the arm64 IOx package too whenever an IE-3400 or other
-IE-3x00 device is in scope. Only skip it when none is, because it carries the
-emulated build.
-tools/start-compose-server.sh builds all four in one run once its inputs are
-present, so leave IRIS_SKIP_XR unset; tools/stage-iox-package.sh --arch amd64
-builds one IOx package when the arm64 one is out of scope, which
-tools/provision-iox-packages.sh cannot do.
+Build the packages the operator requested. For ARM devices or an explicit ARM
+package request, follow "Build and publish the ARM64 IOx package" in this guide:
+fetch the verified client, build on the package host, publish BOTH the tar and
+its manifest to the selected layout's server storage, and verify readiness.
+Set IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64 in the build shell for ARM.
+If ARM is explicitly excluded, set IRIS_DEVICE_PLATFORMS=linux/amd64 instead.
+The wrapper's --arch flag alone does not restrict the shared image build.
+tools/start-compose-server.sh is for single-host Docker with all package
+inputs; it starts services before building packages. Do not use it for split
+hosts, Kubernetes, or an ARM-excluded build. tools/provision-iox-packages.sh
+always builds both IOx wrappers; stage-iox-package.sh builds one wrapper.
 
 Console Settings -> Device packages lists every package type, so one you
 skipped on purpose stays "Not built / absent" forever. That is the correct end
@@ -537,9 +787,9 @@ present a deliberately skipped package as a failure or try to hide it.
 
 Do that preparation yourself and announce each step as you take it:
 
-- Fetch the verified amd64 release with tools/get-aria2c.sh amd64. When an
-  IE-3x00 device is in scope, fetch arm64 with tools/get-aria2c.sh arm64
-  --no-install, keeping bin/aria2c suitable for the server image. Use the
+- Fetch the verified amd64 release with tools/get-aria2c.sh amd64. When ARM
+  is in scope, run tools/get-aria2c.sh --no-install arm64, with the flag FIRST,
+  keeping bin/aria2c suitable for the server image. Use the
   documented hand-in or source-build fallback only when the release cannot
   be reached or the operator explicitly chooses it. For a source build,
   place its outputs in deliverables/, record their sha256sums in
@@ -559,8 +809,9 @@ Do that preparation yourself and announce each step as you take it:
   writes an inert one into a scratch HOME for the packaging call. If a run ever
   needs a prepared profile, IOXCLIENT_HOME selects it, and it must never carry
   a real device credential.
-- Enable arm64 emulation for the arm64 IOx package by installing the
-  distribution's static QEMU package, then confirm the registration.
+- For ARM, check the enabled QEMU registration and fix-binary flag, then the
+  selected Buildx builder's multi-platform OCI export support as described in
+  step 3. Installing QEMU alone is not proof that either check passed.
 
 Initialise instruction custody once the stack is up and before onboarding any
 device, as "Initialise instruction custody" describes. Never hand the operator
@@ -574,20 +825,21 @@ and the message is deliberately fixed, so it never says which part is missing.
 The certificate signing in that sequence is the operator's, like the roots.
 
 Exactly one thing else is the operator's: the two instruction trust roots. Never
-create them. Paste the operator the single line for the chosen layout from
-step 4 of "Supply the handed-in inputs", wait for $HOME/iris-roots to hold the
-two public halves, and refuse a private key if one is offered. On Kubernetes,
-give them the second line for the server pod once it is running. Also ask before
+create them. Follow step 4 of "Supply the handed-in inputs": reuse the approved
+pair for an existing installation, or point the operator to the linked trust
+preparation for a new one. Wait for $HOME/iris-roots to hold the two public
+halves, and refuse a private key if one is offered. On Kubernetes, copy only
+the public pair to the server PVC once its pod is running. Also ask before
 accepting a tonistiigi/binfmt digest, which trusts a third-party image, rather
 than the distribution package.
 
-Offer the two-service Guest Shell path, which builds no packages and needs no
-roots, only when the operator asks for the quickest possible look at a staged
-image. It is not the proof-of-concept default.
+An infrastructure-only preview may omit device packages and instruction
+custody, but cannot demonstrate device staging. Guest Shell onboarding still
+requires its trust-bound bundle and initialized instruction custody.
 
 Install both aria2c architectures with tools/get-aria2c.sh, which fetches the
-published deliverable and verifies it. Take arm64 only when an IE-3400 or
-other IE-3x00 device is in scope. Building aria2c from source is the fallback
+published deliverable and verifies it. Take arm64 when an ARM device or
+package is in scope. Building aria2c from source is the fallback
 for a host that cannot reach the release, or an operator who asks for it: say
 which of the two you are doing.
 
@@ -668,9 +920,10 @@ someone keeps it somewhere else, which is a production arrangement, and
 10001 access to the key, image
 root, artifacts, and volumes as documented there. From the repository root:
 
-Do steps 1 to 4 of
-[Supply the handed-in inputs](#supply-the-handed-in-inputs) for the `x86_64`
-architecture, leaving the long `aarch64` build for later, then start the stack:
+Complete [Supply the handed-in inputs](#supply-the-handed-in-inputs) for the
+requested architectures. Normally both clients are verified downloads, not
+source builds. For a fresh store, start the stack as follows; for an existing
+store, preserve its identity and roots and skip bootstrap and root installation:
 
 ```bash
 set -a
@@ -687,46 +940,54 @@ docker compose -f server/docker-compose.yml up -d
 docker compose -f server/docker-compose.yml ps
 ```
 
-The third command is easy to miss and nothing later reports it: it installs the
-two public roots into the server's config volume, which is separate from
-handing them to the package builders. Without it the server cannot
-self-provision a trust-bound Guest Shell bundle. `tools/start-compose-server.sh`
-does this for you; this sequence does not, because it starts the stack before
-the packages exist. It runs inside the server image as the runtime uid, so
-ownership is right, mounts only the `.pub` files read-only, and is idempotent.
+The `--entrypoint sh` command installs the two public roots into the server's
+config volume, separately from supplying them to package builders. Without
+them the server cannot publish a trust-bound Guest Shell bundle. It runs as
+the runtime uid and mounts the public-roots directory read-only. The
+`tools/start-compose-server.sh` helper includes this step too.
 
 Confirm it before moving on:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
-  ls -l "$IRIS_CONFIG/instr/roots.d"
+  sh -c 'ls -l "$IRIS_CONFIG/instr/roots.d"'
 ```
 
 Open `https://<server-ip>:8080/`, or the host port set by `IRIS_GUI_PUBLISH`.
-A working Console here means the deployment stands; everything that follows
-adds device packages to it.
+Check an authenticated inventory request through that URL before declaring
+the server connection ready. Loading the page alone only verifies the Console.
+The remaining steps add device packages.
 
-Now finish the packages, including the `aarch64` `aria2c` build that takes tens
-of minutes under emulation:
+The single-host default browser identity is encrypted in
+`tls/console-fallback.pem.age` and reused on restart. An upgrade from the old
+ephemeral default changes it once; verify that public certificate through a
+trusted channel before updating API clients. Use an operator certificate for
+address changes. Never disable TLS verification to make a test pass.
+
+If ARM is in scope, complete [Build and publish the ARM64 IOx
+package](#build-and-publish-the-arm64-iox-package), selecting the single-host
+Docker publishing command. Normally this downloads the verified `aria2c`
+client; it does **not** require compiling that client from source.
+
+For the other requested packages, retain the same canonical archive from the
+ARM procedure. For an explicitly amd64-only run, first select
+`IRIS_DEVICE_PLATFORMS=linux/amd64` as in
+[step 1](#1-the-aria2c-client-every-deployment), then create a private build
+directory and set `IRIS_DEVICE_IMAGE_OCI` inside it. In either case:
 
 ```bash
 tools/get-ioxclient.sh
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/stage-iox-package.sh --arch amd64
+  tools/stage-iox-package.sh --arch amd64 --artifacts-dir "$IRIS_ARM_BUILD_DIR"
 IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/build-xr-package.sh --out artifacts/
+  tools/build-xr-package.sh --out "$IRIS_ARM_BUILD_DIR"
 ```
 
-Add the arm64 package only when an IE-3x00 device is in scope. It needs the
-emulated `aarch64` `aria2c` build of step 1 first, and then:
-
-```bash
-cp tools/aria2c-build/out/aarch64/aria2c deliverables/aria2c-aarch64
-sha256sum deliverables/aria2c-aarch64     # record it in tools/aria2c.sha256
-tools/get-aria2c.sh --no-install arm64
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/stage-iox-package.sh --arch arm64
-```
+Publish each package and manifest with the
+[Docker publishing procedure](#publish-to-either-docker-layout), substituting
+`iris-amd64.tar` or `iris-xr.rpm` for the ARM filename. For the amd64-only case,
+use `IRIS_ARM_BUILD_DIR` as the output variable too; its name does not select
+an architecture.
 
 `tools/provision-iox-packages.sh` builds both architectures in one run and is
 the right command when both are in scope; it cannot be used to build only one.
@@ -734,8 +995,7 @@ the right command when both are in scope; it cannot be used to build only one.
 Then read **Settings -> Device packages**. Every package you built must report
 as built. A package you deliberately skipped stays **Not built / absent**, and
 that is the correct end state, not a failure: say which ones you skipped and
-why, so nobody reads that screen as a broken deployment. `iris-arm64.tar` sits
-there for every deployment without an IE-3x00 device.
+why, so nobody reads that screen as a broken deployment.
 
 `tools/start-compose-server.sh` does all of this in one run instead — grants
 uid 10001 the `artifacts/` directory, builds the images, bootstraps the store,
@@ -743,9 +1003,9 @@ installs the two public roots into the config volume, starts both services and
 builds the Guest Shell bundle, both IOx packages and the XR RPM, preserving an
 existing complete store. It is the better path once both `aria2c` binaries
 exist, because it checks every input first and stops before building if one is
-missing. On a first deployment it also means the stack cannot start until the
-emulated arm64 build has finished, which is why the sequence above puts the
-Console first. If a package build fails after the stack is up, the helper exits
+missing. It starts the stack **before** the device-package builds finish;
+a working Console is not proof that the ARM package exists. If a package
+build fails after the stack is up, the helper exits
 nonzero while the stack keeps running; fix the reported problem and rerun
 `tools/provision-iox-packages.sh` or `tools/build-xr-package.sh --out artifacts/`.
 
@@ -816,27 +1076,16 @@ server is unavailable using its local browser identity; API requests return
 503 until the authenticated server connection works. No server data volume
 or age key belongs on the Console host.
 
-Build device packages on the server host, where the inputs live, once its
-stack is up. The `aarch64` client is fetched rather than built, like the amd64
-one; only a host that cannot reach the release falls back to
-[step 1](#1-the-aria2c-client-every-deployment)'s emulated build:
+Build device packages on the **server host**, never the Console host. For ARM,
+follow [Build and publish the ARM64 IOx
+package](#build-and-publish-the-arm64-iox-package), selecting the split-host
+Docker publishing command. It resolves the running server from `server.env`
+and copies into its actual artifact mount; the staging helper does not read
+that environment file itself.
 
-```bash
-tools/get-ioxclient.sh
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/stage-iox-package.sh --arch amd64
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/build-xr-package.sh --out artifacts/
-
-# only with an IE-3x00 device in scope:
-tools/get-aria2c.sh --no-install arm64
-IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-  tools/stage-iox-package.sh --arch arm64
-```
-
-Run only the ones your device types need. The
-[package steps](docker-hosts.md#start-the-server-host) cover placement and
-ownership on that host.
+Build other requested packages using the same selected platforms, roots and
+canonical archive. The [package steps](docker-hosts.md#start-the-server-host)
+cover placement and ownership on that host.
 
 ### Kubernetes
 
@@ -853,6 +1102,10 @@ Configure IRIS:
    `kubernetes/kustomization.yaml`. The server image copies `bin/aria2c`, so
    step 1 of [Supply the handed-in inputs](#supply-the-handed-in-inputs) has to
    be done in the checkout you build from.
+   A single-node lab may explicitly choose preloaded images instead; record
+   that deviation and import the exact images into K3s's containerd, not just
+   Docker. Keep immutable digest references. This checks runtime behavior,
+   not registry authentication, pulls or replacement-node provisioning.
 2. Configure `kubernetes/iris-seed-server.env` with the reserved device-facing
    Service address, age recipients, and full `IRIS_CONSOLE_URL`. Configure
    `kubernetes/iris-console.env` with the internal management URL. The public
@@ -870,30 +1123,12 @@ Configure IRIS:
    new current value and authenticated Console access passes. The Console can
    temporarily use the previous token, so readiness alone cannot confirm that
    both projections have updated.
-5. Build the needed device packages on a host that has the inputs for those
-   device types — `ioxclient`, ARM64 emulation, the appmgr builder — and stage
-   them with their manifests in the server's artifact storage before
-   onboarding devices. That host fetches both `aria2c` architectures with
-   `tools/get-aria2c.sh`; only a host that cannot reach the release falls back
-   to [step 1](#1-the-aria2c-client-every-deployment)'s emulated build, and a
-   cluster does not help with it — the build host's own CPU does the
-   emulating, not a node's:
-
-   ```bash
-   IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-     tools/stage-iox-package.sh --arch amd64
-   IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots" \
-     tools/build-xr-package.sh --out artifacts/
-   ```
-
-   Add `--arch arm64` only with an IE-3x00 device in scope;
-   `tools/provision-iox-packages.sh` builds both and cannot build one.
-
-   The same two public roots must also sit in `/data/config/instr/roots.d` on
-   the server PVC, readable by uid 10001; step 4 of
-   [Supply the handed-in inputs](#supply-the-handed-in-inputs) gives the
-   `kubectl` commands. Never create roots in the pod, and never copy a private
-   root there.
+5. Prepare the requested device packages on a separate build host, not inside
+   a pod. For ARM, use the build step in [Build and publish the ARM64 IOx
+   package](#build-and-publish-the-arm64-iox-package). This produces the tar
+   and matching manifest in a writable host directory. Kubernetes does not
+   build them or copy them from the host automatically. Publish after the
+   server pod is running, as below.
 
 Apply the configured manifests and wait for both Deployments:
 
@@ -902,6 +1137,15 @@ kubectl apply -k kubernetes
 kubectl -n iris rollout status deployment/iris-seed-server
 kubectl -n iris rollout status deployment/iris-console
 ```
+
+Install the same two approved public roots into `/data/config/instr/roots.d`
+on the server PVC, readable by uid 10001, using
+[step 4](#4-the-two-instruction-trust-roots-every-device-package).
+Never create replacement roots in the pod or copy a private root there.
+Then complete the [Kubernetes publishing step](#publish-to-kubernetes): copy
+the ARM tar **and** its manifest into `/data/artifacts` on the server PVC,
+compare hashes and check package readiness before onboarding. Publish other
+requested packages with their manifests to that same server storage.
 
 Use the Console Service's browser address. It is independent of the server
 Service address used by devices.
@@ -915,8 +1159,17 @@ server's instruction producer. Installing the two public roots is not enough:
 the producer also needs an online signing key, a certificate issued by one of
 your roots, and an activated producer epoch.
 
-The steps are the same everywhere; only the way you reach the server container
-changes.
+For an existing store, first run `iris-instructions --status` on that
+deployment's server. Reuse a working identity; do not regenerate its online
+key or initialize another producer merely because the Console moved. A healthy
+server or two public roots alone does not establish signing readiness. An old
+Kubernetes PVC can have different roots and no signing identity even when its
+APIs work. Check that store separately. If custody is missing, complete the
+custodian signing step below, or obtain approval for a server-state migration;
+do not replace roots or copy another deployment's signing files piecemeal.
+
+The fresh-custody steps are the same everywhere; only the way you reach the
+server container changes.
 
 **Copy the public half out of the config volume, never out of `$IRIS_RUN`.**
 The runtime directory is a tmpfs (`server/docker-compose.yml` mounts
@@ -1025,9 +1278,11 @@ stamp.
 
 ## Verify the deployment
 
-Run these checks for the selected layout before onboarding. When verifying
-both Docker options, use separate projects and data for each test, with
-nonconflicting container names and host ports. See
+Run these checks for the selected layout before onboarding. For simultaneous
+independent deployments, use separate projects and data, with nonconflicting
+container names and host ports. For a sequential Console relocation, retain
+the original server project and data and stop the previous Console before
+switching layouts. Never run two backends against the same state. See
 [Running a second stack](server.md#running-a-second-stack-on-the-same-host).
 
 | Check | Docker on one host | Docker on separate hosts |
@@ -1041,12 +1296,21 @@ nonconflicting container names and host ports. See
 
 Use an isolated test deployment for server outage checks when device work is
 active. Check readiness and one authenticated API request after each restart.
+
+For repeatable API validation, run the [bounded API smoke test](api-testing.md#repeat-the-smoke-test-across-layouts)
+through each layout's Console URL. It covers temporary device, policy,
+credential and paused-schedule writes as well as GET/list and access-control
+checks. Keep one report per layout and verify cleanup. A successful readiness
+probe or an expected 401/403 does not establish positive API coverage. Do not
+run a capacity test, build ARM packages or contact devices unless those checks
+are part of the agreed validation scope.
 For Kubernetes, use the corresponding checks in
 [Health and operation](kubernetes.md#health-and-operation).
 
 ## Stage an image
 
-1. **Create the administrator.** Open the configured Console URL from a trusted
+1. **Sign in.** Reuse the configured administrator on an existing store.
+   For a new store, open the configured Console URL from a trusted
    management network. Verify the expected browser certificate, then sign in
    with the first-run credential `iris` / `irisisgreat!` and create the admin.
    That first login returns a one-use setup grant valid for ten minutes; it
@@ -1059,9 +1323,10 @@ For Kubernetes, use the corresponding checks in
 3. **Publish an image.** Upload through the Console or use **Import from disk**
    for a file already on the server. Publishing hashes the file and creates
    catalog and torrent metadata; it does not change a device.
-4. **Add devices.** Management type controls the network fields. Model is
-   optional free text; a recognized model narrows installer choices without
-   changing management type. Choose Guest Shell, IOx, or XR appmgr as
+4. **Add devices.** Management type controls the network fields. Select the
+   model series from the dropdown; API/CSV inputs also accept recognized model
+   numbers. The series narrows installer choices without changing management
+   type. Choose Guest Shell, IOx, or XR appmgr as
    appropriate. XR uses `xr-host` and the router's network, with app, VLAN/SVI,
    VPG, and NAT fields empty. See [Management type](management-type.md).
 5. **Confirm packages.** IE-3400 IOx needs `iris-arm64.tar`; Catalyst 9300 IOx
@@ -1072,11 +1337,17 @@ For Kubernetes, use the corresponding checks in
 6. **Onboard.** Start one-click onboarding and watch each job to completion.
    Inspect failures before retrying. IRIS app/container lifecycle operations
    do not install or activate the staged operating-system image.
+   An existing IRIS app may require normal undeploy using its deployment record
+   first. Without a record, confirm ownership before using force agent-only
+   cleanup; do not use force to bypass transport, package or trust failures.
 7. **Assign and observe.** Assign the image, then watch download, hash
    verification, final staging, and seeding. A tracker seeder can still be
    verifying or placing its file; confirm the device's final per-image staged
    state. Use [Telemetry export](telemetry-export.md) for origin/peer traffic
    measurements and their limits.
+   Check signed-instruction status separately: Guest Shell without SSHSIG
+   verification can stage successfully while reporting `verifier_missing`.
+   That is not a successful signed-policy test.
 8. **Stop at staged.** Installation, activation, reload, and boot management
    belong to the operator's normal device-management process outside IRIS.
 
@@ -1115,3 +1386,11 @@ Console URL, management endpoint, Compose projects or Kubernetes namespace,
 and checks actually performed. For device work, include image ID,
 model/agent choice, staging target, job result, and final per-image state.
 List anything not verified. Keep credentials and tokens out of the record.
+
+For repeated topology tests, record each topology's fresh job IDs and reports;
+do not count an earlier heartbeat as new evidence. Use a distinct test image
+or confirm removal of only the owned test file before another download. A
+synthetic file proves transport and hash/placement behavior, not Cisco image
+authenticity. Afterward clear its assignments, undeploy using the recorded
+jobs, and remove only test-owned files and catalog entries. Undeploy normally
+preserves staged operating-system images; do not erase them for test cleanup.

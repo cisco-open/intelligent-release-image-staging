@@ -91,7 +91,7 @@ Console has its own [deployment variables](docker-hosts.md#deployment-settings).
 | `IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST` | `/dev/null` | Optional previous observability token during a bounded rotation overlap. Remove it after every scraper has moved to the new current token. Host-side only. |
 | `IRIS_OTLP_HEADERS_FILE_HOST` | `/dev/null` | Host path of an optional mode-600 file containing the collector authentication header specification. Compose mounts it only into the server tier at the fixed path named by `IRIS_OTLP_HEADERS_FILE`; host-side only. Prefer this to putting collector credentials in `server/.env`. |
 | `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory bind-mounted read-write at `/srv/artifacts`. Host-side only: it is interpolated into the bind mount, not passed into the container. |
-| `IRIS_SHARP_SANS_FONT_HOST` | `/dev/null` | Host path of the licensed Sharp Sans Bold `.woff2`, bind-mounted read-only over `server/webroot/fonts/SharpSans-Bold.woff2` inside the container. The font is excluded from the build context (`.dockerignore`) and the release tarball — Cisco's license does not permit redistributing it — so the console falls back to its default font stack without it (`font-display: swap`). Set this only on a deployment that independently holds the license; left unset it mounts `/dev/null`, a harmless no-op every other deployment never has to think about. Host-side only: interpolated into the bind mount, never passed into the container. See [Console](console.md#branding). |
+| `IRIS_SHARP_SANS_FONT_HOST` | `/dev/null` | Legacy host-side font bind mount, retained for compatibility. The current theme uses Inter regardless of this setting. Licensed font files remain excluded from Docker builds and release tarballs. Leave unset unless maintaining a separately licensed custom theme. See [Console](console.md#branding). |
 | `IRIS_GUI_PUBLISH` | `8080` | Published Console host port. The one-host Compose stack binds it to `IRIS_HOST_IP`; the standalone Console binds it to `IRIS_CONSOLE_BIND_IP`. The container always listens on 8080 internally. |
 | `IRIS_CONSOLE_URL` | unset | Full external HTTPS Console URL reported in server settings, for example `https://console.example.com:8080`. An explicit URL takes precedence over `IRIS_GUI_PUBLISH`; it does not change Docker's port binding. |
 | `IRIS_GUI_ALLOW_PLAINTEXT` | unset | `1` makes the Console deliberately skip its TLS identity and serve plain HTTP. Without it the Console obtains its active identity through the authenticated management hop or uses its independently mounted default and refuses to start when no usable identity exists. The session cookie loses its `Secure` attribute under the opt-in. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
@@ -430,7 +430,7 @@ verification](operations.md#image-verification).
 | `DELETE /api/v1/devices/<id>` | Retires the device: revokes its credentials first, then clears peer-policy assignment, inventory row, and catalog state. `{deleted: <bool>, degraded: [...]}` — 200 when cleanup was complete, 207 when part of it failed (`degraded` names the areas), 500 `{deleted: false, error: "secret revoke failed"}` when the revoke could not be persisted, in which case nothing was changed. Endpoint rows are retained until they age out. See [Retiring a device](operations.md#retiring-a-device). |
 | `GET /api/v1/devices/export-csv`, `GET /api/v1/devices/example-csv` | The inventory as `devices.csv`, and a blank example. |
 | `POST /api/v1/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
-| `GET /api/v1/install-options?model=<model>` | `{options: [...]}` gives the model-based installer restriction; `options: null` means the model is blank or unclassified. The Console also restricts installer choices by the selected management type. Management type alone controls the network fields; changing model does not change it. Model accepts free text, but saving a value does not confirm hardware support. |
+| `GET /api/v1/install-options?model=<model>` | Returns `{options: [...]}` or `options: null` for an unclassified model. Accepts exact models and series aliases: `IE3x00`, `IR1x00`, `C9xxx`, `C8xxx`, `NCS`, `XR8000`. The Console combines these restrictions with the selected management type. A series choice does not confirm hardware support. |
 | `GET /api/v1/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/v1/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
 | `GET /api/v1/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
@@ -713,12 +713,19 @@ Each new connection replays retained lines from the start; there are no event
 ids or `Last-Event-ID` resume semantics. Read job status before treating a
 closed or idle stream as a job failure.
 
-Successful logs end with `onboard complete: <IP>` or
-`undeploy complete: <IP>`. Use the job's `state` and `rc` for automation.
+New Console job logs use three broad phases and end with `Onboard completed.`
+or `Undeploy completed.`. Set `log: true` before submission for installer detail.
+Direct installer output and older logs retain their original wording. Use the
+job's `state` and `rc` for automation, not message text.
 Two maintenance actions, `iox-recover` and `iox-reconcile-enabled`, are
 queued only by the [IOx control CLI](#iox-control-cli) below.
 
 ### IOx control CLI
+
+Routine onboarding and removal use the Console or
+`POST /api/v1/devices/<id>/onboard` and
+`POST /api/v1/devices/<id>/undeploy`. The local interface below is primarily
+for recovery operations that have no public API equivalent.
 
 `server/iox_verification.py` doubles as a local control client for the IOx
 authority. It talks to the running server over `$IRIS_STATE/iox/control.sock`,
@@ -731,7 +738,8 @@ docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris \
   python3 iox_verification.py <operation> [arguments] [--wait [--wait-timeout <seconds>]]
 ```
 
-There is no network endpoint for it and no Console equivalent yet.
+The control socket has no network endpoint. Recovery and reconciliation have
+no Console equivalent; ordinary onboarding and removal do.
 
 | Operation | Arguments | What it does |
 | --- | --- | --- |

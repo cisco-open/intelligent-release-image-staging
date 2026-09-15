@@ -95,6 +95,10 @@ _TRIPWIRE_TEST_ANCHORS = (
 # allowlisted when it contains one of its file's anchors. Keep anchors narrow
 # enough that they could not accidentally cover a NEW violation.
 ALLOWLIST = [
+    ("tools/api_exercise_fixtures.py",
+     ('for suffix in ("", "/occurrences", "/receipts"):',),
+     "reads the distinct durable schedule receipts API (Tasks 22–23), "
+     "not the retired deployment/peer vocabulary; only this route-list line"),
     # -- decision 4: append-only history -------------------------------
     ("CHANGELOG.md", None,
      "append-only history (decision 4): old released entries keep their "

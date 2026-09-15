@@ -135,6 +135,16 @@ def fetch(url, timeout, out_path):
         with os.fdopen(fd, "wb") as f:
             try:
                 with opener.open(url, timeout=timeout) as resp:
+                    declared_length = resp.headers.get("Content-Length")
+                    if declared_length is not None:
+                        try:
+                            declared_length = int(declared_length)
+                        except (TypeError, ValueError) as exc:
+                            raise BulkHashError(
+                                "download failed: invalid Content-Length") from exc
+                        if declared_length < 0:
+                            raise BulkHashError(
+                                "download failed: invalid Content-Length")
                     total = 0
                     while True:
                         chunk = resp.read(_DOWNLOAD_CHUNK)
@@ -146,6 +156,10 @@ def fetch(url, timeout, out_path):
                                 "download failed: exceeds maximum size of "
                                 "%d bytes" % _MAX_DOWNLOAD_BYTES)
                         f.write(chunk)
+                    if (declared_length is not None
+                            and total != declared_length):
+                        raise BulkHashError(
+                            "download failed: Content-Length mismatch")
             except BulkHashError:
                 raise
             except urllib.error.HTTPError as exc:

@@ -128,7 +128,7 @@ envelope through the controller's application-data channel; see
 | `device/iox/install.sh` | Private controller recipe for IOx onboarding. |
 | `device/iox/uninstall.sh` | Private controller recipe for IOx removal. |
 
-Submit jobs through the Console, API, or [IOx control CLI](reference.md#iox-control-cli).
+Submit jobs through the Console or the [onboard and undeploy API](reference.md#devices).
 The recipes require the controller's private channel and cannot be run standalone.
 
 ## Runtime behavior
@@ -226,8 +226,7 @@ job to include its command output.
 An onboard that fails at activation leaves the app-hosting configuration in
 place, because the activation may still be in flight. That is deliberate and
 does **not** need an undeploy or a forced teardown: press **Onboard** again in
-the Console, submit the onboard API request, or use the IOx control CLI's
-`submit-install` command. Preflight treats an IRIS app that
+the Console or submit `POST /api/v1/devices/<id>/onboard`. Preflight treats an IRIS app that
 is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry. The
 installer removes that incomplete app before retrying. An app that is
 `RUNNING` is a live deployment and requires undeploy first.

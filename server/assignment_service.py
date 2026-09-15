@@ -23,7 +23,6 @@ import sqlite3
 import audit
 import catalog
 import fleet_authority
-import secrets_store
 
 
 class MissingFleetDevice(ValueError):

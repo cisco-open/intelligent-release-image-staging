@@ -113,6 +113,9 @@ def patterns():
 # What a live lab checkout carries under the COPY'd trees, none of which may
 # reach an image layer.
 MUST_EXCLUDE = [
+    "server/console-ui/node_modules/react/index.js",
+    "server/console-ui/dist/console.js",
+    "server/console-ui/tests/build.test.mjs",
     "server/.env",
     "server/lab.env",
     "server/certs/lab-private.key",
@@ -150,6 +153,10 @@ MUST_EXCLUDE = [
 
 # What server/Dockerfile COPYs and the runtime reads: these must stay in.
 MUST_INCLUDE = [
+    "server/console-ui/package.json",
+    "server/console-ui/package-lock.json",
+    "server/console-ui/vite.config.js",
+    "server/console-ui/src/main.jsx",
     "bin/aria2c",
     "tools/aria2c.sha256",
     "VERSION",

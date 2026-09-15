@@ -423,9 +423,8 @@ echo "[1/6] check storage on $DEVICE_IP"
 # One SSH login for all three read-only pre-checks (flash free space, ip
 # routing, device clock) instead of up to three -- same consolidation as
 # _default_router_preflight in server/gui_onboard.py. IOS XE echoes these
-# markers verbatim. The flash pre-check and clock check stay best-effort /
-# informational, exactly as before a missing section there is silently
-# skipped, never fatal. ip routing keeps its HARD fail-closed semantics: a
+# markers verbatim. Only the flash pre-check stays informational.
+# Time synchronization and ip routing are required: a
 # missing ROUTING section (the session never echoed anything back) is a
 # TRANSPORT failure and must not masquerade as, or be silently read as, a
 # routing problem -- see the PREREQ checks below.
@@ -444,7 +443,7 @@ EOF
 fi
 cat <<EOF
 echo ${PRECHECK_MARKER}CLOCK__
-show clock
+show ntp status
 EOF
 }
 precheck_section() {
@@ -487,13 +486,8 @@ if [ "$MANAGEMENT_TYPE" = "routed" ]; then
     exit 1
   fi
 fi
-CLOCK_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section CLOCK)" || true
-# no four-digit year (odd format, probe hiccup) leaves clock_year empty and
-# skips the warning — the grep must not be fatal under pipefail
-clock_year="$(printf '%s' "$CLOCK_RAW" | grep -oE '[0-9]{4}' | tail -1 || true)"
-if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
-  echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
-fi
+CLOCK_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section CLOCK)" || CLOCK_RAW=""
+printf '%s' "$CLOCK_RAW" | python3 "$HERE/../server/time_preflight.py"
 
 echo "[2/6] prepare agent configuration"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"

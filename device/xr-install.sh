@@ -399,7 +399,7 @@ run_rc=0
 preflight_attempt=1
 while : ; do
   run_rc=0
-  PREFLIGHT_OUT="$(printf 'show version\ndir harddisk: | include bytes free\n' \
+  PREFLIGHT_OUT="$(printf 'show version\ndir harddisk: | include bytes free\nshow ntp status\n' \
     | RUN 2>"$RUN_ERR")" || run_rc=$?
   [ "$run_rc" -eq 0 ] && [ -n "$PREFLIGHT_OUT" ] && break
   [ "$preflight_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
@@ -415,6 +415,7 @@ if [ "$run_rc" -ne 0 ] || [ -z "$PREFLIGHT_OUT" ]; then
   tail -5 "$RUN_ERR" >&2 || true
   exit 1
 fi
+printf '%s' "$PREFLIGHT_OUT" | python3 "$HERE/../server/time_preflight.py"
 VERSION_OUT="$PREFLIGHT_OUT"
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"

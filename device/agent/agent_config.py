@@ -65,47 +65,6 @@ _BOOL_VALUES = frozenset((
 _LOWER_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _closed_json_object(value, expected):
-    if not isinstance(value, str):
-        raise ValueError("instruction key record must be canonical JSON")
-
-    def pairs_hook(pairs):
-        result = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError("instruction key record has duplicate members")
-            result[key] = item
-        return result
-
-    try:
-        parsed = json.loads(value, object_pairs_hook=pairs_hook)
-    except (TypeError, ValueError):
-        raise ValueError("instruction key record must be canonical JSON")
-    if not isinstance(parsed, dict) or set(parsed) != set(expected):
-        raise ValueError("instruction key record schema is invalid")
-    canonical = json.dumps(
-        parsed, sort_keys=True, separators=(",", ":"),
-        ensure_ascii=True)
-    if canonical != value:
-        raise ValueError("instruction key record must be canonical JSON")
-    return parsed
-
-
-def parse_instruction_key(value):
-    """Decode one exact canonical ``{key_id,value}`` instruction record."""
-    record = _closed_json_object(value, ("key_id", "value"))
-    key_id = record["key_id"]
-    encoded = record["value"]
-    if not isinstance(key_id, str) or not _LOWER_HEX_64_RE.fullmatch(key_id):
-        raise ValueError("instruction key id is invalid")
-    if not isinstance(encoded, str) or not _LOWER_HEX_64_RE.fullmatch(encoded):
-        raise ValueError("instruction key value is invalid")
-    key = bytes.fromhex(encoded)
-    if hashlib.sha256(key).hexdigest() != key_id:
-        raise ValueError("instruction key id does not match its value")
-    return {"key_id": key_id, "value": key}
-
-
 def encode_instruction_key(record):
     """Validate a refresh-bag key record and return its canonical conf text."""
     if not isinstance(record, dict) or set(record) != {"key_id", "value"}:
@@ -143,19 +102,6 @@ def merge_instruction_key_refresh(cfg, refresh_bag):
     else:
         merged["instr_key_prev"] = previous
     return merged
-
-
-def parse_lkg_key(value):
-    """Decode the strict local 32-byte LKG key without repairing bad input."""
-    if not isinstance(value, str) or not _LOWER_HEX_64_RE.fullmatch(value):
-        raise ValueError("local LKG key is invalid")
-    return bytes.fromhex(value)
-
-
-def encode_lkg_key(value):
-    if not isinstance(value, bytes) or len(value) != 32:
-        raise ValueError("local LKG key is invalid")
-    return value.hex()
 
 
 def validate_target_fs(value):

@@ -256,7 +256,17 @@ remains authoritative for those server controls.
 
 ### Device administrator trust boundary
 
-The encrypted instruction file is confidential against users below privilege 15, against swarm peers and network observers, against reuse on another device, and against envelope-only copies that do not include device private keys. It is not, and cannot be, confidential against the device's own administrator, who is root where the agent runs and holds every key the agent holds. Its integrity and authenticity hold against everyone including that administrator once the verification root is pinned inside the signed image; on Guest Shell, and on any platform where the package signature is not enforced, integrity is tamper-evidence rather than tamper-proofing. Role isolation, announce cadence, peer discovery and origin rates are enforced by the tracker and the origin and do not depend on any device honouring anything.
+The instruction envelope encrypts the **private per-device payload**, not its
+header or signed role intent. That payload is confidential against users below
+privilege 15, swarm peers and network observers, reuse on another device, and
+envelope-only copies without device private keys. It is not confidential against
+the device's own administrator, who holds every key the agent holds.
+
+Signature verification authenticates the instruction against the pinned root.
+On Guest Shell, and wherever package verification is not enforced, the roots
+and verifier are replaceable: this provides tamper-evidence rather than tamper-proofing.
+Tracker and origin enforcement of role isolation, announce cadence, peer
+discovery and origin rates does not depend on the device honoring instructions.
 
 An offline filesystem copy containing `iris-agent.conf`, its current/prior
 instruction keys or its `lkg_key` is not confidential from the holder of that
@@ -597,6 +607,14 @@ provenance and fingerprint) — never a certificate found inside the feed
 itself. Any fetch, signature, or parse failure leaves every stored
 verification verdict untouched: a broken or tampered feed can never
 quarantine an image.
+
+For feed-download failures, IRIS rejects a response whose received byte count
+does not match its declared `Content-Length`; responses without that header,
+including chunked transfers, are still accepted and then checked as archives.
+An `unreadable tar` result alone does not identify the cause: an incomplete
+transfer and an invalid or corrupted archive are distinct possibilities. Do
+not infer which occurred without response/download evidence; a failed refresh
+does not apply partial verification results.
 
 A sha512 mismatch quarantines the image: seeding stops and stays stopped
 across container restarts (the startup re-seed only re-seeds torrents the

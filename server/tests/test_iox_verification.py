@@ -5017,6 +5017,8 @@ def _ordinary_preflight_fixture(monkeypatch, running=b"", app_state=None):
     fake._transport_ok = module.IoxController._transport_ok
     def command(*args, **kwargs):
         calls.append((args, kwargs))
+        if args[2] == b"show ntp status":
+            return dict(result, stdout=b"Clock is synchronized, stratum 5, reference is 192.0.2.123\n"), context
         return result, context
     fake._command = command
     attempt = _Bag(target={}, identity={}, request={"device_id": "edge-01"},
@@ -5033,13 +5035,28 @@ def _ordinary_preflight_fixture(monkeypatch, running=b"", app_state=None):
     return module, fake, attempt, calls
 
 
+def test_ordinary_preflight_rejects_unsynchronized_time_before_collision_reads(monkeypatch):
+    module, fake, attempt, calls = _ordinary_preflight_fixture(monkeypatch)
+    def command(*args, **kwargs):
+        calls.append(args[2])
+        return {"returncode": 0, "timed_out": False, "cancelled": False,
+                "stdout": b"Clock is unsynchronized, stratum 16, no reference clock"}, None
+    fake._command = command
+    fake._transport_ok = lambda result: True
+    with pytest.raises(module._ControllerFailure, match="time preflight failed"):
+        module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert calls == [b"show ntp status"]
+    assert attempt.identity == {}
+
+
 @pytest.mark.parametrize("app_state", [None, "DEPLOYED", "ACTIVATED"])
 def test_ordinary_preflight_sends_five_validated_reads_in_one_bounded_session(
         monkeypatch, app_state):
     module, fake, attempt, calls = _ordinary_preflight_fixture(
         monkeypatch, app_state=app_state)
     module.IoxController._ordinary_install_preflight(fake, attempt)
-    assert calls == [((attempt, "preflight", b"\n".join(
+    assert calls == [((attempt, "preflight", b"show ntp status", 30),
+        {"ordinary": True, "record": False}), ((attempt, "preflight", b"\n".join(
         module._preflight_commands("iris", "edge-01")), 90),
         {"ordinary": True, "record": False})]
     expected = {"status": "passed"}

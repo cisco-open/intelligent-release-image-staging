@@ -995,22 +995,18 @@ def _assert_phase1_rollup_relationship(text):
 
 
 def test_docs_phase1_honest_guarantee_and_admin_boundary():
-    """The exact promise and its cross-page pointer keep the admin limit honest."""
-    guarantee = """The encrypted instruction file is confidential against users
-    below privilege 15, against swarm peers and network observers, against reuse
-    on another device, and against envelope-only copies that do not include
-    device private keys. It
-    is not, and cannot be, confidential against the device's own administrator,
-    who is root where the agent runs and holds every key the agent holds. Its
-    integrity and authenticity hold against everyone including that
-    administrator once the verification root is pinned inside the signed image;
-    on Guest Shell, and on any platform where the package signature is not
-    enforced, integrity is tamper-evidence rather than tamper-proofing. Role
-    isolation, announce cadence, peer discovery and origin rates are enforced by
-    the tracker and the origin and do not depend on any device honouring
-    anything."""
+    """Scope confidentiality to encrypted payloads, never the entire envelope."""
     security = _page("security.md")
-    assert _compact(guarantee) in _compact(security)
+    boundary = _section(security, "Device administrator trust boundary")
+    _assert_unit(boundary, ("encrypts", "private per-device payload", "not its",
+                            "header", "signed role intent"),
+                 "the envelope header and signed role intent are not confidential")
+    _assert_unit(boundary, ("not confidential", "administrator", "every key"),
+                 "device administrators hold the keys needed to decrypt")
+    _assert_unit(boundary, ("Guest Shell", "replaceable", "tamper-evidence",
+                            "tamper-proofing"),
+                 "replaceable verification roots cannot provide tamper-proofing")
+    assert "encrypted instruction file is confidential" not in _compact(boundary)
     _assert_unit(security, ("offline", "iris-agent.conf", "instruction keys",
                            "lkg_key", "not confidential"),
                  "filesystem copies containing device keys lose confidentiality")

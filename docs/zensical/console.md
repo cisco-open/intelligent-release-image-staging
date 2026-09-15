@@ -35,8 +35,7 @@ against the stored administrator credentials and normally fails.
 ### Finishing setup
 
 Creating the admin is the first of four things a new server needs. The sign-in
-straight after it lands on the **setup flow** (`#setup`) — a real Magnetic
-Stepper, not a linking checklist: a step panel on the left, the active step's
+straight after it lands on the **setup flow** (`#setup`): a step panel on the left, the active step's
 own controls on the right — which walks the other three in order:
 
 1. **Telemetry destination** — where swarm progress, device reports and export
@@ -77,17 +76,14 @@ worded distinctly from one never configured at all.
 
 ### Branding
 
-The console's headings render in Cisco's Sharp Sans Bold typeface where it is
-available, and in the browser's default sans-serif font otherwise
-(`font-display: swap`) — a cosmetic difference only, never a functional one.
-The `.woff2` file is excluded from the Docker build context and the release
-tarball (`.dockerignore`): Cisco's license for it does not permit
-redistribution, so it can never ship inside the image. A deployment that
-independently holds the license restores it at runtime, without ever
-touching the image, by bind-mounting the file over Compose's
-`IRIS_SHARP_SANS_FONT_HOST` variable — see [Reference](reference.md) —
-before `docker compose up`. Left unset, the console looks identical apart
-from the fallback font.
+The Console uses self-hosted Inter for headings, body text, IP addresses and
+logs, with system sans-serif fallbacks. React and legacy pages share this
+font stack. The independent IRIS theme includes no proprietary component
+assets and does not require Cisco fonts.
+
+The legacy `IRIS_SHARP_SANS_FONT_HOST` mount remains for compatibility but
+does not change the current theme. Licensed font files are excluded from
+Docker builds and release tarballs; see [Reference](reference.md).
 
 ## Console areas
 
@@ -95,7 +91,8 @@ from the fallback font.
 | --- | --- |
 | Overview | Rollout counters and per-image staging progress. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`, or `unknown` when the health endpoint cannot be read), fed by the hub's OTLP export health. |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on disk. |
-| Devices | Lists known devices, their **management type**, **Agent install** choice, assigned images, and recent reports. |
+| Inventory | Lists known devices, their **management type**, **Agent install** choice, assigned images, and recent reports. Assign or clear device roles here. |
+| Policies | Creates, edits, imports, and exports role definitions; shows peer-policy health and instruction delivery diagnostics. |
 | Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
 | Swarm | Shows peer progress and seeder/device participation. |
 | Monitoring | Holds the audit trail and per-job deployment logs. |
@@ -201,10 +198,13 @@ A device without a management type reads **Inventory only — management type
 not chosen**. Choose a management type before onboarding it. See
 [Inventory](fleet-workflows.md#inventory).
 
-Management type alone controls the network fields in Add Device. Model is
-optional free text; known models narrow the **Agent install** choices without
-changing the management type. A model such as `C3650` can be saved, but that
-does not confirm hardware support. XR host selects `xr-appmgr`, router modes
+Management type controls the network fields in Add Device. **Model series** is
+a dropdown: IE Switches, IR Routers, Catalyst Routers, Catalyst Switches, NCS,
+or Cisco 8000 Series. Series narrow **Agent install** choices without changing
+the management type. Choosing a series does not confirm hardware support.
+Existing devices display their series while retaining their actual model for
+diagnostics. The API and CSV still accept exact model numbers. XR host selects
+`xr-appmgr`, router modes
 offer `router` (Guest Shell) or `iox`, and routed/inband modes require a
 compatible Guest Shell or IOx choice.
 
@@ -265,12 +265,12 @@ participant are unavailable.
 
 ### Roles and peer-policy status
 
-The Devices table's **Role** column shows the declared fleet role, or a dash
+The Inventory table's **Role** column shows the declared fleet role, or a dash
 when none is declared. **Filters → Role** offers *Role: any*, *— no role —*,
 and the complete policy role list, including roles absent from the current
 page. The filter is applied by the server before paging.
 
-For a selection, open **More actions → Set role…**. Leaving the disabled initial
+For a selection in **Inventory**, open **More actions → Set role…**. Leaving the disabled initial
 placeholder untouched is a no-op; choosing the explicit *— no role —* option
 clears membership. **Preview change** sends one aggregate dry run for every
 selected device and shows the four access/membership impact counts, whether QoS
@@ -283,9 +283,15 @@ If the commit connection or response is
 unreadable, **changes may have been saved**: refresh policy and Fleet state,
 review drift, and preview again rather than repeating the request.
 
-The collapsed **Peer policy** disclosure above Devices summarizes role and
-restricted-role counts, drift, and outbox occupancy (`N/256`). Expanding it
-shows per-role member counts, the last origin-QoS state and download counts,
+Open **Policies** to see which roles can share images and use the distribution
+server. Sharing needs permission from both roles. This is configured intent,
+not a connectivity test: quarantine and explicit device/server ACLs may further
+restrict access. The Enforcement section distinguishes the existing server
+blocklist from additional role restrictions, which remain **preview-only**.
+
+**Advanced** opens role and restricted-role counts, drift, and outbox
+occupancy (`N/256`). Its **Peer access and roles** panel also shows per-role
+member counts, the last origin-QoS state and download counts,
 the mutual-origin **preflight count only**, and the explicit-ACL shadowing rule.
 It never displays peer addresses or raw deny lists. Degraded, fail-closed, and
 unavailable states remain distinct. A capability banner blocks role changes
@@ -305,12 +311,14 @@ tracker's last enforcement state.
 
 ### Role definitions
 
-The **Peer policy** disclosure also holds the **Role definitions** table: one
+The **Policies → Advanced → Role definitions** table shows one
 row per defined role with its restricted flag, peer roles, origin access,
 networks, and QoS overrides, plus **Edit** and **Delete** per row. **New
-role…** opens the editor: role name, peer roles (the role itself is implied),
-IPv4 networks, the instruction-expiry fallback, the restricted and origin
-switches, the eight speed limits in bytes per second (0 = unlimited, otherwise
+role** or **Edit** opens sharing permissions. **Limit sharing to these roles**
+enables the peer list and distribution-server restriction; without it, this
+role permits all roles and the server, but the other role must still permit it.
+The editor's **Advanced** section holds IPv4 networks, instruction-expiry
+fallback, the eight speed limits in bytes per second (0 = unlimited, otherwise
 at least 8192; a live hint shows the Mbit/s equivalent), and the swarm and
 agent cadence values. A blank QoS field inherits the global default. Saving
 follows the Set role contract exactly: **Preview change** sends one dry run
@@ -370,7 +378,7 @@ The separate raw and display state vocabularies, including legacy
 Capability comes from `instr_protocol: 1`, not IOS `version`. Labels retain exact
 i63 values as strings, so browser rounding cannot change identity.
 
-The Peer policy disclosure shows issued policy revision, accepted application
+Open **Policies → Advanced → Instruction delivery and key custody** for issued policy revision, accepted application
 counts grouped by policy revision, state counts, current `instr_stamp_missing`
 and `pointer_skew` device counts, and observation time. It excludes orphan
 heartbeats and retains accepted identities beneath stale/rejected/revoked
@@ -405,28 +413,26 @@ before onboarding other applications on the same device.
 
 ## Bulk device actions
 
-The Devices toolbar acts on the current *selection*, so a CSV import can be
-finished without touching each device.
+In **Inventory**, click a row to select or deselect it. Selected rows are
+highlighted and expose bulk actions; there are no selection checkboxes. You can
+also focus a row and press **Space** or **Enter**. Device names open details,
+and buttons or dropdowns inside a row do not change its selection.
+**Select page** selects the visible page; **Clear page selection** reverses it.
+**Cancel** clears the entire selection.
 
-Above it, the filter bar narrows what the table shows — free text across
-device, IP and model, plus management type, **Agent install**, credential,
-telemetry, peer policy and status. Filtering happens on the server, not just
-in the browser: every one of these controls (and the free-text search) is
-applied by the same `GET /api/v1/devices` request the table polls, so the count
-next to the filter bar and the rows on screen can never disagree about what
-"matches" means, no matter how large the fleet is. The **Status** choices are
-generated from the same derivation the Status column renders, so every state
-a row can show can be filtered for. Each dropdown choice shows the same
-sentence-case label the column renders: `Onboarding`, `Undeploying`, `Waiting
-for heartbeat`, `Waiting for staging`, `Onboard failed`, `Undeploy failed`, `Staged`, `Staging
-failed`, `Image(s) failed`, `Copying to IOS storage`, `Staging (other)`,
-`Enrolled`, `Not enrolled`, and `Offline (no recent heartbeat)` — but its
-`<option>` value, and the wire status the cell itself carries, is the
-lowercase/kebab form underneath: `onboarding`, `undeploying`,
-`waiting-heartbeat`, `waiting-staging`, `onboard-failed`, `undeploy-failed`, `deployed`,
-`placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
-`not-enrolled`, and `offline` — the last being a modifier, since a device
-filtered on `deployed` (rendered `Staged`) can still have gone quiet.
+Search by device, IP or model. **Filters** expands the structured filters;
+remove an individual filter chip or use **Reset** to clear all filters. Filters
+apply on the server before paging. **Device series** includes IE Switches,
+IR Routers, Catalyst Routers, Catalyst Switches, NCS and Cisco 8000 Series,
+with legacy and unknown categories retained. These are display labels for the
+existing API families, not a promise that every model in a series is supported.
+The table shows series names; hover the series cell to see the stored model.
+
+CSV import results stay visible independently of inventory refreshes. A refused
+role import names the role/device when the API provides them; define missing
+roles in Policies first. You can select the same file again after correcting it.
+If the response is unavailable, refresh inventory before retrying: the request
+may already have completed, and the Console does not resend it automatically.
 
 ### Schedules
 
@@ -463,7 +469,7 @@ answer, not a promise about the next run.
 ### Paging and selection at fleet scale
 
 The Devices table pages large filtered inventories. Selection follows device
-IDs across pages. The header checkbox selects the current page only;
+IDs across pages. **Select page** selects the current page only;
 **Select all N matching devices** expands it to the active filter. **Cancel**
 clears the entire selection. Review the selected count before any bulk action.
 
@@ -525,37 +531,34 @@ busy device, an unreachable device, a router already holding a deployment
 record — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
 
-### Job log windows
+### Device activity
 
-The batch panel's per-row **log** button opens one log window per job, each
-with its own live stream, **Abort**, and **Close**, so concurrent onboards
-never write into (or blank) each other's window. At most six windows stay
-open; opening more closes the oldest. **Abort** is queue-aware: a job still
-waiting for an install slot is taken out of the queue instead — scoped to
-just that job, other queued work is untouched — while aborting a running job
-stops the installer, with the confirmation warning that the device may be
-left partially configured (re-onboard, which is idempotent, or undeploy to
-clean up). A window opened on a queued job says so and starts streaming the
-moment the job wins a slot.
+**Inventory → Activity** opens recent jobs in a side panel. Choose **log** on
+a job to read its output; only one log is displayed at a time and job streams
+remain separate. **Close** or **Esc** closes the viewer, not the jobs. Reopening
+a log reconnects its stream. Older persisted logs remain under **Monitoring →
+Deployment logs**.
 
-Successful jobs end with `onboard complete: <IP>` or `undeploy complete: <IP>`.
-Errors name the failed check and any recovery steps. Onboarding completion
-means the agent is set up; check Devices for image staging progress.
+**Abort** requires confirmation: it cancels that queued job or stops its running
+installer, which can leave the agent partly configured. Re-onboard or undeploy
+to recover. Completed jobs do not offer Abort.
 
-The log is step-level on every platform. Guest Shell, router and XR jobs
-stream their installer's `[n/N]` banners and notices. An IOx job streams the
-recipe's `[n/8]` (install) or `[n/4]` (undeploy) headers, its prerequisite
-notices and poll outcomes (`app is DEPLOYED (poll 2/24)`), and one indented
-line per controller operation with its duration -- `  configure_app ok (2.1s)`
--- as each step completes. A failed step is named the same way
-(`  configure_app failed (2.1s)`), followed by the device's own `% ...`
-verdict and the controller's `IOx command failed: ...` detail. The raw IOS
-session the controller drove is not in the default job log; it is kept as the job's
-persisted transcript under the state directory's `iox/transcripts`. To stream
-it into the job log for a debugging run, select **Detailed logs** in the
-Onboard or Undeploy dialog, or submit `{"log": true}` through the API.
-It defaults to off; credential redaction remains active. Onboarding with this
-option also enables `aria2c.log` on IOx and IOS-XR. Guest Shell logging is
+New jobs use the same broad progress across Guest Shell, IOx and IOS-XR:
+**Prepare → Deploy/remove IRIS agent → Finalize**. The heading identifies the
+device series and installer. Device Details lists the chassis model separately,
+with its source; a series selection is never presented as a detected chassis.
+Completion is reported as `Onboard completed.` or `Undeploy completed.` only
+after the job finishes successfully. This concerns the agent, not completion of
+an image download or installation of device software.
+
+Errors, warnings and recovery instructions remain visible. For individual
+installer steps, timings and available command diagnostics, select **Detailed
+logs before starting** Onboard or Undeploy, or submit `{"log": true}` through
+the API. The job confirms `Detailed logs enabled.`; the option defaults to off.
+IOx additionally includes its redacted device session, which is retained under
+the state directory's `iox/transcripts`. Existing saved logs are not rewritten,
+and enabling detail on a later job does not expand an earlier summary log.
+Onboarding with this option also enables `aria2c.log` on IOx and IOS-XR. Guest Shell logging is
 configured separately through `iris_log` in its agent configuration (see the
 [reference](reference.md#device-container-environment-variables)).
 
@@ -584,11 +587,11 @@ later verification step instead of exposing only one total duration.
 
 ## Settings
 
-Settings is a sidebar feature with its own sub-menu — **Setup**, **Device
-packages**, **General**, **TLS & trust**, **Telemetry**, and **Audit export** —
-rather than an in-page tab strip. Each sub-page is deep-linkable, including
-`#settings/setup`, `#settings/packages`, `#settings/general`,
-`#settings/tls`, `#settings/telemetry`, and `#settings/audit`.
+Open **Settings** in the navigation rail, then use the section bar: **General**,
+**TLS & trust**, **Telemetry**, **Image verification**, **Device packages**,
+**Audit export**, and **Setup checklist**. Each section keeps its deep link:
+`#settings/general`, `#settings/tls`, `#settings/telemetry`,
+`#settings/bulkhash`, `#settings/packages`, `#settings/audit`, and `#settings/setup`.
 
 General shows the device-facing server IP and the Console's browser URL
 separately. They can belong to different hosts. `IRIS_CONSOLE_URL` on the
@@ -597,7 +600,7 @@ controls where it actually listens.
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+The **Setup checklist** section (`#settings/setup`) is a post-install status panel: four
 cards — **admin account**, **telemetry destination**, **device packages**, and
 **image verification** — each carrying a live status chip and a short
 rationale, meant to be revisited any time after installing a server rather

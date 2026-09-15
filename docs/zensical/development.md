@@ -36,7 +36,7 @@ Do not add code or documentation that causes IRIS to install, activate, commit, 
 
 ### Test dependencies
 
-The shipped code is stdlib-only, but the test suites are not. Install the
+The Python application uses the standard library, but the test suites do not. Install the
 declared test dependencies once, then run the suites from `TESTING.md`:
 
 ```bash
@@ -52,6 +52,56 @@ CI run the same set. `PyYAML` is required, not optional: the Kubernetes
 manifest and `docker-compose.yml` tests parse the shipped YAML to assert
 security properties, and a missing dependency fails the run instead of quietly
 removing those checks from it.
+
+### Console frontend
+
+`server/console-ui/` builds the React header, help/account controls, primary
+navigation, and Settings section navigation. React owns those three explicit
+mount roots; the operational views and forms still use `server/webroot/app.js`,
+including the dedicated Policies page. This is an incremental migration, not a
+complete rewrite. The entry point mounts React before loading the existing
+application, which sends shell state through `iris:shell-state` and handles
+`iris:logout`. Settings links retain the existing `#settings/<section>` routes.
+Settings has one navigation-rail link and an in-page section bar.
+
+The shell uses IRIS-owned React components inspired by Catalyst Center's layout,
+not an official Magnetic implementation. Do not copy the internal Magnetic
+boilerplate, Harbor components, or vendor assets into this public repository.
+Dependencies must come from public npm, with no private registry requirement.
+
+For a focused local build/check, use Node 22.12 or later:
+
+```bash
+cd server/console-ui
+npm ci
+npm test
+```
+
+The frontend tests also guard the public dependency boundary: React and React DOM
+are the only direct runtime dependencies; internal UI imports are not allowed.
+CI also runs the mocked Chromium browser checks with the locked Playwright
+dependency. Locally, install Chromium once with `npx --no-install playwright
+install chromium`, then run `npm run test:browser` from `server/console-ui/`.
+These checks do not contact a live server or device.
+
+The Console Dockerfile uses a separate Node build stage and copies the generated
+`console.js` and `console.css` into the Python runtime's `webroot/assets/`. Node
+and `node_modules` are not shipped in that runtime. Docker builds do this
+automatically. For local Python-only previews, run from the repository root:
+
+```bash
+npm --prefix server/console-ui run build
+mkdir -p server/webroot/assets
+cp server/console-ui/dist/console.js server/console-ui/dist/console.css server/webroot/assets/
+```
+
+The browser loads `/assets/console.js` and `/assets/console.css`. These files
+are generated, git-ignored assets, not source files to commit.
+
+Assets, React, and fonts are served locally. Keep the existing strict Content
+Security Policy: no runtime CDN, inline scripts, or injected inline styles.
+This change does not replace the backend API, sessions, CSRF checks, or access
+control. The public documentation website remains separate and dependency-free.
 
 ## Embedded agent packages
 

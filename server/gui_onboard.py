@@ -18,6 +18,7 @@ streamed job lines are the installer's stdout, which never echoes the password
 deliberately NOT exported: the console always stages locally
 (IRIS_STAGE_LOCAL=1), so no recipe can reach the ssh branch that reads it."""
 import copy
+import device_action_messages
 from collections import deque
 from contextlib import contextmanager, nullcontext
 import inspect
@@ -71,6 +72,12 @@ _MAX_PERSISTED_LOGS = 200
 _INSTRUCTION_BOOTSTRAP_MAX = 256 * 1024
 _STAGING_CAPABILITY = re.compile(r"^[0-9a-f]{32}$")
 _BOOTSTRAP_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Only fixed transport labels may supplement controller details in normal logs.
+# Never interpolate arbitrary transport output or an unvalidated category.
+_IOX_LOG_TRANSPORT_CATEGORIES = frozenset((
+    "connection", "timeout", "ssh_authentication", "host_key", "silence",
+    "rejected", "transport", "unsupported_syntax", "unsupported_response",
+))
 
 
 def _write_private_snapshot(path, body):
@@ -164,10 +171,10 @@ _UNINSTALL_RECIPES = {
 # match wins; case-insensitive prefix regexes. A family's first option is its
 # auto-resolution default.
 _MODEL_INSTALL_TABLE = (
-    (r"^IE-?3", ("iox",)),        # IE-3x00: no Guest Shell on IOS-XE >=17.9
-    (r"^IR1[018]", ("iox",)),     # IR1101/IR18xx are IOx-hosted the same way
-    (r"^C9[0-9]{3}", ("guestshell", "iox")),
-    (r"^C8[0-9]{3}", ("router", "iox")),   # Guest Shell (auto) or an IOx app, both via VPG
+    (r"^(?:IE-?3|IE3x00$)", ("iox",)),  # IE Switches series or detected model
+    (r"^(?:IR1[018]|IR1x00$)", ("iox",)),
+    (r"^(?:C9[0-9]{3}|C9xxx$)", ("guestshell", "iox")),
+    (r"^(?:C8[0-9]{3}|C8xxx$)", ("router", "iox")),
     (r"^(ISR|ASR|CSR)", ("guestshell",)),  # legacy router mapping; not yet supported
 )
 _MODEL_PLATFORMS = tuple((pattern, options[0])
@@ -184,7 +191,7 @@ _FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
 # belt-and-suspenders check that still refuses an explicit platform even when
 # os_family was never probed -- the incident this closes: an 8201 offered iox
 # and dying on an XE-flavoured arch error.
-_XR_MODEL_RE = re.compile(r"^8[0-9]{2,3}(-SYS)?$")
+_XR_MODEL_RE = re.compile(r"^(?:8[0-9]{2,3}(-SYS)?|XR8000)$", re.IGNORECASE)
 # The other IOS-XR family IRIS stages to: NCS-540, NCS-5500, NCS-55A1,
 # NCS-57B1 and their siblings. They run the same appmgr recipe as a Cisco
 # 8000 -- the platform value, the RPM and device/xr-install.sh are identical --
@@ -309,13 +316,13 @@ def install_options_for(model, os_family=None):
 
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
-_ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
+_ARM_IOX_MODELS = tuple(row[0] for row in _MODEL_INSTALL_TABLE[:2])
 # Catalyst 9000 -> amd64 IOx package; the app-hosting SSD share
 # (usbflash1:iox_host_data_share, host-side /vol/usb1) is bind-mounted into
 # the app so image transfer is a local disk write + an IOS-internal plain
 # `copy` onto bootflash — same final placement as Guest Shell, and no
 # CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
-_C9K_MODEL = r"^C9[0-9]{3}"
+_C9K_MODEL = _MODEL_INSTALL_TABLE[2][0]
 # Catalyst 8000 -> amd64 IOx package attached through the IRIS VirtualPortGroup
 # (device/iox/install.sh derives the vnic form from the router management
 # type); no AppGig, staging to bootflash: through SCP-to-self plus IOS copy.
@@ -326,7 +333,7 @@ _C9K_MODEL = r"^C9[0-9]{3}"
 # (/local/local1/core_dir) is invisible to IOS `dir`, and `app-hosting data`
 # copies only INTO the app. The router therefore hands the image to IOS over
 # the scp push, and its SCP server stays enabled (issue #228).
-_C8K_MODEL = r"^C8[0-9]{3}"
+_C8K_MODEL = _MODEL_INSTALL_TABLE[3][0]
 _ROUTER_MANAGEMENT_TYPES = frozenset(("router-routed", "router-nat"))
 _C8K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
@@ -494,7 +501,7 @@ def resolve_platform(dev, probe=None, os_family=None):
                 % (explicit, device_id, ", ".join(sorted(_PLATFORM_RECIPES))))
         if explicit == _XR_PLATFORM and family == "xe":
             _refuse_xr_platform_on_xe(device_id)
-        if re.match(r"^C8[0-9]{3}", dev.get("model") or "", re.IGNORECASE) \
+        if re.match(_C8K_MODEL, dev.get("model") or "", re.IGNORECASE) \
                 and explicit not in ("router", "iox"):
             raise ValueError("Catalyst 8000 models require platform router or iox")
         return explicit
@@ -785,6 +792,8 @@ def _probe_sections(runner, env, commands, label):
     """Run every command in ONE ssh login and split the output on echoed
     markers. One login per device is what makes a large fleet submission
     viable -- see the note in the router preflight."""
+    from time_preflight import require_device_time
+    commands = tuple(commands) + (("ntp", "show ntp status"),)
     marker = "__IRIS_PREFLIGHT_"
     request = "\n".join(
         "echo %s%s__\n%s" % (marker, name.upper(), command)
@@ -813,6 +822,7 @@ def _probe_sections(runner, env, commands, label):
         if not matches:
             raise ValueError("%s preflight did not return %s" % (label, name))
         sections[name] = matches[-1].group(1)
+    require_device_time(sections["ntp"])
     return sections
 
 
@@ -870,6 +880,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         ("running", "show running-config"),
         ("apps", "show app-hosting list"),
         ("guest_share", "dir bootflash:guest-share"),
+        ("ntp", "show ntp status"),
     ]
     if resolved["management_type"] == "router-nat":
         commands.append(("interfaces", "show interfaces %s" % resolved["nat_interface"]))
@@ -898,6 +909,8 @@ def _default_router_preflight(dev, env, resolved, repo_root):
             raise ValueError("router preflight did not return %s" % name)
         sections[name] = match.group(1)
 
+    from time_preflight import require_device_time
+    require_device_time(sections["ntp"])
     version = sections["version"]
     # Classify from the banner already in hand, exactly like the Guest Shell
     # preflight -- no extra SSH round trip. The router preflight never probed
@@ -1452,6 +1465,8 @@ class OnboardService:
             job["result_code"] = 130
             job["error_category"] = "cancelled"
         self._append_locked(job, reason)
+        self._store_line_locked(job, device_action_messages.result(
+            job.get("action"), "cancelled"))
         job.pop("_work", None)
         if job.get("_schedule_context") and reason == "manual_override":
             job["admission_reason"] = reason
@@ -1719,7 +1734,7 @@ class OnboardService:
         if management_type == "legacy_routed":
             management_type = "routed"
         # The address comes from the RESOLVED target for every management
-        # type: on undeploy that is the deployment record, so an inventory
+        # mode. On undeploy that is the deployment record, so an inventory
         # edit after deployment cannot retarget the teardown at another box.
         # Only the router path used to be bound this way; Guest Shell and IOx
         # teardowns followed the live fleet row.
@@ -2152,6 +2167,14 @@ class OnboardService:
                 platform, script = self._resolve(
                     device_id, dev, env, action,
                     controller_owns_credentials=controller_custody)
+                with self._lock:
+                    j["platform"] = platform
+                    self._store_line_locked(j, device_action_messages.heading(
+                        action, family(dev.get("model")), platform))
+                    for message in device_action_messages.phase(j, 1):
+                        self._store_line_locked(j, message)
+                    if (j.get("env_extra") or {}).get("IRIS_LOG") == "on":
+                        self._store_line_locked(j, "Detailed logs enabled.")
                 if action == "onboard" and platform == "guestshell":
                     # The reachability probe stays AHEAD of the collision
                     # preflight: an unreachable device is far more common than
@@ -2253,10 +2276,6 @@ class OnboardService:
                 j = self._jobs.get(job_id)
                 if j is not None:
                     j["platform"] = platform   # for the *_finished audit line
-            recipe = (_UNINSTALL_RECIPES if action == "undeploy"
-                      else _PLATFORM_RECIPES)[platform]
-            self._append(job_id, "platform: %s (model %s) -> %s" % (
-                platform, dev.get("model") or "?", recipe))
             if action == "onboard" and platform == "iox":
                 pkg = env.get("PKG", "iris-arm64.tar")
                 if not os.path.isfile(os.path.join(self.artifacts_dir, pkg)):
@@ -2422,7 +2441,7 @@ class OnboardService:
                             evidence = self._iox_preflight(
                                 callback_dev, env,
                                 j.get("resolved") or resolved or callback_dev)
-                    except Exception as exc:
+                    except Exception:
                         self._persist_os_family(
                             device_id, callback_dev, prior_family)
                         preflight_diagnostic[0] = (
@@ -2533,6 +2552,10 @@ class OnboardService:
                                 for character in detail)):
                         raise ValueError("invalid IOx controller detail")
                     if detail:
+                        category = result.get("error_category")
+                        if (result_code != 0 and isinstance(category, str)
+                                and category in _IOX_LOG_TRANSPORT_CATEGORIES):
+                            detail += " (" + category + ")"
                         self._append(job_id, "IOx controller: " + detail)
                 except Exception as exc:
                     result = None
@@ -2809,6 +2832,10 @@ class OnboardService:
                 self._append_locked(j, line)
 
     def _append_locked(self, job, line):
+        for message in device_action_messages.progress(job, line):
+            self._store_line_locked(job, message)
+
+    def _store_line_locked(self, job, line):
         size = len(line.encode("utf-8", "replace"))
         # Kept in lockstep with job["lines"] on every path below, including
         # the pops, so _persist_log can zip the two without checking.
@@ -2922,6 +2949,10 @@ class OnboardService:
                 j["finished_at"] = int(self._now())
                 device_id = j.get("device_id")
                 action = j.get("action", "onboard")
+                if state == "done" and action in ("onboard", "undeploy"):
+                    for message in device_action_messages.phase(j, 3):
+                        self._store_line_locked(j, message)
+                self._store_line_locked(j, device_action_messages.result(action, state))
                 # A job can finish without ever starting (a reaper or cancel
                 # path); measure from the queue stamp then, never crash.
                 base = j.get("started_at")

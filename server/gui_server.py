@@ -146,10 +146,6 @@ def _token_pair(path, previous_path=None):
     return tokens
 
 
-def _current_token(path):
-    return _token_pair(path)[0]
-
-
 def _management_request(host, port, context, method, target, headers, tokens,
                         *, body=None, timeout=10):
     """Retry only a rejected tier credential, before any browser body is read.

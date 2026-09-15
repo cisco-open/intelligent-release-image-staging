@@ -552,10 +552,31 @@ _stage_build_context() {
   printf '#!/bin/sh\nexit 0\n' > "$CTX/agent_bin/aria2c-amd64"
   printf '#!/bin/sh\nexit 0\n' > "$CTX/agent_bin/aria2c-arm64"
   chmod +x "$CTX/agent_bin/aria2c-amd64" "$CTX/agent_bin/aria2c-arm64"
-  # a throwaway self-signed cert stands in for the pinned catalog cert
-  openssl req -x509 -newkey rsa:2048 -keyout "$CTX/key.pem" \
-    -out "$CTX/iris-catalog.pem" -days 1 -nodes -subj "/CN=test-catalog" 2>/dev/null
+  # The shared image requires public instruction trust, rendered exactly as
+  # tools/build-device-image.sh does. Disposable test private keys stay OUTSIDE
+  # the Docker context; no deployment roots or runtime bypass are involved.
+  TEST_CUSTODY="$BATS_TEST_TMPDIR/test-custody"
+  mkdir -p "$TEST_CUSTODY/private" "$TEST_CUSTODY/public"
+  for root_id in root-a root-b; do
+    ssh-keygen -q -t ed25519 -N '' -C "XR build fixture only: $root_id" \
+      -f "$TEST_CUSTODY/private/$root_id"
+    cp "$TEST_CUSTODY/private/$root_id.pub" "$TEST_CUSTODY/public/$root_id.pub"
+  done
+  PYTHONPATH="$REPO/server" python3 - "$TEST_CUSTODY/public" "$CTX/agent" <<'PY'
+import sys
+from instruction_keys import render_device_trust
+render_device_trust(sys.argv[1], sys.argv[2])
+PY
   cp "$DOCKERFILE" "$ENTRYPOINT" "$CONTAINER_DIR/reconcile.sh" "$CTX/"
+}
+
+@test "XR build context includes rendered public trust without private keys" {
+  _stage_build_context
+  [ -s "$CTX/agent/iris-signers.allowed_signers" ]
+  [ -s "$CTX/agent/iris-root.allowed_signers" ]
+  [ ! -e "$CTX/key.pem" ]
+  run grep -R -l -E 'BEGIN (OPENSSH |RSA |EC )?PRIVATE KEY' "$CTX"
+  [ "$status" -eq 1 ]
 }
 
 @test "the XR image builds" {

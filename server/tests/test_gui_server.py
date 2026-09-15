@@ -117,7 +117,7 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
     assert '<th>Device</th><th>Role</th>' in html
     assert '<td class="dev-role">' in js and 'dash(d.role)' in js
-    assert 'colspan="13"' in js
+    assert 'colspan="12"' in js
     assert html.count('id="dev-filter-role"') == 1
     assert html.count('id="dev-filter-peer"') == 1
     assert "peer-intent badge" in js and "Quarantined intent" in js
@@ -632,7 +632,9 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
     assert "#dev-rows .cred" in js
     assert "/credential'" in js or '/credential"' in js
     assert "onboard-selected" in js
-    assert "#dev-rows .mark" in js
+    assert "#dev-rows tr[data-id]" in js
+    assert "function toggleDeviceRow(row)" in js
+    assert "getElementById('dev-rows').addEventListener('keydown'" in js
 
 
 def test_devices_toolbar_regrouped():
@@ -660,8 +662,8 @@ def test_devices_toolbar_regrouped():
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
-    assert devices_thead.count('<th>') == 13, \
-        "declared Role and Instructions columns added without row action links"
+    assert devices_thead.count('<th>') == 12, \
+        "Role and Instructions remain; row selection needs no checkbox column"
     assert devices_thead.count('<th>Role</th>') == 1
     assert devices_thead.count('<th>Instructions</th>') == 1
 
@@ -693,8 +695,8 @@ def test_peer_policy_console_controls_are_typed_and_safe():
     assert "method: 'PUT', headers: csrfHdr" in js
     assert "if_revision: peerPolicy.revision" in js
     assert "r.status === 409" in js and "operation_backlog_full" in js
-    assert "may not terminate existing device-to-device sessions immediately" in js
-    assert "never installs or reloads a device" in js
+    assert "Existing device-to-device transfers may continue" in js
+    assert "Device software is unchanged" in js
     assert "Quarantined intent" in js and "desired_ip_count" in js and "conflict_types" in js
     assert "participant_class === 'legacy_unattributed'" in js
     assert "p.tracker" in js and "device_ip" not in js.split("function refreshSwarm()")[1].split("// ---- Settings ----")[0]
@@ -1083,15 +1085,20 @@ def test_settings_tls_trust_and_destination_sections_wired():
     assert "'/api/v1/settings/ca-trust/refresh'" in js        # POST job start
     assert "'/api/v1/settings/ca-trust/refresh/' + encodeURIComponent(" in js
     assert js.count("'/api/v1/settings/telemetry-destination'") == 2
-    # every DELETE carries the CSRF header (4 pre-existing + 3 new)
-    assert js.count("{ method: 'DELETE', headers: csrfHdr() }") >= 7
+    # Settings mutations share error handling and keep CSRF on both methods.
+    helper = js.split("async function settingsWrite(", 1)[1].split("// Drag-and-drop", 1)[0]
+    assert "fetch(url, { method: 'DELETE', headers: csrfHdr() })" in helper
+    assert "await jpost(url, body)" in helper
+    for endpoint in ("gui-cert", "telemetry-destination"):
+        assert "settingsWrite('/api/v1/settings/" + endpoint + "', null, msg, 'DELETE')" in js
+    assert "settingsWrite('/api/v1/settings/trust/' + encodeURIComponent(name), null, msg, 'DELETE')" in js
     # per-row remove is a danger link rendered into the trust table
     assert "#trust-rows .trust-del" in js
     assert "danger-link trust-del" in js
     # destructive paths confirm with consequence-naming messages
-    assert "serves its deployment certificate again" in js    # cert revert
-    assert "stops trusting certificates issued" in js         # trust remove
-    assert "goes back to the environment configuration" in js # dest revert
+    assert "Deletes the uploaded certificate and key" in js   # cert revert
+    assert "no longer trust certificates from this CA" in js  # trust remove
+    assert "uses the deployment settings from the next sample" in js # dest revert
     # download-now polls the job like the image publish poller
     assert "function pollCaRefresh(" in js
     assert "j.state === 'failed'" in js
@@ -1118,25 +1125,24 @@ def test_settings_tls_trust_and_destination_sections_wired():
     assert ".inline-form textarea" in css
 
 
-def test_settings_uses_sidebar_feature_submenus():
-    """Source guard for the Settings navigation: the three feature sub-pages
-    (General / TLS & trust / Telemetry) are reached from an indented sidebar
-    sub-menu under Settings — deep-linkable as #settings/<sub> — not from an
-    in-page tab strip. Panes stay siblings inside #view-settings, toggled
-    with the `hidden` attribute; the sub-menu lives in the sidebar and is
-    revealed only while a settings sub-page is active."""
+def _react_shell(name="main.jsx"):
+    path = os.path.join(gui_server.WEBROOT, "..", "console-ui", "src", name)
+    with open(path, encoding="utf-8") as stream:
+        return stream.read()
+
+
+def test_settings_uses_react_section_navigation():
+    """A single rail entry leads to local sections without remounting forms."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    side = html.split('<nav class="nav-rail">')[1].split("</nav>")[0]
-    # the sub-menu container starts hidden (revealed by the router) and holds
-    # one deep-linkable entry per feature sub-page
-    assert 'id="settings-submenu" hidden' in side
+    side = _react_shell("settings-navigation.jsx")
+    assert "link('settings/general', 'Settings', 'gear', route.startsWith('settings'))" in _react_shell()
+    assert 'aria-label="Settings sections"' in side
     for sub in ("general", "tls", "telemetry"):
-        assert ('id="nav-settings-%s"' % sub) in side, sub
-        assert ('href="#settings/%s"' % sub) in side, sub
+        assert ("['%s'," % sub) in side, sub
+    assert 'href={`#settings/${id}`}' in side
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    # the old in-page tab strip is gone everywhere
-    assert "settings-tab" not in html
+    assert 'id="iris-settings-navigation-root"' in settings
     for pane_id in ("settings-pane-general", "settings-pane-tls", "settings-pane-telemetry"):
         assert ('id="%s"' % pane_id) in settings, pane_id
     # exactly one pane is visible in the static markup: General (the default)
@@ -1153,12 +1159,12 @@ def test_settings_uses_sidebar_feature_submenus():
     # array that drives the concatenation (mirrors the orphan guard's own
     # getElementById/querySelector extraction, which only catches literals).
     assert "'settings-pane-' + t" in js
-    assert "'nav-settings-' + t" in js
+    assert "'nav-settings-' + t" not in js
     assert re.search(
         r"SETTINGS_SUBS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js)
     # the router owns sub-page selection: #settings/<sub> deep-links resolve
     assert "showSettingsSub(" in js
-    assert "settings-submenu" in js
+    assert "window.addEventListener('hashchange', update)" in side
 
 
 def test_device_packages_have_a_persistent_settings_view():
@@ -1166,7 +1172,7 @@ def test_device_packages_have_a_persistent_settings_view():
     html = _webroot("index.html")
     js = _webroot("app.js")
     assert 'href="#settings/packages"' in html
-    assert 'id="nav-settings-packages"' in html
+    assert "['packages', 'Device packages'," in _react_shell("settings-navigation.jsx")
     assert 'id="settings-pane-packages" hidden' in html
     assert 'id="device-packages-table"' in html
     assert 'id="device-packages-recheck"' in html
@@ -2985,16 +2991,17 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
     return "127.0.0.1", port, srv.shutdown
 
 
-def test_onboard_start_status_and_stream(tmp_path):
+@pytest.mark.parametrize("detailed", [False, True])
+def test_onboard_start_status_and_stream(tmp_path, detailed):
     def run_fn(p, e, on):
-        on("[1/6] hello"); on("[6/6] done"); return 0
+        on("[1/6] hello"); on("[3/6] deploy"); on("[6/6] done"); return 0
     host, port, stop = _serve_onboard(tmp_path, run_fn)
     try:
         ck, csrf = _auth(host, port)
         # start requires CSRF
         assert _req(host, port, "POST", "/api/devices/d1/onboard",
                     {}, headers={"Cookie": ck})[0] == 403
-        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {"log": detailed},
                         headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 200
         job_id = json.loads(b)["job_id"]
@@ -3008,14 +3015,18 @@ def test_onboard_start_status_and_stream(tmp_path):
                 break
             _t.sleep(0.02)
         assert job["state"] == "done"
-        assert "[6/6] done" in job["lines"]
+        for line in ("[1/3] Prepare onboarding", "[2/3] Deploy IRIS agent",
+                     "[3/3] Finalize onboarding", "Onboard completed."):
+            assert line in job["lines"]
+        assert ("[6/6] done" in job["lines"]) is detailed
         # SSE stream returns text/event-stream and the data lines + an end event
         s, hd, sb = _req(host, port, "GET",
                          "/api/onboard/jobs/" + job_id + "/stream",
                          headers={"Cookie": ck})
         assert s == 200 and "text/event-stream" in hd.get("Content-Type", "")
         body = sb.decode()
-        assert "data: [1/6] hello" in body and "event: end" in body
+        assert "data: [1/3] Prepare onboarding" in body and "event: end" in body
+        assert ("data: [1/6] hello" in body) is detailed
     finally:
         stop()
 
@@ -4745,7 +4756,7 @@ def test_setup_requires_fields(tmp_path):
 
 
 def test_normal_mode_serves_login_not_setup(tmp_path):
-    # once an admin exists, / serves the console shell (app.js), /login.html the login
+    # Once an admin exists, / serves the React Console shell; login stays separate.
     app = gui_app.GuiApp(str(tmp_path / "secrets.json")); app.set_admin("admin", "pw")
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
     port = srv.server_address[1]
@@ -4753,9 +4764,11 @@ def test_normal_mode_serves_login_not_setup(tmp_path):
     try:
         st, _, b = _req("127.0.0.1", port, "GET", "/login.html")
         assert st == 200 and b"Sign in" in b
-        # GET / serves the console shell (app.js), NOT the setup wizard, once set up
+        # GET / serves the current module entrypoint, not the setup wizard.
         st, _, b = _req("127.0.0.1", port, "GET", "/")
-        assert st == 200 and b"/app.js" in b and b"First-run setup" not in b
+        assert st == 200
+        assert b'<script type="module" src="/assets/console.js"></script>' in b
+        assert b'id="setup-form"' not in b and b'id="login-form"' not in b
         # setup is refused now, even with a syntactically plausible grant
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
                         {"username": "x", "password": "password",
@@ -6647,9 +6660,9 @@ def test_image_upload_oversized_emits_fail_audit(tmp_path):
 def test_source_guard_monitoring_nav_and_view():
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert 'id="nav-monitoring"' in html
+    assert "['monitoring', 'Monitoring', 'pulse'" in _react_shell()
     assert 'id="view-monitoring"' in html
-    assert "System" in html
+    assert "System" in _react_shell()
     assert 'id="audit-load-older"' in html
     assert "Load older" in html
     assert 'id="audit-category"' in html
@@ -7380,6 +7393,7 @@ def test_ca_trust_default_url_is_prefilled(tmp_path, monkeypatch):
     settings view both surface the built-in Cisco CA-bundle URL, not None,
     so the UI shows it prefilled and 'Download now' works out of the box."""
     assert gui_server._CA_TRUST_DEFAULT_URL == _CA_DEFAULT_URL
+    assert "var CA_CISCO_URL = '" + _CA_DEFAULT_URL + "';" in _webroot("app.js")
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     p = str(tmp_path / "state" / "ca-trust-settings.json")
     assert gui_server.read_ca_trust_settings(p) == {
@@ -8397,7 +8411,8 @@ def test_deployment_route_returns_503_without_an_authority_controller(tmp_path):
 
 # ---- GET /api/deploy-logs (persistent deployment logs) --------------------
 
-def test_deploy_logs_routes_list_filter_and_serve(tmp_path):
+@pytest.mark.parametrize("detailed", [False, True])
+def test_deploy_logs_routes_list_filter_and_serve(tmp_path, detailed):
     log_dir = str(tmp_path / "deploy-logs")
 
     def run_fn(p, e, on):
@@ -8407,7 +8422,7 @@ def test_deploy_logs_routes_list_filter_and_serve(tmp_path):
     try:
         assert _req(host, port, "GET", "/api/deploy-logs")[0] == 401
         ck, csrf = _auth(host, port)
-        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {"log": detailed},
                         headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 200
         jid = json.loads(b)["job_id"]
@@ -8447,7 +8462,9 @@ def test_deploy_logs_routes_list_filter_and_serve(tmp_path):
         first = text.splitlines()[0]
         assert first.startswith("# job=%s device=d1 action=onboard "
                                 "state=done rc=0" % jid)
-        assert "[1/6] hello" in text and "[6/6] done" in text
+        assert "[1/3] Prepare onboarding" in text and "Onboard completed." in text
+        assert ("[1/6] hello" in text) is detailed
+        assert ("[6/6] done" in text) is detailed
     finally:
         stop()
 
@@ -8628,12 +8645,13 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
         assert "<script" not in page, name
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert 'id="help-btn"' in html
-    assert 'href="/help-device.html"' in html
-    assert 'href="/help-server.html"' in html
+    shell = _react_shell()
+    assert 'aria-controls="iris-help-panel"' in shell
+    assert "safeLink(help.guides?.device, '/help-device.html')" in shell
+    assert "safeLink(help.guides?.server, '/help-server.html')" in shell
     # The bundled API reference is a Console-served page too; the menu must
     # use the canonical trailing-slash path (bare /swagger only redirects).
-    assert 'id="help-api-reference" href="/swagger/"' in html
+    assert 'href="/swagger/" target="_blank" rel="noopener noreferrer"' in shell
     with open(os.path.join(gui_server.WEBROOT, "help-server.html")) as f:
         server_guide = f.read()
     assert 'href="/swagger/"' in server_guide
@@ -8790,45 +8808,23 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(
 
 
 def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
-    """Source guard for the force-undeploy operator-facing text (Directive 2
-    Task 4): both the undeploy modal's help copy (index.html) and the confirm()
-    dialog text (app.js) must say, in the same breath as the pre-existing
-    router/IOx wording, what force actually does on an IOS-XR device --
-    strips only the IRIS-named appmgr footprint (app `iris`, source
-    `iris-xr`, the RPM, iris-work/, sidecar files) and never a staged image
-    file -- with the carve-out honestly stated too: the agent (not IRIS
-    teardown) deletes an adopted file when the catalog republishes new
-    content under that same image id, per
-    test_content_republish_on_an_adopted_file_warns_before_replacing_it in
-    device/agent/tests/test_iris_agent.py -- a claim that "a file the agent
-    did not itself download is never removed" would overclaim against that
-    tested behavior. Pinned as one whitespace-collapsed sentence so
-    re-wrapped HTML indentation can't dodge the assertion, and the
-    pre-existing router/IOx sentences are pinned alongside it so neither
-    text loses its wording when the other changes."""
-    xr_sentence = (
-        "On an IOS-XR device, force removes the same IRIS-named footprint "
-        "a normal undeploy would — the appmgr application iris, its "
-        "iris-xr package source, the RPM, iris-work/, and the IRIS sidecar "
-        "files at harddisk: root — but a staged image file there is never "
-        "removed by IRIS teardown, and the agent deletes an adopted file "
-        "only when the catalog republishes new content under that same "
-        "image id — never otherwise.")
+    """Keep cleanup warnings concise and platform-neutral in both dialogs.
 
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    help_row = html.split('id="undeploy-modal"', 1)[1].split(
+    Staged-file retention describes undeploy only, not agent republishing.
+    Per-platform file inventories belong in the manual, not this popup.
+    """
+    html = _webroot("index.html")
+    modal = html.split('id="undeploy-modal"', 1)[1].split(
         'class="modal-foot"', 1)[0]
-    collapsed = " ".join(help_row.split())
-    assert xr_sentence in collapsed
-    assert ("VirtualPortGroup and NAT are left untouched, because nothing "
-            "here proves IRIS created them.") in collapsed
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert xr_sentence in js
-    assert ("The VirtualPortGroup and NAT are NOT removed, because without "
-            "a record there is no proof IRIS created them") in js
+    confirm = _webroot("app.js").split("!confirm('Undeploy ", 1)[1].split(
+        "setBulkBusy(false)", 1)[0]
+    for text in (modal, confirm):
+        for warning in ("resources listed as IRIS-owned", "staged images in device storage",
+                        "Does not stop running jobs", "record and device identity checks",
+                        "VirtualPortGroup and NAT settings", "Retires the old record on success"):
+            assert warning in text
+        assert "never otherwise" not in text
+    assert len(re.sub(r"<[^>]+>", " ", modal).split()) < 100
 
 
 def test_telemetry_health_badge_lives_on_overview_not_monitoring():
@@ -8971,7 +8967,7 @@ def test_add_device_form_filters_install_options_live_by_model():
     The behavior tests cover changes, failures and late lookup responses."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "getElementById('df-model').addEventListener('input'" in js
+    assert "getElementById('df-model').addEventListener('change'" in js
     assert "/api/v1/install-options?model=" in js
     assert "no agent install available yet" not in js
     assert "'xr-appmgr'" in js and "XR appmgr container" in js
@@ -9069,15 +9065,19 @@ def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
     for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
         assert row in guarded, "%r must be inside the !xrHost guard" % row
     # State/Record/Planned/Finished/Preflight/Management type stay
-    # unconditional (every record has them); so do Swarm port/Model/Agent
+    # unconditional (every record has them); so do Swarm port/Agent
     # install/Device identity, which are outside the guard, after it closes
     unguarded = fn.split("if (!xrHost) {", 1)[0]
     for row in ("State", "Record", "Planned", "Finished", "Preflight",
                 "Management type"):
         assert row in unguarded
     after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
-    for row in ("Swarm port", "Model", "Agent install", "Device identity"):
+    for row in ("Swarm port", "Agent install", "Device identity"):
         assert row in after_guard
+    hardware = js.split("function deviceHardwareRows", 1)[1].split(
+        "function deployRecordRows", 1)[0]
+    assert "Chassis model" in hardware and "Series" in hardware
+    assert "xrHost" not in hardware
 
 
 def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):
@@ -9821,7 +9821,7 @@ def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
         "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
-    assert "Some selected devices are missing assignments present on others" in bulk_handler
+    assert "These devices have different image assignments" in bulk_handler
     assert "sets.some(" in bulk_handler
     # the picker itself resets any stale note on every open, so a note left
     # over from one bulk pick never bleeds into the next (bulk or per-row)
@@ -10305,8 +10305,10 @@ def test_console_fonts_are_served_with_woff2_type(tmp_path):
 
 def test_stylesheet_registers_selfhosted_faces_only():
     css = _webroot("styles.css")
-    for fam in ('font-family: "Inter"', 'font-family: "Roboto Mono"', 'font-family: "Sharp Sans"'):
-        assert fam in css
+    assert 'font-family: "Inter"' in css
+    # The Console uses one family; standalone pages retain their own fonts.
+    assert 'font-family: "Roboto Mono"' not in css
+    assert 'font-family: "Sharp Sans"' not in css
     assert "https://" not in css  # CSP: no remote assets in the stylesheet
     assert "DM Sans" not in css
 
@@ -10367,44 +10369,33 @@ def test_console_declares_responsive_and_a11y_foundations():
     below can mean anything."""
     html = _webroot("index.html")
     css = _webroot("styles.css")
-    assert 'id="nav-toggle"' in html
+    assert 'id="iris-menu-toggle"' in _react_shell()
     assert "@media" in css and "prefers-reduced-motion" in css
     assert 'class="table-scroll"' in html or "table-scroll" in _webroot("app.js")
     assert 'aria-live' in html
 
 
 def test_off_canvas_nav_toggle_wired():
-    """#nav-toggle lives in the product bar (not the nav rail itself, which
-    carries no id -- Task 5 shipped it as a bare `.nav-rail` and several
-    existing tests slice on the literal '<nav class="nav-rail">' string, so
-    this task targets it by selector rather than adding an id and risking
-    those pins). Below 768px it slides in via `.open`/`translateX`; the
-    button must report its own state through aria-expanded, not just move
-    a class around."""
-    html = _webroot("index.html")
-    css = _webroot("styles.css")
-    js = _webroot("app.js")
-    toggle = html.split('id="nav-toggle"', 1)[1].split(">", 1)[0]
-    assert 'aria-expanded="false"' in toggle
-    assert 'aria-label="' in toggle
-    # the off-canvas rail lives inside the same max-width:768px breakpoint
-    # the Step-1 pin already requires to exist for prefers-reduced-motion
-    mobile = css.split("@media (max-width: 768px)", 1)[1].split("\n}\n", 1)[0]
-    assert ".nav-rail" in mobile and "translateX(-100%)" in mobile
-    assert ".nav-rail.open" in css and "translateX(0)" in css
-    assert "#nav-toggle" in mobile or "#nav-toggle { display: inline-flex; }" in css
-    # full-width drawers/modal and --sp-lg page padding at the breakpoint
-    assert ".main { padding: var(--sp-lg); }" in mobile
-    assert "width: 100vw;" in mobile
-    # app.js: click toggles an open state and keeps aria-expanded honest,
-    # and every navigation closes it again (show() is the router's one
-    # entry point, so hooking it there covers every nav-rail link)
-    assert "var navToggle = document.getElementById('nav-toggle');" in js
-    assert "function setNavOpen(open) {" in js
-    assert "navRail.classList.toggle('open'" in js
-    assert "navToggle.setAttribute('aria-expanded'" in js
-    show_fn = js.split("function show(view) {", 1)[1][:200]
-    assert "setNavOpen(false);" in show_fn
+    """React owns responsive navigation state, focus and route-close behavior."""
+    js = _react_shell()
+    css = _react_shell("shell.css")
+    assert 'id="iris-menu-toggle"' in js
+    assert 'aria-expanded={expanded}' in js
+    assert 'aria-controls="iris-navigation"' in js
+    assert 'aria-label="Toggle navigation"' in js
+    assert "@media (max-width: 800px)" in css
+    assert "transform: translateX(-100%)" in css
+    assert ".iris-nav-open #iris-navigation-root" in css
+    assert "transform: translateX(0)" in css
+    assert "onClick={toggleNavigation}" in js
+    assert "closeNavigation(true)" in js
+    assert "window.addEventListener('hashchange', change)" in js
+    assert "if (event.key === 'Tab')" in js
+    assert "event.key === 'Escape'" in js
+    assert "first?.focus()" in js and "last?.focus()" in js
+    # Existing operational drawers retain their narrow-screen geometry.
+    legacy = _webroot("styles.css")
+    assert "width: 100vw;" in legacy
 
 
 def test_every_operational_table_gets_a_scroll_wrapper():
@@ -11043,77 +11034,34 @@ def test_nav_icon_symbols_vendored_in_sprite():
 
 
 def test_nav_items_carry_leading_icons():
-    """Post-walk Magnetic nav audit, Wave B fix 1 (root cause of the
-    operator's "is the sidebar even Magnetic?" complaint): every top-level
-    destination plus the Setup sub-item leads with a 20px currentColor icon
-    -- icons are structural in Magnetic nav. Every OTHER sub-item inside a
-    flyout stays icon-less; only Setup was named in the audit's glyph
-    list. Each icon-bearing item's label also moves into its own
-    .nav-label span, ahead of a future collapsed (icon-only) rail state."""
-    html = _webroot("index.html")
-    side = html.split('<nav class="nav-rail">')[1].split("</nav>")[0]
-    icon_items = {
-        "nav-overview": "i-nav-gauge", "nav-images": "i-nav-stack",
-        "nav-devices": "i-nav-hard-drives", "nav-swarm": "i-nav-share-network",
-        "nav-settings": "i-nav-gear", "nav-monitoring": "i-nav-pulse",
-        "nav-settings-setup": "i-nav-list-checks",
-    }
-    for nav_id, icon in icon_items.items():
-        item = side.split('id="%s"' % nav_id, 1)[1].split("</a>", 1)[0]
-        assert ('<svg class="nav-icon" aria-hidden="true"><use href="#%s"/></svg>'
-                % icon) in item, nav_id
-        assert '<span class="nav-label">' in item, nav_id
-    for sub_id in ("nav-settings-general", "nav-settings-tls",
-                   "nav-settings-telemetry", "nav-settings-audit",
-                   "nav-settings-bulkhash", "nav-monitoring-audit",
-                   "nav-monitoring-deploylogs"):
-        item = side.split('id="%s"' % sub_id, 1)[1].split("</a>", 1)[0]
-        assert "nav-icon" not in item, sub_id
+    """React destinations retain local sprite icons and readable labels."""
+    js = _react_shell()
+    for icon in ("gauge", "stack", "hard-drives", "share-network", "gear", "pulse"):
+        assert "'%s'" % icon in js
+    assert '<svg className="iris-shell-icon" aria-hidden="true">' in js
+    assert '<use href={`#i-nav-${name}`}' in js
+    assert '<span>{label}</span>' in js
+    assert 'aria-label={label}' in js
+    assert 'items.map(([child, name]) => link(`${id}/${child}`, name))' in js
 
 
 def test_hamburger_uses_sprite_glyph_and_product_name_drops_diamond():
-    """Wave B fixes 2 + 7: the literal ☰ character in #nav-toggle is
-    replaced with the vendored i-nav-list sprite glyph (list-bold,
-    deliberately not hamburger-bold -- that glyph is a food icon in
-    Phosphor's set, not a menu control); the invented ◈ logomark is dropped
-    from the product name (OSPO branding rule: no invented logomark)."""
-    html = _webroot("index.html")
-    assert "☰" not in html  # ☰
-    assert "◈" not in html  # ◈
-    toggle = html.split('id="nav-toggle"', 1)[1].split("</button>", 1)[0]
-    assert '<use href="#i-nav-list"/>' in toggle
-    assert '<span class="product-name">Intelligent Release &amp; Image Staging' in html
+    """React preserves the local menu glyph without an invented logomark."""
+    js = _react_shell()
+    assert "☰" not in js and "◈" not in js
+    assert '<Icon name="list" />' in js
+    assert 'Intelligent Release &amp; Image Staging' in js
 
 
-def test_settings_and_monitoring_flyouts_are_positioned_beside_the_rail():
-    """Wave B fix 5, the biggest anatomy break: Settings/Monitoring stop
-    being inline in-rail accordions and become floating flyout panels
-    beside the rail, reusing .menu's floating-panel chrome (surface/
-    border/radius8/--shadow-md) via a shared class rather than a
-    reimplementation, anchored to .nav-rail (position:relative) rather than
-    to their own trigger. A small header label styled like .nav-group sits
-    inside each. Off-canvas (<=768px) reverts them to the in-rail
-    presentation so a flyout can't detach from a hidden, translateX'd
-    rail. Item markup/ids/hrefs inside are unchanged -- guarded already by
-    test_settings_uses_sidebar_feature_submenus and
-    test_settings_submenu_has_image_verification_entry (bulkhash suite);
-    this pins only the container's own placement/presentation."""
-    html = _webroot("index.html")
-    css = _webroot("styles.css")
-    assert '<div class="nav-flyout menu" id="settings-submenu" hidden>' in html
-    assert '<div class="nav-flyout menu" id="monitoring-submenu" hidden>' in html
-    after_settings = html.split('id="settings-submenu" hidden>', 1)[1]
-    assert after_settings.lstrip().startswith('<div class="nav-group">Settings</div>')
-    after_monitoring = html.split('id="monitoring-submenu" hidden>', 1)[1]
-    assert after_monitoring.lstrip().startswith('<div class="nav-group">Monitoring</div>')
-    assert ".nav-rail { width:200px; background:var(--surface); " \
-        "border-right:1px solid var(--rule); padding:8px 0; position:relative; }" in css
-    assert ".nav-flyout { left:200px;" in css
-    assert "#settings-submenu { top:" in css
-    assert "#monitoring-submenu { top:" in css
-    mobile = css.split("@media (max-width: 768px)", 1)[1].split("\n}\n", 1)[0]
-    assert "#settings-submenu, #monitoring-submenu {" in mobile
-    assert "position: static;" in mobile
+def test_monitoring_group_stays_inside_react_navigation():
+    """Monitoring uses an in-rail accordion; Settings has local sections."""
+    js = _react_shell()
+    css = _react_shell("shell.css")
+    assert 'className="iris-navigation-children" hidden={!expanded[id]}' in js
+    assert 'aria-controls={`iris-group-${id}`}' in js
+    assert 'aria-expanded={expanded[id]}' in js
+    assert ".iris-navigation-children[hidden] { display: none; }" in css
+    assert ".iris-navigation-children .iris-navigation-link" in css
 
 
 def test_bulk_bar_action_buttons_capped_via_more_menu():
@@ -11267,28 +11215,17 @@ def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
 
 
 def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
-    """Wave B fixes 3/4/8: a hairline divider separates the four primary
-    destinations from the Settings/Monitoring group; the rail's indent
-    steps to a consistent 16px per level (--sp-lg, was an uneven
-    18/30/44px); and the console's already-accepted compact 48px/200px
-    product-bar/nav-rail anatomy (vs. the boilerplate's 56px/280px) is
-    recorded in a comment, so it reads as a deliberate, user-directed
-    decision rather than something later fidelity work should "fix"."""
-    html = _webroot("index.html")
-    css = _webroot("styles.css")
-    assert '<hr class="nav-divider">' in html
-    assert ".nav-divider { border:0; height:1px; background:var(--rule); margin:8px 16px 0; }" \
-        in css
-    assert ".product-bar { background:var(--surface); color:var(--text-heading); " \
-        "border-bottom:1px solid var(--rule); height:48px; display:flex; " \
-        "align-items:center; padding:0 16px; gap:8px; }" in css
-    assert ".nav { display:flex; align-items:center; gap:8px; height:32px; padding:0 16px;" \
-        in css
-    assert ".nav-group { padding:12px 16px 2px;" in css
-    assert ".nav.sub { padding-left:32px; font-size:13px; }" in css
-    assert ".nav.subsub { padding-left:48px; font-size:13px; color:var(--text-secondary); }" \
-        in css
-    assert "56px" in css and "280px" in css and "48px" in css and "200px" in css
+    """The independent React shell owns navigation spacing and grouping."""
+    from pathlib import Path
+    source = Path(gui_server.WEBROOT).parent / "console-ui" / "src"
+    jsx = (source / "main.jsx").read_text()
+    css = (source / "shell.css").read_text()
+    assert '<div className="iris-nav-divider" />' in jsx
+    assert jsx.index('primary.map(') < jsx.index('iris-nav-divider') < jsx.index("link('settings/general'")
+    assert '.iris-nav-divider' in css
+    assert '.iris-header { position: fixed;' in css and 'height: 56px;' in css
+    assert '#iris-navigation-root { flex: 0 0 280px;' in css
+    assert '.iris-navigation-children .iris-navigation-link' in css
 
 
 # ---------------------------------------------------------------------------
@@ -11320,50 +11257,24 @@ def test_devices_table_gets_the_dense_type_modifier():
         "line-height: 18px; font-weight: 500; color: var(--text-heading); }" in css
 
 
-def test_settings_monitoring_flyouts_close_on_outside_click_not_just_route():
-    """Wave D fix 2 (operator: "does not disappear when I click the site").
-    Wave B's flyouts were visually floating panels, but their hidden state
-    was still tied to the active route (`hidden = view !== 'settings'`), so
-    a flyout stayed open for as long as the operator was anywhere on
-    Settings/Monitoring -- never closing on an outside click the way every
-    other .menu popover does. The rail trigger is now ALSO wired through
-    wireMenu -- the same open-on-click / close-on-outside-click-or-Escape
-    machinery as csv-menu / onboard-pop / more-pop -- and the unconditional
-    route-tied hidden assignment is gone from the router."""
-    js = _webroot("app.js")
-    assert "wireMenu('nav-settings', 'settings-submenu');" in js
-    assert "wireMenu('nav-monitoring', 'monitoring-submenu');" in js
-    # the old unconditional route-tied visibility toggle is gone
-    assert "document.getElementById('settings-submenu').hidden = view !== 'settings';" \
-        not in js
-    assert "document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';" \
-        not in js
-    # navigating to an unrelated view still closes a flyout left open (the
-    # back-button / programmatic-hashchange path an outside click never
-    # covers, since no click event fires on the page at all)
-    show_fn = js.split("function show(view) {", 1)[1].split(
-        "function current() {", 1)[0]
-    assert "if (view !== 'settings' && view !== 'monitoring') closeMenus();" in show_fn
-    # closeMenus() also clears aria-expanded on both triggers -- they live
-    # directly in the rail, not inside a .menu-wrap, so the generic
-    # .menu-wrap [aria-expanded] reset in closeMenus() would otherwise miss
-    # them and leave a stale aria-expanded="true" on a collapsed trigger
-    close_menus_fn = js.split("function closeMenus() {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "nav-settings" in close_menus_fn and "nav-monitoring" in close_menus_fn
-    assert "setAttribute('aria-expanded', 'false')" in close_menus_fn
-
-    html = _webroot("index.html")
-    assert 'id="nav-settings" aria-expanded="false"' in html
-    assert 'id="nav-monitoring" aria-expanded="false"' in html
-    # every sub-item closes the flyout the instant it is chosen (wireMenu's
-    # own panel click handler acts on .menu-close)
-    for sub_id in ("nav-settings-setup", "nav-settings-general", "nav-settings-tls",
-                   "nav-settings-telemetry", "nav-settings-audit", "nav-settings-bulkhash",
-                   "nav-monitoring-audit", "nav-monitoring-deploylogs"):
-        before = html.split('id="%s"' % sub_id, 1)[0]
-        tag_start = before.rfind("<a ")
-        assert "menu-close" in before[tag_start:], sub_id
+def test_react_navigation_groups_toggle_without_legacy_menu_mutation():
+    """Accordion groups and modal mobile navigation have separate ownership."""
+    js = _react_shell()
+    legacy = _webroot("app.js")
+    assert "function toggleGroup(id)" in js
+    assert "onClick={() => toggleGroup(id)}" in js
+    assert "hidden={!expanded[id]}" in js
+    assert "setExpanded(previous => ({ ...previous, [id]: !previous[id] }))" in js
+    assert "window.addEventListener('hashchange', change)" in js
+    assert "onClick={() => closeNavigation()}" in js
+    assert 'aria-label="Close navigation"' in js
+    assert "closeNavigation(true)" in js
+    assert "wireMenu('nav-settings'" not in legacy
+    assert "wireMenu('nav-monitoring'" not in legacy
+    # Help remains a dismissible popover, including keyboard focus return.
+    assert "document.addEventListener('pointerdown', click)" in js
+    assert "if (event.key === 'Escape')" in js
+    assert "trigger.current?.focus()" in js
 
 
 def test_images_import_blurb_drops_the_subdirectory_examples():
@@ -11681,7 +11592,8 @@ def test_console_fetch_wrapper_handles_session_loss_polls_and_stale_state():
     assert "h.set('X-IRIS-Poll', '1');" in js
     assert js.count("backgroundPoll = true;") == 2          # view poll + batch poll
     assert "function markConnection(ok)" in js
-    assert 'id="conn-state"' in html
+    assert 'className="iris-connection" role="status"' in _react_shell()
+    assert "new CustomEvent('iris:shell-state', { detail: { connection: connection } })" in js
     assert "if (!r.ok) throw new Error('health proxy '" in js
     assert "poll = pollMonitoring;" in js
     assert "if (fromPoll && auditExtraPages > 0) return;" in js
@@ -12467,8 +12379,8 @@ def test_device_type_filters_have_server_and_client_preview_parity():
         "'Results unavailable'" in failed
     assert "devTotal = 0" in failed and "devOffset = 0" in failed
     assert "updateDevPager(0)" in failed
-    assert "markAll.checked = false" in failed
-    assert "markAll.indeterminate = false" in failed
+    assert "markAll.disabled = true" in failed
+    assert "markAll.textContent = 'Select page'" in failed
     assert "delete SELECTED" not in failed
 
     # Task 22 consumes this same pure predicate; the HTTP handler delegates to
@@ -12523,6 +12435,7 @@ class AbortController {
   abort() {}
 }
 var devicesRefreshGeneration = 0, devicesRefreshController = null;
+var peerPolicyReadGeneration = 0;
 var LAST_DEVICES = [{device_id: 'stale-row'}], LAST_DEV_NOW = 77;
 var devTotal = 1, devOffset = 0, DEV_PAGE_SIZE = 200;
 var SELECTED = {'keep-selected': true};
@@ -12557,8 +12470,8 @@ async function fetch(url) {
   assert.match(el('dev-rows').innerHTML, /preview unavailable/i);
   assert.equal(el('dev-count').textContent, 'Results unavailable');
   assert.equal(pagerTotal, 0);
-  assert.equal(el('mark-all').checked, false);
-  assert.equal(el('mark-all').indeterminate, false);
+  assert.equal(el('mark-all').disabled, true);
+  assert.equal(el('mark-all').textContent, 'Select page');
   await selectAllMatchingDevices();
   assert.deepEqual(replayed, []);
   assert.deepEqual(SELECTED, {'keep-selected': true});
@@ -13653,7 +13566,7 @@ function policyCount(v) { return Number.isSafeInteger(v) && v >= 0 ? v : '—'; 
 def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
     html, js = (_webroot(name) for name in ("index.html", "app.js"))
     assert "<th>Instructions</th>" in html
-    assert 'colspan="13"' in js
+    assert 'colspan="12"' in js
     for identifier in (
             "policy-issued-revision", "policy-applied-revisions",
             "policy-instruction-states", "policy-instr-stamp-missing",

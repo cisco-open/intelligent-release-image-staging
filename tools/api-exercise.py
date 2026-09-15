@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bounded live Console API coverage and load exercise; never onboards devices.
 
-Default is read-only. --mutate requires an empty inventory and creates only
+Default is read-only. --mutate normally requires an empty inventory and creates only
 run-owned documentation-address devices. Reports never contain response bodies,
 cookies, CSRF tokens, or passwords. Successful guards are NOT positive coverage.
 """
@@ -46,8 +46,13 @@ class Pacer:
 class Client:
     def __init__(self, base, cafile, timeout=5, request_rate=0):
         self.url = urllib.parse.urlsplit(base)
-        if self.url.scheme != "https" or self.url.path not in ("", "/"):
-            raise ValueError("base must be an HTTPS origin")
+        if (self.url.scheme != "https" or not self.url.hostname
+                or self.url.path not in ("", "/") or self.url.query
+                or self.url.fragment or self.url.username is not None
+                or self.url.password is not None):
+            # The origin is recorded in reports. Reject embedded credentials
+            # instead of ignoring them for requests but leaking them in output.
+            raise ValueError("base must be an HTTPS origin without credentials, query, or fragment")
         self.context = ssl.create_default_context(cafile=cafile)
         self.timeout = timeout
         self.local = threading.local()
@@ -137,6 +142,8 @@ def main():
     p.add_argument("--username", default="admin")
     p.add_argument("--password-file", required=True)
     p.add_argument("--mutate", action="store_true")
+    p.add_argument("--allow-existing-inventory", action="store_true",
+                   help="lab smoke only: preserve existing devices; requires --mutate, <=10 devices and concurrency 1")
     p.add_argument("--devices", type=int, default=500)
     p.add_argument("--concurrency", default="1,4,8,16")
     p.add_argument("--seconds", type=float, default=2)
@@ -150,6 +157,8 @@ def main():
     levels = [int(v) for v in args.concurrency.split(",")]
     if not levels or any(v < 1 or v > 32 for v in levels):
         p.error("concurrency must be between 1 and 32")
+    if args.allow_existing_inventory and (not args.mutate or args.devices > 10 or levels != [1]):
+        p.error("existing-inventory smoke requires --mutate, --devices <=10, --concurrency 1")
     if not 1 <= args.devices <= 2000 or not 0 < args.seconds <= 10 or not 1 <= args.max_requests <= 1000:
         p.error("limits: 1..2000 devices, <=10 seconds per read phase, <=1000 requests")
     client = Client(args.base, args.cafile, request_rate=args.request_rate)
@@ -162,8 +171,9 @@ def main():
     _, initial = client.call("GET", "/api/v1/devices")
     if not isinstance(initial.get("devices"), list):
         raise RuntimeError("unexpected device-list schema")
-    if args.mutate and initial["devices"]:
+    if args.mutate and initial["devices"] and not args.allow_existing_inventory:
         raise RuntimeError("mutation exercise requires an empty inventory")
+    initial_ids = {d["device_id"] for d in initial["devices"]}
     if args.mutate:
         _, policy = client.call("GET", "/api/v1/peer-policy")
         outbox = policy.get("outbox", {})
@@ -176,10 +186,13 @@ def main():
               "request_start_rate": args.request_rate,
               "scope": "Console API only; guards are not positive functional coverage",
               "read_phase_seconds": args.seconds, "max_requests_per_read_phase": args.max_requests,
-              "limitations": ["short local-loopback load test, not sustained production capacity",
+              "limitations": ["bounded API exercise, not sustained production capacity",
                               "one authenticated session; login throughput not benchmarked",
                               "no positive real-device jobs, trust changes, or external exports"],
               "owned_device_ids": ids, "errors": []}
+    if initial_ids.intersection(ids):
+        raise RuntimeError("generated fixture IDs collide with existing inventory")
+    report["initial_device_count"] = len(initial_ids)
     output = pathlib.Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     def save():
@@ -250,6 +263,8 @@ def main():
                 status, _ = client.request("GET", path, phase="get-coverage")
                 entry["get_status"] = status
                 entry["positive"] = 200 <= status < 300
+                if status == 0 or status >= 500:
+                    report["errors"].append("GET coverage failed: %s HTTP %s" % (path, status))
                 if "{" in route.path and not entry["positive"]:
                     entry["limitation"] = "fixture unavailable; negative response is not positive coverage"
             else:
@@ -280,7 +295,7 @@ def main():
                     list(pool.map(lambda _: worker(), range(concurrency)))
                 row = summary(client.records[before:], time.monotonic()-started)
                 row.update(name="read", endpoint=endpoint, concurrency=concurrency,
-                           fleet_size=len(ids) if ids else initial.get("total", len(initial["devices"])),
+                           fleet_size=len(initial_ids) + len(ids),
                            stopped_on_error=stop.is_set(),
                            completion="error" if stop.is_set() else
                            "request-cap" if counter[0] >= args.max_requests else "time-budget")
@@ -314,9 +329,22 @@ def main():
                 else:
                     report["remaining_owned_devices"] = [d["device_id"] for d in inventory["devices"]
                                                          if d["device_id"] in set(ids)]
+                    final_ids = {d["device_id"] for d in inventory["devices"]}
+                    report["existing_devices_preserved"] = initial_ids <= final_ids
+                    if not report["existing_devices_preserved"]:
+                        report["errors"].append("pre-existing devices missing after exercise")
             else:
                 report["errors"].append("cleanup inventory unavailable; use owned_device_ids manifest")
                 report["remaining_owned_devices"] = "unknown"
+        status, _ = client.request("POST", "/api/v1/logout", {})
+        report["logout_verified"] = status == 200
+        if status != 200:
+            report["errors"].append("logout failed: HTTP %s" % status)
+        else:
+            status, _ = client.request("GET", "/api/v1/devices", phase="logged-out-guard")
+            report["logout_verified"] = status == 401
+            if status != 401:
+                report["errors"].append("logged-out session still accepted: HTTP %s" % status)
         for entry in report["coverage"]:
             successes = [r for r in client.records if r["phase"] in
                          ("coverage", "get-coverage", "create", "delete")

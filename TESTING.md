@@ -17,12 +17,29 @@ both to get the result CI reports. OpenSSH's `ssh-keygen` is assumed present.
 
 ```
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ lab/tests/ device/test_verify_image.py -q
+python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ lab/tests/ device/test_verify_image.py tools/test_api_exercise.py -q
 bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
 
 Both commands are expected to be fully green on a clean checkout, with no
 host provisioning and no running IRIS stack.
+
+### Console and Swagger browser checks
+
+With Node 24, run from `server/console-ui`:
+
+```bash
+npm ci --no-audit --no-fund
+npm test
+npx --no-install playwright install --with-deps chromium
+npm run test:browser
+npm run test:swagger
+```
+
+These bounded Chromium checks use local fixtures, not live devices. They cover
+Console workflows and the real vendored Swagger UI: canonical operations and
+schemas, filtering, deep links, read-only controls, and mobile layout. CI runs
+the same commands.
 
 ### Opt-in host-integration tests
 
@@ -65,9 +82,9 @@ test suite, in a few seconds:
 python3 -m pytest server/tests/test_capacity_harness.py -q
 ```
 
-The full progression this project's scale claims are stated at — 100, 1,000
-and 10,000 devices, a hundredfold range, 10,000 being the top of the
-supported fleet size — rebuilds a 10,000-device synthetic fleet and is slow
+The larger synthetic progression — 100, 1,000 and 10,000 devices —
+checks how implementation work grows, not a supported production fleet size.
+It rebuilds a 10,000-device synthetic fleet and is slow
 by design, so it is opt-in behind its own variable, following the
 `IRIS_TEST_HOST_INTEGRATION=1` convention above:
 

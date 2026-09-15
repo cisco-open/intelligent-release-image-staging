@@ -130,15 +130,20 @@ ERR_COPY="$(mktemp "${TMPDIR:-/tmp}/iris-run-err.XXXXXX")" \
 RUN_STATUS=$?
 iris_ssh_cleanup
 
-# ssh's own diagnostics, redacted, on OUR stderr -- never discarded. This is
+# SSH diagnostics are redacted on stderr. Only normal session-close notices
+# from a successful session are hidden unless detailed logging is enabled.
+# Failed sessions retain every diagnostic. This is
 # the only place "connection refused", "no matching key exchange method",
 # "permission denied" and "host key changed" can be told apart.
 if [ -s "$ERR_COPY" ]; then
-  perl -pe '
+  IRIS_RUN_STATUS="$RUN_STATUS" perl -ne '
       s/\r$//;
       for my $secret (grep { defined && length } @ENV{qw(DEVICE_PASS DEVICE_ENABLE)}) {
         s/\Q$secret\E/[REDACTED]/g;
       }
+      next if $ENV{IRIS_RUN_STATUS} eq "0" && ($ENV{IRIS_LOG} // "off") ne "on"
+        && /^Connection to \S+ closed(?: by remote host)?\.\s*$/;
+      print;
     ' "$ERR_COPY" | sed 's/^/ssh: /' >&2
   iris_ssh_explain "$ERR_COPY" "$HOST"
 fi

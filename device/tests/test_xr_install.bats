@@ -4,8 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests for device/xr-install.sh (agentinfo/plans/2026-08-28-xr-agent.md,
-# Task 3): the appmgr onboard recipe for a Cisco 8000-series IOS-XR router.
+# Tests for device/xr-install.sh: the appmgr onboard recipe for Cisco 8000
+# Series and NCS routers. "live" below means the real script with stubbed I/O.
 
 setup() {
   INSTALL="$BATS_TEST_DIRNAME/../xr-install.sh"
@@ -285,7 +285,8 @@ EOF
 
 _xr_install_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/lab" "$STUBDIR/device" "$STUBDIR/bin"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device" "$STUBDIR/bin" "$STUBDIR/server"
+  cp "$BATS_TEST_DIRNAME/../../server/time_preflight.py" "$STUBDIR/server/time_preflight.py"
   FAKE_STATE_DIR="$BATS_TEST_TMPDIR/state"
   mkdir -p "$FAKE_STATE_DIR"
   FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/xr-commands.log"
@@ -310,7 +311,7 @@ if [ -n "${FAKE_REGISTER_RESET:-}" ] && [ "$cmds" = 'show appmgr source-table' ]
   # The failed install never registered a source; the retry must install it.
   exit 0
 fi
-# The preflight sends both of these in ONE session, so answer each that is
+# The preflight sends these in ONE session, so answer each that is
 # present rather than only the first that matches.
 answered=""
 case "$cmds" in
@@ -322,6 +323,12 @@ esac
 case "$cmds" in
   *"dir harddisk: | include bytes free"*)
     printf '%s\n' "${FAKE_DIR_BYTES_FREE-39929724928 bytes total (39883231232 bytes free)}"
+    answered=1
+    ;;
+esac
+case "$cmds" in
+  *"show ntp status"*)
+    printf '%s\n' "${FAKE_NTP_STATUS-Clock is synchronized, stratum 3, reference is 192.0.2.254}"
     answered=1
     ;;
 esac
@@ -349,7 +356,7 @@ case "$cmds" in
 esac
 STUB
   chmod +x "$STUBDIR/lab/xr-run.sh"
-  # The scp push sources the real trust policy from the tree it runs in.
+  # The SSH session launching device-side HTTPS uses the real trust policy.
   cp "$BATS_TEST_DIRNAME/../../lab/iris-ssh-policy.sh" "$STUBDIR/lab/iris-ssh-policy.sh"
   export IRIS_STATE="$BATS_TEST_TMPDIR/state"   # persistent known_hosts stays local
 
@@ -420,7 +427,7 @@ _xr_install_run_live() {
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
   rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
-  # All three actual invocations must select SCP, not OpenSSH's default SFTP.
+  # All three artifacts share one SSH-launched HTTPS staging operation.
   [ "$(grep -c '=== HTTPS: sshpass -e ssh -tt ' "$FAKE_COMMAND_LOG")" -eq 1 ]
   ! grep -q '=== SCP:' "$FAKE_COMMAND_LOG"
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
@@ -461,6 +468,15 @@ _xr_install_run_live() {
   [[ "$output" == *"XR HTTPS staging failed"* ]]
   ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
   ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: unsynchronized time prevents HTTPS staging and package registration" {
+  _xr_install_stub_setup
+  FAKE_NTP_STATUS='Clock is unsynchronized, stratum 16, no reference clock' run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"time preflight failed"* ]]
+  ! grep -q '=== HTTPS:' "$FAKE_COMMAND_LOG"
+  ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: parses the running version out of its own preflight show version" {
@@ -568,14 +584,14 @@ _xr_install_run_live() {
   [[ "${lines[${#lines[@]}-1]}" = "onboard complete: 192.0.2.10" ]]
 }
 
-@test "live: the RPM scp verifies the router's host key (never /dev/null known_hosts)" {
+@test "live: HTTPS staging's SSH session verifies the router host key" {
   _xr_install_stub_setup
   FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/cmd.log"; : > "$FAKE_COMMAND_LOG"; export FAKE_COMMAND_LOG
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  scp_line="$(grep '=== HTTPS:' "$FAKE_COMMAND_LOG")"
-  [[ "$scp_line" != *"UserKnownHostsFile=/dev/null"* ]] || return 1
-  [[ "$scp_line" != *"StrictHostKeyChecking=no"* ]] || return 1
-  [[ "$scp_line" == *"StrictHostKeyChecking=accept-new"* ]] || return 1
-  [[ "$scp_line" == *"UserKnownHostsFile=$IRIS_STATE/ssh/known_hosts"* ]]
+  transport_line="$(grep '=== HTTPS:' "$FAKE_COMMAND_LOG")"
+  [[ "$transport_line" != *"UserKnownHostsFile=/dev/null"* ]] || return 1
+  [[ "$transport_line" != *"StrictHostKeyChecking=no"* ]] || return 1
+  [[ "$transport_line" == *"StrictHostKeyChecking=accept-new"* ]] || return 1
+  [[ "$transport_line" == *"UserKnownHostsFile=$IRIS_STATE/ssh/known_hosts"* ]]
 }

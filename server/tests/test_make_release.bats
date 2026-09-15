@@ -62,6 +62,9 @@
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh \
+    iris/tools/check-host-time.sh \
+    iris/tools/api-exercise.py \
+    iris/tools/test_api_exercise.py \
     iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
@@ -109,7 +112,8 @@ _make_release_fixture() {
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
-           agent-source-freshness.sh start-compose-server.sh vendor-swagger-ui.sh; do
+           agent-source-freshness.sh start-compose-server.sh check-host-time.sh vendor-swagger-ui.sh \
+           api-exercise.py test_api_exercise.py; do
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"

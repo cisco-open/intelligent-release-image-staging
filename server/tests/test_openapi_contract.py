@@ -1292,7 +1292,7 @@ def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
             assert success in operation["responses"]
             assert "default" not in operation["responses"]
             assert "only assign images or onboard staging agents" in operation["description"]
-            expected_errors = {401, 404, 422, 503}
+            expected_errors = {401, 404, 422, 429, 503}
             if method != "GET":
                 expected_errors.update((400, 403, 413))
             if service == "console":

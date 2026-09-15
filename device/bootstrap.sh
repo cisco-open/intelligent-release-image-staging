@@ -1204,6 +1204,19 @@ def install(stage, bundle_path, digest_path, signer_path):
         # Put every dependency in place before the executable agent entrypoint.
         for name in ROOT_FILES:
             os.replace(os.path.join(new_dir, name), os.path.join(stage, name))
+        # Guest-share mounts can change ownership during promotion. Bootstrap
+        # and the agent run as the same guest user: test actual read access at
+        # the final paths before publishing the new agent entrypoint. Never
+        # chmod/chown around a trust failure; roll back the entire transaction.
+        for name in ("iris-root.allowed_signers", "iris-signers.allowed_signers"):
+            try:
+                stream, identity = open_regular(os.path.join(stage, name), 65536)
+                with stream:
+                    data = stream.read(65537)
+                    if len(data) > 65536 or stream_identity(stream) != identity:
+                        raise BundleError("trust-unreadable")
+            except (OSError, BundleError):
+                raise BundleError("trust-unreadable")
         new_agent = os.path.join(new_dir, "agent")
         live_agent = os.path.join(stage, "agent")
         os.mkdir(live_agent, 0o700)
@@ -1339,7 +1352,7 @@ if [ -e "$STAGE/bundle.tgz" ] || [ -L "$STAGE/bundle.tgz" ]; then
                "$STAGE/bundle.tgz.sha256" \
                "$STAGE/.incoming-iris-signers.allowed_signers")" || {
       case "$result" in
-        invalid-digest|digest-mismatch|invalid-archive|invalid-signer|signer-mismatch)
+        invalid-digest|digest-mismatch|invalid-archive|invalid-signer|signer-mismatch|trust-unreadable)
           reason="$result" ;;
         rollback-failed)
           reject_bundle install-failed

@@ -218,6 +218,10 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
+# Check before any artifact publication, device configuration or trust changes.
+printf 'show ntp status\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" \
+  | python3 "$HERE/../server/time_preflight.py"
+
 ssh_host() {
   # Same trust policy as the device transport (lab/iris-ssh-policy.sh): the
   # stage host receives the per-device enrollment token, so it is verified.

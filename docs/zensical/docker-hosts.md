@@ -12,13 +12,19 @@ serves the browser and forwards API requests over authenticated HTTPS. Each
 host uses its own local storage; no shared filesystem, Docker network, or
 Docker socket is needed.
 
+Before starting either host, run `bash tools/check-host-time.sh` on **both**.
+Containers inherit their own host's clock; neither host synchronizes the other.
+See [time checks](aiagent.md#verify-time-before-deployment) and
+[time troubleshooting](troubleshooting.md#time-synchronization).
+
 ```mermaid
 flowchart LR
     Browser["Operator browser"] -->|"HTTPS 8080"| Console["Console host"]
     Console -->|"Private HTTPS 9443 + management token"| Server["Server host"]
     Server --> State["Server volumes and images"]
     Device["Device agents"] -->|"Catalog, tracker, artifacts, image pieces"| Server
-    Server -->|"SSH/SCP for onboarding"| Device
+    Server -->|"SSH control for onboarding"| Device
+    Device -->|"HTTPS package download"| Server
 ```
 
 Both deployments run one container. This separates the Console from the
@@ -172,16 +178,33 @@ iris_server() {
 tools/get-aria2c.sh amd64
 iris_server build --pull
 iris_server run --rm iris iris-bootstrap
+iris_server run --rm \
+  -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
+  'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" && \
+   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'
 iris_server up -d
 iris_server ps
 ```
 
+Use the approved directory containing exactly two distinct public roots in
+place of `$HOME/iris-roots` if needed. Do not replace roots on an existing
+server; skip that installation step along with bootstrap. The server config
+volume and package builders both need the same public pair. Before onboarding,
+also [initialize instruction custody](aiagent.md#initialise-instruction-custody);
+public roots alone do not configure the online producer.
+
 Build device packages on the server host as required for your devices:
+
+For an ARM-only wrapper build, follow [Build and publish the ARM64 IOx
+package](aiagent.md#build-and-publish-the-arm64-iox-package), choosing the
+split-host publishing command. The full-set commands below build **both** IOx
+wrappers and XR; they are not a way to skip ARM.
 
 ```bash
 set -a
 . server/server.env
 set +a
+export IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"
 tools/provision-iox-packages.sh
 tools/build-xr-package.sh --out device/xr/out
 sudo install -o 10001 -g 10001 -m 444 device/xr/out/iris-xr.rpm \

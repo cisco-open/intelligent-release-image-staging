@@ -24,6 +24,12 @@ The management-type choice governs what the installer and uninstaller may config
 and remove; see
 [Management Type and VLAN Ownership](management-type.md).
 
+Before onboarding any switch or router, IRIS requires `show ntp status` to
+report synchronization to an external time source. The check is read-only:
+configure approved NTP outside IRIS and wait for synchronization. No time-server
+address is stored in an IRIS device template. See
+[time troubleshooting](troubleshooting.md#time-synchronization).
+
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,
 networking, trustpoint, and cleanup state across a reload. Failed or partial
@@ -128,8 +134,9 @@ supervisor loop, running the agent once every `IRIS_TICK_SECONDS` (default 60s).
 Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
 
 **Upgrade on IOx is undeploy, then onboard** with the rebuilt package. Use the
-Console, API, or the [IOx control CLI](reference.md#iox-control-cli)'s
-`submit-uninstall` and `submit-install` commands. The install and uninstall
+Console or submit `POST /api/v1/devices/<id>/undeploy`, wait for its job to
+finish successfully, then submit `POST /api/v1/devices/<id>/onboard`. Read
+`GET /api/v1/onboard/jobs/<job_id>` for each result. The install and uninstall
 shell recipes require the controller's private channel; neither is a
 standalone operator command. A running app requires undeploy first. An incomplete
 IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried with Onboard; see
@@ -191,7 +198,8 @@ install or activate any network OS image that IRIS distributes.
 ### Confirming it worked
 
 An inventory row and a deployment job can exist before the agent connects.
-The final `onboard complete: <device-ip>` line means the installer completed.
+The final `Onboard completed.` result means the agent installer completed
+(`onboard complete: <device-ip>` in direct installer output and older logs).
 A fresh heartbeat confirms the agent can reach the catalog, even when no
 images are assigned. Check each assigned image in Devices for its staging
 result; onboard completion alone does not mean an image is staged.

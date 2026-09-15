@@ -2720,7 +2720,8 @@ def test_hardware_app_list_table_passes_the_transport_intact(tmp_path, peer_fact
 
 
 def _preflight(tmp_path, peer_factory, apps, config=b"", counts=(0, 0, 0),
-               device_id="iris-c8kv-101", log="off"):
+               device_id="iris-c8kv-101", log="off",
+               ntp=b"Clock is synchronized, stratum 5, reference is 192.0.2.123\n"):
     """Run the controller's actual read set through a durable SSH replay."""
     module = _verification_module()
     commands = (
@@ -2743,9 +2744,18 @@ def _preflight(tmp_path, peer_factory, apps, config=b"", counts=(0, 0, 0),
     transport, transport_config = _transport(root, peer, purpose="preflight",
                                              context=context)
 
+    reads = []
     def command(attempt, purpose, body, seconds, **kwargs):
-        assert purpose == "preflight" and seconds == 90
+        assert purpose == "preflight"
         assert kwargs == {"ordinary": True, "record": False}
+        reads.append(body)
+        if body == b"show ntp status":
+            assert seconds == 30
+            result, unused = _replay(tmp_path, peer_factory, purpose,
+                ((body, ntp),), hw.C8000V_HOST)
+            return result, context
+        assert seconds == 90
+        assert reads[0] == b"show ntp status"
         assert body.split(b"\n") == list(commands)
         result = _command(transport, body, timeout=2.5)
         peer.assert_reaped()
@@ -2767,6 +2777,7 @@ def _preflight(tmp_path, peer_factory, apps, config=b"", counts=(0, 0, 0),
 
     fake = types.SimpleNamespace(
         _command=command,
+        preflight_reads=reads,
         _transport_ok=module.IoxController._transport_ok,
         config={"application_id": "iris"},
         state_dir=transport_config["state_dir"], controller_id=CONTROLLER)
@@ -2774,6 +2785,17 @@ def _preflight(tmp_path, peer_factory, apps, config=b"", counts=(0, 0, 0),
                                     attempt_id=ATTEMPT,
                                     request={"device_id": device_id})
     return module, fake, attempt
+
+
+def test_unsynchronized_time_stops_before_collision_read(tmp_path, peer_factory):
+    module, fake, attempt = _preflight(
+        tmp_path, peer_factory, hw.APP_LIST_EMPTY,
+        ntp=b"Clock is unsynchronized, stratum 16, no reference clock\n")
+    with pytest.raises(module._ControllerFailure) as error:
+        module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert "time preflight failed" in error.value.detail
+    assert fake.preflight_reads == [b"show ntp status"]
+    assert attempt.identity == {}
 
 
 def test_hardware_preflight_reads_the_app_state_column_and_the_iris_stanza(

@@ -55,7 +55,7 @@ def _run_js(expression, checked=None, mutate_after_first_post=False):
         pytest.skip("Node is required for Console job-option tests")
     source = (_WEBROOT / "app.js").read_text()
     functions = []
-    for name in ("telemetryFlags", "jobFlags", "jpost", "startBatch"):
+    for name in ("telemetryFlags", "jobFlags", "jpost", "showActivity", "startBatch"):
         match = re.search(
             r"^  (?:async )?function " + name + r"\([^\n]*\) \{.*?^  \}",
             source, re.MULTILINE | re.DOTALL)
@@ -66,6 +66,11 @@ const controls = CHECKED;
 const elements = Object.fromEntries(
   Object.entries(controls).map(([id, checked]) => [id, { checked }]));
 for (const id of ['batch-rows', 'batch-summary', 'batch-panel']) elements[id] = {};
+// startBatch opens the shared activity drawer before posting. Use the real
+// drawer helper with its DOM dependencies rather than skipping that behavior.
+elements['activity-panel'] = { hidden: true };
+elements['deploy-info-panel'] = { hidden: true };
+elements['batch-close'] = { focus() { document.activeElement = this; } };
 const document = { getElementById: id => elements[id] || null };
 const requests = [];
 const busy = [];
@@ -76,6 +81,7 @@ function claimSelection() { return ['edge-1', '192.0.2.9']; }
 function confirm() { return true; }
 function setBulkBusy(value) { busy.push(value); }
 function stopBatchPoll() {}
+function closeDeployInfo() { throw new Error('fixture details drawer is already closed'); }
 function pollBatch() { return Promise.resolve(false); }
 function startBatchPoll() { throw new Error('unexpected poll start'); }
 function renderOnboardOutcome(action, started, failed) {
@@ -153,7 +159,9 @@ def test_batch_posts_job_options_with_force_and_telemetry_preserved(action, forc
                 for identity, rows in _checkboxes().inputs.items()}
     controls.update({action + "-log": enabled, "undeploy-force": forced,
                      "onboard-telemetry": False, "onboard-telemetry-stream": True})
-    result = _run_js("(await startBatch(%s), {requests, outcome, busy})" %
+    result = _run_js("(await startBatch(%s), {requests, outcome, busy, "
+                     "activityVisible: !elements['activity-panel'].hidden, "
+                     "activityFocused: document.activeElement === elements['batch-close']})" %
                      json.dumps(action), controls)
     expected = {"log": enabled}
     if action == "onboard":
@@ -169,6 +177,8 @@ def test_batch_posts_job_options_with_force_and_telemetry_preserved(action, forc
         }
     assert result["outcome"] == {"action": action, "started": 2, "failed": []}
     assert result["busy"] == [False]
+    assert result["activityVisible"] is True
+    assert result["activityFocused"] is True
 
 
 @pytest.mark.parametrize("action", ["onboard", "undeploy"])

@@ -12,6 +12,75 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Reject incomplete Bulk Hash downloads before replacing a cached file when
+  the body disagrees with its declared size. Isolate the pinned XR RPM
+  builder's log per invocation, avoiding collisions with another user's build.
+- API quality checks cover shared-admission HTTP 429 responses in the generated
+  OpenAPI contract. The reusable API harness rejects credential-bearing or
+  ambiguous base URLs before requests or report generation, and ships with
+  its regression tests in source release archives.
+- Clearer read-only Swagger reference with service filtering, canonical search,
+  preserved deep links, and mobile layout. CI exercises the vendored UI in
+  Chromium and now includes XR HTTPS and API-harness Python regressions.
+- Console logout failures retain a visible retry action instead of implying
+  success. Remove unused helpers and stale font declarations; correct TLS
+  persistence and API-first operator documentation.
+- Clarify that instruction encryption protects the private per-device payload,
+  not public envelope metadata or signed role intent. Split-host setup now
+  explicitly provisions approved public instruction roots before startup.
+- Correct the Cisco CA preset and its daily-refresh validation. Settings writes
+  show transport/proxy failures without claiming rollback or silently retrying;
+  troubleshooting explains how to verify an uncertain result.
+- Preserve complete React runtime dependency license notices in the distributed
+  Console JavaScript, with a build regression preventing stripped notices.
+- Required read-only NTP synchronization checks before switch and router
+  onboarding, plus a host time preflight for Docker and Kubernetes deployment.
+- Encrypted persistence for the single-host default Console TLS identity,
+  keeping its certificate stable across restarts without reusing catalog keys.
+- Quiet routine SSH close notices after successful IOS-XE sessions; failed
+  sessions and detailed logging retain the diagnostics.
+- Small, serial API smoke mode for existing lab inventories, with run-owned
+  fixtures, preservation/cleanup checks and logout verification. GET-route
+  server errors now fail the report. Deployment and troubleshooting guides
+  distinguish API verification from readiness and production capacity.
+- Clearer React Policies overview showing mutual role sharing, distribution
+  server access and honest enforcement status. Technical controls and
+  diagnostics move into Advanced; role writes retain preview and revision checks.
+- Guest Shell bundle promotion checks final trust-file readability as the
+  agent user and rolls back before starting the new agent if access fails.
+- Shorter Console popups with plain-language actions and concise cleanup,
+  identity-check, and data-retention warnings. One font family throughout
+  the Console, including logs and action completion messages.
+- Consistent three-phase onboard/undeploy progress with device-series headings
+  across Guest Shell, IOx and IOS-XR. Detailed logs opt in to installer steps;
+  errors remain visible. Device Details separates chassis model and series.
+- Faster cached inventory snapshots for flat rows, retaining defensive copies,
+  cross-process freshness checks and strict corruption handling. Cache hits
+  verify current file content, including edits with colliding timestamps.
+- Frontend CI builds the locked React assets and runs mocked Chromium workflows.
+- Quality fixes: Catalyst Router onboarding offers both Guest Shell and IOx;
+  CSV import errors retain role/device context and support same-file retries;
+  IOx failure logs include safe transport categories; aria2c input collection
+  rejects misplaced/extra arguments before replacing any binary. Console guards
+  now verify direct row selection and React navigation.
+- AI deployment guide includes a shared ARM64 IOx build procedure with verified
+  client inputs, explicit builder prerequisites, and package/manifest publishing
+  and readiness checks for single-host Docker, split Docker hosts, and Kubernetes.
+- Add Device uses the same six model-series choices as Inventory. Server-side
+  classification accepts series aliases while preserving installer and
+  management-type checks; existing model numbers are retained for diagnostics.
+- Cleaner Inventory search and expandable filters, with removable filter chips
+  and series labels including NCS and Cisco 8000 Series. Bulk selection is
+  controlled by row clicks or keyboard, without checkboxes; job logs share one
+  side panel instead of stacking below the table.
+- Dedicated Policies page for role definitions and policy diagnostics; device
+  role assignments remain in Inventory. Settings now uses one navigation link
+  and a section bar, with clearer form layouts and unchanged deep links.
+- React Console shell with a navy header, collapsible navigation rail,
+  mobile navigation, and help/account controls. Existing operational views and
+  backend APIs are retained during incremental migration. A separate Docker
+  build stage produces self-hosted assets without adding Node to the runtime
+  or relaxing the browser Content Security Policy.
 - Configurable shared Console API admission budgets return HTTP 429 with
   Retry-After before mutation. Total/read/write buckets are bounded across
   sessions; the API exercise supports paced requests for capacity checks.
@@ -50,6 +119,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- IOx checks recognized device UTC/GMT clocks against artifact-certificate
+  validity before replacing its trustpoint, with an actionable clock/renewal
+  error instead of a later opaque IOS certificate-import failure.
+- AI deployment guide publishes readable packages without attempting privileged
+  ownership changes inside hardened containers. Clarify existing instruction
+  custody, sequential topology moves, fresh staging evidence, and test cleanup.
 - XR onboarding downloads its RPM and sealed bootstrap over authenticated
   HTTPS, with an SSH-delivered trust anchor, protected stdin credentials and
   SHA-256 verification before placement. No device SCP server is required.

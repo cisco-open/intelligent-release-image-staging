@@ -617,10 +617,11 @@ The endpoint map stores one row per principal in `peer-endpoints.d/`, spread
 over 256 shard files. An announce locks, parses, and rewrites only its own
 principal's shard. Each write is atomic: a temporary file followed by a rename.
 
-The capacity of the map is the supported fleet size **plus** headroom for
+The capacity of the map is the configured device-count limit **plus** headroom for
 service principals, so a full fleet of devices and the `service:seeder`
 principal all fit without evicting anything. The capacity bound is applied by
-the reconciler's maintenance pass, not by each announce.
+the reconciler's maintenance pass, not by each announce. This storage limit is
+not a tested production throughput or fleet-capacity guarantee.
 
 A corrupt or unreadable shard — unparseable JSON, a wrong schema, or a
 malformed endpoint row — is treated as fail-closed rather than empty: the reconcile pass stops before deriving or applying anything, existing
@@ -1011,8 +1012,8 @@ then tell the controller that you did.
    read the server log.
 
 4. **Clear what the cut-off attempt left behind.** Run **Undeploy** with
-   **Force** from the Console (or `submit-uninstall --device-id <id>
-   --force-agent-only --wait`). With the obligation resolved it proceeds,
+   **Force** from the Console (or `POST /api/v1/devices/<id>/undeploy` with
+   `{"force": true}`, then check the job result). With the obligation resolved it proceeds,
    removes the IRIS-named footprint and retires the device's leftover
    records; then onboard again.
 

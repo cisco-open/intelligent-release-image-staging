@@ -2,6 +2,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# Build browser assets separately: Node and npm dependencies never enter the
+# Python runtime image. The existing Console remains the HTML/auth owner.
+FROM node:24-bookworm-slim AS console-ui-build
+WORKDIR /build/console-ui
+COPY server/console-ui/package.json server/console-ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY server/console-ui/vite.config.js ./
+COPY server/console-ui/src/ ./src/
+RUN npm run build
+
 FROM python:3.12-slim-trixie
 
 # Certificate metadata is read locally from the browser-facing identity.
@@ -21,9 +31,11 @@ LABEL org.opencontainers.image.title="IRIS web console" \
       org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
 WORKDIR /opt/iris/server
+COPY LICENSE NOTICE /opt/iris/
 COPY server/gui_server.py server/api_problem.py server/api_routes.py \
      server/tier_auth.py server/bounded_pool.py /opt/iris/server/
 COPY server/webroot/ /opt/iris/server/webroot/
+COPY --from=console-ui-build /build/console-ui/dist/ /opt/iris/server/webroot/assets/
 COPY docs/zensical/swagger/ /opt/iris/docs/zensical/swagger/
 COPY docs/zensical/openapi.yaml /opt/iris/docs/zensical/openapi.yaml
 

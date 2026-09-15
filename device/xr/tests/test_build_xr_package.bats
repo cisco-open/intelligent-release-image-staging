@@ -81,7 +81,8 @@ _xr_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   APPMGR_DIR="$BATS_TEST_TMPDIR/appmgr"
   OUT_DIR="$BATS_TEST_TMPDIR/out"
-  mkdir -p "$STUBDIR/tools" "$STUBDIR/device/xr" "$STUBDIR/bin" "$APPMGR_DIR"
+  mkdir -p "$STUBDIR/tools" "$STUBDIR/device/xr" "$STUBDIR/bin" \
+    "$APPMGR_DIR/release_configs"
   ln -s "$HELPER" "$STUBDIR/tools/build-xr-package.sh"
   printf '0.0.0-test\n' > "$STUBDIR/VERSION"
 
@@ -135,6 +136,14 @@ STUB
 
 _run_real() {
   run env PATH="$STUBDIR/bin:$PATH" TEST_ROOT="$TEST_ROOT" \
+    COMMON_STUB_FAIL="${COMMON_STUB_FAIL:-0}" \
+    APPMGR_BUILD_DIR="$APPMGR_DIR" \
+    APPMGR_BUILD_CMD="${APPMGR_BUILD_CMD:-bash ./appmgr_build}" \
+    bash "$STUBDIR/tools/build-xr-package.sh" --out "$OUT_DIR"
+}
+
+_run_real_default() {
+  run env -u APPMGR_BUILD_CMD PATH="$STUBDIR/bin:$PATH" TEST_ROOT="$TEST_ROOT" \
     COMMON_STUB_FAIL="${COMMON_STUB_FAIL:-0}" \
     APPMGR_BUILD_DIR="$APPMGR_DIR" \
     bash "$STUBDIR/tools/build-xr-package.sh" --out "$OUT_DIR"
@@ -226,6 +235,47 @@ STUB
   [[ "$output" != *"STUB-GIT-SHOULD-NOT-BE-CALLED"* ]]
 }
 
+@test "behavior: pinned appmgr gets a private RPM log without modifying the cached builder" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'STUB'
+#!/usr/bin/env python3
+from pathlib import Path
+
+def main():
+    target = "x86_64"
+    spec_file = "spec"
+    RPM_SOURCE_DIR = "sources"
+    release_conf = {"build": {"rpm_rpm_dir": "rpms"}}
+    command = [
+        "./build_rpm.sh",
+        "--target",
+        target,
+        "--spec-file",
+        spec_file,
+        "--source-dir", RPM_SOURCE_DIR,
+        "--rpm-dir",
+        release_conf["build"]["rpm_rpm_dir"],
+        "--output-dir", "RPMS",
+        "--verbose",
+    ]
+    print("APP-MGR-RPM-ARGV=" + repr(command))
+    Path("RPMS").mkdir(exist_ok=True)
+    Path("RPMS/iris-xr-test.x86_64.rpm").write_bytes(b"private-log-test-rpm")
+
+main()
+STUB
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  before="$(sha256sum "$APPMGR_DIR/appmgr_build" | awk '{print $1}')"
+  private_tmp="$BATS_TEST_TMPDIR/tmp with 'quote"
+  mkdir -p "$private_tmp"
+  TMPDIR="$private_tmp" _run_real_default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"APP-MGR-RPM-ARGV="*"--log-file"*"/.iris-rpmbuild.log"* ]]
+  [[ "$output" != *"/tmp/rpmbuild.log"* ]]
+  [ "$(sha256sum "$APPMGR_DIR/appmgr_build" | awk '{print $1}')" = "$before" ]
+  [ "$(cat "$OUT_DIR/iris-xr.rpm")" = "private-log-test-rpm" ]
+}
+
 @test "behavior: nonempty APPMGR_BUILD_DIR without a builder is preserved and refused" {
   _xr_stub_setup
   printf 'operator data\n' > "$APPMGR_DIR/precious.txt"
@@ -237,6 +287,7 @@ STUB
 
 @test "behavior: an empty APPMGR_BUILD_DIR is cloned without deletion" {
   _xr_stub_setup
+  rm -rf "$APPMGR_DIR/release_configs"
   cat > "$STUBDIR/bin/git" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1" = clone ]; then

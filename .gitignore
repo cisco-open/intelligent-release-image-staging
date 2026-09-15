@@ -106,3 +106,7 @@ server/docker-compose.override.yml
 
 # --- Cisco-licensed typeface: staged at deploy time, never distributed ---
 server/webroot/fonts/SharpSans-Bold.woff2
+
+# --- locally built Console React assets (Docker builds these separately) ---
+server/webroot/assets/console.js
+server/webroot/assets/console.css

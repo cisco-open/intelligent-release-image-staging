@@ -175,6 +175,121 @@ class TestFetch:
         finally:
             srv.shutdown()
 
+    @pytest.mark.parametrize("prior_good_file", [False, True])
+    def test_short_body_against_content_length_is_rejected(
+            self, tmp_path, prior_good_file):
+        payload = b"truncated body"
+        prior = b"prior verified tar"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload) + 9))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+                self.close_connection = True
+
+            def log_message(self, *a):
+                pass
+
+        srv = _http_server(Handler)
+        try:
+            out_path = os.path.join(str(tmp_path), "out.tar")
+            if prior_good_file:
+                with open(out_path, "wb") as f:
+                    f.write(prior)
+            url = "http://127.0.0.1:%d/truncated" % srv.server_address[1]
+            with pytest.raises(bulkhash.BulkHashError,
+                               match="Content-Length mismatch"):
+                bulkhash.fetch(url, timeout=5, out_path=out_path)
+            if prior_good_file:
+                with open(out_path, "rb") as f:
+                    assert f.read() == prior
+            else:
+                assert not os.path.exists(out_path)
+            assert not list(tmp_path.glob(".bulkhash-*.tmp"))
+        finally:
+            srv.shutdown()
+
+    @pytest.mark.parametrize("content_length", ["not-a-number", "-1"])
+    def test_invalid_content_length_is_rejected_without_partial_file(
+            self, tmp_path, content_length):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", content_length)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = _http_server(Handler)
+        try:
+            out_path = os.path.join(str(tmp_path), "out.tar")
+            url = "http://127.0.0.1:%d/invalid-length" % srv.server_address[1]
+            with pytest.raises(bulkhash.BulkHashError,
+                               match="invalid Content-Length"):
+                bulkhash.fetch(url, timeout=5, out_path=out_path)
+            assert not os.path.exists(out_path)
+            assert not list(tmp_path.glob(".bulkhash-*.tmp"))
+        finally:
+            srv.shutdown()
+
+    def test_response_without_content_length_is_accepted(self, tmp_path):
+        payload = b"body without declared length"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(payload)
+                self.close_connection = True
+
+            def log_message(self, *a):
+                pass
+
+        srv = _http_server(Handler)
+        try:
+            out_path = os.path.join(str(tmp_path), "out.tar")
+            url = "http://127.0.0.1:%d/no-length" % srv.server_address[1]
+            assert bulkhash.fetch(url, timeout=5, out_path=out_path) == out_path
+            with open(out_path, "rb") as f:
+                assert f.read() == payload
+        finally:
+            srv.shutdown()
+
+    def test_chunked_response_without_content_length_is_accepted(self,
+                                                                  tmp_path):
+        payload = b"chunked response body"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(("%x\r\n" % len(payload)).encode("ascii"))
+                self.wfile.write(payload + b"\r\n0\r\n\r\n")
+
+            def log_message(self, *a):
+                pass
+
+        srv = _http_server(Handler)
+        try:
+            out_path = os.path.join(str(tmp_path), "out.tar")
+            url = "http://127.0.0.1:%d/chunked" % srv.server_address[1]
+            assert bulkhash.fetch(url, timeout=5, out_path=out_path) == out_path
+            with open(out_path, "rb") as f:
+                assert f.read() == payload
+        finally:
+            srv.shutdown()
+
     def test_failure_never_clobbers_a_prior_good_file(self, tmp_path):
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

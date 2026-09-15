@@ -17,6 +17,10 @@ setup() {
   mkdir -p "$REPO/tools" "$REPO/server" "$REPO/artifacts" "$REPO/bin" "$STUB"
 
   cp "$BATS_TEST_DIRNAME/../../tools/start-compose-server.sh" "$REPO/tools/"
+  cp "$BATS_TEST_DIRNAME/../../tools/check-host-time.sh" "$REPO/tools/"
+  printf '#!/usr/bin/env bash\necho yes\n' > "$STUB/timedatectl"
+  printf '#!/usr/bin/env bash\necho "Leap status : Normal"\necho "Stratum : 5"\necho "Reference ID : C000027B"\n' > "$STUB/chronyc"
+  chmod +x "$STUB/timedatectl" "$STUB/chronyc"
   cp "$BATS_TEST_DIRNAME/../setup_status.py" "$REPO/server/"
   chmod +x "$REPO/tools/start-compose-server.sh"
   : > "$REPO/server/docker-compose.yml"

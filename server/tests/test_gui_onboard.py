@@ -134,7 +134,9 @@ def test_onboard_assembles_env_and_streams(tmp_path):
     svc = _svc(fake_run)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done" and job["returncode"] == 0
-    assert job["lines"][-2:] == ["[1/6] flash pre-check", "[6/6] done"]
+    assert job["lines"] == ["Onboard | Catalyst Switches | Guest Shell",
+                            "[1/3] Prepare onboarding", "[3/3] Finalize onboarding",
+                            "Onboard completed."]
     env = seen["env"]
     assert seen["install_path"] == "/fake/device-install.sh"
     assert env["DEVICE_IP"] == "10.0.0.1" and env["DEVICE_ID"] == "d1"
@@ -711,7 +713,8 @@ def _xr_preflight_stub(monkeypatch, version=None, apps="", sources="",
             "__IRIS_PREFLIGHT_VERSION__\n"
             + (version if version is not None else _xr_show_version())
             + "\n__IRIS_PREFLIGHT_APPS__\n" + apps
-            + "\n__IRIS_PREFLIGHT_SOURCES__\n" + sources))
+            + "\n__IRIS_PREFLIGHT_SOURCES__\n" + sources
+            + "\n__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
 
 
@@ -1143,7 +1146,7 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     assert "board_identity" not in target
     assert {"device_id": "d1", "model": "IE-3400"} in fleet.upserts
     # the job line reports the model the probe just found, not a placeholder
-    assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
+    assert "Onboard | IE Switches | IOx" in job["lines"]
 
 
 def test_probe_normalizes_sys_suffix_before_caching(tmp_path):
@@ -1678,6 +1681,7 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
         "show app-hosting list": apps,
         "dir bootflash:guest-share": guest_share,
         "show interfaces Gi1": interface,
+        "show ntp status": "Clock is synchronized, stratum 5, reference is 192.0.2.123\n",
     }
 
     def run(_argv, input=None, **_kwargs):
@@ -1686,7 +1690,8 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
                               ("RUNNING", "show running-config"),
                               ("APPS", "show app-hosting list"),
                               ("GUEST_SHARE", "dir bootflash:guest-share"),
-                              ("INTERFACES", "show interfaces Gi1")):
+                              ("INTERFACES", "show interfaces Gi1"),
+                              ("NTP", "show ntp status")):
             if command in input:
                 chunks.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, outputs[command]))
         return SimpleNamespace(returncode=0, stdout="\n".join(chunks))
@@ -1740,7 +1745,8 @@ def test_default_router_preflight_uses_one_ssh_session(monkeypatch):
             "cisco C8000V (VXE) processor\nProcessor board ID 9ABC123\n"
             "__IRIS_PREFLIGHT_RUNNING__\n"
             "__IRIS_PREFLIGHT_APPS__\nNo App found\n"
-            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"))
+            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"
+            "__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
 
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     evidence = gui_onboard._default_router_preflight(
@@ -1860,7 +1866,8 @@ def test_default_router_preflight_refuses_an_ios_xr_device(monkeypatch):
             "Processor board ID FOX1234ABCD\n"
             "__IRIS_PREFLIGHT_RUNNING__\nhostname xr1\n"
             "__IRIS_PREFLIGHT_APPS__\nNo App found\n"
-            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"))
+            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"
+            "__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     dev = {"device_id": "xr1"}
     with pytest.raises(ValueError, match="IOS-XR"):
@@ -1901,7 +1908,8 @@ def test_default_iox_preflight_extracts_identity_and_model(monkeypatch):
         return SimpleNamespace(returncode=0, stdout=(
             "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
             "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
-            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     evidence = gui_onboard._default_iox_preflight(
         {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
@@ -1921,7 +1929,8 @@ def test_default_iox_preflight_refuses_an_ios_xr_device(monkeypatch):
             "cisco 8201 (Intel 686 F6M14S4)\n"
             "Processor board ID FOX1234ABCD\n"
             "\n__IRIS_PREFLIGHT_RUNNING__\nhostname xr1\n"
-            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     dev = {"device_id": "xr1"}
     with pytest.raises(ValueError, match="IOS-XR"):
@@ -1934,7 +1943,8 @@ def test_default_iox_preflight_records_the_family_it_read(monkeypatch):
         return SimpleNamespace(returncode=0, stdout=(
             "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
             "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
-            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     dev = {"device_id": "sw1"}
     gui_onboard._default_iox_preflight(
@@ -1960,7 +1970,8 @@ def test_default_iox_preflight_raises_when_identity_unparseable(monkeypatch):
             "__IRIS_PREFLIGHT_VERSION__\nCisco IOS XE Software\n"
             "cisco IE-3400 (ARMv7) processor\n"
             "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
-            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     with pytest.raises(ValueError, match="processor board ID"):
         gui_onboard._default_iox_preflight(
@@ -1983,7 +1994,8 @@ def _iox_preflight_stub(monkeypatch, running="hostname sw1\n",
         return SimpleNamespace(returncode=0, stdout=(
             "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
             "\n__IRIS_PREFLIGHT_RUNNING__\n" + running +
-            "\n__IRIS_PREFLIGHT_APPS__\n" + apps))
+            "\n__IRIS_PREFLIGHT_APPS__\n" + apps +
+            "\n__IRIS_PREFLIGHT_NTP__\nClock is synchronized, stratum 5, reference is 192.0.2.123\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
 
 
@@ -2169,7 +2181,7 @@ def test_iox_present_iris_tar_proceeds(tmp_path):
             tmp_path / "iris-arm64.tar")
 
 
-def test_job_lines_note_platform_and_recipe(tmp_path):
+def test_job_lines_use_series_and_installer_labels(tmp_path):
     raw_runs = []
     controller = _FrozenIoxController()
     svc = _iox_controller_service(tmp_path, controller, raw_runs)
@@ -2177,8 +2189,8 @@ def test_job_lines_note_platform_and_recipe(tmp_path):
     assert job["state"] == "done"
     assert raw_runs == []
     assert _request_value(controller.requests[0], "action") == "install"
-    assert any("platform: iox" in l and "device/iox/install.sh" in l
-               for l in job["lines"])
+    assert "Onboard | IE Switches | IOx" in job["lines"]
+    assert not any("device/iox/" in line for line in job["lines"])
 
 
 def test_audit_fn_called_on_finish_ok():
@@ -2359,7 +2371,7 @@ def test_list_jobs_summaries_without_lines():
     j = [x for x in svc.list_jobs() if x["id"] == jid][0]
     assert j["device_id"] == "d1" and j["state"] == "done"
     assert "lines" not in j
-    assert j["last_line"] == "world"
+    assert j["last_line"] == "Onboard completed."
     assert j["queued_at"] is not None
 
 
@@ -2510,7 +2522,7 @@ def test_undeploy_iox_runs_the_iox_uninstall_script(tmp_path):
     assert _request_value(request, "teardown_mode") == "force_agent_only"
     assert not _request_has(request, "wrapper_path")
     assert minted == []                       # undeploy never mints
-    assert any("device/iox/uninstall.sh" in l for l in job["lines"])
+    assert "Undeploy | IE Switches | IOx" in job["lines"]
 
 
 def test_undeploy_guestshell_runs_the_guestshell_uninstall_script():
@@ -3165,7 +3177,8 @@ def _common_preflight_stub(monkeypatch, running="", apps="", files="",
         out = []
         for name, body in (("VERSION", version or _iox_show_version()),
                            ("RUNNING", running), ("APPS", apps),
-                           ("FILES", files)):
+                           ("FILES", files),
+                           ("NTP", "Clock is synchronized, stratum 5, reference is 192.0.2.123\n")):
             out.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, body))
         return SimpleNamespace(returncode=0, stdout="\n".join(out))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
@@ -3428,6 +3441,9 @@ def test_probe_sections_survive_an_input_echoing_transport(monkeypatch):
         "RP/0/RP0/CPU0:r1#echo __IRIS_PREFLIGHT_APPS__\n"
         "% Invalid input detected at '^' marker.\n"
         "RP/0/RP0/CPU0:r1#show appmgr application-table\n"
+        "RP/0/RP0/CPU0:r1#echo __IRIS_PREFLIGHT_NTP__\n"
+        "RP/0/RP0/CPU0:r1#show ntp status\n"
+        "Clock is synchronized, stratum 5, reference is 192.0.2.123\n"
     )
 
     class _Out:
@@ -3927,7 +3943,8 @@ def _iox_controller_service(tmp_path, controller, raw_runs=None,
         artifacts_dir=str(tmp_path), iox_controller=controller)
 
 
-def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
+@pytest.mark.parametrize("detailed", [False, True])
+def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path, detailed):
     """Freeze the whole Console -> controller -> private recipe handoff."""
     import test_iox_verification as iox_spec
 
@@ -3998,7 +4015,8 @@ def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
         return record["record_id"]
 
     try:
-        job_id = service.start("d1", prepare=prepare_record)
+        job_id = service.start("d1", prepare=prepare_record,
+                               env_extra={"IRIS_LOG": "on" if detailed else "off"})
         job = _wait(service, job_id)
     finally:
         controller.close()
@@ -4014,12 +4032,17 @@ def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
     # The job log is step-level: the controller's line per recipe operation,
     # in order, and none for the closing protocol handshake.
     step_lines = [line for line in job["lines"] if line.startswith("  ")]
-    assert step_lines[0].startswith("  fetch_wrapper ok (")
-    assert step_lines[-1].startswith("  save ok (")
-    assert [line.split()[0] for line in step_lines] == [
-        arguments.get("name") if operation == "command" else operation
-        for operation, arguments in iox_spec._install_operations()
-        if operation != "finish"]
+    if detailed:
+        assert "Detailed logs enabled." in job["lines"]
+        assert step_lines[0].startswith("  fetch_wrapper ok (")
+        assert step_lines[-1].startswith("  save ok (")
+        assert [line.split()[0] for line in step_lines] == [
+            arguments.get("name") if operation == "command" else operation
+            for operation, arguments in iox_spec._install_operations()
+            if operation != "finish"]
+    else:
+        assert step_lines == []
+    assert job["lines"][-1] == "Onboard completed."
     assert not any(line.startswith("  finish") for line in job["lines"])
 
     # Reload through a separate store instance: this must be the durable
@@ -4129,7 +4152,8 @@ def test_real_iox_teardown_accepts_restored_predecessor_transition(tmp_path):
     try:
         job = _wait(service, service.start(
             "d1", action="undeploy", record_id="old",
-            prepare=lambda: "old", teardown_mode="recorded"))
+            prepare=lambda: "old", teardown_mode="recorded",
+            env_extra={"IRIS_LOG": "on"}))
     finally:
         controller.close()
 
@@ -4477,6 +4501,26 @@ def test_iox_terminal_controller_evidence_is_published_without_inference(tmp_pat
     assert job["iox_verification"] == verification
     assert job["iox_session"] == evidence["session"]
     assert job["iox_session"]["job_id"] == job_id
+
+
+@pytest.mark.parametrize("category", [
+    "connection", "timeout", "ssh_authentication", "host_key", "silence",
+    "rejected", "transport", "unsupported_syntax", "unsupported_response",
+    "do-not-print-private-output", None, ["connection"],
+])
+def test_iox_failure_log_reports_only_safe_transport_categories(tmp_path, category):
+    controller = _FrozenIoxController(result={
+        "result_code": 4, "returncode": 1, "recovery_code": 0,
+        "error_category": category, "detail": "identity discovery failed",
+    })
+    service = _iox_controller_service(tmp_path, controller)
+    job = _wait(service, service.start("d1", prepare=lambda: "record-1"))
+    safe = isinstance(category, str) and category in gui_onboard._IOX_LOG_TRANSPORT_CATEGORIES
+    expected = "IOx controller: identity discovery failed" + (
+        " (" + category + ")" if safe else "")
+    assert expected in job["lines"]
+    assert "do-not-print-private-output" not in "\n".join(job["lines"])
+    assert job["state"] == "error"
 
 
 def test_recorded_iox_uninstall_keeps_the_preselected_record_target(tmp_path):

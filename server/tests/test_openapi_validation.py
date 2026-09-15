@@ -10,6 +10,8 @@ import socket
 from pathlib import Path
 
 import pytest
+import api_problem
+import api_routes
 from jsonschema.exceptions import SchemaError, ValidationError
 from openapi_schema_validator import OAS32Validator
 from openapi_spec_validator import OpenAPIV32SpecValidator
@@ -111,6 +113,36 @@ def test_complete_document_and_all_schema_objects_validate_offline(monkeypatch):
     document = _load()
     OpenAPIV32SpecValidator(document).validate()
     _validate_schemas(document)
+
+
+def test_shared_api_admission_response_is_valid_for_every_session_route():
+    document = _load()
+    # Management admission applies to every registered browser-session route,
+    # including policy, schedules and streams, before any handler body work.
+    rejection = api_problem.document(429, "rate-limit-exceeded",
+                                     "Rate limit exceeded")
+    covered = set()
+    for route in api_routes.ROUTES:
+        if route.service not in ("console", "management") or \
+                "consoleSession" not in route.security:
+            continue
+        operation = document["paths"][route.path][route.method.lower()]
+        response = operation["responses"]["429"]
+        assert "rate-limit-exceeded" in response["x-iris-problem-codes"]
+        header = response["headers"]["Retry-After"]["schema"]
+        OAS32Validator(header).validate(1)
+        with pytest.raises(ValidationError):
+            OAS32Validator(header).validate(0)
+        schema = response["content"]["application/problem+json"]["schema"]
+        OAS32Validator(_local_schema(schema, document)).validate(rejection)
+        covered.add(route.method)
+    assert {"GET", "POST", "PUT", "PATCH", "DELETE"} <= covered
+    for path, method in (("/internal/v1/authorizations", "post"),
+                         ("/internal/v1/console-certificate", "get"),
+                         ("/api/v1/setup", "post"),
+                         ("/internal/v1/setup", "post"),
+                         ("/healthz", "get"), ("/readyz", "get")):
+        assert "429" not in document["paths"][path][method]["responses"]
 
 
 @pytest.mark.parametrize("location", ["request", "response", "stream", "component"])

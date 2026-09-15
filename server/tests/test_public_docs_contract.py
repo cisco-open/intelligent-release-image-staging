@@ -29,7 +29,9 @@ def test_introductory_api_examples_are_registered_console_operations():
     examples = []
     for name in ("docs/index.html", "docs/app.js",
                  "docs/zensical/getting-started.md", "docs/zensical/console.md",
-                 "docs/zensical/fleet-workflows.md", "docs/zensical/reference.md"):
+                 "docs/zensical/fleet-workflows.md", "docs/zensical/reference.md",
+                 "docs/zensical/device-agents.md", "docs/zensical/iox.md",
+                 "docs/zensical/operations.md"):
         text = (ROOT / name).read_text()
         for method, path in re.findall(
                 r"\b(GET|POST|PUT|PATCH|DELETE) (/api/v1/(?:[A-Za-z0-9_/{}/.-]|<[A-Za-z_][A-Za-z0-9_-]*>)+)", text):
@@ -46,3 +48,11 @@ def test_static_workflow_fallback_matches_initial_script_copy():
         expected = re.search(r'\b' + field + r': "([^"]*)"', script).group(1)
         actual = re.search(r'id="' + element + r'">([^<]*)<', markup).group(1)
         assert html.unescape(actual) == expected
+
+
+def test_api_test_guide_describes_persisted_default_browser_identity():
+    guide = (ROOT / "docs/zensical/api-testing.md").read_text()
+    assert "tls/console-fallback.pem.age" in guide
+    assert "reused on restart" in guide
+    assert "not durable across" not in guide
+    assert "Never disable" in guide and "TLS verification" in guide

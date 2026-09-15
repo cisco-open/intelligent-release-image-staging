@@ -113,6 +113,44 @@ else
   fi
 fi
 
+# The pinned upstream appmgr_build invokes build_rpm.sh without its supported
+# --log-file option, whose default is the shared /tmp/rpmbuild.log. That can
+# collide with another user's file and makes a normal build fail even when
+# this invocation has an isolated output directory. For the supported default
+# command, execute a private copy of appmgr_build from this invocation's CTX,
+# with only that argv addition; preserve the pinned checkout and any operator
+# customization. appmgr_build resolves release_configs/build directories
+# relative to __file__, so mirror the pinned release_configs beside the copy.
+APPMGR_RUN_CMD="$APPMGR_BUILD_CMD"
+if [ "$APPMGR_BUILD_CMD" = "./appmgr_build" ]; then
+  APPMGR_RUN_CMD="$CTX/appmgr_build"
+  [ -f "$APPMGR_BUILD_DIR/appmgr_build" ] \
+    || { echo "!! pinned appmgr_build is missing from $APPMGR_BUILD_DIR" >&2; exit 1; }
+  [ -d "$APPMGR_BUILD_DIR/release_configs" ] \
+    || { echo "!! pinned appmgr release_configs directory is missing from $APPMGR_BUILD_DIR" >&2; exit 1; }
+  cp "$APPMGR_BUILD_DIR/appmgr_build" "$APPMGR_RUN_CMD"
+  chmod 0755 "$APPMGR_RUN_CMD"
+  cp -a "$APPMGR_BUILD_DIR/release_configs" "$CTX/release_configs"
+  python3 - "$APPMGR_RUN_CMD" "$CTX/.iris-rpmbuild.log" <<'PYTHON'
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1])
+text = script.read_text()
+expected = '''        "--output-dir", "RPMS",
+        "--verbose",
+    ]'''
+if text.count(expected) != 1:
+    raise SystemExit("!! pinned appmgr_build RPM argv did not match the expected structure")
+replacement = '''        "--output-dir", "RPMS",
+        "--verbose",
+        "--log-file",
+        ''' + repr(sys.argv[2]) + ''',
+    ]'''
+script.write_text(text.replace(expected, replacement, 1))
+PYTHON
+fi
+
 command -v skopeo >/dev/null 2>&1 \
   || { echo "!! skopeo is required to select the XR image from the canonical OCI" >&2; exit 1; }
 echo ">> selecting linux/amd64 from canonical OCI $OCI_INDEX"
@@ -153,7 +191,11 @@ EOF
 rm -rf "$APPMGR_BUILD_DIR/RPMS"
 mkdir -p "$APPMGR_BUILD_DIR/RPMS"
 LOG="$APPMGR_BUILD_DIR/.iris-appmgr-build.log"
-( cd "$APPMGR_BUILD_DIR" && $APPMGR_BUILD_CMD -b build.yaml ) >"$LOG" 2>&1 || true
+if [ "$APPMGR_BUILD_CMD" = "./appmgr_build" ]; then
+  ( cd "$APPMGR_BUILD_DIR" && "$APPMGR_RUN_CMD" -b build.yaml ) >"$LOG" 2>&1 || true
+else
+  ( cd "$APPMGR_BUILD_DIR" && $APPMGR_RUN_CMD -b build.yaml ) >"$LOG" 2>&1 || true
+fi
 cat "$LOG"
 
 RPM_FILE="$(find "$APPMGR_BUILD_DIR/RPMS" -type f -name '*.rpm' 2>/dev/null | sort | tail -n1)"

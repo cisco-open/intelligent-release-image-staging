@@ -1255,7 +1255,7 @@ class Telemetry:
                 self._emit_transfer_lifecycle()
             except Exception:
                 pass                        # telemetry never breaks on bad input
-            delivered = self._flush_logs(now)
+            self._flush_logs(now)
         if self.metrics_exporter is not None:
             # Every pass exports the latest snapshot (conflation, spec 7.5) —
             # NOT gated on transfers existing: the rejected-samples counter and

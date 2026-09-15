@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 IRIS separates network onboarding from image assignment. That keeps connectivity data and release intent in different files, which makes review and rollback easier.
 
-Use the Console for routine inventory, assignment, and onboarding. Use the inventory CSV template for reviewed imports from **Devices**; role
-CSV import is available under peer policy. Other templates are not automatically
+Use the Console for routine inventory, assignment, and onboarding. Use the inventory CSV template for reviewed imports from **Inventory**; role
+CSV import is available under **Policies**. Other templates are not automatically
 accepted by either import. For
 automation, consult registered operations in the
 [interactive API reference](swagger/index.html) or [OpenAPI contract](openapi.yaml).
@@ -47,10 +47,11 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - `model` and `platform` may be blank in imported inventory. In Add Device,
   **management type controls which network fields appear**. Editing the model
   or agent choice does not change that type. XR host uses `xr-appmgr`; router
-  modes use `router`. Routed and inband modes require an explicit compatible
+  modes offer Guest Shell (`router`) or IOx (`iox`). Routed and inband modes require an explicit compatible
   Guest Shell or IOx choice. Known models limit installer choices; conflicts
-  appear in the form. Model is optional free text: you can enter `C3650`, but
-  saving it does not confirm hardware support. When an imported platform is
+  appear in the form. Add Device uses a required **Model series** dropdown;
+  the API and CSV also accept exact model numbers. Choosing a series or saving
+  a model does not confirm hardware support. When an imported platform is
   blank, onboarding can select an installer for a known IOS-XE model; it
   refuses devices it cannot classify.
 - **router-routed** — fill `app_ip`, `app_mask`, `app_gateway`, and
@@ -109,7 +110,7 @@ reviewable, Git-friendly file.
 
 The optional `role` inventory column declares one lowercase role per device.
 Copying or re-importing an older pre-role CSV does not clear membership, and a
-blank `role` cell preserves the stored value. Use the Console's **Set role**
+blank `role` cell preserves the stored value. Use **Inventory → More actions → Set role…**
 action to change or clear membership. The versioned API exposes role-write
 operations; see the [OpenAPI contract](openapi.yaml) for dry-run, confirmation,
 and revision requirements.
@@ -122,7 +123,7 @@ values are integer seconds.
 `fleet/roles.csv` is operator-owned and ignored by Git; review and back it up
 with the rest of your site inventory.
 
-The Console offers role CSV import/export under **Devices → Peer policy → Role
+The Console offers role CSV import/export under **Policies → Role
 definitions**, and edits single definitions in place; see
 [Console](console.md#role-definitions).
 

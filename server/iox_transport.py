@@ -17,7 +17,6 @@ import copy
 import errno
 import hashlib
 import json
-import math
 import os
 import re
 import resource

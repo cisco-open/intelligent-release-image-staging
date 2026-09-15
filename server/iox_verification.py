@@ -13,6 +13,7 @@ from __future__ import print_function
 
 import argparse
 import base64
+import calendar
 import copy
 import errno
 import fcntl
@@ -512,6 +513,36 @@ def _command_bytes(lines):
         raise _ControllerFailure(
             "unsupported_syntax", "rendered IOx command is invalid", 2)
     return body
+
+
+def _check_device_certificate_clock(stdout, not_before, not_after):
+    """Reject a known UTC clock outside the certificate window, before PKI writes.
+
+    IOS remains the TLS verifier. Unknown/local timezone output is not guessed
+    and cannot waive the device's own certificate verification.
+    """
+    matches = re.findall(
+        br"(?m)^[*.]?(\d{2}:\d{2}:\d{2})(?:\.\d+)?\s+(?:UTC|GMT)\s+"
+        br"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+([A-Z][a-z]{2})\s+"
+        br"(\d{1,2})\s+(\d{4})\s*$", bytes(stdout))
+    if len(matches) != 1:
+        return
+    clock, month, day, year = (part.decode("ascii") for part in matches[0])
+    try:
+        observed = calendar.timegm(time.strptime(
+            "%s %s %s %s" % (month, day, year, clock), "%b %d %Y %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return
+    if observed < not_before:
+        raise _ControllerFailure(
+            "rejected", "IOx device clock is before the artifact certificate's "
+            "validity period; synchronize device time or wait until the "
+            "certificate is valid, then retry. IRIS trustpoint was not changed.", 4)
+    if observed > not_after:
+        raise _ControllerFailure(
+            "rejected", "IOx device clock is after the artifact certificate's "
+            "validity period; check device time and renew an expired server "
+            "certificate before retrying. IRIS trustpoint was not changed.", 4)
 
 
 def _open_public_certificate(path, validate_x509=True):
@@ -3549,7 +3580,7 @@ class IoxController(object):
         self._fence_barrier(attempt)
         return updated
 
-    def _recover_journal(self, attempt, journal, initiating=False):
+    def _recover_journal(self, attempt, journal):
         if attempt.durability_uncertain:
             raise _ControllerFailure(
                 "journal_durability",
@@ -3557,12 +3588,11 @@ class IoxController(object):
         previous = attempt.safety_recovery
         attempt.safety_recovery = True
         try:
-            return self._recover_journal_owned(
-                attempt, journal, initiating=initiating)
+            return self._recover_journal_owned(attempt, journal)
         finally:
             attempt.safety_recovery = previous
 
-    def _recover_journal_owned(self, attempt, journal, initiating=False):
+    def _recover_journal_owned(self, attempt, journal):
         if (not isinstance(journal, dict) or
                 journal.get("controller_id") != self.controller_id):
             raise _ControllerFailure(
@@ -3607,7 +3637,6 @@ class IoxController(object):
             self._event(attempt, "ownership_probe", {}, ack=True)
             probe_read = self._issue_continuation(attempt, "probe_read")
             phase = "ownership_probe"
-            initiating = True
         if phase == "ownership_probe":
             self._consume_continuation(
                 attempt, probe_read, "probe_read")
@@ -3647,7 +3676,6 @@ class IoxController(object):
                                        "transcript_refs": refs(result)}), ack=True)
             enable_send = self._issue_continuation(attempt, "enable_send")
             phase = "restore_intent"
-            initiating = True
         if phase == "restore_intent":
             if enable_send is None:
                 observation, result, unused = self._verification_read(attempt)
@@ -3738,8 +3766,7 @@ class IoxController(object):
         incoming_target = attempt.target
         try:
             self._strict_recovery_binding(attempt, obligations[0])
-            code = self._recover_journal(
-                attempt, obligations[0], initiating=False)
+            code = self._recover_journal(attempt, obligations[0])
         finally:
             # Recovery uses only the predecessor record's closed projection;
             # the admitted retry resumes with its independently validated
@@ -3845,6 +3872,17 @@ class IoxController(object):
         appid = _get(attempt.target, "iox_appid",
                      self.config.get("application_id", "iris"))
         commands = _preflight_commands(appid, _get(attempt.request, "device_id"))
+        from time_preflight import require_device_time
+        time_result, _ = self._command(
+            attempt, "preflight", _command_bytes(b"show ntp status"),
+            30, ordinary=True, record=False)
+        if not self._transport_ok(time_result) or _get(time_result, "error_category"):
+            raise _ControllerFailure(
+                "rejected", "time preflight could not read 'show ntp status'", 4)
+        try:
+            require_device_time(_get(time_result, "stdout", b""))
+        except ValueError as exc:
+            raise _ControllerFailure("rejected", str(exc), 4) from None
         result, context = self._command(
             attempt, "preflight",
             _command_bytes(b"\n".join(commands)),
@@ -4508,7 +4546,7 @@ class IoxController(object):
             attempt.transport = self._make_transport(attempt, attempt.supervisor)
             self._strict_recovery_binding(attempt, journal)
             self._revalidate_known_identity(attempt, journal)
-            code = self._recover_journal(attempt, journal, initiating=False)
+            code = self._recover_journal(attempt, journal)
             attempt.recovery_code = code
             if code == 3:
                 attempt.primary = _ControllerFailure(
@@ -5100,6 +5138,29 @@ class IoxController(object):
         device-side `copy https:` has to validate the artifact server."""
         if protocol.get("trust_configured"):
             return
+        if self._strict_target:
+            # A recently issued server certificate can be ahead of an
+            # unsynchronized IOS clock even when its year looks reasonable.
+            # Check before removing the previous IRIS trustpoint; the recipe's
+            # later clock warning is too late for its first HTTPS download.
+            descriptor = _open_public_certificate(
+                self.config.get("catalog_certificate_path"))
+            try:
+                certificate = ssl._ssl._test_decode_cert(
+                    "/proc/self/fd/%d" % descriptor)
+            finally:
+                os.close(descriptor)
+            result, unused = self._command(
+                attempt, "clock", self._render_command(attempt, "clock"),
+                30, ordinary=True)
+            if not self._transport_ok(result) or _get(result, "error_category"):
+                raise _ControllerFailure(
+                    _get(result, "error_category") or "readback_unknown",
+                    _command_failure_detail("clock", result), 4)
+            _check_device_certificate_clock(
+                _get(result, "stdout", b""),
+                ssl.cert_time_to_seconds(certificate["notBefore"]),
+                ssl.cert_time_to_seconds(certificate["notAfter"]))
         result, unused = self._command(
             attempt, "configure_trustpoint",
             self._render_command(attempt, "configure_trustpoint"),
@@ -5832,7 +5893,7 @@ class IoxController(object):
                                               _get(transport_result, "stdout", b""))):
                             raise _ControllerFailure(_get(transport_result, "error_category") or
                                                      "rejected", "IRIS application not DEPLOYED")
-                        code = self._recover_journal(attempt, attempt.journal, initiating=True)
+                        code = self._recover_journal(attempt, attempt.journal)
                         if code:
                             attempt.recovery_code = code
                             raise _ControllerFailure("readback_unknown", "verification restoration failed", code)
@@ -5925,7 +5986,7 @@ class IoxController(object):
                                 attempt.journal["unresolved"] and
                                 not attempt.durability_uncertain):
                             attempt.recovery_code = self._recover_journal(
-                                attempt, attempt.journal, initiating=True)
+                                attempt, attempt.journal)
                     elif operation == "finish" and isinstance(arguments, dict) and set(arguments) == {"exit_intent"}:
                         intent = arguments["exit_intent"]
                         if type(intent) is not int or not 0 <= intent <= 255:
@@ -5936,7 +5997,7 @@ class IoxController(object):
                                     attempt.journal["unresolved"] and
                                     not attempt.durability_uncertain):
                                 attempt.recovery_code = self._recover_journal(
-                                    attempt, attempt.journal, initiating=True)
+                                    attempt, attempt.journal)
                             if (action == "install" and
                                     attempt.journal is not None and
                                     not attempt.journal["unresolved"] and
@@ -6015,7 +6076,7 @@ class IoxController(object):
                 not attempt.durability_uncertain):
             try:
                 recovery_code = self._recover_journal(
-                    attempt, attempt.journal, initiating=False)
+                    attempt, attempt.journal)
                 if recovery_code:
                     attempt.recovery_code = recovery_code
             except _ControllerFailure as recovery_failure:
