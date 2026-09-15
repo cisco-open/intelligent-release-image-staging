@@ -353,6 +353,22 @@ def _v2_report(**over):
 
 
 class TestV2ReportSanitizer:
+    def test_download_timing_optional_and_whitelisted(self):
+        report = _v2_report(report_created_at=30,
+                            download={"start": 10, "end": 20, "extra": 1})
+        assert catalog._sanitize_report_v2(report)["download"] == {
+            "start": 10.0, "end": 20.0}
+        assert "download" not in catalog._sanitize_report_v2(_v2_report())
+
+    @pytest.mark.parametrize("download", [
+        [], {"start": True, "end": 20}, {"start": 21, "end": 20},
+        {"start": float("nan"), "end": 20}, {"start": 10},
+        {"start": 10, "end": float("inf")},
+        {"start": 10, "end": 999999999999}])
+    def test_download_timing_rejects_invalid(self, download):
+        with pytest.raises(ValueError):
+            catalog._sanitize_report_v2(_v2_report(download=download))
+
     def test_valid_v2_report(self):
         out = catalog._sanitize_report(_v2_report())
         assert out["schema"] == "v2"

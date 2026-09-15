@@ -72,6 +72,7 @@ import telemetry_destination
 import trust
 import api_problem
 import api_routes
+import api_rate_limit
 import tier_auth
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
@@ -3044,7 +3045,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                  record_store=None, now_fn=time.time, keyfile=None,
                  management_token_file=None,
                  management_previous_token_file=None, iox_controller=None,
-                 schedule_wake=None):
+                 schedule_wake=None, api_rate_limiter=None):
+    api_rate_limiter = (api_rate_limiter or
+                        api_rate_limit.AggregateRateLimiter.from_env())
     login_limiter = gui_auth.LoginRateLimiter()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
@@ -3414,6 +3417,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     ("POST", "/internal/v1/devices/{device_id}/role"),
                     ("POST", "/internal/v1/devices/bulk-role"),
                 }
+                # Admission follows tier auth, browser session/CSRF, and
+                # registry matching, but precedes body reads and all handler
+                # state work. Management-only controls and pre-auth account
+                # creation/login are deliberately outside these work budgets.
+                if not management_only and not body_authenticated:
+                    admitted, retry_after = api_rate_limiter.admit(
+                        route.method)
+                    if not admitted:
+                        api_problem.send(
+                            self, 429, "rate-limit-exceeded",
+                            "Rate limit exceeded",
+                            headers=(("Retry-After", str(retry_after)),))
+                        self.close_connection = True
+                        return False
                 self.path = mapped
             # A background view poll (GET + "X-IRIS-Poll: 1", sent by app.js's
             # periodic refreshers) validates the session WITHOUT refreshing its

@@ -18,9 +18,12 @@ import time
 import pytest
 
 import api_problem
+import api_rate_limit
 import api_routes
 import artifact_server
 import catalog
+import gui_app
+import gui_fleet
 import gui_server
 import management_api
 import secrets_store
@@ -98,6 +101,102 @@ class _NoSessionApp:
         if sid == "valid":
             return {"username": "admin", "csrf": "csrf"}
         return None
+
+
+def _management_session(port, token, username="admin", password="password"):
+    headers = {"Authorization": "Bearer " + token,
+               "Content-Type": "application/json"}
+    status, response_headers, body = _request(
+        port, "/internal/v1/login", method="POST", headers=headers,
+        body=json.dumps({"username": username, "password": password}).encode(),
+        https=True)
+    assert status == 200
+    auth = dict(headers)
+    auth["Cookie"] = response_headers["Set-Cookie"].split(";", 1)[0]
+    auth["X-CSRF-Token"] = json.loads(body)["csrf"]
+    return auth
+
+
+def test_management_rate_limit_runs_after_auth_and_route_matching(tmp_path):
+    cert, key = _certificate(tmp_path, "rate-management")
+    token_file = tmp_path / "tier-token"
+    _write_secret(token_file, "r" * 64)
+    token = "r" * 64
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "password")
+    limiter = api_rate_limit.AggregateRateLimiter(
+        read_rate=1, read_burst=1, clock=lambda: 100.0)
+    server = management_api.make_server(
+        "127.0.0.1", 0, app, certfile=str(cert), keyfile=str(key),
+        management_token_file=str(token_file), api_rate_limiter=limiter)
+    _thread(server)
+    port = server.server_address[1]
+    tier = {"Authorization": "Bearer " + token}
+    try:
+        # Tier auth alone is insufficient; rejection happens before the
+        # admitted-work budget is charged.
+        assert _request(port, "/internal/v1/session", headers=tier,
+                        https=True)[0] == 401
+        auth = _management_session(port, token)
+        # Unknown registered paths are rejected without consuming capacity.
+        assert _request(port, "/internal/v1/no-such-route", headers=auth,
+                        https=True)[0] == 404
+        assert _request(port, "/internal/v1/session", headers=auth,
+                        https=True)[0] == 200
+        status, headers, body = _request(
+            port, "/internal/v1/session?unused=1", headers=auth, https=True)
+        assert status == 429
+        assert headers["Retry-After"] == "1"
+        assert json.loads(body)["code"] == "rate-limit-exceeded"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_management_write_budget_is_global_and_rejects_before_mutation(
+        tmp_path):
+    cert, key = _certificate(tmp_path, "rate-write-management")
+    token_file = tmp_path / "tier-token"
+    _write_secret(token_file, "w" * 64)
+    token = "w" * 64
+    state = tmp_path / "state"
+    state.mkdir()
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "password")
+    fleet = gui_fleet.FleetStore(str(state))
+    limiter = api_rate_limit.AggregateRateLimiter(
+        write_rate=1, write_burst=1, clock=lambda: 100.0)
+    server = management_api.make_server(
+        "127.0.0.1", 0, app, fleet=fleet, certfile=str(cert),
+        keyfile=str(key), management_token_file=str(token_file),
+        api_rate_limiter=limiter)
+    _thread(server)
+    port = server.server_address[1]
+    try:
+        first = _management_session(port, token)
+        second = _management_session(port, token)
+        body = json.dumps({"device_id": "rate-owned", "device_ip": "192.0.2.10"}).encode()
+        no_csrf = {k: v for k, v in first.items() if k != "X-CSRF-Token"}
+        assert _request(port, "/internal/v1/devices", "POST",
+                        headers=no_csrf, body=body, https=True)[0] == 403
+        status, _, _ = _request(port, "/internal/v1/devices", "POST",
+                                headers=first, body=body, https=True)
+        assert status == 200
+        assert fleet.get_device("rate-owned")["device_ip"] == "192.0.2.10"
+
+        # A different session shares the same server-wide bucket. The 429 is
+        # sent at parse time, before the second body reaches device upsert.
+        changed = json.dumps({"device_id": "rate-owned",
+                              "device_ip": "192.0.2.11"}).encode()
+        status, headers, body = _request(
+            port, "/internal/v1/devices", "POST", headers=second,
+            body=changed, https=True)
+        assert status == 429
+        assert headers["Retry-After"] == "1"
+        assert fleet.get_device("rate-owned")["device_ip"] == "192.0.2.10"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_bff_unknown_and_known_routes_authenticate_before_existence(

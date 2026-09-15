@@ -676,7 +676,7 @@ caller's session and revokes the others.
 
 Every SSH session the server or an operator's installer opens -- the device
 transports `lab/device-run.sh` and `lab/xr-run.sh`, the stage-host push in
-`device/device-install.sh` / `device/router-install.sh`, and the RPM `scp` in
+`device/device-install.sh` / `device/router-install.sh`, and the HTTPS bootstrap session in
 `device/xr-install.sh` -- verifies the peer through one shared policy,
 `lab/iris-ssh-policy.sh`:
 

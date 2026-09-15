@@ -12,6 +12,21 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Configurable shared Console API admission budgets return HTTP 429 with
+  Retry-After before mutation. Total/read/write buckets are bounded across
+  sessions; the API exercise supports paced requests for capacity checks.
+- Reusable bounded Console API coverage/load harness, with isolated synthetic
+  fleet CRUD, policy/credential/paused-schedule fixtures, per-route auth/CSRF
+  checks and latency/throughput reports. HTTP 207 partial cleanup is reported
+  separately from clean success; no live device jobs are started.
+- Shorter getting-started instructions link advanced build details separately;
+  the API testing guide starts with a read-only check and explains lab cleanup.
+- Rollout dashboard measures average image download time from agent-recorded
+  aria2 submission to the completion hook, excluding later verification/copy.
+  Optional measured endpoints survive report ingestion and OTLP export; older
+  and already-present transfers remain unmeasured. Correct swarm-rate coverage
+  wording and MiB/s units. `IRIS_DEVICE_PLATFORMS=linux/amd64` permits an
+  explicitly x86-only lab package refresh without building ARM.
 - `tools/build-xr-package.sh` refuses to start without `rpmbuild`, naming the
   `rpm` package, rather than failing later inside the vendored appmgr builder's
   log. Both guides list it as an IOS-XR prerequisite, alongside `skopeo`.
@@ -35,6 +50,29 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- XR onboarding downloads its RPM and sealed bootstrap over authenticated
+  HTTPS, with an SSH-delivered trust anchor, protected stdin credentials and
+  SHA-256 verification before placement. No device SCP server is required.
+- IOx records SCP server ownership before enabling it for share-less image
+  placement. Recorded undeploy restores and saves an IRIS-enabled setting
+  after verifying app removal; pre-existing, legacy, and recordless settings
+  are preserved. Interrupted changes fail closed for operator reconciliation.
+- Simplify the public documentation around Console/API workflows and platform
+  families. Remove model-specific lab results and unconditional speed claims
+  from landing pages; clarify assignment replacement, inventory retirement,
+  and XR package preparation. Add introductory API/copy regression checks.
+- Policy acknowledgements from an older snapshot now require proof from its
+  exact retained event before pruning. Valid delayed acknowledgements drain
+  the outbox during mutation bursts, while unrelated restored branches remain
+  rejected; no queue-cap increase or audit reset is needed.
+- Fix policy-operation replay acknowledgements for already queued/in-flight
+  events, preventing repeated mutations from permanently filling the outbox.
+  Reduce repeated inventory shard parsing on fleet reads with stat-validated,
+  isolated snapshot copies; keep cross-process changes and read failures visible.
+- Telemetry streaming samples upload rates from normally staged, steady
+  seeders across Guest Shell, IOx, and XR. Existing cadence and opt-in guards
+  remain in effect, and completed transfer reports are not changed by these
+  live rate samples. Refresh device agents to enable the new coverage.
 - Successful XR command sessions omit the routine SSH connection-closed
   notice from job logs; failed sessions retain their diagnostics.
 - XR source verification accepts the numbered NCS appmgr table as well as

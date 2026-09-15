@@ -354,16 +354,48 @@ observation, which is what explains a `seeding_started_at` a backend already
 holds a different value for.
 
 !!! note "Which throughput number to trust"
-    `iris.transfer.throughput` is reported **by the devices**, and a device
-    samples once per 60-second agent tick. A transfer that finishes inside one
-    tick is therefore never observed: the reading is a truthful instantaneous
-    zero taken outside the transfer, not a broken metric. On a fast fabric a
-    1 GB image lands in well under a minute, so expect this to read zero there.
+    `iris.transfer.throughput` is reported **by the devices** when telemetry
+    streaming is enabled. Downloading devices and steady seeders sample aria2
+    receive/send speeds on the existing cadence (normally one 60-second tick;
+    server directives and constrained links can reduce sampling frequency).
+    Steady-seeder samples do not modify a completed transfer's byte totals or
+    frozen peer report. A short transfer can fall between samples, so a zero
+    rate does not prove no traffic occurred. Missing RPC observations remain
+    unavailable rather than becoming invented zero samples.
+
+    This requires the refreshed shared agent on the devices, not only a server
+    update. Older agents omit rate samples after reaching steady seeding.
 
     `iris.seeder.torrent.upload_rate` is measured by the **origin's own** aria2
     poll, independent of any device tick, so it does see a short transfer. It is
     a **lower bound** on total swarm throughput: device-to-device reseed traffic
     never passes through the origin and is invisible to it.
+
+### Average image download time
+
+The rollout tile averages `iris.download.duration_seconds` once per device and
+transfer, using completion reports received in the selected time window. The
+shared agent records successful aria2 submission and the matching GID's
+last-piece completion hook timestamp (one-second resolution). This is elapsed
+download time, including connection waiting and pauses/resumes, but excluding
+subsequent SHA-256 verification, IOS copying, and report delivery delay.
+Resumes retain the original start when known. Already-present images, missing
+hooks, and transfers whose start was not recorded are excluded, not reported as
+zero. Historical tracker role transitions cannot be converted to this metric.
+
+The optional v2 report `download: {start, end}` block is validated by the server
+and exported as `iris.download.started_at`, `iris.download.completed_at`, and
+`iris.download.duration_seconds`. Updated device agents and server are required;
+refresh the Guest Shell bundle, IOx packages, and XR RPM before rollout. For an
+explicitly amd64-only lab, set `IRIS_DEVICE_PLATFORMS=linux/amd64` while running
+`tools/stage-iox-package.sh --arch amd64` and `tools/build-xr-package.sh --out
+artifacts/`. This creates a separate amd64 OCI archive; ARM packages are not
+refreshed and must not be rolled out as containing this change.
+
+The measured swarm-rate panel is fleet-wide and uses fresh device samples plus
+an independently sampled origin rate. Its lines have different timing and
+coverage: subtracting received and origin-sent rates does **not** establish
+peer-to-peer throughput. Use captured peer-byte panels for measured byte totals.
 
 Device- and peer-labelled measurements are exported as OTLP log records.
 Aggregate metric families are listed in the table above.

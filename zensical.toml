@@ -46,6 +46,7 @@ nav = [
   { "Reference and development" = [
     { "Reference" = "reference.md" },
     { "Browsable API reference" = "swagger/index.html" },
+    { "API coverage and load testing" = "api-testing.md" },
     { "Problem type registry" = "problems.md" },
     { "Validation" = "validation.md" },
     { "Development" = "development.md" },

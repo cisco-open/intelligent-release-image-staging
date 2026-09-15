@@ -8,34 +8,22 @@ SPDX-License-Identifier: Apache-2.0
 
 This page collects the actions operators perform after the first deployment.
 
-## Daily commands
+<span id="daily-commands"></span>
 
-| Task | Command |
-| --- | --- |
-| Start server and Console | `docker compose -f server/docker-compose.yml up -d --build` |
-| View server logs | `docker logs iris` |
-| View Console logs | `docker logs iris-console` |
-| Publish image | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<path>/<image>.bin` |
-| Show images and assignments | `docker compose -f server/docker-compose.yml exec iris iris-assign` |
-| Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
-| Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` — a reset also ends every live console session ([Console sessions](security.md#console-sessions)) |
+## Daily operations
 
-`apply-assignments.sh` and `gen-device-installers.sh`
-([Prepare devices](getting-started.md#prepare-devices)) require the running
-`iris` container by that name; set `IRIS_CONTAINER=<name>` if yours differs.
+Use the [Console](console.md) to publish images, manage devices and assignments,
+and inspect staging progress. Automation uses the
+[API quick reference](reference.md#api-quick-reference) and
+[complete API contract](swagger/index.html). Keep assignment replacement,
+asynchronous job completion, and rate limits in mind.
 
-The Console is a separate service. It reaches the server through the internal
-HTTPS management API on TCP 9443; it does not mount the server's state or image
-storage. For [separate Docker hosts](docker-hosts.md), use
-`server/docker-compose.server.yml` on the server and
-`server/docker-compose.console.yml` on the Console host, with that host's
-`--env-file`. For Kubernetes, use the corresponding deployments:
-
-```bash
-kubectl -n iris exec deployment/iris-seed-server -c iris -- iris-assign
-kubectl -n iris logs deployment/iris-seed-server -c iris
-kubectl -n iris logs deployment/iris-console -c console
-```
+Server lifecycle, logs, backup, and administrator recovery are host maintenance,
+not image-rollout API operations. Follow the selected deployment guide:
+[one Docker host](getting-started.md), [separate Docker hosts](docker-hosts.md),
+or [Kubernetes](kubernetes.md). Preserve its environment files, container names,
+volumes, and trust material. An administrator reset ends existing Console
+sessions; see [Console sessions](security.md#console-sessions).
 
 ## Recognizing an ownership problem
 
@@ -515,10 +503,12 @@ Every policy mutation — role definitions, memberships, QoS, migration,
 quarantine, and release — is committed under a single policy lock and appends a
 stable entry to an **outbox** that the tracker drains. One bulk membership
 change creates one revision and one outbox entry. Each commit also creates a new
-acknowledgement epoch. The tracker may advance
-`last_operation_exported_revision` only when the status epoch matches the
-current policy history and after it appends the local audit record and accepts
-the event into its queue. Each outbox row has a stable event ID, so a failed
+acknowledgement epoch. The tracker advances `last_operation_exported_revision`
+after appending the local audit record and accepting the event into its queue;
+an already queued or in-flight event counts as accepted without duplication.
+A delayed acknowledgement is valid when its epoch matches the current snapshot
+or the exact retained event at its revision proves ancestry. Revision alone is
+not sufficient after restoring a different history. Each outbox row has a stable event ID, so a failed
 export or history mismatch replays the same event at least once. Only entries at
 or below a valid revision-and-epoch watermark are pruned on the next commit.
 The tracker persists both the accepted revision and its epoch in enforcement
@@ -528,15 +518,16 @@ The outbox is capped at **256** unacknowledged entries. A mutation that observes
 a full backlog in preflight is refused before its normal Fleet/policy write with
 `operation_backlog_full`, so a stalled consumer blocks new operations instead
 of silently discarding them. New role/QoS routes use 409; the legacy quarantine
-route retains its 503 compatibility response. Either means the tracker is not
-draining — check that it is running and reconciling before retrying. A direct
+route retains its 503 compatibility response. The producer may be outrunning
+the consumer, or reconciliation may be stalled. Check queue progress and the
+tracker before retrying; respect [API limits](api-testing.md#api-admission-limits). A direct
 writer racing after a Fleet-first preflight can still fail partially; inspect
 `partial`, `applied`, `failed`, revision, and `role_drift` on every error before
 retrying.
 
 Do not manually advance or clear the acknowledgement fields to suppress a
-backlog. A number from another acknowledgement epoch is treated as zero and all
-stable event IDs replay; changing it by hand can only obscure the state that
+backlog. An acknowledgement without a matching epoch or retained-event proof
+is treated as zero and retained stable event IDs replay; changing it by hand can only obscure the state that
 the tracker still needs to export. Reads, refusals, and dry runs commit no new
 revision or acknowledgement epoch.
 
@@ -547,7 +538,7 @@ The same route separates its other refusals, and they mean different things:
 | `409 revision_conflict` | Policy changed elsewhere; the current revision is returned so the caller can retry against it. |
 | `422 policy_error` | Policy is degraded — running on the last-known-good copy. Repair the authoritative file. |
 | `503 policy_fail_closed` | Policy is fail-closed; mutations are refused entirely. |
-| `503 operation_backlog_full` | 256 operations are unacknowledged. The tracker is not draining. |
+| `503 operation_backlog_full` | 256 operations are unacknowledged; inspect consumer progress and reduce write pressure. |
 
 New role and QoS routes instead use exact strong ETags (`428
 precondition_required`, `412 precondition_failed`) and return `409
@@ -675,7 +666,7 @@ without minting if that clear fails.
 ## Forgetting a device's SSH host key
 
 Every SSH/scp session IRIS opens itself — device transports, the installers'
-stage-host push, the XR RPM scp — verifies the peer per
+stage-host push, the XR HTTPS bootstrap session — verifies the peer per
 [Security → Device SSH host keys](security.md#device-ssh-host-keys).
 By default that is trust-on-first-use: the first session records the peer's
 host key into a persistent `known_hosts` under the IRIS state volume, and
@@ -831,7 +822,7 @@ torrent, so it repairs that case too.
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
 
-On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed; Catalyst 9300 Guest Shell writes through the guest-share; Catalyst 8000 routers stage over Guest Shell or the IOx app to `bootflash:`. On IE-3400 (or a Catalyst 9300 that fell back to the scp push) that transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s; IRIS never modifies CoPP.
+On Catalyst 9300 IOx deployments configured with an SSD share, the agent hands the image to IOS through that mount; an unusable share fails placement without falling back to SCP. Guest Shell writes through its guest-share. Share-less IOx deployments, including IE-3400 and the current Catalyst 8000V profile, use SCP-to-self before the final IOS copy. Control-plane policing can limit that transfer; IRIS never modifies CoPP.
 
 ### How many torrents are served at once
 
@@ -1303,10 +1294,10 @@ manifest as evidence in either outcome.
    Do not publish that port for devices or browsers.
 4. From the device's agent network, check the catalog on HTTPS TCP 8443 and
    tracker on HTTPS TCP 6969. Check BitTorrent TCP 6881 to the server seeder
-   and TCP 6881–6999 between device peers. Guest Shell and IOx onboarding
+   and TCP 6881–6999 between device peers. Guest Shell, IOx and XR onboarding
    also need the artifact server on HTTPS TCP 8000 from the device;
-   server-to-device onboarding uses SSH on TCP 22 (SCP only for the IOS-XR
-   package). IOx additionally needs SSH/SCP from the app to IOS. See
+   server-to-device onboarding uses SSH on TCP 22; packages download over
+   HTTPS on TCP 8000. IOx additionally needs SSH/SCP from the app to IOS. See
    [Network ports](network-ports.md).
 5. Confirm the published image still exists in its recorded source directory
    under the import root or uploads volume, and uid 10001 can read it.

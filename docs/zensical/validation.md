@@ -161,8 +161,12 @@ including both architectures of the shared IOx/XR image.
 On 2026-09-14, `scp -O` package transfer and downloaded-copy SHA-256 were
 also verified on Cisco 8201 / IOS-XR 25.4.2. On NCS-540 / IOS-XR 25.2.2,
 OpenSSH's default SFTP upload transferred the RPM but ended with SSH status
-255 and client failure. The installer now selects SCP explicitly for both
-families. These transfer checks do not constitute a full lifecycle test.
+255 and client failure. That historical installer selected SCP explicitly.
+The current development installer instead uses certificate-verified HTTPS.
+Its local tests cover authentication, certificate and checksum failures; a
+short Cisco 8000 check verified the protected SSH input sequence and HTTPS
+reachability. Full HTTPS onboarding on Cisco 8000 and NCS remains to be
+validated. Historical SCP checks do not validate the new delivery path.
 
 The NCS lab app had telemetry enabled but could not reach the catalog through
 its default-VRF path. A separate diagnostic through the management VRF with

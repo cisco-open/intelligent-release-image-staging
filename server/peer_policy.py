@@ -1862,12 +1862,31 @@ def effective_acked(doc, acked_revision):
     revision = doc.get("revision") if isinstance(doc, dict) else None
     if type(revision) is not int:
         return 0
-    # Legacy scalar/no-epoch pairs remain compatible until the first mutation.
-    # Thereafter only a tracker acknowledgement for the current snapshot epoch
-    # can prune. Old status cannot age into trust after consecutive commits.
-    if epoch != doc.get("operation_ack_epoch"):
+    if acked_revision > revision:
         return 0
-    return 0 if acked_revision > revision else acked_revision
+    current_epoch = doc.get("operation_ack_epoch")
+    # Preserve the exact-current-snapshot path, including a partial watermark
+    # and legacy scalar/no-epoch documents. A matching epoch with a future
+    # revision was rejected above.
+    if epoch == current_epoch:
+        return acked_revision
+    # A prior snapshot acknowledgement remains useful only while its exact
+    # event is retained in this outbox. This proves ancestry across ordinary
+    # commits without trusting a watermark from a divergent/restored branch.
+    # If the anchor was already pruned, fail safe to zero and replay the
+    # remaining retained suffix; never infer lineage from revision alone.
+    if not isinstance(epoch, str) or not re.fullmatch(r"[0-9a-f]{32}", epoch):
+        return 0
+    for event in doc.get("operation_outbox", ()):
+        if (isinstance(event, dict)
+                and event.get("revision") == acked_revision
+                and isinstance(event.get("event_id"), str)
+                and re.fullmatch(r"[0-9a-f]{16}", event["event_id"])):
+            expected = hashlib.sha256(
+                event["event_id"].encode()).hexdigest()[:32]
+            if secrets.compare_digest(epoch, expected):
+                return acked_revision
+    return 0
 
 
 def pending_exports(doc, exported_revision):

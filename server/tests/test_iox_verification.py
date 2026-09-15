@@ -120,6 +120,7 @@ class _StatefulTransport(object):
         self.supervisor = supervisor
         self.app_present = True
         self.app_state = "RUNNING"
+        self.scp_enabled = True
         self.closed = False
 
     def _purpose(self, command_id, command_bytes):
@@ -248,6 +249,15 @@ class _StatefulTransport(object):
                 stderr=("injected %s\n" % outcome).encode("ascii"),
                 returncode=1, error_category=outcome,
                 framing_complete=False)
+        if purpose == "scp_read":
+            return _transport_result(b"hostname fixture\n" +
+                (b"ip scp server enable\n" if self.scp_enabled else b""))
+        if purpose in ("scp_enable", "scp_disable"):
+            self.scp_enabled = purpose == "scp_enable"
+            return _transport_result()
+        if purpose == "scp_apps":
+            return _transport_result(b"App id State\n" +
+                (b"iris RUNNING\n" if self.app_present else b""))
         if self.scenario is not None and self.scenario.recipe_compatible:
             prerequisites = {
                 "routing_prereq": b"Gateway of last resort is 192.0.2.1\n",
@@ -568,6 +578,18 @@ class _StatefulStore(object):
     def iox_summary(self, device_id):
         self.calls.append(("iox_summary", device_id))
         return copy.deepcopy(self.summaries)
+
+    def iox_scp_state(self, record_id, controller_id, board_identity,
+                      prior_enabled=None, phase=None):
+        record = self.records[record_id]
+        if prior_enabled is not None:
+            record["scp_server"] = {"board_identity": board_identity,
+                "prior_enabled": prior_enabled,
+                "phase": "preserved" if prior_enabled else "enable_intent"}
+        elif phase is not None:
+            record["scp_server"]["phase"] = phase
+        self.calls.append(("scp_state", prior_enabled, phase))
+        return copy.deepcopy(record.get("scp_server"))
 
     def iox_begin(self, record_id, controller_id, board_identity,
                   wrapper_binding, initial_observation, transcript_ref):
@@ -2719,7 +2741,8 @@ def test_scp_server_is_enabled_only_where_there_is_no_share(tmp_path, name):
         tmp_path, name, _share_render_target(share=False, router=False)
     ).splitlines()
     assert "ip scp server enable" not in shared
-    assert "ip scp server enable" in bare
+    # The controller now owns SCP changes; neither raw recipe can enable it.
+    assert "ip scp server enable" not in bare
     assert "file prompt quiet" in shared and "file prompt quiet" in bare
     # the rest of the step is untouched, and it still ends cleanly
     assert shared[-1] == "end" and bare[-1] == "end"
@@ -4839,7 +4862,7 @@ def test_fetch_sequence_installs_trust_once_and_brackets_each_copy_with_credenti
     assert trust[7:] == [b"fixture catalog certificate", b"quit",
                          b"ip http client secure-trustpoint IRIS", b"end"]
     assert not [call for call in timeline if call[0] == "command" and
-                b"ip scp server" in call[2] and call[4] != "prepare_iox_scp"]
+                b"ip scp server" in call[2] and call[4] not in ("scp_read", "scp_enable")]
 
 
 def test_trustpoint_failure_stops_before_credentials_or_any_fetch(tmp_path):

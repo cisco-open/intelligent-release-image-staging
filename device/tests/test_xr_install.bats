@@ -90,13 +90,14 @@ setup() {
   [ "$activate_line" -lt "$commit_line" ]
 }
 
-@test "dry-run pushes the rpm straight to harddisk: root" {
+@test "dry-run downloads the rpm over verified HTTPS to harddisk" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
-  [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
-  [[ "$output" == *"scp -O <instruction-envelope> <user>@192.0.2.10:/harddisk:/iris-instructions.bootstrap"* ]]
+  [[ "$output" == *"--cacert <trusted-certificate> --config -"* ]]
+  [[ "$output" == *"iris-instructions.bootstrap"* ]]
+  [[ "$output" != *"scp -O"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -204,16 +205,9 @@ EOF
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the upload pushes each file to its own fixed harddisk path" {
-  # One push per file, the order and the destinations the Cisco 8000 has
-  # always used. Every push goes through the same helper, so the retry and the
-  # captured stderr apply to all three.
-  run grep -c 'sshpass -e scp ' "$INSTALL"
-  [ "$status" -eq 0 ]
-  [ "$output" -eq 1 ]
-  grep -q '_xr_push "\$XR_RPM_FILE" "/harddisk:/\$SOURCE_NAME.rpm"' "$INSTALL"
-  grep -q '_xr_push "\$CATALOG_CA_FILE" "/harddisk:/iris-catalog.pem"' "$INSTALL"
-  grep -q '_xr_push "\$INSTRUCTION_SNAPSHOT_FILE" "/harddisk:/iris-instructions.bootstrap"' "$INSTALL"
+@test "HTTPS delivery replaces every SCP push" {
+  ! grep -q 'sshpass -e scp' "$INSTALL"
+  grep -q 'python3 "\$HERE/xr_https.py"' "$INSTALL"
 }
 
 @test "one EXIT trap removes everything, including the decrypted bootstrap" {
@@ -248,26 +242,25 @@ EOF
   grep -q 'preflight attempt \$preflight_attempt failed; retrying' "$INSTALL"
 }
 
-@test "a reset upload is retried before the installer gives up" {
+@test "preflight and registration retain bounded SSH retries" {
   # A line freed by another session ending is the usual difference between a
   # failed attempt and a successful one, so the push is retried rather than
   # failing the onboard outright.
   grep -q 'XR_SCP_ATTEMPTS="\${XR_SCP_ATTEMPTS:-3}"' "$INSTALL"
   grep -q 'XR_SCP_RETRY_SECONDS="\${XR_SCP_RETRY_SECONDS:-10}"' "$INSTALL"
-  grep -q 'upload attempt \$attempt failed:' "$INSTALL"
   grep -q 'retrying in \${XR_SCP_RETRY_SECONDS}s' "$INSTALL"
   # The failure shows scp's own words, not only a guess about the vty pool.
   grep -q 'tail -5 "\$RUN_ERR"' "$INSTALL"
   # VTY contention is a possible explanation for resets, not every failure.
-  grep -q "For connection resets, check 'show users'" "$INSTALL"
+  grep -q 'https_rc' "$INSTALL"
 }
 
-@test "the installer opens no SSH session of its own other than the scp helper" {
+@test "HTTPS helper receives one host-key-checked SSH dialogue" {
   # Each file uses this helper. Other device interactions go through RUN(),
   # which wraps lab/xr-run.sh. Count commands, not diagnostic text.
-  count="$(grep -c 'sshpass -e scp' "$INSTALL")"
+  count="$(grep -c 'sshpass -e ssh -tt' "$INSTALL")"
   [ "$count" -eq 1 ]
-  grep -q 'sshpass -e scp' "$INSTALL"
+  grep -q 'sshpass -e ssh -tt' "$INSTALL"
 }
 
 @test "activation (config + commit) is piped through RUN, not sent directly" {
@@ -373,6 +366,16 @@ STUB
   chmod +x "$STUBDIR/bin/sshpass"
 
   ln -sf "$INSTALL" "$STUBDIR/device/xr-install.sh"
+  cat > "$STUBDIR/device/xr_https.py" <<'STUB'
+import os, sys
+with open(os.environ['FAKE_COMMAND_LOG'], 'a') as log:
+    log.write('=== HTTPS: ' + ' '.join(sys.argv[1:]) + '\n')
+    for name in ('iris-xr.rpm', 'iris-catalog.pem', 'iris-instructions.bootstrap'):
+        log.write('/harddisk:/' + name + '\n')
+if os.environ.get('FAKE_HTTPS_FAIL'):
+    print('ERROR: XR HTTPS staging failed', file=sys.stderr)
+    sys.exit(1)
+STUB
 
   RPMFILE="$BATS_TEST_TMPDIR/iris-xr.rpm"
   echo "fake rpm bytes" > "$RPMFILE"
@@ -405,7 +408,7 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  grep -q "${CRTFILE} admin@192.0.2.10:/harddisk:/iris-catalog.pem" "$FAKE_COMMAND_LOG"
+  grep -q '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG"
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   activate_line="$(grep -n 'appmgr application iris activate' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   [ -n "$cert_line" ] && [ -n "$activate_line" ]
@@ -418,7 +421,8 @@ _xr_install_run_live() {
   [ "$status" -eq 0 ] || return 1
   rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   # All three actual invocations must select SCP, not OpenSSH's default SFTP.
-  [ "$(grep -c '=== SCP: -e scp -O ' "$FAKE_COMMAND_LOG")" -eq 3 ]
+  [ "$(grep -c '=== HTTPS: sshpass -e ssh -tt ' "$FAKE_COMMAND_LOG")" -eq 1 ]
+  ! grep -q '=== SCP:' "$FAKE_COMMAND_LOG"
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   instruction_line="$(grep -n '/harddisk:/iris-instructions.bootstrap' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   register_line="$(grep -n 'appmgr package install rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
@@ -452,10 +456,9 @@ _xr_install_run_live() {
 
 @test "live: bootstrap upload failure prevents package registration and activation" {
   _xr_install_stub_setup
-  FAKE_SCP_FAIL_MATCH=iris-instructions.bootstrap run _xr_install_run_live
+  FAKE_HTTPS_FAIL=1 run _xr_install_run_live
   [ "$status" -ne 0 ]
-  [[ "$output" == *"XR package/catalog/bootstrap upload failed"* ]]
-  [[ "$output" == *"/harddisk:/iris-instructions.bootstrap (scp/sshpass exit 1)"* ]]
+  [[ "$output" == *"XR HTTPS staging failed"* ]]
   ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
   ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
 }
@@ -570,7 +573,7 @@ _xr_install_run_live() {
   FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/cmd.log"; : > "$FAKE_COMMAND_LOG"; export FAKE_COMMAND_LOG
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  scp_line="$(grep '=== SCP:' "$FAKE_COMMAND_LOG")"
+  scp_line="$(grep '=== HTTPS:' "$FAKE_COMMAND_LOG")"
   [[ "$scp_line" != *"UserKnownHostsFile=/dev/null"* ]] || return 1
   [[ "$scp_line" != *"StrictHostKeyChecking=no"* ]] || return 1
   [[ "$scp_line" == *"StrictHostKeyChecking=accept-new"* ]] || return 1

@@ -1055,6 +1055,8 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "agent": {"version": cfg.get("agent_version", "unknown"),
                   "runtime_mode": runtime_mode},
     }
+    if isinstance(tele.get("download"), dict):
+        report["download"] = dict(tele["download"])
     # An unknown start still cannot PLACE a capture inside the window, so the
     # records keep the documented drop (bounded at the end) rather than
     # riding along on a window whose start nobody observed.

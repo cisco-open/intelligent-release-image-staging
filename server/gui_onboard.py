@@ -318,13 +318,9 @@ _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
 _C9K_MODEL = r"^C9[0-9]{3}"
 # Catalyst 8000 -> amd64 IOx package attached through the IRIS VirtualPortGroup
 # (device/iox/install.sh derives the vnic form from the router management
-# type); no AppGig, staging straight to bootflash:. Like the C9300 it hands
-# the image to IOS through a bind-mounted host share plus an IOS-internal
-# plain `copy`, so no image bytes cross the punted control plane and the
-# device's SCP server stays off (issue #228: SCP is for IE-3x00 only, the one
-# IOx platform that cannot bind-mount its staging filesystem into the app).
+# type); no AppGig, staging to bootflash: through SCP-to-self plus IOS copy.
 #
-# No share on a Catalyst 8000: verified on a C8000V (IOS-XE 17.15.5) on
+# The current profile omits a share: tested on a C8000V (IOS-XE 17.15.5) on
 # 2026-09-10 -- CAF accepts a `-v /bootflash/iox_host_data_share:/mnt/share`
 # run option but never mounts it, the only bootflash mount the app gets
 # (/local/local1/core_dir) is invisible to IOS `dir`, and `app-hosting data`
@@ -1757,7 +1753,7 @@ class OnboardService:
             "IRIS_CRT_FILE": self.crt_public,
             # The state-owning management worker remains in the server tier
             # beside the artifact volume, so device-install.sh can stage its
-            # temporary inputs locally before the verified SCP delivery --
+            # temporary inputs locally before device-initiated HTTPS delivery --
             # ssh-to-self / HOST_USER is never needed for console onboarding.
             # IRIS_ARTIFACTS_DIR tells the installer where that server actually
             # stores compatibility artifacts (default /srv/artifacts,

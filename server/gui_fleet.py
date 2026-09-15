@@ -581,7 +581,8 @@ class FleetStore:
         # here out of the plain-ValueError input-validation catches every
         # write route already has (see FleetStateError's docstring).
         self._devices = keyed_state.KeyedState(
-            self.path, error=FleetStateError, legacy_extract=_fleet_legacy_rows)
+            self.path, error=FleetStateError, legacy_extract=_fleet_legacy_rows,
+            cache_snapshots=True)
         self._now = now_fn
 
     def _read_revision(self):

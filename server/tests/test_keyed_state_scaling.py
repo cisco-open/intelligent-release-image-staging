@@ -1053,3 +1053,124 @@ def test_strict_read_nonregular_json_candidate_is_not_silently_ignored(tmp_path)
         keyed_state.read_all(path, strict=True)
     assert keyed_state.read_all(path) == rows
     assert _snapshot_disk(tmp_path) == before
+
+
+def test_opt_in_snapshot_cache_tracks_atomic_cross_instance_updates(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    first = keyed_state.KeyedState(path, cache_snapshots=True)
+    second = keyed_state.KeyedState(path, cache_snapshots=True)
+    first.put("edge-a", {"value": "old"})
+    assert first.snapshot() == {"edge-a": {"value": "old"}}
+
+    # A second process/store instance atomically replaces the shard. Snapshot
+    # must stat it afresh and never return a stale process-local copy.
+    second.put("edge-a", {"value": "new"})
+    assert first.snapshot() == {"edge-a": {"value": "new"}}
+
+
+def test_opt_in_snapshot_cache_returns_defensive_copies(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"nested": {"value": [1, 2]}})
+    result = store.snapshot()
+    result["edge-a"]["nested"]["value"].append(3)
+    assert store.snapshot() == {"edge-a": {"nested": {"value": [1, 2]}}}
+
+
+def test_opt_in_snapshot_cache_invalidates_on_chmod_and_fails_closed_on_corruption(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    shard = Path(keyed_state.shard_dir(path)) / (
+        "%02x.json" % keyed_state.bucket_of("edge-a"))
+
+    reads = []
+    original = store._read_shard
+
+    def observed_read(bucket):
+        reads.append(bucket)
+        return original(bucket)
+
+    monkeypatch.setattr(store, "_read_shard", observed_read)
+    shard.chmod(0o400)
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    assert reads == [keyed_state.bucket_of("edge-a")]
+
+    shard.chmod(0o600)
+    shard.write_text("not-json")
+    with pytest.raises(keyed_state.KeyedStateError):
+        store.snapshot()
+
+
+def test_opt_in_snapshot_cache_detects_same_size_in_place_rewrite(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    shard = Path(keyed_state.shard_dir(path)) / (
+        "%02x.json" % keyed_state.bucket_of("edge-a"))
+    original = shard.stat()
+    original_text = shard.read_text()
+    updated_text = original_text.replace('"value": 1', '"value": 2')
+    assert len(updated_text) == len(original_text)
+    shard.write_text(updated_text)
+    os.utime(shard, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert store.snapshot() == {"edge-a": {"value": 2}}
+
+
+def test_opt_in_snapshot_cache_tracks_shard_deletion_and_recreation(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    first = keyed_state.KeyedState(path, cache_snapshots=True)
+    second = keyed_state.KeyedState(path, cache_snapshots=True)
+    first.put("edge-a", {"value": 1})
+    assert first.snapshot() == {"edge-a": {"value": 1}}
+    assert second.delete("edge-a")
+    assert first.snapshot() == {}
+    second.put("edge-a", {"value": 2})
+    assert first.snapshot() == {"edge-a": {"value": 2}}
+
+
+def test_opt_in_snapshot_cache_is_safe_under_concurrent_reads_and_updates(
+        tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = str(tmp_path / "fleet.json")
+    reader = keyed_state.KeyedState(path, cache_snapshots=True)
+    writer = keyed_state.KeyedState(path, cache_snapshots=True)
+    writer.put("edge-a", {"nested": {"value": 0}})
+
+    def read_many(_):
+        for _ in range(30):
+            result = reader.snapshot()
+            assert type(result["edge-a"]["nested"]["value"]) is int
+            result["edge-a"]["nested"]["value"] = -1
+
+    def write_many():
+        for value in range(1, 31):
+            writer.put("edge-a", {"nested": {"value": value}})
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [pool.submit(read_many, i) for i in range(4)]
+        futures.append(pool.submit(write_many))
+        for future in futures:
+            future.result()
+    assert reader.snapshot() == {"edge-a": {"nested": {"value": 30}}}
+
+
+def test_snapshot_cache_is_disabled_by_default(tmp_path, monkeypatch):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path)
+    store.put("edge-a", {"value": 1})
+    reads = []
+    original = store._read_shard
+
+    def observed_read(bucket):
+        reads.append(bucket)
+        return original(bucket)
+
+    monkeypatch.setattr(store, "_read_shard", observed_read)
+    store.snapshot()
+    store.snapshot()
+    assert len(reads) == 2

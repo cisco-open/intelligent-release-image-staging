@@ -7,18 +7,18 @@ SPDX-License-Identifier: Apache-2.0
 const workflow = {
   publish: {
     title: "Publish an image",
-    body: "The operator publishes one Cisco image or patch. IRIS records the hashes and creates private swarm metadata for the fleet.",
-    command: "iris-publish /opt/images/<image>.bin",
+    body: "Upload an image or import an eligible file already on the server. IRIS records its hashes and creates private swarm metadata.",
+    command: "POST /api/v1/images/import",
   },
   assign: {
     title: "Choose who should stage it",
     body: "A simple assignment maps each device to the approved image. The device agent picks up that intent on its next catalog poll.",
-    command: "tools/apply-assignments.sh fleet/assignments.csv",
+    command: "POST /api/v1/devices/{device_id}/assign",
   },
   download: {
     title: "Share image pieces",
-    body: "Each device downloads missing pieces from the IRIS server and from other devices that already have those pieces.",
-    command: "private torrent + aria2c piece download",
+    body: "Devices download missing pieces from the server and reachable peers allowed by policy.",
+    command: "Automatic: private swarm transfer",
   },
   verify: {
     title: "Verify on the device",
@@ -28,7 +28,7 @@ const workflow = {
   report: {
     title: "Report staged",
     body: "The device reports that the image is staged and can keep seeding while assigned. IRIS does not install, activate, change boot variables, or reload.",
-    command: "POST https://<server-ip>:8443/v1/devices/<device>/heartbeat",
+    command: "GET /api/v1/devices/{device_id}/reports",
   },
 };
 
@@ -71,7 +71,7 @@ const paths = {
   },
   xr: {
     title: "Cisco 8000 Series and NCS appmgr",
-    copy: "Cisco 8000 and NCS IOS-XR routers use the shared appmgr package and recipe with the router's network and harddisk: storage. The Cisco 8201 lifecycle is lab-validated. NCS-540 package transfer and app startup are verified; heartbeat and staging validation remain pending a working catalog network path.",
+    copy: "Cisco 8000 and NCS IOS-XR routers use the shared appmgr package, the router's network, and harddisk: storage. Check device requirements before onboarding.",
     items: [
       "Receives iris-xr.rpm over SCP during onboarding.",
       "Downloads image pieces through the private swarm directly onto harddisk:.",

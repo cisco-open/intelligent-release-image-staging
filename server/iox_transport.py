@@ -112,6 +112,7 @@ _ERROR_CATEGORIES = frozenset((
     "transcript_limit", "descendant_unreaped", "reconciliation_required",
 ))
 _PURPOSES = frozenset((
+    "scp_read", "scp_enable", "scp_disable", "scp_apps",
     "iox_status", "app_list", "routing_prereq", "storage_prereq", "clock",
     "prepare_iox_scp", "configure_network", "mkdir_share", "app_stop",
     "app_deactivate", "app_uninstall", "remove_app_config", "configure_app",

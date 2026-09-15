@@ -6,37 +6,35 @@ SPDX-License-Identifier: Apache-2.0
 
 # Reference
 
-Lookup tables for commands, ports, environment variables, the console API, and
+Lookup tables for ports, environment variables, the Console API, and
 the catalog schema. Every page is listed in the [Overview](index.md).
 
-## Command quick reference
+<span id="command-quick-reference"></span>
 
-| Command | Use |
+## API quick reference
+
+Use the Console for interactive work and the authenticated `/api/v1` API for
+automation. The [API reference](swagger/index.html) supplies schemas, session and
+CSRF requirements, preconditions, and error responses.
+
+| Task | API |
 | --- | --- |
-| `docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap` | Initialize a fresh encrypted server config volume. |
-| `docker compose -f server/docker-compose.yml up -d --build` | Build and start the IRIS server and state-free Console. |
-| `tools/start-compose-server.sh` | The complete first start: list every missing hand-in up front, grant uid 10001 `artifacts/`, build, bootstrap, install the two public instruction roots from `IRIS_INSTRUCTION_ROOTS_DIR`, start, and stage the Guest Shell bundle, both IOx packages and the XR RPM (`IRIS_SKIP_XR=1` to omit). It never creates roots. |
-| `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<image>.bin` | Publish an image into the catalog and seeder. In place: the image is seeded from its own directory and nothing is copied. |
-| `docker compose -f server/docker-compose.yml exec iris iris-assign` | Show images and assignments. |
-| `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image> [<image> ...]` | Merge one or more images into the device's ordered assignment. Use `iris-assign --replace <device> <image> [<image> ...]` to replace and intentionally narrow it. |
-| `tools/gen-device-installers.sh fleet/devices.csv` | Generate per-device installers. |
-| `tools/apply-assignments.sh fleet/assignments.csv` | Validate and apply assignment CSV. |
-| `tools/make-agent-bundle.sh` | Build the x86_64 Guest Shell bundle; `--arch arm64 --aria2 PATH` builds the ARM bundle from a verified aarch64 binary. |
-| `device/device-uninstall.sh` | Remove Guest Shell IRIS wiring from a device. |
-| `device/iox/install.sh` | Private controller recipe; use Console/API Onboard or the IOx control CLI's `submit-install`. Direct execution refuses without the inherited controller channel. |
-| `device/iox/uninstall.sh` | Private controller recipe; use Console/API Undeploy or the IOx control CLI's `submit-uninstall`. Direct execution refuses without the inherited controller channel. |
-| `docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris python3 iox_verification.py <operation> ...` | Local IOx control client: submit, recover, reconcile, or read an IOx job from inside the server container. See [IOx control CLI](#iox-control-cli). |
-| `device/iox/build.sh --image-only` | Build or verify the one persisted OCI archive containing both linux/amd64 and linux/arm64 device images. |
-| `tools/provision-iox-packages.sh` | Build and stage both architecture-specific IOx packages. |
-| `tools/build-xr-package.sh --out artifacts/` | Build the deployment-neutral IOS-XR appmgr RPM and its canonical-image provenance manifest. |
-| `device/xr-install.sh` | Onboard the IOS-XR appmgr agent. |
-| `device/xr-uninstall.sh` | Remove the IOS-XR appmgr agent footprint. |
-| `tools/check-package-freshness.sh` | Check package wrapper/provenance integrity and live-versus-distributed runtime certificate readiness. |
-| `kubectl apply -k kubernetes` | Deploy the optional split server and stateless Console workloads on Kubernetes. |
+| List images | `GET /api/v1/images` |
+| Upload or import an image | `PUT /api/v1/images/upload/{filename}`, `POST /api/v1/images/import` |
+| List or add devices | `GET /api/v1/devices`, `POST /api/v1/devices` |
+| Set a device's image assignment | `POST /api/v1/devices/{device_id}/assign` |
+| Onboard or undeploy the agent | `POST /api/v1/devices/{device_id}/onboard`, `POST /api/v1/devices/{device_id}/undeploy` |
+| Read device reports | `GET /api/v1/devices/{device_id}/reports` |
+| Read policy or audit history | `GET /api/v1/peer-policy`, `GET /api/v1/audit` |
 
-Most of these have a console equivalent; the command line is not the only way to run them — see [When to use the CLI](console.md#when-to-use-the-cli).
+Assignment updates replace the ordered image list. Follow asynchronous jobs to
+completion; request acceptance does not prove staging or successful undeploy.
+Respect [API admission limits](api-testing.md#api-admission-limits).
 
-Docs build commands and their tool pins live in [Development](development.md#documentation-loop).
+Host deployment, package builds, and offline key custody remain administrative
+procedures: see [Getting started](getting-started.md), [Development](development.md),
+and [Operations](operations.md). Do not substitute direct installer scripts for
+the record-backed onboarding API.
 
 ## Port quick reference
 
@@ -967,8 +965,7 @@ bootstrap flow. Its static bootstrap, bundle, certificate, and
 `staging/<128-bit-capability>` paths therefore remain available over verified
 HTTPS without HTTP Basic. The secret-bearing names are generated per install,
 written mode `0600`, redacted from access logs, and swept after one hour. This
-is the Guest Shell enrollment path; IOx uses the authenticated API above and
-XR uses server-initiated SCP.
+is the Guest Shell enrollment path; IOx and XR use the authenticated API above.
 
 `GET` additionally enforces the `staging/` permission contract: a file under
 `staging/` must be mode `0600`-or-tighter before it is served — the server
@@ -1367,7 +1364,7 @@ and overload backoff](device-agents.md#cadence-jitter-and-overload-backoff).
 | `IRIS_MAX_CONCURRENT` | launcher fallback `100`; absent from Dockerfile defaults | IOx, XR | Legacy provisional launch ceiling, integer 1–1000; first successful tick writes verified/default global and active-GID options before reconciliation. Every future `addTorrent` uses verified/default values. |
 | `CAF_APP_PERSISTENT_DIR` | `/data` | IOx only | CAF persistent root. The profile stages and keeps its work/config/state under `<root>/iris`; it must be an absolute path without `..`. XR neither reads nor accepts it as a storage selector. |
 | `IRIS_TARGET_FS` | unset (auto-detect) | IOx only | Optional IOS filesystem preference such as `sdflash:`. The prefix grammar is checked here and the agent still requires live proof that the filesystem is writable and is not `crashinfo:`. XR rejects the variable and always uses `harddisk:`. |
-| `IRIS_SHARE_DIR` | `/mnt/share` | IOx only | Container side of the optional IOx host-data share; absolute path without `..`. If it is not usable, IOx uses SCP. XR rejects it. |
+| `IRIS_SHARE_DIR` | `/mnt/share` | IOx only | Container side of the optional IOx host-data share; absolute path without `..`. An unusable configured share fails placement without SCP fallback. Only share-less IOx deployments use SCP. XR rejects it. |
 | `IRIS_SHARE_IOS_PATH` | `usbflash1:iox_host_data_share` | IOx only | IOS path corresponding to the IOx share, restricted to a filesystem prefix and safe path components. XR rejects it. |
 | `IRIS_DEVICE_SSH_HOST` | **required on first start** | IOx only | IOS SSH-to-self address used for read-only discovery and staged-file placement. XR rejects every `IRIS_DEVICE_SSH_*` variable. |
 | `IRIS_DEVICE_SSH_USER` / `IRIS_DEVICE_SSH_PASS` | **required on first start** | IOx only | Scoped IOS transport credential persisted in the owner-only config. Values are rejected if they could create another config line; the user and host have tighter identifier grammars. |

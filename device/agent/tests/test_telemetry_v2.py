@@ -309,6 +309,57 @@ def test_observed_envelope_carries_aria_seq_and_checkpoints_before_post():
     assert cat.order.index("checkpoint") < cat.order.index("heartbeat")
 
 
+def test_steady_seeder_reports_upload_rate_without_changing_completed_report():
+    import copy
+
+    cat = _Cat({"approved_image_id": "img1"}, _IMG)
+    stats = dict(_observed_stats(), completedLength="5", totalLength="5",
+                 downloadSpeed="0", uploadSpeed="2097152", status="active")
+    calls = []
+    deps = _deps(cat, {"/stage/img1.bin": 5},
+                 aria_stats=lambda p: calls.append(p) or stats,
+                 aria_peers=lambda p: (_ for _ in ()).throw(
+                     AssertionError("steady sampling must not inspect peers")))
+    tele = {"report_pending": False, "report_sent_ts": 1.0,
+            "event": "staging-complete", "done_ts": 50.0,
+            "peers_v2": {"10.0.0.1": {"observations": 4}},
+            "report_v2": {"immutable": "completed capture"}}
+    frozen = copy.deepcopy(tele)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "stage_fs": "flash:",
+             "img1": {"done": True, "copied": True, "sha": "abc", "tele": tele}}
+
+    assert iris_agent.run_once(_CFG, deps, state) == "complete"
+    obs = cat.heartbeats[-1]["telemetry_observation"]
+    assert obs["obs_state"] == "observed"
+    assert obs["aria"]["send_bps"] == 2097152
+    assert obs["aria"]["receive_bps"] == 0
+    assert calls == ["/stage/img1.bin"]
+    assert cat.telemetry == []
+    for key, value in frozen.items():
+        assert tele[key] == value
+    assert cat.order.index("checkpoint") < cat.order.index("heartbeat")
+
+    # A second tick before the next sample is due does no more RPC work.
+    assert iris_agent.run_once(_CFG, deps, state) == "complete"
+    assert cat.heartbeats[-1]["telemetry_observation"]["obs_state"] == "not_due"
+    assert calls == ["/stage/img1.bin"]
+
+
+def test_steady_sampling_respects_toggles_and_reports_rpc_unavailable():
+    for cfg, expected in ((dict(_CFG, telemetry="off"), "disabled"),
+                          (dict(_CFG, telemetry_stream="off"), "paused"),
+                          (_CFG, "rpc_unavailable")):
+        cat = _Cat({"approved_image_id": "img1"}, _IMG)
+        calls = []
+        deps = _deps(cat, {}, aria_stats=lambda p: calls.append(p) or None)
+        obs, _ = iris_agent._build_observation(
+            cfg, deps, {}, "img1", "/stage/img1.bin", "steady", _time.time())
+        assert obs["obs_state"] == expected
+        assert "aria" not in obs
+        assert len(calls) == (1 if expected == "rpc_unavailable" else 0)
+
+
 def test_checkpoint_failure_downgrades_observed_to_not_due_without_rewind():
     cat = _Cat({"approved_image_id": "img1"}, _IMG)
     stats = {"gid": "g", "status": "active", "completedLength": "2",

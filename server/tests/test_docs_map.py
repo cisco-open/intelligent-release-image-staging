@@ -2,13 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Documentation-map completeness gate.
+"""Documentation navigation and operator-contract gates.
 
-The site nav (zensical.toml), the docs index page, and the README's
-documentation section describe the same set of pages from three places, and
-they have drifted apart before (README listed 8 of 19 pages; index.md linked
-6). This gate fails whenever a page exists in one map but not the others, so
-adding a docs page means updating all three or failing CI.
+The site nav is the complete page map. README and the docs index are concise
+task entry points, not duplicate maps. Keep every manual page discoverable
+through nav, preserve essential entry links, and retain safety/correctness
+contracts in the detailed guides.
 """
 import os
 import re
@@ -62,19 +61,21 @@ def test_every_docs_page_is_in_the_nav():
         "docs pages missing from the zensical.toml nav: %s" % sorted(orphans)
 
 
-def test_index_links_every_nav_page():
+def test_index_links_core_tasks_without_duplicating_full_navigation():
     with open(os.path.join(DOCS, "index.md")) as fh:
         index = fh.read()
-    missing = [p for p in _nav_pages() if p != "index.md"
-               and ("(%s)" % p) not in index]
+    missing = [p for p in ("getting-started.md", "console.md", "security.md",
+                           "reference.md", "api-testing.md")
+               if ("(%s)" % p) not in index]
     assert not missing, \
         "docs/zensical/index.md does not link these nav pages: %s" % missing
 
 
-def test_readme_links_every_nav_page():
+def test_readme_links_overview_and_entry_points():
     with open(os.path.join(REPO, "README.md")) as fh:
         readme = fh.read()
-    missing = [p for p in _nav_pages()
+    missing = [p for p in ("index.md", "getting-started.md", "console.md",
+                           "security.md", "device-agents.md")
                if ("docs/zensical/%s" % p) not in readme]
     assert not missing, \
         "README.md documentation section is missing these pages: %s" % missing
@@ -97,20 +98,16 @@ def test_every_page_is_filed_under_a_section():
         "these pages are not filed under a nav section: %s" % top_level
 
 
-def test_index_and_readme_use_the_same_section_headings():
-    """The three maps must agree on STRUCTURE, not just on the page set — a
-    regrouped nav with stale index/README headings is the drift this gate
-    exists to catch."""
-    sections = _nav_sections()
+def test_entry_points_stay_short_and_task_oriented():
+    """The complete map lives in nav; entry points must not duplicate it."""
     with open(os.path.join(DOCS, "index.md")) as fh:
         index = fh.read()
     with open(os.path.join(REPO, "README.md")) as fh:
         readme = fh.read()
-    for title in sections:
-        assert title in index, \
-            "docs/zensical/index.md is missing the nav section heading: %s" % title
-        assert title in readme, \
-            "README.md is missing the nav section heading: %s" % title
+    assert "## Where to start" in index
+    assert "## Start here" in readme
+    assert len(index.splitlines()) <= 80
+    assert len(readme.splitlines()) <= 60
 
 
 def test_index_groups_pages_under_their_own_section():
@@ -1534,8 +1531,8 @@ def test_docs_phase2_orphaned_schedule_and_narrowing_caveats():
     _assert_unit(console, ("schedule", "device row", "manual"),
                  "the device row must warn before a manual/scheduled clash")
     workflows = _page("fleet-workflows.md")
-    _assert_unit(workflows, ("iris-assign", "--replace", "narrow"),
-                 "the single-image narrowing caveat must be stated")
+    _assert_unit(workflows, ("manual replacement", "narrow", "approved"),
+                 "manual/scheduled assignment narrowing must stay explicit")
 
 
 def test_docs_phase2_problem_types_and_schedule_api_reference():

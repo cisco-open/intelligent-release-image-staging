@@ -672,9 +672,10 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now,
                 return None
             return envelope(obs_state, sample_seq=seq)
 
-        # Only live-transfer phases carry an aria snapshot; steady seeding uses
-        # the RPC-free path and reports not_due (last value ages to stale).
-        if phase not in ("downloading", "seeding-only"):
+        # Steady seeders can upload to other devices after their own transfer
+        # completes. Sample their current rates under the same opt-in/cadence
+        # guards, without reopening their frozen download report.
+        if phase not in ("downloading", "seeding-only", "steady"):
             return state_envelope("not_due"), None
         if not telemetry_report.stream_enabled(cfg):
             return state_envelope("paused"), None
@@ -687,7 +688,7 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now,
                 state, tele, tier, now, tick_seconds=tick_seconds):
             return state_envelope("not_due"), None
         stats = deps.aria_stats(stage)
-        peers = deps.aria_peers(stage)
+        peers = [] if phase == "steady" else deps.aria_peers(stage)
         if not stats:
             # RPC unreachable / no matching download: never retain an old rate.
             return state_envelope("rpc_unavailable"), None
@@ -2135,9 +2136,8 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                           "%s could not be re-added to aria2 for seeding "
                           "(%s); will retry" % (image["filename"],
                                                 type(e).__name__))
-            # The observation phase stays 'steady' whatever the report does:
-            # aria2 is seeding here, not downloading, and _build_observation
-            # takes an aria snapshot only for 'downloading'/'seeding-only'.
+            # Publish a cadence-limited seeding rate snapshot independently
+            # of the completed transfer's frozen report and peer counters.
             obs, _ = _build_observation(
                 cfg, deps, state, img_id, stage, "steady", time.time(),
                 tick_seconds=tick.tick_seconds)
@@ -2897,7 +2897,13 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         _discard_peer_transfer_records(stage)
         try:
             deps.aria_remove(image["filename"])
-            deps.aria_add(torrent, stage_dir)
+            download_start = int(time.time())
+            download_gid = deps.aria_add(torrent, stage_dir)
+            download_tele = state.setdefault(img_id, {}).setdefault("tele", {})
+            if not resume_untracked:
+                download_tele.pop("download", None)
+                download_tele["download_start"] = download_start
+            download_tele["download_gid"] = download_gid
             # Provenance (Directive 2): proof, for the eventual origin
             # verdict, that THIS agent's own aria2 session is what is
             # fetching this image — recorded only once the call actually
@@ -4274,6 +4280,19 @@ def _ingest_peer_transfer_records(deps, tele, stage_path, now):
             telemetry_report.peer_transfer_sidecar_path(stage_path))
         if raw is None:
             return False
+        # Hook timestamp is captured on last-piece completion, before RPC,
+        # checksum, IOS copy, and the next agent tick. Match this aria2 attempt.
+        snapshot = json.loads(raw)
+        start = tele.get("download_start")
+        end = snapshot.get("captured_at")
+        if (snapshot.get("schema") == 1
+                and snapshot.get("source") == "aria2_session_counters"
+                and tele.get("download_gid")
+                and snapshot.get("gid") == tele["download_gid"]
+                and type(start) in (int, float)
+                and type(end) in (int, float)
+                and 0 < start <= end <= now):
+            tele["download"] = {"start": start, "end": end}
         block = telemetry_report.parse_peer_transfer_snapshot(raw)
         if not telemetry_report.fold_peer_transfer_records(tele, block, now):
             return False
@@ -5151,10 +5170,10 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
 
 def _share_settings(cfg):
     """(share_dir, share_ios_path) for the bind-mounted app-hosting share
-    (C9300: the SSD share; Catalyst 8000: bootflash). The app-hosting run-opts
+    (for example, the C9300 SSD share). The app-hosting run-opts
     set the environment (the normal path); conf keys are the fallback so a
     hand-dropped config can steer it too. Empty strings = no share, which is
-    what selects the IE-3x00 scp hand-off."""
+    what selects the share-less SCP hand-off (IE-3x00/current C8000V)."""
     return (os.environ.get("IRIS_SHARE_DIR") or cfg.get("share_dir") or "",
             os.environ.get("IRIS_SHARE_IOS_PATH")
             or cfg.get("share_ios_path") or "")
@@ -5187,8 +5206,8 @@ class _ShareUnavailable(object):
     verdict: callers test for it by type, never for truthiness.
 
     It exists because the reason has to reach the operator. On a platform
-    whose app block configures a share (Catalyst 9300, Catalyst 8000) there
-    is NO scp fallback — the device's SCP server is not even enabled there
+    whose app block configures a share (such as Catalyst 9300) there
+    is NO scp fallback — IRIS does not enable the device's SCP server there
     (issue #228) — so _iox_place_impl turns this into a terminal
     ROOTCOPY-FAIL that names what the probe found."""
 
@@ -5301,8 +5320,8 @@ def _iox_place_impl(fname, target_prefix, share_dir, share_ios_path,
     """Hand the verified scratch to IOS from inside the IOx container, by the
     ONE route this target's app block configured. Issue #228.
 
-    A target whose app block carries a share (both run-opts set: Catalyst
-    9300 via the SSD share, Catalyst 8000 via bootflash:) hands the image
+    A target whose app block carries a share (both run-opts set, such as
+    Catalyst 9300 via the SSD share) hands the image
     over through that bind mount plus an IOS-internal plain `copy`. There is
     NO scp fallback for it: IRIS does not enable the device's SCP server on a
     share-configured target at all (server/iox_verification.py,
@@ -5316,8 +5335,8 @@ def _iox_place_impl(fname, target_prefix, share_dir, share_ios_path,
     name and nothing may authorise the terminal reclaim. It still counts as
     an attempt, so the operator still reaches the terminal state.
 
-    A target with no share (IE-3x00: IOx cannot bind-mount sdflash: into the
-    app) keeps the scp push to guest-share exactly as before."""
+    A target with no share (IE-3x00 or the current C8000V IOx profile)
+    keeps the SCP push to guest-share."""
     if share_dir and share_ios_path:
         shared = stage_via_share_fn()
         if not isinstance(shared, _ShareUnavailable):
@@ -5507,7 +5526,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here, and a
-    # share-configured IOx target (C9300, Catalyst 8000) never reaches this
+    # share-configured IOx target (such as C9300) never reaches this
     # push at all: its SCP server is not even enabled (issue #228).
     _legacy_runtime = (os.environ.get("IRIS_RUNTIME_MODE")
                        or cfg.get("runtime_mode") or "guestshell")
@@ -5561,12 +5580,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # basename safety decision made before any destructive command.
         confirmed_running = lambda: running
         if _container_iox and _transport is not None:
-            # Share-configured container (C9300 SSD share, Catalyst 8000
-            # bootflash share): the share is bind-mounted at IRIS_SHARE_DIR,
+            # Share-configured container (such as C9300 SSD share):
+            # the share is bind-mounted at IRIS_SHARE_DIR,
             # so the scratch lands there at disk speed and IOS places it with
             # an internal disk-to-disk plain `copy` — no scp, no CoPP-policed
             # punt traffic, and no fallback if the share is unusable. Only a
-            # share-LESS container (IE-3x00) scp-pushes the scratch onto the
+            # share-LESS container (IE-3x00/current C8000V) scp-pushes onto the
             # IOS-visible SD and then runs a plain `copy` DIRECTLY over the
             # SSH-to-self vty. (The EEM applet offload is only needed for the
             # C9300 Guest Shell cli module, which can't drive an interactive
