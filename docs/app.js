@@ -73,7 +73,7 @@ const paths = {
     title: "Cisco 8000 Series and NCS appmgr",
     copy: "Cisco 8000 and NCS IOS-XR routers use the shared appmgr package, the router's network, and harddisk: storage. Check device requirements before onboarding.",
     items: [
-      "Receives iris-xr.rpm over SCP during onboarding.",
+      "Downloads iris-xr.rpm over authenticated HTTPS during onboarding.",
       "Downloads image pieces through the private swarm directly onto harddisk:.",
       "Stages the software but does not install, activate, or reload the device.",
     ],

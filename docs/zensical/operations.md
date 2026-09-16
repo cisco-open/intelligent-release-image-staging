@@ -1159,8 +1159,10 @@ change. Before rebuilding, set `IRIS_INSTRUCTION_ROOTS_DIR` to the approved
 two-public-root directory and `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` to the
 current checksum-pinned binaries if fallback artifacts are older. Root private
 keys never enter build inputs. Rebuild the server to refresh its Guest Shell
-bundle, then build both IOx wrappers and the XR wrapper with their adjacent
-provenance manifests:
+bundle. If you also serve `iris-agent-arm.tgz`, refresh it using the ARM command
+below after every shared-agent source change; the server rebuild does not
+refresh that additional bundle. Then build both IOx wrappers and the XR wrapper
+with their adjacent provenance manifests:
 
 ```bash
 docker compose -f server/docker-compose.yml up -d --build
