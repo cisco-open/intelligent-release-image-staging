@@ -1,0 +1,2592 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../iox/">
+      
+      
+        <link rel="next" href="../fleet-workflows/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Web Console - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#web-console" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Web Console
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker on Separate Hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-type/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#first-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        First run
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="First run">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#finishing-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Finishing setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#branding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Branding
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-areas" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console areas
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-images-already-on-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing images already on disk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Management type
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Management type">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#roles-and-peer-policy-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Roles and peer-policy status
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#role-definitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Role definitions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-status-and-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction status and custody
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instruction status and custody">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#iox-onboarding-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOx onboarding verification
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bulk-device-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Bulk device actions
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Bulk device actions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#schedules" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Schedules
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#paging-and-selection-at-fleet-scale" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Paging and selection at fleet scale
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Paging and selection at fleet scale">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#force-undeploy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Force undeploy
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#onboarding-from-the-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding from the console
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Onboarding from the console">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#device-activity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device activity
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deployment-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment logs
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Settings
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Settings">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tls-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        TLS &amp; trust
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Audit export
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-and-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console and API
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry Export
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Splunk Setup
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browsable API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API coverage and load testing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Problem type registry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#first-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        First run
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="First run">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#finishing-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Finishing setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#branding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Branding
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-areas" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console areas
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-images-already-on-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing images already on disk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Management type
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Management type">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#roles-and-peer-policy-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Roles and peer-policy status
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#role-definitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Role definitions
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-status-and-custody" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Instruction status and custody
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instruction status and custody">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#iox-onboarding-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        IOx onboarding verification
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bulk-device-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Bulk device actions
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Bulk device actions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#schedules" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Schedules
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#paging-and-selection-at-fleet-scale" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Paging and selection at fleet scale
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Paging and selection at fleet scale">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#force-undeploy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Force undeploy
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#onboarding-from-the-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding from the console
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Onboarding from the console">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#device-activity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device activity
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deployment-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deployment logs
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Settings
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Settings">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tls-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        TLS &amp; trust
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Audit export
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-and-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console and API
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="web-console">Web Console</h1>
+<p>The Console runs in its own container and provides the browser interface and
+operator API. It forwards authenticated requests to the server, which owns
+images, inventory, credentials, jobs, and audit records.</p>
+<h2 id="first-run">First run</h2>
+<p>Open:</p>
+<div class="highlight"><pre><span></span><code>https://&lt;console-address&gt;:8080/
+</code></pre></div>
+<p>Use the configured Console host and port. In the one-host Compose stack this
+is <code>IRIS_HOST_IP</code>; a separate deployment has its own Console address. Its
+browser certificate is independent of the device/catalog certificate. Before an admin account
+exists, sign in with the default credential <code>iris</code> / <code>irisisgreat!</code>. A correct
+login creates no session; it yields a one-use setup grant that expires after
+ten minutes and takes you to the account-creation page. Creating the real admin
+permanently ends this special behavior, after which the pair is checked only
+against the stored administrator credentials and normally fails.</p>
+<div class="admonition warning">
+<p class="admonition-title">The first reachable caller can claim a fresh Console</p>
+<p>Keep the Console on a trusted management network and complete admin setup
+immediately after deployment. Do not expose a brand-new Console to an
+untrusted network while no administrator exists.</p>
+</div>
+<h3 id="finishing-setup">Finishing setup</h3>
+<p>Creating the admin is the first of four things a new server needs. The sign-in
+straight after it lands on the <strong>setup flow</strong> (<code>#setup</code>): a step panel on the left, the active step's
+own controls on the right — which walks the other three in order:</p>
+<ol>
+<li><strong>Telemetry destination</strong> — where swarm progress, device reports and export
+   health are published. Already satisfied if the deployment environment sets
+   <code>IRIS_OTLP_ENDPOINT</code> and observability is enabled, in which case the step
+   shows as done rather than being hidden.</li>
+<li><strong>Device packages</strong> — whether each served IOx package and the IOS-XR agent
+   RPM (<code>iris-xr.rpm</code>) matches its canonical-image provenance, plus whether
+   the live and distributed copies of the runtime certificate agree — see
+   below.</li>
+<li><strong>Image verification</strong> — the Cisco Bulk Hash source check against published
+   images. Configured inline: refresh now, enable the daily schedule, a
+   pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
+   the offline feed-file import. These are the same controls Settings ›
+   Image verification exposes — the wizard step mounts them in place rather
+   than duplicating them.</li>
+</ol>
+<p>The forms are hosted in the flow itself, so finishing setup does not send you
+round the Settings pages. A step panel on the left shows every step with its
+current state — completed steps carry a check, the current step is filled in,
+upcoming ones stay outline-only — and lets you open any of them directly, in
+any order.</p>
+<p>Every step can be skipped, and re-entering <code>#setup</code> resumes at the first one
+still outstanding. The package step shows the server's inspection results and
+provides build commands to run on the Docker host. Use <strong>Re-check</strong> after a
+build. Neither runtime container has a Docker socket.</p>
+<p>While anything is outstanding, a banner offers the way back. It dismisses for
+the session rather than permanently, because a package that goes stale later is
+a silent failure with no other symptom, and a banner dismissed for good would
+hide precisely the case this exists to catch.</p>
+<p>Settings › Setup keeps reporting the same four states afterwards, for checking
+a server long after it was installed — including a schedule for image
+verification that is configured but has not yet produced a successful run,
+worded distinctly from one never configured at all.</p>
+<h3 id="branding">Branding</h3>
+<p>The Console uses self-hosted Inter for headings, body text, IP addresses and
+logs, with system sans-serif fallbacks. React and legacy pages share this
+font stack. The independent IRIS theme includes no proprietary component
+assets and does not require Cisco fonts.</p>
+<p>The legacy <code>IRIS_SHARP_SANS_FONT_HOST</code> mount remains for compatibility but
+does not change the current theme. Licensed font files are excluded from
+Docker builds and release tarballs; see <a href="../reference/">Reference</a>.</p>
+<h2 id="console-areas">Console areas</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Overview</td>
+<td>Rollout counters and per-image staging progress. Carries the <em>Telemetry export</em> badge (<code>ok</code> / <code>degraded</code> / <code>off</code>, or <code>unknown</code> when the health endpoint cannot be read), fed by the hub's OTLP export health.</td>
+</tr>
+<tr>
+<td>Images</td>
+<td>Shows published image metadata and staged network status, uploads new images, and imports images already on disk.</td>
+</tr>
+<tr>
+<td>Inventory</td>
+<td>Lists known devices, their <strong>management type</strong>, <strong>Agent install</strong> choice, assigned images, and recent reports. Assign or clear device roles here.</td>
+</tr>
+<tr>
+<td>Policies</td>
+<td>Creates, edits, imports, and exports role definitions; shows peer-policy health and instruction delivery diagnostics.</td>
+</tr>
+<tr>
+<td>Onboarding</td>
+<td>Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured.</td>
+</tr>
+<tr>
+<td>Swarm</td>
+<td>Shows peer progress and seeder/device participation.</td>
+</tr>
+<tr>
+<td>Monitoring</td>
+<td>Holds the audit trail and per-job deployment logs.</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>Shows server configuration, version, and operational settings.</td>
+</tr>
+<tr>
+<td>Audit</td>
+<td>Records administrative and workflow actions.</td>
+</tr>
+</tbody>
+</table>
+<p>For IOx devices, <strong>Copying to <filesystem></strong> means the app is copying the
+downloaded image to IOS storage. <strong>Staging failed</strong> reports a download,
+verification or placement error. Read the diagnostic beside the status; for
+placement failures, the device's <code>IRIS ROOTCOPY-FAIL</code> syslog entry has more detail.</p>
+<p>After a new assignment, an idle device shows <strong>Waiting for staging</strong> until its
+agent reports activity. <strong>Staging now</strong> counts devices reporting work. Current
+image errors take precedence over older staged flags in Devices and Overview.</p>
+<p>On the Images screen, every picked or dropped file gets its own upload row —
+filename, progress bar, publish state, then Cisco Bulk Hash verification —
+with its own publish poller, so
+concurrent uploads report independently and a failed file names its error
+without stopping the others. Finished rows fade out on their own; failed rows
+stay until dismissed. A file over the 4 GB upload cap is refused in the
+browser before any bytes move.</p>
+<p>The header's <strong>?</strong> button opens a help popover with the running version, the
+stable per-deployment id (with a copy button — quote it when reporting a
+problem so reports from different installations stay distinguishable), a link
+to this documentation site, and three pages the console serves itself —
+the <em>Local API reference (Swagger)</em> at <code>/swagger/</code>, <em>Device-side
+troubleshooting</em>, and <em>Server-side setup &amp; troubleshooting</em> — so all of them
+stay reachable from a network with no internet access.</p>
+<h2 id="importing-images-already-on-disk">Importing images already on disk</h2>
+<p>Besides the upload box, the Images screen has an <strong>Import from disk</strong> panel that
+lists image files present on the server but missing from the catalog — orphaned
+uploads left behind by a catalog reset, and files an operator placed under the
+read-only image root. Both image roots are scanned recursively: the read-write
+uploads volume (<code>IRIS_IMAGES_DIR</code>) and the read-only import root (<code>IMAGES_ROOT</code>,
+the <code>IRIS_IMAGE_ROOT</code> host tree bind mounted <code>:ro</code>). See
+<a href="../reference/#image-path-variables">Image path variables</a>.</p>
+<p>Importing publishes <strong>in place</strong>: the publish seeds from the file's own
+directory, so nothing is copied and the read-only root stays read-only, and the
+<code>.torrent</code> is written to the server's state directory rather than next to the
+image. The import runs as an ordinary publish job with the same progress
+reporting as an upload. After publication it immediately reconciles the
+catalog against Cisco's Bulk Hash feed even when the schedule is off; the job
+stays in <code>verifying</code> until that pass returns and reports <code>verified</code>,
+<code>mismatch</code>, <code>not in feed</code>, or an explicit incomplete-check reason. Publication
+remains durable if the feed is unavailable. The import is recorded in Audit as
+<code>image_import</code> (also with <code>result=fail</code> when a request is rejected).</p>
+<p>A file is offered only when it has an explicit Cisco software suffix (<code>.bin</code>,
+<code>.iso</code>, <code>.tar</code>, or <code>.rpm</code>), passes the filename charset gate, is not a dotfile
+or a <code>.torrent</code>/<code>.upload</code> temporary, resolves inside its own root
+(so a symlink cannot reach outside it), is readable by the server, is not
+already published, and is not ambiguous. Files failing the silent gates (wrong
+extension, dotfiles, temporaries, symlinks escaping the root) are hidden
+entirely; the remaining three failure reasons — <code>already published</code>,
+<code>ambiguous name in more than one location</code>, and <code>not readable by the server</code> —
+are listed greyed out with the reason named. Two of those three are actionable
+from this screen:</p>
+<ul>
+<li><code>ambiguous name in more than one location</code> — remove or rename the duplicate so
+  exactly one file claims the ID, then re-check the panel.</li>
+<li><code>not readable by the server</code> — fix ownership so uid 10001 can read the file and
+  traverse its directory, then re-check the panel. See
+  <a href="../server/#volume-permissions">Volume permissions</a>.</li>
+</ul>
+<p><code>already published</code> needs nothing; the image is already in the catalog under its
+derived ID. For the exact definitions see
+<a href="../reference/#import-skip-reasons">Import skip reasons</a>.</p>
+<p>Ambiguity is refused rather than guessed at import. Startup reseeding prefers
+the catalog entry's recorded <code>source_dir</code>. If that field is absent or its
+directory is unavailable, it searches both image roots for a file with the
+entry's filename. The seeder runs with
+<code>bt-seed-unverified</code>, so a wrong directory would serve the wrong bytes under
+correct piece hashes.</p>
+<p>Because publishing records <code>source_dir</code>, <strong>Delete</strong> unlinks the file only when
+that directory resolves to the uploads volume: an image published in place from
+the read-only import root is removed from the catalog and left on disk. See
+<a href="../reference/#catalog-entry-fields">Catalog entry fields</a>.</p>
+<h2 id="management-type">Management type</h2>
+<p>The Add Device form has an explicit <strong>Management type</strong> choice, and the
+device table shows each device's management type rather than a bare VLAN/SVI value:</p>
+<ul>
+<li><strong>Routed - IRIS-managed app network</strong> — IRIS creates a dedicated VLAN and SVI.
+  Onboarding is one-click and create-only.</li>
+<li><strong>Inband - existing management VLAN</strong> — the agent attaches to an existing,
+  operator-owned VLAN that IRIS never creates, changes, or removes.</li>
+<li><strong>Router routed - IRIS-managed VPG subnet</strong> — creates a VirtualPortGroup and
+  routed app subnet; the operator provides routes to IRIS and peers.</li>
+<li><strong>Router NAT - VPG behind NAT</strong> — adds overload NAT and static TCP PAT for
+  port 6881. The deployment record preserves a pre-existing <code>ip nat outside</code> marking.</li>
+<li><strong>XR host - router's own network stack</strong> — the appmgr container runs on
+  the router's own network stack; there are no app-network fields to set.</li>
+</ul>
+<p>A device without a management type reads <strong>Inventory only — management type
+not chosen</strong>. Choose a management type before onboarding it. See
+<a href="../fleet-workflows/#inventory">Inventory</a>.</p>
+<p>Management type controls the network fields in Add Device. <strong>Model series</strong> is
+a dropdown: IE Switches, IR Routers, Catalyst Routers, Catalyst Switches, NCS,
+or Cisco 8000 Series. Series narrow <strong>Agent install</strong> choices without changing
+the management type. Choosing a series does not confirm hardware support.
+Existing devices display their series while retaining their actual model for
+diagnostics. The API and CSV still accept exact model numbers. XR host selects
+<code>xr-appmgr</code>, router modes
+offer <code>router</code> (Guest Shell) or <code>iox</code>, and routed/inband modes require a
+compatible Guest Shell or IOx choice.</p>
+<p>Router choices show the VPG number and app addressing; Router NAT also requires
+the outside interface. Both target the Catalyst 8000 family. Current hardware
+coverage is recorded in <a href="../validation/#validated-platforms">Validated platforms</a>.</p>
+<p>Each onboard creates a durable <strong>deployment record</strong> of what it applied, and <strong>Undeploy</strong>
+runs only from that deployment record, so editing inventory after onboarding cannot
+retarget cleanup. If an agent is present without an active deployment record,
+check its row and use the toolbar's <strong>Adopt</strong> action (an explicit,
+audited, no-change recording of current ownership) before undeploying it. Router deployments cannot
+be adopted — force-undeploy the IRIS footprint, then onboard again. For preflight and deployment-record ownership see
+<a href="../management-type/#deployment-plans-and-applied-records">Deployment plans and applied records</a>.</p>
+<p>Each device row's <strong>ⓘ Deployment details</strong> control opens a read-only drawer
+beside the table — it slides in from the right, closes on <strong>Esc</strong> or <strong>✕</strong>, and
+leaves the row you opened it from where it was. It opens on an <strong>Images</strong> table
+listing every image currently assigned to the device:</p>
+<ul>
+<li><code>ready</code>: staged and verified.</li>
+<li><code>error</code>: the agent reported a failure.</li>
+<li><code>staging</code>: the agent is working on the image.</li>
+<li><code>pending</code>: staging has not been reported.</li>
+</ul>
+<p>For a single image, the drawer shows the agent's detailed state and error.
+For multiple images, the shared error appears in <strong>Last reported error</strong> below
+the table. A device with failed images shows <code>N of M image(s) failed</code> in the
+Status column.</p>
+<p>Below that, it shows the deployment record state (<code>active</code>,
+<code>removed</code>, <code>superseded</code>, <code>needs-reconcile</code>,
+<code>abandoned</code>) and record id, the
+preflight result, and the resolved configuration the onboard applied — the
+management type, the owned management VLAN or VPG, SVI and app addressing,
+NAT interface, swarm port, and the recorded model, <strong>Agent install</strong> choice, and device
+identity. A device with no deployment record says so, naming adopt or re-onboard as the
+fix. The drawer ends with that device's persisted deployment logs
+(<a href="#deployment-logs">Deployment logs</a>), each viewable in place. A run that
+finished before the current device was registered under this name is labelled
+<strong>previous device</strong>. Logs are keyed on the device id and deliberately survive a
+delete — they are the record of what actually ran — so a rebuilt or replaced box
+added back under the same name inherits its predecessor's runs. They are kept
+and shown, never presented as this device's own history. Devices registered
+before IRIS started stamping registration time carry no stamp, and nothing is
+labelled for them.</p>
+<p>The Swarm Map's <strong>Image staging</strong> section lists images from the device's last
+heartbeat. The Devices drawer lists current assignments, including pending
+ones. A new assignment can therefore appear in Devices before it appears on
+the map.</p>
+<p>Open swarm details update with the map. <strong>Tracker role</strong> describes torrent
+participation: a seeder may still be verifying or placing an image. <strong>Ready</strong>
+requires the device to report staging complete. Rates and verification results
+identify the image they describe. Measurements that cannot be tied to a
+participant are unavailable.</p>
+<h3 id="roles-and-peer-policy-status">Roles and peer-policy status</h3>
+<p>The Inventory table's <strong>Role</strong> column shows the declared fleet role, or a dash
+when none is declared. <strong>Filters → Role</strong> offers <em>Role: any</em>, <em>— no role —</em>,
+and the complete policy role list, including roles absent from the current
+page. The filter is applied by the server before paging.</p>
+<p>For a selection in <strong>Inventory</strong>, open <strong>More actions → Set role…</strong>. Leaving the disabled initial
+placeholder untouched is a no-op; choosing the explicit <em>— no role —</em> option
+clears membership. <strong>Preview change</strong> sends one aggregate dry run for every
+selected device and shows the four access/membership impact counts, whether QoS
+changes, per-device failures, and the confirmation threshold. <strong>Set role</strong> uses
+the original pre-preview ETag and that preview's confirmation token in one
+aggregate commit. Cancel never commits. A concurrent change or confirmation
+refusal discards the preview and requires a refresh and new preview; the Console
+never silently retries policy intent, and an all-failed preview cannot commit.
+If the commit connection or response is
+unreadable, <strong>changes may have been saved</strong>: refresh policy and Fleet state,
+review drift, and preview again rather than repeating the request.</p>
+<p>Open <strong>Policies</strong> to see which roles can share images and use the distribution
+server. Sharing needs permission from both roles. This is configured intent,
+not a connectivity test: quarantine and explicit device/server ACLs may further
+restrict access. The Enforcement section distinguishes the existing server
+blocklist from additional role restrictions, which remain <strong>preview-only</strong>.</p>
+<p><strong>Advanced</strong> opens role and restricted-role counts, drift, and outbox
+occupancy (<code>N/256</code>). Its <strong>Peer access and roles</strong> panel also shows per-role
+member counts, the last origin-QoS state and download counts,
+the mutual-origin <strong>preflight count only</strong>, and the explicit-ACL shadowing rule.
+It never displays peer addresses or raw deny lists. Degraded, fail-closed, and
+unavailable states remain distinct. A capability banner blocks role changes
+unless the server explicitly returns <code>roles_supported: true</code>; a fully old
+Console/server pair cannot show this warning, which is why downgrade uses the
+quarantine-first procedure in <a href="../operations/#role-policy-operations-and-rollback">Role-policy operations and
+rollback</a>.</p>
+<p>The Set role action and its apply controls remain disabled while capability or
+policy health is uncertain. The UI's degraded state can cover LKG fallback or
+lost role state; the state-owning management process startup log provides the
+specific lost-state signal.</p>
+<p>The existing quarantine filter and per-row/bulk quarantine actions remain in
+place. Quarantine intent uses its existing badge and stays distinct from the
+tracker's last enforcement state.</p>
+<h3 id="role-definitions">Role definitions</h3>
+<p>The <strong>Policies → Advanced → Role definitions</strong> table shows one
+row per defined role with its restricted flag, peer roles, origin access,
+networks, and QoS overrides, plus <strong>Edit</strong> and <strong>Delete</strong> per row. <strong>New
+role</strong> or <strong>Edit</strong> opens sharing permissions. <strong>Limit sharing to these roles</strong>
+enables the peer list and distribution-server restriction; without it, this
+role permits all roles and the server, but the other role must still permit it.
+The editor's <strong>Advanced</strong> section holds IPv4 networks, instruction-expiry
+fallback, the eight speed limits in bytes per second (0 = unlimited, otherwise
+at least 8192; a live hint shows the Mbit/s equivalent), and the swarm and
+agent cadence values. A blank QoS field inherits the global default. Saving
+follows the Set role contract exactly: <strong>Preview change</strong> sends one dry run
+with the pre-preview ETag and shows the impact counts; <strong>Save role</strong> commits
+that candidate with the preview's confirmation token; editing any field after
+a preview discards it. Delete previews first and asks for confirmation before
+the committed DELETE. Editing an existing role carries its tracker <code>qos_state</code>
+overlay along unchanged, because a definition write is a full replacement.</p>
+<p><strong>Import CSV…</strong> replaces every definition with the chosen file, using the
+<code>fleet/roles.csv.example</code> format, after a preview
+and an explicit confirmation that names how many roles the file holds; roles
+missing from the file are removed, and a role a device still declares refuses
+the import as <code>role_in_use</code>. <strong>Export CSV</strong> downloads the current definitions
+in that format. All three controls, like Set role, are disabled while the
+capability banner shows or the policy is degraded.</p>
+<p>The Console has no role-policy JSON editor: definitions are edited as typed
+fields. Global/role QoS and tracker <code>qos_state</code> are API-only, managed through the
+versioned API's <code>PUT /api/v1/peer-policy/qos</code>; there is no per-device QoS write
+route. Mutual-access pair explanations are available only through
+<code>GET /api/v1/peer-policy/explain</code>. See the <a href="../swagger/index.html">interactive API reference</a>
+for schemas and conditional-write requirements; do not edit server state files
+directly.</p>
+<p>Tracker/quarantine discovery alone does not sever existing connections or
+remove retained peers. Applied verified device deny lists may cooperatively
+disconnect matching peers. Image unassignment requests containment; torrent
+removal waits for the next successful due policy poll and successful aria2
+policy apply, subject to signed logical cadence and catalog/RPC failures.
+Device-side rate intent is cooperative, and a privileged device administrator
+can alter the device environment.</p>
+<p>An <code>abandoned</code> deployment record is one that no longer describes a device IRIS manages:
+the device was deleted from the inventory, or a forced teardown stripped the
+agent without using the deployment record as authority. It is kept as the account of what
+IRIS built on that box, but it never authorises a teardown and never blocks an
+onboard again.</p>
+<h2 id="instruction-status-and-custody">Instruction status and custody</h2>
+<p>Devices shows a canonical instruction chip with a server-created exact label,
+source evidence and report age. Raw instruction state, accepted
+<code>{epoch, instr_serial, policy_revision}</code>, verification level, pointer skew and
+QoS drift are agent-asserted. Device-authored reports are not independent
+measurements. Durable revocation and report age are server-observed: revoked
+wins visually while the underlying agent LKG/state remains visible. Within a
+supported instruction report, raw <code>stale_expired</code> or <code>allowlist_expired</code> is
+stale by agent assertion before report-age classification, even when age is
+unknown. Other supported reports with missing/invalid/future report arrival time display unknown;
+old valid report arrival times display stale with the last reported state. The chip's
+<code>reason</code> distinguishes <code>unknown_key</code> from <code>bad_mac</code> rejection.</p>
+<p>The separate raw and display state vocabularies, including legacy
+<code>pre-instructions</code>, derived <code>stale</code>/<code>rejected</code>/<code>unavailable</code>/<code>unknown</code> and durable
+<code>revoked</code>, are listed in <a href="../reference/#instruction-protocol-and-state-reference">Reference</a>.
+Capability comes from <code>instr_protocol: 1</code>, not IOS <code>version</code>. Labels retain exact
+i63 values as strings, so browser rounding cannot change identity.</p>
+<p>Open <strong>Policies → Advanced → Instruction delivery and key custody</strong> for issued policy revision, accepted application
+counts grouped by policy revision, state counts, current <code>instr_stamp_missing</code>
+and <code>pointer_skew</code> device counts, and observation time. It excludes orphan
+heartbeats and retains accepted identities beneath stale/rejected/revoked
+states. <code>policy_revision</code> is server-issued intent; <code>instr_serial</code> with
+<code>instr_epoch</code> is sealed freshness; <code>enforcement.applied_revision</code> and
+<code>iris_peer_enforcement_applied_revision</code> are unrelated aria2 blocklist counters.
+Unavailable heartbeat/policy/revocation/custody evidence stays null/unknown,
+never a healthy zero. <strong>violation = 0 does not mean compliant</strong>.</p>
+<p>The custody panel shows enablement/state, certificate days remaining (including
+zero/negative values), renewal/signing-refusal flags, keylist age and re-signing
+due, root ceremony status, and roots attested in 180 days. Disabled reads not
+enabled; unavailable evidence stays unavailable. Quorum healthy means recorded
+attestations support both roots, not that the Console inspected private-key
+custody. Follow <a href="../operations/#instruction-root-ceremony-and-recovery">root recovery</a>
+for warning, critical or degraded status. The current bounded schemas are in
+<a href="../openapi.yaml">OpenAPI</a>; the deprecated effective-QoS <code>delivery_state</code> sentinel is not
+evidence of instruction application. That response now includes the same canonical
+<code>instruction</code> object as Devices.</p>
+<h3 id="iox-onboarding-verification">IOx onboarding verification</h3>
+<p>IOx verification is device-global. The onboarding job prefers a signed wrapper
+with no verification-state change. Unsigned/enabled records the obligation,
+disables only for installation and restores with read-back before
+activation/start; initial disabled stays disabled; unknown refuses. Durable
+interruption/resume and uninstall recovery never blindly enables an
+operator-changed or unowned state. Inspect the job/deployment evidence when
+restoration is incomplete. Package readiness and signature-marker presence do
+not validate a native signature. See <a href="../iox/#device-global-package-verification">IOx prerequisites</a>
+before onboarding other applications on the same device.</p>
+<h2 id="bulk-device-actions">Bulk device actions</h2>
+<p>In <strong>Inventory</strong>, click a row to select or deselect it. Selected rows are
+highlighted and expose bulk actions; there are no selection checkboxes. You can
+also focus a row and press <strong>Space</strong> or <strong>Enter</strong>. Device names open details,
+and buttons or dropdowns inside a row do not change its selection.
+<strong>Select page</strong> selects the visible page; <strong>Clear page selection</strong> reverses it.
+<strong>Cancel</strong> clears the entire selection.</p>
+<p>Search by device, IP or model. <strong>Filters</strong> expands the structured filters;
+remove an individual filter chip or use <strong>Reset</strong> to clear all filters. Filters
+apply on the server before paging. <strong>Device series</strong> includes IE Switches,
+IR Routers, Catalyst Routers, Catalyst Switches, NCS and Cisco 8000 Series,
+with legacy and unknown categories retained. These are display labels for the
+existing API families, not a promise that every model in a series is supported.
+The table shows series names; hover the series cell to see the stored model.</p>
+<p>CSV import results stay visible independently of inventory refreshes. A refused
+role import names the role/device when the API provides them; define missing
+roles in Policies first. You can select the same file again after correcting it.
+If the response is unavailable, refresh inventory before retrying: the request
+may already have completed, and the Console does not resend it automatically.</p>
+<h3 id="schedules">Schedules</h3>
+<p><strong>Devices → Schedules</strong> opens the schedule list: what is going to run, against
+what, when it next runs, its state, and how its latest run went. Each row
+carries the target summary, the server-computed next run (local time in the
+schedule's own zone, so the console never recomputes a weekly time across a
+daylight-saving boundary), and, for the latest occurrence, its state, the
+<code>+N / −M since preview</code> delta and the wave gate's staged / errored / missing
+counts.</p>
+<p><strong>Schedule…</strong> in the bulk bar creates one. Its target is the <strong>current Devices
+filter</strong>, not the rows that happen to be checked: the filter is re-resolved at
+each run, which is the reason to schedule against it. The modal says how many
+devices that filter matches now and offers naming the selected devices instead
+as the explicit second choice. Editing a window, wave gate, or full payload is
+not available in the Console. Use only schedule operations and fields listed
+in the <a href="../openapi.yaml">OpenAPI contract</a>; do not assume schedule CSV
+import/export is available.</p>
+<p>A schedule whose creator is gone shows <code>created_by &lt;actor&gt; (actor no longer
+exists)</code>, and <strong>Re-affirm</strong> on that row takes ownership of it. Firing never
+depended on that account, so the schedule kept running either way.
+Re-affirming rewrites <code>created_by</code> to the current operator and bumps <code>rev</code>,
+against the revision on screen — a concurrent edit makes it a refusal, not an
+overwrite.</p>
+<p>Any device row a pending schedule's approved preview names carries a
+<strong>Scheduled</strong> marker, so a <strong>manual</strong> assignment is not made in ignorance of a
+scheduled one. The marker reads the schedule's last approved preview; a
+late-bound target is re-resolved when it fires, so it is the last approved
+answer, not a promise about the next run.</p>
+<h3 id="paging-and-selection-at-fleet-scale">Paging and selection at fleet scale</h3>
+<p>The Devices table pages large filtered inventories. Selection follows device
+IDs across pages. <strong>Select page</strong> selects the current page only;
+<strong>Select all N matching devices</strong> expands it to the active filter. <strong>Cancel</strong>
+clears the entire selection. Review the selected count before any bulk action.</p>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Onboard</td>
+<td>Queues an agent deployment for each selected device.</td>
+</tr>
+<tr>
+<td>Undeploy</td>
+<td>Removes the agent using its deployment record.</td>
+</tr>
+<tr>
+<td>Adopt</td>
+<td>Records a reviewed existing deployment; router adoption is not supported.</td>
+</tr>
+<tr>
+<td>Delete</td>
+<td>Retires inventory and server-side device state; does not uninstall the agent.</td>
+</tr>
+<tr>
+<td>Set credential or role</td>
+<td>Updates the selected devices; review clears and policy previews carefully.</td>
+</tr>
+<tr>
+<td>Assign images</td>
+<td>Replaces each selected device's image set with the checked images.</td>
+</tr>
+</tbody>
+</table>
+<p>The image picker allows up to ten images. For a mixed selection it initially
+checks only images common to every device. Applying the set can therefore
+remove assignments; review the warning and the full checked set. Empty means
+unassign all. Cleanup after unassignment follows
+<a href="../device-agents/#unassigned-image-park">platform ownership rules</a>, not a promise
+to delete every staged image.</p>
+<p>Bulk actions report individual successes and refusals. Review each result and
+follow asynchronous jobs to completion. HTTP 207 means partial cleanup, not a
+fully successful operation; HTTP 429 is admission rejection and includes
+<code>Retry-After</code>. See <a href="../api-testing/#api-admission-limits">API limits</a>.</p>
+<h4 id="force-undeploy">Force undeploy</h4>
+<p>Use <strong>Force</strong> only when the normal deployment record is missing or no longer
+describes the device. Review the platform's cleanup scope: it removes IRIS
+agent configuration without treating unproven network resources as IRIS-owned.
+Do not use it as an image-deletion shortcut. Successful forced teardown
+abandons the old deployment records.</p>
+<p>Force does not bypass an unresolved IOx signature-verification recovery
+obligation. Recover and reconcile the journal first; see
+<a href="../operations/#recovering-an-iox-attempt-cut-off-mid-run">interrupted IOx attempts</a>.
+An app activation failure may be resumable through <strong>Onboard</strong>, without Force.</p>
+<p>An unreadable deployment-record store is a storage/recovery problem, not proof
+that no record exists. Repair it from verified state; do not delete evidence or
+adopt an unverified deployment to bypass the error.</p>
+<div class="admonition warning">
+<p class="admonition-title">Deleting inventory is not an undeploy</p>
+<p>Undeploy first if you intend to remove the agent. Delete does not contact
+the device to remove it, but does revoke credentials and retire associated
+server-side assignments, reports, records, and jobs. Re-adding the ID does
+not restore that state. Peer endpoint records are retained until expiry so
+revoked principals remain denied. Check partial-cleanup responses.</p>
+</div>
+<h2 id="onboarding-from-the-console">Onboarding from the console</h2>
+<p>Console onboarding uses the device's assigned credential profile to run the platform installer. Credentials belong in the Console or the server secret store. Generated per-device staging files are temporary and swept after their configured age.</p>
+<p>Guest Shell onboards probe device reachability before running the installer:
+an unpingable or unreachable IP fails the job immediately with <code>cannot reach
+device &lt;ip&gt; — ping/SSH probe failed; check the device IP and credentials</code>.
+Router, IOx, and XR onboarding also check device reachability in their
+preflight. Every onboarding rejection — a failed preflight, a
+busy device, an unreachable device, a router already holding a deployment
+record — is rendered in the console and recorded in Audit, whether it is
+refused at submit time or fails once the job is running.</p>
+<h3 id="device-activity">Device activity</h3>
+<p><strong>Inventory → Activity</strong> opens recent jobs in a side panel. Choose <strong>log</strong> on
+a job to read its output; only one log is displayed at a time and job streams
+remain separate. <strong>Close</strong> or <strong>Esc</strong> closes the viewer, not the jobs. Reopening
+a log reconnects its stream. Older persisted logs remain under <strong>Monitoring →
+Deployment logs</strong>.</p>
+<p><strong>Abort</strong> requires confirmation: it cancels that queued job or stops its running
+installer, which can leave the agent partly configured. Re-onboard or undeploy
+to recover. Completed jobs do not offer Abort.</p>
+<p>New jobs use the same broad progress across Guest Shell, IOx and IOS-XR:
+<strong>Prepare → Deploy/remove IRIS agent → Finalize</strong>. The heading identifies the
+device series and installer. Device Details lists the chassis model separately,
+with its source; a series selection is never presented as a detected chassis.
+Completion is reported as <code>Onboard completed.</code> or <code>Undeploy completed.</code> only
+after the job finishes successfully. This concerns the agent, not completion of
+an image download or installation of device software.</p>
+<p>Errors, warnings and recovery instructions remain visible. For individual
+installer steps, timings and available command diagnostics, select <strong>Detailed
+logs before starting</strong> Onboard or Undeploy, or submit <code>{"log": true}</code> through
+the API. The job confirms <code>Detailed logs enabled.</code>; the option defaults to off.
+IOx additionally includes its redacted device session, which is retained under
+the state directory's <code>iox/transcripts</code>. Existing saved logs are not rewritten,
+and enabling detail on a later job does not expand an earlier summary log.
+Onboarding with this option also enables <code>aria2c.log</code> on IOx and IOS-XR. Guest Shell logging is
+configured separately through <code>iris_log</code> in its agent configuration (see the
+<a href="../reference/#device-container-environment-variables">reference</a>).</p>
+<h3 id="deployment-logs">Deployment logs</h3>
+<p>Job windows are live views; the durable record is Monitoring →
+<strong>Deployment logs</strong> (<code>#monitoring/deploylogs</code>). Every finished onboard or
+undeploy job's installer output is persisted on the server under the state
+directory, so the logs survive console reloads, session changes, and server
+restarts; the newest 200 are kept. The table lists each log's finish time,
+device, action, result, and size. A histogram above it bins the retained logs
+over the selected window — 24h, 7d (the default), 30d, 90d or All — and
+dragging a range across the graph filters the table to that span; a search box
+plus Action and Result pickers narrow it further, and rows page 25 at a time.
+<strong>view</strong> opens the log in a drawer beside the table. If a job you expect is
+missing, widen the range before concluding the log was not kept: the table only
+ever shows the selected window. The same list, already filtered to one device,
+sits at the bottom of that device's deployment-details panel on the Devices
+screen.</p>
+<p>Each line in the persisted log is prefixed with its elapsed offset from the job
+start, for example <code>[+   42.3s] [4/7] waiting for Guest Shell</code>. The live SSE
+stream remains unchanged. These offsets identify whether a slow onboard spent
+its time in device reachability, Guest Shell readiness, artifact download, or a
+later verification step instead of exposing only one total duration.</p>
+<h2 id="settings">Settings</h2>
+<p>Open <strong>Settings</strong> in the navigation rail, then use the section bar: <strong>General</strong>,
+<strong>TLS &amp; trust</strong>, <strong>Telemetry</strong>, <strong>Image verification</strong>, <strong>Device packages</strong>,
+<strong>Audit export</strong>, and <strong>Setup checklist</strong>. Each section keeps its deep link:
+<code>#settings/general</code>, <code>#settings/tls</code>, <code>#settings/telemetry</code>,
+<code>#settings/bulkhash</code>, <code>#settings/packages</code>, <code>#settings/audit</code>, and <code>#settings/setup</code>.</p>
+<p>General shows the device-facing server IP and the Console's browser URL
+separately. They can belong to different hosts. <code>IRIS_CONSOLE_URL</code> on the
+server supplies the published Console URL; the Console host's Compose binding
+controls where it actually listens.</p>
+<h3 id="setup">Setup</h3>
+<p>The <strong>Setup checklist</strong> section (<code>#settings/setup</code>) is a post-install status panel: four
+cards — <strong>admin account</strong>, <strong>telemetry destination</strong>, <strong>device packages</strong>, and
+<strong>image verification</strong> — each carrying a live status chip and a short
+rationale, meant to be revisited any time after installing a server rather
+than completed in one sitting. The admin card links to Settings › General; the
+telemetry and image verification cards both open the setup flow (<code>#setup</code>),
+which hosts those controls as steps 1 and 3. The telemetry card also names the
+endpoint in effect and whether it is a console override or the deployment
+default. Every card's status is one of <code>ok</code>, <code>unset</code>, <code>stale</code>, <code>absent</code>, or
+<code>unknown</code>, plus a sixth reading unique to image verification — a schedule
+that is configured but has not yet produced a successful run, worded
+distinctly ("Configured — no successful run yet") from one never configured
+at all. <code>absent</code> and
+<code>unknown</code> both mean the server could not determine the state; a failed or
+malformed status fetch shows every chip as <code>unknown</code> rather than leaving a
+previous, possibly stale, render on screen. Neither is ever presented as
+success — and <code>absent</code> is rendered as a neutral, not-applicable chip rather
+than a warning, since (as the device packages paragraph below explains) it
+routinely just means an architecture this deployment does not use.</p>
+<p>The Setup card links to the persistent <strong>Settings › Device packages</strong> page,
+where the same status remains available after the first-run flow is dismissed.
+That page re-checks all three artifacts on demand and prints the complete
+Docker-host build command for every absent, stale, or unverifiable package
+family. The server inspects the artifacts and returns the results through the
+management API; neither runtime container has a Docker socket.</p>
+<p>The <strong>device packages</strong> status covers deployment-neutral wrappers. The two IOx
+packages (<code>iris-arm64.tar</code>, <code>iris-amd64.tar</code>) and IOS-XR RPM (<code>iris-xr.rpm</code>)
+contain the shared agent but no deployment certificate. Each row binds the
+served wrapper's SHA-256 to an adjacent provenance manifest naming its wrapper
+kind, platform, and canonical OCI image/source digests. <code>ok</code> means those bytes
+and metadata agree; it does not claim to inspect the package contents or
+validate its native signature. <code>stale</code> means the wrapper digest no longer
+matches its manifest, while missing or malformed evidence is <code>absent</code> or
+<code>unknown</code>. <code>absent</code> for an architecture you do not deploy needs no action.
+Build time is informational, never a proxy for certificate freshness.</p>
+<p>The card performs a separate TLS readiness check between the certificate the
+live service presents and the public <code>iris-catalog.pem</code> copy that onboarding
+distributes. A mismatch or unreadable copy makes the aggregate state non-green
+because new onboards would receive unusable trust, but it does not make any
+package row certificate-stale. Reconcile the served/distributed certificate;
+rebuilding a deployment-neutral package cannot fix that condition.</p>
+<p>When a wrapper or its provenance really needs rebuilding, use
+<code>tools/provision-iox-packages.sh</code> for both IOx tars and
+<code>tools/build-xr-package.sh --out artifacts/</code> for the XR RPM. Certificate
+rotation needs no package rebuild: re-onboard affected devices to replace the
+runtime certificate delivered through IOx app data, the IOS-XR harddisk bind
+mount, or the Guest Shell artifact flow. See
+<a href="../operations/#tls-rotation-and-device-packages">TLS rotation and device packages</a>.</p>
+<h3 id="tls-trust">TLS &amp; trust</h3>
+<ul>
+<li><strong>Certificate</strong> — drop (or browse to) a certificate and private key, or
+  paste PEM directly. Files are classified by their PEM content rather than
+  extension, so a single combined cert+key file works. Dropping an encrypted
+  private key reveals a passphrase field; the key is decrypted at import
+  (<code>openssl pkey</code>, passphrase piped over stdin, never on the command line)
+  instead of being rejected, and is still stored age-encrypted at rest either
+  way. The card shows the identity this Console is serving.
+  <strong>Use deployment default certificate</strong> reverts to the deployment's default browser identity
+  and appears only once a custom certificate is installed.</li>
+<li><strong>Trusted CAs</strong> — drop one or many CA certificate files to install them
+  individually, or use the CA bundle source picker to download and trust a
+  whole public bundle: Cisco Trusted Root Store (default), the Mozilla CA
+  bundle (<code>https://curl.se/ca/cacert.pem</code>), or a custom URL. The downloaded
+  bundle appears as a single row in the trusted-CA table, labelled with its
+  source; removing that row (<strong>remove bundle</strong>) is how you revert to
+  system-store-only trust. A failed download never replaces the previous
+  bundle.</li>
+</ul>
+<h3 id="audit-export">Audit export</h3>
+<p>The <strong>Audit export</strong> sub-page configures the age-encrypted off-box copy of
+the audit trail — destination, age recipient, SCP password, daily schedule —
+and carries the <strong>Export now</strong> button plus a status line showing the
+configured destination and the last run's outcome. The operational behaviour
+is described in <a href="../operations/#audit-export">Audit export</a>.</p>
+<p><a id="when-to-use-the-cli"></a></p>
+<h2 id="console-and-api">Console and API</h2>
+<p>Use the Console for routine image publishing/import, inventory, assignments,
+onboarding, schedules, and monitoring. IRIS distributes, verifies, and stages
+images only: it never installs or activates them, reloads a device, changes
+boot variables, or alters running software.</p>
+<p>For automation or the exact request/response contract, use the authenticated
+Console API under <code>/api/v1</code> and consult the <a href="../swagger/index.html">interactive API reference</a>
+or <a href="../openapi.yaml">OpenAPI contract</a>. The compact <a href="../reference/#api-quick-reference">API quick reference</a>
+lists operations without replacing their full schemas. The registry defines
+the supported methods and paths; a Console capability is not evidence that an
+unlisted API operation exists. In particular, image assignment is per-device
+at the API layer; the Console implements bulk selection by coordinating device
+operations.</p>
+<p>Protected mutations require a Console session and CSRF token; each operation's
+security and conditional-write requirements are in OpenAPI. For server
+provisioning and offline instruction-root custody, follow the separate
+<a href="../getting-started/">deployment</a> and <a href="../operations/#instruction-root-ceremony-and-recovery">custody</a>
+procedures rather than inferring a workflow from the browser API.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>
