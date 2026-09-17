@@ -756,6 +756,18 @@ def test_snapshot_settles_a_write_racing_its_own_multi_shard_scan(tmp_path,
     assert {r["device_id"] for r in rows} == {"d1", "other"}
 
 
+def test_fleet_snapshot_cache_is_fresh_across_store_instances(tmp_path):
+    first = _fs(tmp_path)
+    second = _fs(tmp_path)
+    assert first._devices.cache_snapshots is True
+    first.upsert(dict(_ROUTED))
+    assert first.snapshot()[1][0]["model"] == "C9300"
+    second.upsert({"device_id": "d1", "model": "C9300-48P"})
+    revision, rows = first.snapshot()
+    assert revision == 2
+    assert rows[0]["model"] == "C9300-48P"
+
+
 def test_snapshot_settle_fallback_is_never_staler_than_the_rows(tmp_path,
                                                                  monkeypatch):
     """When every settle attempt keeps losing the race (pathological, but

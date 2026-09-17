@@ -310,6 +310,16 @@ def _build_v2_report_record(report, device_id, enrich=None):
     # detail that was deliberately dropped from this event. The four figures
     # stay four -- an absent split adds nothing rather than zeroing a bucket.
     pairs.extend(_transfer_record_split_pairs(enrich))
+    download = report.get("download")
+    if isinstance(download, dict):
+        start, end = download.get("start"), download.get("end")
+        if (type(start) in (int, float) and type(end) in (int, float)
+                and 0 < start <= end < float("inf")):
+            pairs.extend([
+                ("iris.download.started_at", start),
+                ("iris.download.completed_at", end),
+                ("iris.download.duration_seconds", end - start),
+            ])
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     window = report.get("window") if isinstance(report.get("window"), dict) \
         else {}
@@ -979,12 +989,19 @@ class LogQueue:
             self._keys.discard(dropped_key)
         self._dropped += 1
 
-    def emit(self, event, evictable=False):
+    def emit(self, event, evictable=False, accept_duplicate=False):
+        """Enqueue once; optionally acknowledge an already accepted replay.
+
+        Policy outbox replay needs acceptance, not insertion, to advance its
+        watermark. Check queued/inflight membership under the same lock as
+        insertion so a concurrent flush cannot race a contains-then-emit pair.
+        Other producers keep the historical False-for-duplicate contract.
+        """
         with self._lock:
             key = self._key(event)
             if key is not None and (key in self._keys or
                                     key in self._inflight_keys):
-                return False
+                return bool(accept_duplicate)
             if self._max == 0:
                 self._dropped += 1
                 return False

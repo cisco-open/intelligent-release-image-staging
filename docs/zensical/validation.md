@@ -64,9 +64,9 @@ resolvers with accepted and unknown tokens. The harness counts index lookups
 and rejects fleet-wide scans during resolution.
 
 A small pair of sizes (50 and 500 devices) runs by default, in seconds, with
-every test suite. The full progression the project's own scale claims are
-stated at — 100, 1,000 and 10,000 devices, 10,000 being the top of the
-supported fleet size — rebuilds a 10,000-device fleet and is slow by design,
+every test suite. The larger synthetic progression — 100, 1,000 and 10,000
+devices — checks implementation scaling, not a production capacity guarantee.
+It rebuilds a 10,000-device fleet and is slow by design,
 so it is opt-in behind `IRIS_TEST_CAPACITY_LARGE=1`:
 
 ```bash
@@ -161,8 +161,15 @@ including both architectures of the shared IOx/XR image.
 On 2026-09-14, `scp -O` package transfer and downloaded-copy SHA-256 were
 also verified on Cisco 8201 / IOS-XR 25.4.2. On NCS-540 / IOS-XR 25.2.2,
 OpenSSH's default SFTP upload transferred the RPM but ended with SSH status
-255 and client failure. The installer now selects SCP explicitly for both
-families. These transfer checks do not constitute a full lifecycle test.
+255 and client failure. That historical installer selected SCP explicitly.
+The current development installer instead uses certificate-verified HTTPS.
+Its local tests cover authentication, certificate and checksum failures.
+On 2026-09-15, the current HTTPS path completed onboarding, fresh SHA-256
+verified staging and normal undeploy on Cisco 8201 / IOS-XR 25.4.2 with
+single-host Docker, split-host Docker and Kubernetes. Native checks confirmed the staged file
+and unchanged running software. This used a synthetic 16 MiB staging fixture,
+not Cisco image-signature attestation. Full HTTPS lifecycle validation on NCS
+remains pending. Historical SCP checks do not validate the new delivery path.
 
 The NCS lab app had telemetry enabled but could not reach the catalog through
 its default-VRF path. A separate diagnostic through the management VRF with

@@ -825,6 +825,7 @@ def _schedule_errors(route):
     errors = {401: {"console-session-required", "management-authentication-required"},
               404: {"route-not-found"},
               422: {"invalid_schedule"},
+              429: {"rate-limit-exceeded"},
               503: {"service-unavailable", "credential-store-unavailable",
                     "schedule_state_unavailable"}}
     if suffix != "/schedules":
@@ -913,7 +914,8 @@ def _policy_errors(route):
         return None
     errors = {status: set(codes) for status, codes in business.items()}
     common = {401: {"console-session-required"},
-              404: {"route-not-found"}, 503: {"service-unavailable"}}
+              404: {"route-not-found"}, 429: {"rate-limit-exceeded"},
+              503: {"service-unavailable"}}
     # The proxy can forward a rejected mounted tier credential as well.
     common[401].add("management-authentication-required")
     if route.method in MUTATIONS:
@@ -1857,6 +1859,12 @@ def _request_body(route):
         schema["properties"]["endpoint"]["format"] = "uri"
     elif suffix == "/settings/ca-trust":
         schema["properties"]["url"]["format"] = "uri"
+    elif suffix == "/settings/audit-export":
+        schema["properties"]["password"]["description"] = (
+            "Required for first configuration or recovery after an interrupted "
+            "save/clear leaves the destination unconfigured. An absent or empty "
+            "password keeps the stored secret only when the existing "
+            "configuration is valid.")
     elif suffix == "/devices/{device_id}/assign":
         singular = {"image_id": "image-01", "expect_image_ids": []}
         schema["properties"]["image_id"] = {"type": ["string", "null"]}
@@ -2938,7 +2946,7 @@ def _error_statuses(route):
 
     # Cross-cutting state/session/framing errors, narrowed below for reads.
     if route.method == "GET":
-        statuses = {401, 404, 503}
+        statuses = {401, 404, 429, 503}
         if route.service == "console":
             statuses.update((400, 411, 413))
         if suffix in ("/audit", "/audit/histogram", "/devices", "/swarm",
@@ -2950,7 +2958,7 @@ def _error_statuses(route):
             statuses.update((400, 422))
         return tuple(sorted(statuses))
 
-    statuses = {400, 401, 403, 404, 413, 503}
+    statuses = {400, 401, 403, 404, 413, 429, 503}
     if route.service == "console":
         statuses.add(411)
     if suffix == "/images/upload/{filename}":
@@ -3104,6 +3112,9 @@ def _description(route):
         if route.path == "/scrape":
             notes.append("A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. The seeder service and authenticated unattributed principals can scrape all torrents.")
     suffix = _resource_suffix(route)
+    if route.service in ("console", "management") and \
+            "consoleSession" in route.security:
+        notes.append("Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.")
     if _schedule_resource(route):
         notes.append("Schedules only assign images or onboard staging agents; devices never evaluate schedule time. "
                      "Each definition has its own revision, generation and strong ETag; occurrence progress does not change it. "

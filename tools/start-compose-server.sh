@@ -95,6 +95,7 @@ fi
 # canonical OCI archive and its manifest there as the OPERATOR. Owner 10001
 # plus the operator's group with group-write serves both; 10001:10001 -- what
 # the docs used to say -- silently breaks the second writer.
+bash "$REPO/tools/check-host-time.sh"
 mkdir -p "$REPO/artifacts"
 OPERATOR_GID="$(id -g)"
 artifacts_uid="$(stat -c %u "$REPO/artifacts" 2>/dev/null || echo -1)"

@@ -44,6 +44,35 @@ def test_login_wrong_password_returns_none(tmp_path):
     assert app.login("admin", "pw") is not None
 
 
+@pytest.mark.parametrize("reset", ["password-change", "break-glass"])
+def test_login_cannot_mint_session_from_replaced_credential(tmp_path, monkeypatch, reset):
+    """Pause after password verification, when another request can reset it."""
+    clock = [1000.0]
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"), now_fn=lambda: clock[0])
+    app.set_admin("admin", "old-password")
+    existing_sid, _ = app.login("admin", "old-password")
+    verify = gui_auth.verify_admin
+
+    def verified_before_reset(store, username, password):
+        valid = verify(store, username, password)
+        # Deterministic interleaving: the credential changes after this login
+        # has verified its snapshot but before it is allowed to create a session.
+        monkeypatch.setattr(gui_auth, "verify_admin", verify)
+        clock[0] = 1001.0
+        if reset == "break-glass":
+            app.set_admin("admin", "new-password", invalidate_sessions=True)
+        else:
+            assert app.change_password("old-password", "new-password")
+            app.revoke_other_sessions(existing_sid)
+        clock[0] = 1002.0
+        return valid
+
+    monkeypatch.setattr(gui_auth, "verify_admin", verified_before_reset)
+    assert app.login("admin", "old-password") is None
+    new_sid, _ = app.login("admin", "new-password")
+    assert app.session_info(new_sid) is not None
+
+
 def test_logout_invalidates_session(tmp_path):
     app, _ = _app(tmp_path)
     app.set_admin("admin", "pw")

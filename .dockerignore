@@ -22,6 +22,10 @@ AGENTS.md
 **/__pycache__/
 **/*.pyc
 **/.DS_Store
+# Browser dependencies and output are rebuilt in the Console's Node stage.
+server/console-ui/node_modules/
+server/console-ui/dist/
+server/console-ui/tests/
 
 creds/
 artifacts/

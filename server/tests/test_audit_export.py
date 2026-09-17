@@ -11,8 +11,11 @@ import http.client
 import json
 import os
 import re
+import stat
 import threading
 import time
+
+import pytest
 
 import audit_export
 import gui_app
@@ -86,6 +89,160 @@ def test_settings_clear_is_idempotent(tmp_path):
     audit_export.clear_settings(p)
     assert not os.path.exists(p)
     audit_export.clear_settings(p)      # second clear: no error
+
+
+@pytest.mark.parametrize("boundary", ["pause", "secret-before", "secret-after", "publish"])
+@pytest.mark.parametrize("failure", [OSError, SystemExit])
+def test_configuration_save_failure_or_interruption_is_fail_closed(
+        tmp_path, monkeypatch, boundary, failure):
+    path = audit_export.settings_path(str(tmp_path))
+    previous = _valid_settings(auto=True, last_run_ts=123, last_result="ok:previous")
+    audit_export.write_settings(path, previous)
+    creds = gui_creds.CredentialStore(str(tmp_path / "secrets.json"))
+    creds.set_audit_export_secret("previous-password")
+    original_write = audit_export.write_settings
+    calls = []
+
+    def write(target, settings, **kwargs):
+        calls.append(dict(settings))
+        if boundary == "pause" or (boundary == "publish" and len(calls) == 2):
+            raise failure("injected boundary failure")
+        original_write(target, settings, **kwargs)
+
+    def save_secret(password):
+        if boundary == "secret-before":
+            raise failure("injected boundary failure")
+        creds.set_audit_export_secret(password)
+        if boundary == "secret-after":
+            raise failure("injected boundary failure")
+
+    candidate = _valid_settings(host="new.example.com", auto=True)
+    monkeypatch.setattr(audit_export, "write_settings", write)
+    expected = audit_export.ConfigurationSaveError if failure is OSError else SystemExit
+    with pytest.raises(expected):
+        audit_export.save_configuration(path, candidate, "new-password", save_secret)
+    # Fresh disk read models recovery after a worker/process interruption.
+    observed = audit_export.read_settings(path)
+    assert observed["last_run_ts"] == 123 and observed["last_result"] == "ok:previous"
+    if boundary == "pause":
+        assert observed == previous
+        assert creds.audit_export_secrets()["password"] == "previous-password"
+    else:
+        assert observed["auto"] is False
+        assert audit_export.validate_settings(observed) is not None  # manual run refused
+        assert not audit_export.export_due(observed, 100000)         # scheduler refused
+    with open(path) as settings_file:
+        assert "password" not in settings_file.read()
+    # Explicit operator retry with the complete configuration is safe.
+    monkeypatch.setattr(audit_export, "write_settings", original_write)
+    audit_export.save_configuration(path, candidate, "new-password", creds.set_audit_export_secret)
+    settings, secret = audit_export.read_configuration(path, creds.audit_export_secrets)
+    assert settings["host"] == "new.example.com" and settings["auto"] is True
+    assert secret["password"] == "new-password"
+
+
+def test_export_snapshot_waits_for_complete_configuration(tmp_path):
+    path = audit_export.settings_path(str(tmp_path))
+    audit_export.write_settings(path, _valid_settings(auto=True))
+    secret = {"password": "previous-password"}
+    writing, release, reading, read_done = (threading.Event() for _ in range(4))
+    results, errors = [], []
+
+    def save_password(value):
+        writing.set()
+        if not release.wait(3):
+            raise RuntimeError("test writer was not released")
+        secret["password"] = value
+
+    def writer():
+        try:
+            audit_export.save_configuration(
+                path, _valid_settings(host="new.example.com"), "new-password", save_password)
+        except Exception as exc:
+            errors.append(exc)
+
+    def reader():
+        reading.set()
+        results.append(audit_export.read_configuration(path, lambda: dict(secret)))
+        read_done.set()
+
+    worker = threading.Thread(target=writer, daemon=True)
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    worker.start()
+    try:
+        assert writing.wait(3)
+        reader_thread.start()
+        assert reading.wait(3)
+        assert not read_done.wait(0.1)
+    finally:
+        release.set()
+        worker.join(3)
+        if reader_thread.ident is not None:
+            reader_thread.join(3)
+    assert not errors and read_done.is_set()
+    assert results[0][0]["host"] == "new.example.com"
+    assert results[0][1]["password"] == "new-password"
+
+
+@pytest.mark.parametrize("failure_at", [None, "file-fsync", "rename", "directory-fsync"])
+def test_password_save_durably_pauses_before_secret_and_recovers_from_sync_failure(
+        tmp_path, monkeypatch, failure_at):
+    path = audit_export.settings_path(str(tmp_path))
+    previous = _valid_settings(auto=True)
+    candidate = _valid_settings(host="new.example.com", auto=True)
+    audit_export.write_settings(path, previous)
+    real_fsync, real_replace = os.fsync, os.replace
+    events = []
+    secret = {"password": "previous-password"}
+
+    def fsync(fd):
+        event = "directory-fsync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file-fsync"
+        events.append(event)
+        if event == failure_at:
+            raise OSError("injected sync failure")
+        real_fsync(fd)
+
+    def replace(source, target):
+        events.append("rename")
+        if failure_at == "rename":
+            raise OSError("injected rename failure")
+        real_replace(source, target)
+
+    def save_secret(password):
+        # No secret update until the pause's data and namespace are synced.
+        assert events == ["file-fsync", "rename", "directory-fsync"]
+        assert audit_export.validate_settings(audit_export.read_settings(path)) is not None
+        events.append("secret")
+        secret["password"] = password
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    if failure_at is None:
+        audit_export.save_configuration(path, candidate, "new-password", save_secret)
+        assert events == ["file-fsync", "rename", "directory-fsync", "secret", "rename"]
+        assert audit_export.read_settings(path)["host"] == "new.example.com"
+        assert secret["password"] == "new-password"
+        return
+
+    with pytest.raises(audit_export.ConfigurationSaveError):
+        audit_export.save_configuration(path, candidate, "new-password", save_secret)
+    assert "secret" not in events
+    assert secret["password"] == "previous-password"
+    observed = audit_export.read_settings(path)
+    if failure_at == "directory-fsync":
+        # Rename happened, but its durability is unknown. The old secret was
+        # not touched, so either old or paused settings remain a safe pairing.
+        assert observed["auto"] is False
+        assert audit_export.validate_settings(observed) is not None
+    else:
+        assert observed == previous
+    assert not list(tmp_path.glob(".audit-export-*.tmp"))
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    monkeypatch.setattr(os, "replace", real_replace)
+    audit_export.save_configuration(
+        path, candidate, "new-password", lambda value: secret.update(password=value))
+    assert audit_export.read_settings(path)["host"] == "new.example.com"
+    assert secret["password"] == "new-password"
 
 
 # ---- validate_settings (conservative argv shapes) -------------------------
@@ -639,6 +796,85 @@ def test_audit_export_config_roundtrip_and_settings_payload(tmp_path, monkeypatc
         stop()
 
 
+def test_audit_export_failed_secret_save_disables_manual_run_and_recovers(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, creds, audit_path, stop = _serve_export(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST", "/api/settings/audit-export",
+                    _cfg_body(), headers=headers)[0] == 200
+        original_save = creds.set_audit_export_secret
+
+        def fail_secret(password):
+            raise OSError("private injected credential failure")
+
+        monkeypatch.setattr(creds, "set_audit_export_secret", fail_secret)
+        status, _, body = _req(host, port, "POST", "/api/settings/audit-export",
+                               _cfg_body(host="new.example.com", password="new-password"),
+                               headers=headers)
+        assert status == 500
+        assert "audit export is disabled" in json.loads(body)["detail"]
+        assert b"private injected" not in body and b"new-password" not in body
+        status, _, body = _req(host, port, "GET", "/api/settings", headers=headers)
+        assert status == 200
+        assert json.loads(body)["audit_export"]["auto"] is False
+        assert _req(host, port, "POST", "/api/settings/audit-export/run", {},
+                    headers=headers)[0] == 409
+        assert creds.audit_export_secrets()["password"] == "scp-pw"
+        monkeypatch.setattr(creds, "set_audit_export_secret", original_save)
+        for blank in (None, ""):
+            status, _, body = _req(host, port, "POST", "/api/settings/audit-export",
+                                   _cfg_body(host="new.example.com", password=blank),
+                                   headers=headers)
+            assert status == 400
+            assert "password is required" in json.loads(body)["error"]
+            assert _req(host, port, "POST", "/api/settings/audit-export/run", {},
+                        headers=headers)[0] == 409
+            assert creds.audit_export_secrets()["password"] == "scp-pw"
+        assert _req(host, port, "POST", "/api/settings/audit-export",
+                    _cfg_body(host="new.example.com", password="new-password"),
+                    headers=headers)[0] == 200
+        assert creds.audit_export_secrets()["password"] == "new-password"
+        assert "new-password" not in json.dumps(_read_audit_lines(audit_path))
+    finally:
+        stop()
+
+
+def test_audit_export_failed_secret_clear_stays_disabled_and_can_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, creds, _audit_path, stop = _serve_export(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST", "/api/settings/audit-export",
+                    _cfg_body(), headers=headers)[0] == 200
+        original_clear = creds.clear_audit_export_secret
+
+        def fail_clear():
+            raise OSError("private injected cleanup failure")
+
+        monkeypatch.setattr(creds, "clear_audit_export_secret", fail_clear)
+        status, _, body = _req(host, port, "DELETE", "/api/settings/audit-export", headers=headers)
+        assert status == 500
+        assert "audit export is disabled" in json.loads(body)["detail"]
+        assert b"private injected" not in body
+        assert _req(host, port, "POST", "/api/settings/audit-export/run", {},
+                    headers=headers)[0] == 409
+        assert creds.audit_export_secrets() is not None
+        status, _, body = _req(host, port, "POST", "/api/settings/audit-export",
+                               _cfg_body(password=""), headers=headers)
+        assert status == 400
+        assert "password is required" in json.loads(body)["error"]
+        assert _req(host, port, "POST", "/api/settings/audit-export/run", {},
+                    headers=headers)[0] == 409
+        monkeypatch.setattr(creds, "clear_audit_export_secret", original_clear)
+        assert _req(host, port, "DELETE", "/api/settings/audit-export", headers=headers)[0] == 200
+        assert creds.audit_export_secrets() is None
+    finally:
+        stop()
+
+
 def test_audit_export_config_validation_400(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     host, port, _creds, _ap, stop = _serve_export(tmp_path)
@@ -655,7 +891,9 @@ def test_audit_export_config_validation_400(tmp_path, monkeypatch):
                      _cfg_body(port="2022"),
                      _cfg_body(port=0),
                      _cfg_body(auto="yes"),
-                     _cfg_body(password=7)):
+                     _cfg_body(password=7),
+                     _cfg_body(password=None),
+                     _cfg_body(password="")):
             st, _, b = _req(host, port, "POST", "/api/settings/audit-export",
                             body, headers=hh)
             assert st == 400, body
@@ -675,6 +913,12 @@ def test_audit_export_absent_password_keeps_stored_one(tmp_path, monkeypatch):
         # re-save without a password field: the stored secret survives
         assert _req(host, port, "POST", "/api/settings/audit-export",
                     _cfg_body(password=None, host="other.example.com"),
+                    headers=hh)[0] == 200
+        assert creds.audit_export_secrets()["password"] == "scp-pw"
+        # Explicit empty strings preserve the existing secret too, provided
+        # the current destination is valid (unlike interrupted-save recovery).
+        assert _req(host, port, "POST", "/api/settings/audit-export",
+                    _cfg_body(password="", host="other.example.com"),
                     headers=hh)[0] == 200
         assert creds.audit_export_secrets()["password"] == "scp-pw"
         st, _, b = _req(host, port, "GET", "/api/settings",

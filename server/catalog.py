@@ -771,6 +771,19 @@ def _sanitize_report_v2(data):
         if start is not None:
             win_out["start"] = float(start)
 
+    download = data.get("download")
+    download_out = None
+    if download is not None:
+        if not isinstance(download, dict):
+            raise ValueError("bad download")
+        edges = [download.get(key) for key in ("start", "end")]
+        if any(type(value) not in (int, float) or not math.isfinite(value)
+               or value <= 0 for value in edges):
+            raise ValueError("bad download timestamps")
+        if edges[0] > edges[1] or edges[1] > data["report_created_at"]:
+            raise ValueError("bad download order")
+        download_out = dict(zip(("start", "end"), map(float, edges)))
+
     content = data.get("content")
     content_out = None
     # An EMPTY content block means the same thing as an absent one: the
@@ -873,6 +886,8 @@ def _sanitize_report_v2(data):
               "peers_saturated": data["peers_saturated"]}
     if win_out is not None:
         report["window"] = win_out
+    if download_out is not None:
+        report["download"] = download_out
     if content_out is not None:
         report["content"] = content_out
     transfer_records = data.get("peer_transfer_records")

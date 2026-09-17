@@ -34,6 +34,16 @@ def _state():
                                       "observations": 71}}}}}
 
 
+def test_download_endpoints_are_optional_and_independent_of_staging_window():
+    state = _state()
+    args = (_CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
+    assert "download" not in telemetry_report.build_report_v2(*args)
+    state["img1"]["tele"]["download"] = {"start": 990, "end": 1050}
+    report = telemetry_report.build_report_v2(*args)
+    assert report["download"] == {"start": 990, "end": 1050}
+    assert report["window"]["end"] == 1100
+
+
 def test_build_report_v2_exact_schema(monkeypatch):
     # No platform selector is the unchanged Guest Shell compatibility path,
     # including its legacy IRIS_RUNTIME_MODE fallback. Keep this assertion

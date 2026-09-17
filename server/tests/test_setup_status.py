@@ -637,7 +637,9 @@ def _webroot(name):
 def test_console_has_a_setup_pane_wired_to_the_endpoint():
     html = _webroot("index.html")
     js = _webroot("app.js")
-    assert 'id="nav-settings-setup"' in html
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "console-ui", "src", "settings-navigation.jsx"), encoding="utf-8") as stream:
+        assert "['setup', 'Setup checklist'," in stream.read()
     assert 'id="settings-pane-setup"' in html
     assert "'setup'" in js                       # registered in the pane list
     assert "'/api/v1/settings/setup-status'" in js

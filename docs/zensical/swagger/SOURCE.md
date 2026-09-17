@@ -43,3 +43,9 @@ applies and Swagger UI renders it without a dialect warning. Declaring a value
 -- even OpenAPI 3.2's own dialect base -- makes this Swagger UI compare it
 against the 3.1 base and warn; the schemas use no OAS-dialect keyword, so the
 declaration bought nothing.
+
+The IRIS header offers Console API and All services views through Swagger's
+native filter; non-Console deep links select All services automatically. The
+canonical explorer searches the full contract without rewriting it. Browser
+regressions run with `npm run test:swagger` from `server/console-ui` (see
+`TESTING.md` for prerequisites).

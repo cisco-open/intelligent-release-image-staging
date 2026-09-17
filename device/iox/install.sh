@@ -908,16 +908,18 @@ fetch_block() {
 scp_server_block() {  # the device's SCP server -- ONLY where there is no share
 # IRIS enables it for exactly one reason: the agent's runtime image hand-off
 # on a platform that cannot bind-mount its staging filesystem into the app
-# (IE-3x00 and sdflash:). There the agent scp-pushes the downloaded image to
+# (IE-3x00 and the current C8000V IOx profile). The agent scp-pushes the image to
 # guest-share and a plain copy places it. Every share-configured platform
-# (Catalyst 9300, Catalyst 8000) hands the image over through the mount plus
+# (such as Catalyst 9300 with an SSD share) hands the image through the mount plus
 # an IOS-internal copy and has NO scp fallback, so the SCP server must stay
-# off there -- issue #228. Onboarding itself pushes nothing over SCP on any
+# unchanged there. The controller records ownership before enabling it for a
+# share-less deployment and restores it on recorded undeploy (issue #228).
+# Onboarding itself pushes nothing over SCP on any
 # platform (the device fetches its own package over https).
 if [ -n "$SHARE_IOS_PATH" ]; then return 0; fi
 cat <<EOF
 ! SCP server: the agent's runtime image hand-off on a share-less platform
-! (IE-3x00) pushes the scratch to guest-share through it, then the plain copy
+! pushes the scratch to guest-share through it, then the plain copy
 ! places it. Not used by onboarding.
 ip scp server enable
 !

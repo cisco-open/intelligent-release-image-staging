@@ -137,6 +137,14 @@ services:
       # is passed through. Where an EMPTY value would not mean the same thing as
       # "unset" to the reader on the other side, the code's own default is
       # restated as the fallback rather than the empty string.
+      # Shared, process-local Console API budgets. Zero disables a budget;
+      # burst defaults to one admitted request pending measured deployment data.
+      IRIS_API_RATE_READ: "${IRIS_API_RATE_READ:-0}"
+      IRIS_API_RATE_WRITE: "${IRIS_API_RATE_WRITE:-0}"
+      IRIS_API_RATE_TOTAL: "${IRIS_API_RATE_TOTAL:-0}"
+      IRIS_API_BURST_READ: "${IRIS_API_BURST_READ:-1}"
+      IRIS_API_BURST_WRITE: "${IRIS_API_BURST_WRITE:-1}"
+      IRIS_API_BURST_TOTAL: "${IRIS_API_BURST_TOTAL:-1}"
       IRIS_HTTP_TIMEOUT: "${IRIS_HTTP_TIMEOUT:-}"
       # int() with no guard in tracker.py, and an empty value would build an
       # invalid HTTPS announce authority in the catalog -- restate the default.

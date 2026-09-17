@@ -4,8 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests for device/xr-install.sh (agentinfo/plans/2026-08-28-xr-agent.md,
-# Task 3): the appmgr onboard recipe for a Cisco 8000-series IOS-XR router.
+# Tests for device/xr-install.sh: the appmgr onboard recipe for Cisco 8000
+# Series and NCS routers. "live" below means the real script with stubbed I/O.
 
 setup() {
   INSTALL="$BATS_TEST_DIRNAME/../xr-install.sh"
@@ -90,13 +90,14 @@ setup() {
   [ "$activate_line" -lt "$commit_line" ]
 }
 
-@test "dry-run pushes the rpm straight to harddisk: root" {
+@test "dry-run downloads the rpm over verified HTTPS to harddisk" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
-  [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
-  [[ "$output" == *"scp -O <instruction-envelope> <user>@192.0.2.10:/harddisk:/iris-instructions.bootstrap"* ]]
+  [[ "$output" == *"--cacert <trusted-certificate> --config -"* ]]
+  [[ "$output" == *"iris-instructions.bootstrap"* ]]
+  [[ "$output" != *"scp -O"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -204,16 +205,9 @@ EOF
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the upload pushes each file to its own fixed harddisk path" {
-  # One push per file, the order and the destinations the Cisco 8000 has
-  # always used. Every push goes through the same helper, so the retry and the
-  # captured stderr apply to all three.
-  run grep -c 'sshpass -e scp ' "$INSTALL"
-  [ "$status" -eq 0 ]
-  [ "$output" -eq 1 ]
-  grep -q '_xr_push "\$XR_RPM_FILE" "/harddisk:/\$SOURCE_NAME.rpm"' "$INSTALL"
-  grep -q '_xr_push "\$CATALOG_CA_FILE" "/harddisk:/iris-catalog.pem"' "$INSTALL"
-  grep -q '_xr_push "\$INSTRUCTION_SNAPSHOT_FILE" "/harddisk:/iris-instructions.bootstrap"' "$INSTALL"
+@test "HTTPS delivery replaces every SCP push" {
+  ! grep -q 'sshpass -e scp' "$INSTALL"
+  grep -q 'python3 "\$HERE/xr_https.py"' "$INSTALL"
 }
 
 @test "one EXIT trap removes everything, including the decrypted bootstrap" {
@@ -248,26 +242,25 @@ EOF
   grep -q 'preflight attempt \$preflight_attempt failed; retrying' "$INSTALL"
 }
 
-@test "a reset upload is retried before the installer gives up" {
+@test "preflight and registration retain bounded SSH retries" {
   # A line freed by another session ending is the usual difference between a
   # failed attempt and a successful one, so the push is retried rather than
   # failing the onboard outright.
   grep -q 'XR_SCP_ATTEMPTS="\${XR_SCP_ATTEMPTS:-3}"' "$INSTALL"
   grep -q 'XR_SCP_RETRY_SECONDS="\${XR_SCP_RETRY_SECONDS:-10}"' "$INSTALL"
-  grep -q 'upload attempt \$attempt failed:' "$INSTALL"
   grep -q 'retrying in \${XR_SCP_RETRY_SECONDS}s' "$INSTALL"
   # The failure shows scp's own words, not only a guess about the vty pool.
   grep -q 'tail -5 "\$RUN_ERR"' "$INSTALL"
   # VTY contention is a possible explanation for resets, not every failure.
-  grep -q "For connection resets, check 'show users'" "$INSTALL"
+  grep -q 'https_rc' "$INSTALL"
 }
 
-@test "the installer opens no SSH session of its own other than the scp helper" {
+@test "HTTPS helper receives one host-key-checked SSH dialogue" {
   # Each file uses this helper. Other device interactions go through RUN(),
   # which wraps lab/xr-run.sh. Count commands, not diagnostic text.
-  count="$(grep -c 'sshpass -e scp' "$INSTALL")"
+  count="$(grep -c 'sshpass -e ssh -tt' "$INSTALL")"
   [ "$count" -eq 1 ]
-  grep -q 'sshpass -e scp' "$INSTALL"
+  grep -q 'sshpass -e ssh -tt' "$INSTALL"
 }
 
 @test "activation (config + commit) is piped through RUN, not sent directly" {
@@ -292,7 +285,8 @@ EOF
 
 _xr_install_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/lab" "$STUBDIR/device" "$STUBDIR/bin"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device" "$STUBDIR/bin" "$STUBDIR/server"
+  cp "$BATS_TEST_DIRNAME/../../server/time_preflight.py" "$STUBDIR/server/time_preflight.py"
   FAKE_STATE_DIR="$BATS_TEST_TMPDIR/state"
   mkdir -p "$FAKE_STATE_DIR"
   FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/xr-commands.log"
@@ -317,7 +311,7 @@ if [ -n "${FAKE_REGISTER_RESET:-}" ] && [ "$cmds" = 'show appmgr source-table' ]
   # The failed install never registered a source; the retry must install it.
   exit 0
 fi
-# The preflight sends both of these in ONE session, so answer each that is
+# The preflight sends these in ONE session, so answer each that is
 # present rather than only the first that matches.
 answered=""
 case "$cmds" in
@@ -329,6 +323,12 @@ esac
 case "$cmds" in
   *"dir harddisk: | include bytes free"*)
     printf '%s\n' "${FAKE_DIR_BYTES_FREE-39929724928 bytes total (39883231232 bytes free)}"
+    answered=1
+    ;;
+esac
+case "$cmds" in
+  *"show ntp status"*)
+    printf '%s\n' "${FAKE_NTP_STATUS-Clock is synchronized, stratum 3, reference is 192.0.2.254}"
     answered=1
     ;;
 esac
@@ -356,7 +356,7 @@ case "$cmds" in
 esac
 STUB
   chmod +x "$STUBDIR/lab/xr-run.sh"
-  # The scp push sources the real trust policy from the tree it runs in.
+  # The SSH session launching device-side HTTPS uses the real trust policy.
   cp "$BATS_TEST_DIRNAME/../../lab/iris-ssh-policy.sh" "$STUBDIR/lab/iris-ssh-policy.sh"
   export IRIS_STATE="$BATS_TEST_TMPDIR/state"   # persistent known_hosts stays local
 
@@ -373,6 +373,16 @@ STUB
   chmod +x "$STUBDIR/bin/sshpass"
 
   ln -sf "$INSTALL" "$STUBDIR/device/xr-install.sh"
+  cat > "$STUBDIR/device/xr_https.py" <<'STUB'
+import os, sys
+with open(os.environ['FAKE_COMMAND_LOG'], 'a') as log:
+    log.write('=== HTTPS: ' + ' '.join(sys.argv[1:]) + '\n')
+    for name in ('iris-xr.rpm', 'iris-catalog.pem', 'iris-instructions.bootstrap'):
+        log.write('/harddisk:/' + name + '\n')
+if os.environ.get('FAKE_HTTPS_FAIL'):
+    print('ERROR: XR HTTPS staging failed', file=sys.stderr)
+    sys.exit(1)
+STUB
 
   RPMFILE="$BATS_TEST_TMPDIR/iris-xr.rpm"
   echo "fake rpm bytes" > "$RPMFILE"
@@ -405,7 +415,7 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  grep -q "${CRTFILE} admin@192.0.2.10:/harddisk:/iris-catalog.pem" "$FAKE_COMMAND_LOG"
+  grep -q '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG"
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   activate_line="$(grep -n 'appmgr application iris activate' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   [ -n "$cert_line" ] && [ -n "$activate_line" ]
@@ -417,8 +427,9 @@ _xr_install_run_live() {
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
   rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
-  # All three actual invocations must select SCP, not OpenSSH's default SFTP.
-  [ "$(grep -c '=== SCP: -e scp -O ' "$FAKE_COMMAND_LOG")" -eq 3 ]
+  # All three artifacts share one SSH-launched HTTPS staging operation.
+  [ "$(grep -c '=== HTTPS: sshpass -e ssh -tt ' "$FAKE_COMMAND_LOG")" -eq 1 ]
+  ! grep -q '=== SCP:' "$FAKE_COMMAND_LOG"
   cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   instruction_line="$(grep -n '/harddisk:/iris-instructions.bootstrap' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   register_line="$(grep -n 'appmgr package install rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
@@ -452,12 +463,20 @@ _xr_install_run_live() {
 
 @test "live: bootstrap upload failure prevents package registration and activation" {
   _xr_install_stub_setup
-  FAKE_SCP_FAIL_MATCH=iris-instructions.bootstrap run _xr_install_run_live
+  FAKE_HTTPS_FAIL=1 run _xr_install_run_live
   [ "$status" -ne 0 ]
-  [[ "$output" == *"XR package/catalog/bootstrap upload failed"* ]]
-  [[ "$output" == *"/harddisk:/iris-instructions.bootstrap (scp/sshpass exit 1)"* ]]
+  [[ "$output" == *"XR HTTPS staging failed"* ]]
   ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
   ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: unsynchronized time prevents HTTPS staging and package registration" {
+  _xr_install_stub_setup
+  FAKE_NTP_STATUS='Clock is unsynchronized, stratum 16, no reference clock' run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"time preflight failed"* ]]
+  ! grep -q '=== HTTPS:' "$FAKE_COMMAND_LOG"
+  ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: parses the running version out of its own preflight show version" {
@@ -565,14 +584,14 @@ _xr_install_run_live() {
   [[ "${lines[${#lines[@]}-1]}" = "onboard complete: 192.0.2.10" ]]
 }
 
-@test "live: the RPM scp verifies the router's host key (never /dev/null known_hosts)" {
+@test "live: HTTPS staging's SSH session verifies the router host key" {
   _xr_install_stub_setup
   FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/cmd.log"; : > "$FAKE_COMMAND_LOG"; export FAKE_COMMAND_LOG
   run _xr_install_run_live
   [ "$status" -eq 0 ] || return 1
-  scp_line="$(grep '=== SCP:' "$FAKE_COMMAND_LOG")"
-  [[ "$scp_line" != *"UserKnownHostsFile=/dev/null"* ]] || return 1
-  [[ "$scp_line" != *"StrictHostKeyChecking=no"* ]] || return 1
-  [[ "$scp_line" == *"StrictHostKeyChecking=accept-new"* ]] || return 1
-  [[ "$scp_line" == *"UserKnownHostsFile=$IRIS_STATE/ssh/known_hosts"* ]]
+  transport_line="$(grep '=== HTTPS:' "$FAKE_COMMAND_LOG")"
+  [[ "$transport_line" != *"UserKnownHostsFile=/dev/null"* ]] || return 1
+  [[ "$transport_line" != *"StrictHostKeyChecking=no"* ]] || return 1
+  [[ "$transport_line" == *"StrictHostKeyChecking=accept-new"* ]] || return 1
+  [[ "$transport_line" == *"UserKnownHostsFile=$IRIS_STATE/ssh/known_hosts"* ]]
 }

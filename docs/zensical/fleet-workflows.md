@@ -8,17 +8,17 @@ SPDX-License-Identifier: Apache-2.0
 
 IRIS separates network onboarding from image assignment. That keeps connectivity data and release intent in different files, which makes review and rollback easier.
 
-These CSV workflows exist for reviewed, repeatable batches. The same inventory, assignment, and onboarding actions are available in the console — see [Bulk device actions](console.md#bulk-device-actions).
+Use the Console for routine inventory, assignment, and onboarding. Use the inventory CSV template for reviewed imports from **Inventory**; role
+CSV import is available under **Policies**. Other templates are not automatically
+accepted by either import. For
+automation, consult registered operations in the
+[interactive API reference](swagger/index.html) or [OpenAPI contract](openapi.yaml).
+The API exposes per-device image assignment, not a bulk-assignment endpoint.
 
 ## Inventory
 
-Start from the template:
-
-```bash
-cp fleet/devices.csv.example fleet/devices.csv
-```
-
-The inventory is a management-type-aware, named-header **CSV**. Every device
+Use `fleet/devices.csv.example` as the management-type-aware, named-header
+**CSV** template. Every device
 declares a `management_type`: `routed` (IRIS creates a dedicated VLAN and SVI),
 `inband` (the agent attaches to an existing operator-owned management VLAN),
 `router-routed` (an IRIS-managed VirtualPortGroup subnet), `router-nat` (that
@@ -47,10 +47,11 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - `model` and `platform` may be blank in imported inventory. In Add Device,
   **management type controls which network fields appear**. Editing the model
   or agent choice does not change that type. XR host uses `xr-appmgr`; router
-  modes use `router`. Routed and inband modes require an explicit compatible
+  modes offer Guest Shell (`router`) or IOx (`iox`). Routed and inband modes require an explicit compatible
   Guest Shell or IOx choice. Known models limit installer choices; conflicts
-  appear in the form. Model is optional free text: you can enter `C3650`, but
-  saving it does not confirm hardware support. When an imported platform is
+  appear in the form. Add Device uses a required **Model series** dropdown;
+  the API and CSV also accept exact model numbers. Choosing a series or saving
+  a model does not confirm hardware support. When an imported platform is
   blank, onboarding can select an installer for a known IOS-XE model; it
   refuses devices it cannot classify.
 - **router-routed** — fill `app_ip`, `app_mask`, `app_gateway`, and
@@ -61,9 +62,11 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
   8000 family and is lab-tested on Catalyst 8000V; see
   [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
-- **xr-host** — use `platform=xr-appmgr` on supported IOS-XR routers, Cisco 8000-series and NCS,
-  routers and leave every addressing, VPG, and NAT field empty. Onboarding
-  requires a current `artifacts/iris-xr.rpm`.
+- **xr-host** — use `platform=xr-appmgr` on an IOS-XR router and leave every
+  addressing, VPG, and NAT field empty. This selects the XR appmgr recipe; it
+  does not establish model-level validation. See [Validated platforms](validation.md#validated-platforms)
+  for recorded hardware coverage. Onboarding requires a current
+  `artifacts/iris-xr.rpm`.
 
 See [Management Type and VLAN Ownership](management-type.md) for the full
 ownership rules.
@@ -107,33 +110,21 @@ reviewable, Git-friendly file.
 
 The optional `role` inventory column declares one lowercase role per device.
 Copying or re-importing an older pre-role CSV does not clear membership, and a
-blank `role` cell preserves the stored value. Clear it explicitly through the
-role API, the Console's **Set role** action, or:
-
-```bash
-iris-role set DEVICE_ID - --dry-run
-iris-role set DEVICE_ID - --confirm '<preview token>'
-```
+blank `role` cell preserves the stored value. Use **Inventory → More actions → Set role…**
+action to change or clear membership. The versioned API exposes role-write
+operations; see the [OpenAPI contract](openapi.yaml) for dry-run, confirmation,
+and revision requirements.
 
 Role definitions have their own round-trippable file. Lists in `peers` and
 `nets` are semicolon-separated; rates are integer bytes per second and `*_s`
 values are integer seconds.
 
 `fleet/roles.csv.example` is the tracked template. The real
-`fleet/roles.csv` is operator-owned and ignored by Git; keep its review and
-backup controls with the rest of your site inventory.
+`fleet/roles.csv` is operator-owned and ignored by Git; review and back it up
+with the rest of your site inventory.
 
-```bash
-cp fleet/roles.csv.example fleet/roles.csv
-iris-role import fleet/roles.csv --dry-run
-iris-role import fleet/roles.csv --confirm '<preview token>'
-iris-role export > fleet/roles.exported.csv
-```
-
-The Console offers the same file round trip: **Peer policy → Role
-definitions → Import CSV… / Export CSV** on the Devices page use one shared
-parser and writer with `iris-role`, so either surface's export imports in the
-other. The Console also edits single definitions in place; see
+The Console offers role CSV import/export under **Policies → Role
+definitions**, and edits single definitions in place; see
 [Console](console.md#role-definitions).
 
 Import validates the whole role graph before writing, including references,
@@ -195,33 +186,13 @@ token-refresh endpoint.
 
 ## Assignments
 
-Start from the template:
+Use the Devices page to assign images to one device or a reviewed selection.
+API automation uses `POST /api/v1/devices/{device_id}/assign` for each device
+already in inventory. The `image_ids` list **replaces** its assignment; include
+every image you want to keep. The Console/API does not provide an assignment
+CSV import or a bulk-assignment endpoint. See the
+[API reference](swagger/index.html) for payloads and conflict checks.
 
-```bash
-cp fleet/assignments.csv.example fleet/assignments.csv
-```
-
-Assignments are release intent, one image per device per row. The CSV requires
-each device id once; applying that row adds its image without discarding images
-already assigned to the device:
-
-```text
-device_id,image_id
-```
-
-Apply them:
-
-```bash
-tools/apply-assignments.sh fleet/assignments.csv
-```
-
-The script validates all rows first, then applies assignments. That avoids partially applying a malformed file.
-Each target must already exist in fleet inventory. The command-line
-To add several images in one operation, use
-`iris-assign DEVICE IMAGE [IMAGE ...]`, which also merges by default. Use
-`iris-assign --replace DEVICE IMAGE [IMAGE ...]` only when the reviewed intent
-is to replace the set and remove images that are no longer listed. The Console
-and assignment API keep replacement semantics.
 The agent picks up assignments on its next policy poll. Approval alone is not
 staging activity: the Console shows **Waiting for staging** until the device
 reports work, then uses that device's progress and errors.
@@ -235,17 +206,11 @@ verb, and neither of these two installs, activates, changes a boot variable, or
 reloads anything. A scheduled window stages images and nothing else — the same
 hard limit that applies to every other path into IRIS.
 
-Create one from the Console (**Devices → Schedule…**, or the **Schedules**
-panel) or from the CLI, which reads and writes the same durable store:
-
-```bash
-iris-schedule list
-iris-schedule create core-wave --file core-wave.json
-iris-schedule get core-wave
-iris-schedule patch core-wave --file pause.json --if-match '"iris-schedule-core-wave-3"'
-iris-schedule export > fleet/schedules.exported.csv
-iris-schedule import fleet/schedules.csv
-```
+Create schedules in the Console (**Devices → Schedule…** or the **Schedules**
+panel). The versioned API exposes list/read/create/update/delete, occurrences,
+execution outcomes, and reaffirm operations; see the [OpenAPI contract](openapi.yaml) for
+the accepted schema and conditional-write requirements. Do not assume schedule
+CSV import/export is available through that API.
 
 ### What a schedule targets
 
@@ -318,13 +283,11 @@ paths can collide. The Console shows a **Scheduled** marker on the row of any
 device a pending schedule's approved preview names, so a manual assignment is
 not made in ignorance of one.
 
-The collision that actually loses work is narrowing:
-`iris-assign --replace DEVICE IMAGE` replaces the whole approved set with the
-single image named, including images a schedule put there — and a scheduled
-assignment with `"mode":"replace"` does the same to a manual one. Merge mode
-(the default on both paths) adds without removing. Every scheduled outcome
-records `before_image_ids`, `after_image_ids` and `removed_image_ids`, so a
-narrowing is visible after the fact even when nobody expected it.
+The collision that actually loses work is narrowing: a manual replacement or
+a scheduled assignment with `"mode":"replace"` replaces the whole approved
+set, including images assigned by the other path. Merge mode adds without
+removing. Every scheduled outcome records `before_image_ids`, `after_image_ids`
+and `removed_image_ids`, so a narrowing is visible after the fact.
 
 ## Workflow map
 

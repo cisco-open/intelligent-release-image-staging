@@ -58,6 +58,46 @@ def test_console_image_bakes_only_canonical_api_docs():
                    for line in console.splitlines())
 
 
+def test_console_runtime_retains_asset_licenses():
+    from pathlib import Path
+    import test_dockerignore
+
+    root = Path(_SERVER).parent
+    runtime = _read("Dockerfile.console").split("FROM python:3.12-slim-trixie", 1)[1]
+    assert "COPY LICENSE NOTICE /opt/iris/" in runtime
+    assert "COPY server/webroot/ /opt/iris/server/webroot/" in runtime
+    patterns = test_dockerignore.load_patterns()
+    for relative in ("LICENSE", "NOTICE", "server/webroot/fonts/Inter-OFL.txt"):
+        assert (root / relative).is_file()
+        assert not test_dockerignore.excluded(relative, patterns)
+    assert "Apache License" in (root / "LICENSE").read_text()
+    assert "Roboto Mono" in (root / "NOTICE").read_text()
+    html = _read("webroot/index.html")
+    license_notice = html.split("Phosphor Icons —", 1)[1].split("-->", 1)[0]
+    for clause in (
+        "Copyright (c) 2023 Phosphor Icons",
+        "Permission is hereby granted, free of charge",
+        "The above copyright notice and this permission notice shall be included in all",
+        'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND',
+        "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE",
+    ):
+        assert clause in license_notice
+
+
+def test_console_builds_local_browser_assets_without_node_in_runtime():
+    console = _read("Dockerfile.console")
+    builder, runtime = console.split("FROM python:3.12-slim-trixie", 1)
+    assert "FROM node:24-bookworm-slim AS console-ui-build" in builder
+    assert "COPY server/console-ui/package.json server/console-ui/package-lock.json ./" in builder
+    assert "RUN npm ci --no-audit --no-fund" in builder
+    assert "COPY server/console-ui/src/ ./src/" in builder
+    assert "RUN npm run build" in builder
+    assert builder.index("RUN npm ci") < builder.index("COPY server/console-ui/src/")
+    assert "COPY --from=console-ui-build /build/console-ui/dist/ /opt/iris/server/webroot/assets/" in runtime
+    assert "npm" not in runtime and "node_modules" not in runtime
+    assert 'ENTRYPOINT ["python3", "/opt/iris/server/gui_server.py"]' in runtime
+
+
 def test_console_api_docs_need_no_state_or_documentation_mounts():
     import yaml
     allowed_targets = {

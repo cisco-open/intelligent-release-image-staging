@@ -7,16 +7,19 @@ SPDX-License-Identifier: Apache-2.0
 # Getting Started
 
 This path brings up the IRIS server and Console tiers, publishes an image,
-onboards devices, and assigns an image to a device. Docker Compose
+onboards devices, and assigns an image to a device. IRIS verifies and stages
+images only; it never installs or activates them, reloads a device, changes boot
+variables, or mutates running software. Docker Compose
 runs the two-container stack on one host by default. To place the Console on another
 host, follow [Docker on separate hosts](docker-hosts.md).
 
 For an assistant-led deployment that chooses and verifies either Docker
 layout, use [AI-guided PoC](aiagent.md).
 
-Start from the command line on an empty host. Once both services are running
-and the required device packages are built, use the browser for image import, device onboarding, and assignments — see
-[Web Console](console.md). Native package builds still run on the Docker host.
+Complete host deployment, package preparation, and trust provisioning first.
+Then use the [Console](console.md) or [API](swagger/index.html) for image import,
+device onboarding, and assignments. The API does not replace host provisioning
+or offline signing by a root custodian.
 
 ## Prerequisites
 
@@ -30,122 +33,59 @@ and the required device packages are built, use the browser for image import, de
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used by server-side device operations. IOx also needs an IOS-XE credential for agent SSH-to-self. Do not commit real credentials. |
-| Device-image build inputs | The IOx/XR builder always creates an amd64 + arm64 OCI image, so both pinned `aria2c` binaries and a builder able to run both architectures are required. On an amd64 host, the IOx staging helper can register ARM64 emulation using an audited `BINFMT_IMAGE_DIGEST`; see [IOx builds](iox.md#build-and-stage-for-console-onboarding). |
+| Device-image build inputs | The standard startup helper builds both IOx architectures, requiring both pinned `aria2c` binaries and a builder able to run them. The underlying device-image builder supports an explicit amd64-only build for a narrower deployment. On an amd64 host, the IOx staging helper can register ARM64 emulation using an audited `BINFMT_IMAGE_DIGEST`; see [IOx builds](iox.md#build-and-stage-for-console-onboarding). |
 
 ## Obtain the handed-in inputs
 
-A fresh clone has neither of these, on purpose, and
-`tools/start-compose-server.sh` reports both before it builds anything.
+A fresh clone intentionally omits release binaries and trust roots.
+`tools/start-compose-server.sh` checks for them before building.
 
-### The `aria2c` client
+### The aria2c client
 
-Install it for both architectures you need:
+For the usual amd64 server path, fetch the pinned client:
 
 ```bash
 tools/get-aria2c.sh amd64
-tools/get-aria2c.sh --no-install arm64
 ```
 
-The helper fetches this project's published deliverable, refuses anything that
-does not match `tools/aria2c.sha256`, and keeps a verified copy in
-`deliverables/`, where the device-package builders look. The second line is
-only for IOx on IE-3400 and other IE-3x00 devices.
-
-`bin/` holds one client, the x86_64 one the server image copies, so
-`--no-install` collects the arm64 deliverable without replacing it. Without
-that flag the arm64 binary lands in `bin/aria2c` and the next server image
-build fails its architecture check.
-
-A host with no route to that release can take a hand-in instead — at
-`deliverables/aria2c-<cpu>`, or via `ARIA2C_DELIVERABLE` — or build one:
-
-```bash
-mkdir -p tools/aria2c-build/vendor
-git clone https://github.com/AnInsomniacy/aria2-next \
-  tools/aria2c-build/vendor/aria2-next
-git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
-(cd tools/aria2c-build && ./build.sh x86_64)
-```
-
-A binary you built will not match `tools/aria2c.sha256`, and
-`tools/get-aria2c.sh` fails closed on that, so adopting it is deliberate: copy
-`tools/aria2c-build/out/x86_64/aria2c` to `deliverables/aria2c-x86_64`, put its
-`sha256sum` on the `x86_64` line of `tools/aria2c.sha256`, and record what you
-built. That local modification is expected; never edit the file to clear a
-mismatch on a binary you did not build, and a mismatch on the downloaded asset
-means the asset is wrong and must not be adopted. Leave the file
-world-readable: the server image copies it in and reads it as the runtime uid,
-so a rewrite that lands as `0600` — which an atomic write through a temporary
-file does by default — breaks the build that uses it. Run
-`chmod 0644 tools/aria2c.sha256` after editing.
-
-The `aarch64` build is the expensive fallback: it compiles under emulation,
-takes tens of minutes and keeps every core busy. Start it detached so a closing
-SSH session cannot cancel the `buildx` client, and leave Docker's cache alone:
-
-```bash
-cd tools/aria2c-build
-setsid nohup ./build.sh aarch64 > build-aarch64.log 2>&1 < /dev/null &
-```
-
-It has no exit status to collect that way. It finished if the log ends with a
-size gate (`UNDER TARGET` or `OVER TARGET`, not `HARD FAIL`) and
-`out/aarch64/aria2c` exists. It is safe to rerun; the layer cache makes a
-second attempt much shorter.
-[`tools/aria2c-build/README.md`](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md)
-covers the patch set, the pinned toolchain, and publishing a new deliverable.
+For IOx ARM64 builds, also fetch `tools/get-aria2c.sh --no-install arm64`;
+this keeps the server's amd64 `bin/aria2c` in place. The helper verifies
+published inputs against `tools/aria2c.sha256`. Hand-in and source-build
+fallbacks are documented in the
+[aria2c build guide](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-build/README.md).
 
 ### The `ioxclient` packaging profile
 
-Nothing to prepare. `ioxclient` refuses every command until a configuration
-file exists in `HOME` and tries to create one interactively, which stops a
-scripted run at its password prompt, so `device/iox/build.sh` writes an inert
-packaging profile into a scratch `HOME` for the length of the `ioxclient
-package` call and discards it with the build context.
-
-That keeps packaging offline and hermetic, and keeps an operator profile — which
-may hold a real device address and credential — out of a step that only
-assembles and signs a directory. `IOXCLIENT_HOME` points the call at a prepared
-profile when one is genuinely needed; it must never carry a real device
-credential.
+No operator profile is needed. The builder supplies a temporary inert profile
+for packaging and discards it; `IOXCLIENT_HOME`, if set, must not contain real
+device credentials.
 
 ### ARM64 emulation
 
-The arm64 package builders need Docker's arm64 emulation on an amd64 host: the
-device image runs `apk add` and `chmod` steps inside the target platform, so
-the package cannot be assembled without it even though the `aria2c` client
-itself is fetched rather than compiled.
-Check for it, and prefer your distribution's static QEMU package, which needs
-no digest and no privileged container:
-
-```bash
-grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
-```
-
-Where that is unavailable, the builders register the handler themselves and
-require `BINFMT_IMAGE_DIGEST` rather than pulling a floating tag. Review the
-`tonistiigi/binfmt` tag you intend to use, resolve it to a digest, and export
-it:
-
-```bash
-docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
-  --format '{{println .Manifest.Digest}}'
-export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
-```
+ARM64 package builds on amd64 need QEMU/binfmt. The IOx guide covers checking or
+registering an audited, digest-pinned handler:
+[IOx builds](iox.md#build-and-stage-for-console-onboarding).
 
 ### The two instruction roots
 
-Every device package embeds exactly two public roots and the build fails closed
-without them. Create them yourself — no installer generates trust anchors — and
-keep `~/iris-roots` holding the two public keys and nothing else:
+Every package embeds exactly two distinct public trust roots. Generate them
+yourself with real passphrases, and keep the private halves offline with
+separate custodians. Copy only the public halves into an otherwise empty
+`~/iris-roots` directory:
 
 ```bash
-install -d -m 0700 ~/iris-custody && ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a && ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b && rm -rf ~/iris-roots && install -d -m 0755 ~/iris-roots && install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/ && ls -A ~/iris-roots
+install -d -m 0700 ~/iris-custody
+ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a
+ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b
+install -d -m 0755 ~/iris-roots
+install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/
+ls -A ~/iris-roots
 ```
 
-Use a real passphrase at each prompt; the last command must print exactly the
-two `.pub` names. In production run the two `ssh-keygen` commands on separate
-custodians' machines and carry only the public halves over. See
+Verify the final listing contains exactly the two `.pub` files. In production,
+generate each root on a separate custodian's machine and carry only public
+halves across. The [custody ceremony](operations.md#instruction-root-ceremony-and-recovery)
+covers rotation and recovery. Installers never generate trust anchors. See
 [Prepare instruction trust](#prepare-instruction-trust).
 
 ## Configure the server
@@ -222,90 +162,24 @@ manually created volumes, check [Volume permissions](server.md#volume-permission
 
 ## Start the server
 
-`start-compose-server.sh` is the whole first start. Before it builds anything
-it checks every input a fresh clone lacks and reports all of them in one list:
-the handed-in `aria2c` (`bin/aria2c`), `ioxclient`, the per-architecture
-`aria2c` deliverables the IOx builder needs, and the two instruction-root
-public keys. It then grants uid 10001 the `artifacts/` directory (or tells you
-the exact `chown`), builds the images, initializes a fresh encrypted config
-volume, installs the two public roots, starts the stack, waits for health, and
-builds the Guest Shell bundle (self-provisioned by the server), both IOx
-packages and the XR RPM — everything the Console's **Device packages** screen
-lists. From the repository root:
+From the repository root, with the prerequisites and permissions above prepared:
 
 ```bash
-tools/get-aria2c.sh amd64
 IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
 
-`IRIS_INSTRUCTION_ROOTS_DIR` defaults to `instr-roots/` in the repository and
-must hold exactly two `.pub` files and nothing else. The helper reads those
-public halves and **never creates roots**: they come from the
-[custody ceremony](operations.md#instruction-root-ceremony-and-recovery), and
-the private halves stay with their custodians. Set `IRIS_SKIP_XR=1` on a
-deployment with no XR devices.
+The helper bootstraps encrypted configuration, installs the two public roots,
+starts the server and Console, and builds the device packages. It builds the XR
+RPM unless `IRIS_SKIP_XR` is set. It never creates trust roots.
 
-`iris-bootstrap` never overwrites existing encrypted state on a plain run: a
-volume that already holds all three `.age` files (and whose files decrypt with
-the mounted identity) is left untouched, and a volume holding only some of them
-is refused rather than silently regenerated. Name the one missing file with
-`--repair <secrets.json|rpc-secret|tls/key.pem>` to recreate just that file. To
-add a break-glass recipient later, run
-`IRIS_AGE_RECIPIENTS=<primary>,<break-glass> iris-bootstrap --rekey`, which
-re-encrypts the existing store without touching any token, key, or the pinned
-certificate. `--force --yes` is disaster recovery only: it mints new secrets and
-a new certificate, so every onboarded device must be re-onboarded with the new
-runtime trust anchor. The deployment-neutral IOx and XR packages can be reused
-unless their agent source also changed. Set both recipients on the first
-bootstrap so either identity can recover the store.
+Check the helper's exit status and **Settings → Device packages**. A reachable
+Console does not mean package preparation succeeded. Package readiness checks
+do not replace a source rebuild or prove native device acceptance; follow
+[package rebuilds](development.md#embedded-agent-packages) after agent changes.
 
-The server container exposes the tracker, catalog, artifact server, seeder data
-port, and telemetry endpoints. The separate state-free Console publishes 8080
-and reaches the server's internal 9443 management API with a file-mounted,
-rotatable credential over pinned HTTPS. The age-encrypted server store lives
-on `iris-config` and is decrypted into `/run/iris` tmpfs; the Console does not
-mount that volume. The separate tier credential persists in `iris-tier-auth`.
-
-After the container becomes healthy the helper runs
-`tools/provision-iox-packages.sh`, which produces `iris-arm64.tar` for IE-3400
-and `iris-amd64.tar` for Catalyst 9300 IOx as deployment-neutral wrappers of
-the same canonical device image, and then `tools/build-xr-package.sh` for the
-XR RPM, placed through the running container so `artifacts/` stays owned by
-the runtime uid. Onboarding supplies the current public server certificate
-separately as IOx application data.
-
-Because the hand-ins are checked up front, a build failure after the stack is
-up is now limited to emulation or the build itself; a reachable Console still
-does not mean packages are ready, so read the helper's exit status. Fix the
-reported problem and rerun `tools/provision-iox-packages.sh` or
-`tools/build-xr-package.sh --out artifacts/`. A Guest Shell-only deployment can
-bring up the two services without native package builds:
-
-```bash
-docker compose -f server/docker-compose.yml build --pull
-docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
-docker compose -f server/docker-compose.yml run --rm \
-  -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
-  'install -d -m 0755 "$IRIS_CONFIG/instr" "$IRIS_CONFIG/instr/roots.d" && \
-   install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'
-docker compose -f server/docker-compose.yml up -d
-```
-
-The third command is the one `start-compose-server.sh` would have run for you:
-it installs the two public roots into the server's config volume, which is a
-different thing from handing them to the package builders. Without it the
-server cannot self-provision a trust-bound Guest Shell bundle, and nothing
-reports the omission. Confirm it with
-`docker compose -f server/docker-compose.yml exec iris ls -l "$IRIS_CONFIG/instr/roots.d"`.
-
-For IOS-XR, also run `tools/build-xr-package.sh --out artifacts/`; the startup
-helper does not build the RPM. Check the artifacts and manifests in
-**Settings → Device packages** before onboarding. Readiness checks wrapper
-bytes against their build manifests and checks the distributed runtime
-certificate separately. It does not detect newer agent source or verify native
-signatures. After source changes, follow the complete
-[package rebuild procedure](development.md#embedded-agent-packages), including
-replacement of an existing canonical image when needed.
+Existing encrypted state is preserved by a normal bootstrap. Do not force-reset
+a deployment to resolve a missing file or package. Use the recovery guidance in
+[Operations](operations.md) and preserve its volumes, identity, and certificates.
 
 ## Create the console admin
 
@@ -322,43 +196,34 @@ permanently ends that special behavior.
     restricted to a trusted management network and complete this step
     immediately after deployment.
 
-Or set the admin account from the container instead:
-
-```bash
-docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
-```
-
-For scripted setup, pass `IRIS_GUI_ADMIN_PASSWORD` into the `iris-gui-admin`
-process; setting it only in the host shell does not pass it through
-`docker compose exec`.
+For automation, the API exposes login and first-admin setup with the same
+setup-grant requirements; see the [API reference](swagger/index.html). Host-level
+administrator recovery is a separate [maintenance task](operations.md).
 
 ## Publish an image
 
-The Compose file mounts `IRIS_IMAGE_ROOT` from the host at `/opt/images`
-(`IRIS_IMAGE_ROOT` defaults to `/opt/images`). Publish from inside the container
-so the seeder RPC remains local-only:
+In **Images**, upload a file or choose **Import from disk** for an eligible file
+already available to the server. API equivalents are:
 
-```bash
-docker compose -f server/docker-compose.yml exec iris \
-  iris-publish /opt/images/iosxe/c9300/<image>.bin
-```
+- `PUT /api/v1/images/upload/{filename}`
+- `GET /api/v1/images/importable`
+- `POST /api/v1/images/import`
 
-`iris-publish` computes `sha256` and `sha512`, creates a private torrent, hands it to the seeder, and records catalog metadata. The server can check the recorded `sha512` against Cisco's signed Bulk Hash feed and quarantines the image on a mismatch; what the device checks is the staged file's `sha256` against this catalog entry.
+Follow the returned image job to completion before assigning the image. Use the
+[API reference](swagger/index.html) for request bodies, session/CSRF requirements,
+and responses.
+
+Publishing records SHA-256 and SHA-512 metadata. Device agents verify the
+download against catalog SHA-256. The separate Cisco Bulk Hash check can
+quarantine a mismatch; publication alone is not proof of a matching vendor hash.
 
 ### Import an image already on disk
 
-Uploading a multi-gigabyte file through the browser is unnecessary when the file
-is already on the server. The **Import from disk** panel on the Console Images
-screen lists every eligible `.bin`, `.iso`, `.tar`, or `.rpm` under the uploads
-volume (`IRIS_IMAGES_DIR`) and read-only import root (`IMAGES_ROOT`) that is not
-yet in the catalog, and
-publishes it in place with one click. Nothing is copied, and the `.torrent` is
-written to the state directory rather than next to the image, so the read-only
-import root stays read-only. See
-[Importing images already on disk](server.md#importing-images-already-on-disk)
-for what makes a file eligible, and
-[Import skip reasons](reference.md#import-skip-reasons) for the reasons a file is
-listed greyed out instead.
+The default host import root is `/opt/images`, configured through
+`IRIS_IMAGE_ROOT`. The Console lists eligible files and explains why others
+cannot be imported. Import uses the existing file in place; keep it available
+to the server while it is published. See
+[import requirements](server.md#importing-images-already-on-disk).
 
 ## Prepare instruction trust
 
@@ -387,11 +252,10 @@ docker exec iris iris-instr-key initialize
 docker exec iris iris-instructions --status
 ```
 
-Copy the public half out of the config volume as shown, not out of
-`$IRIS_RUN`: the runtime directory is a tmpfs and `docker cp` cannot read a
-tmpfs mount, so an export written there succeeds and then cannot be found from
-the host. Signing uses the **private** root and prompts for its passphrase; it
-is the one step no installer or assistant performs.
+Export the public half from the config volume as shown, not the runtime tmpfs;
+see [Docker's copy limitations](https://docs.docker.com/reference/cli/docker/container/cp/#corner-cases).
+Signing uses the **private** root and its passphrase and remains a custodian's
+responsibility.
 
 `iris-instr-key initialize` activates the producer, which is the authority half
 of this: the certificate alone leaves the stamper without an activated epoch,
@@ -428,88 +292,39 @@ private keys never belong in platform configuration. See the
 
 ## Prepare devices
 
-Create an inventory from the template:
+Use **Devices → Add Device** or import inventory in the Console. API automation
+uses `POST /api/v1/devices` or `POST /api/v1/devices/import-csv`.
 
-```bash
-cp fleet/devices.csv.example fleet/devices.csv
-```
+Select a platform and management type, then supply the required connectivity
+fields and a credential profile. These choices control onboarding, not just
+inventory labels. See [management types](management-type.md#inventory).
 
-The inventory contains network onboarding information only, as a
-management-type-aware CSV. Each device declares `routed`, `inband`,
-`router-routed`, `router-nat`, or `xr-host` as its `management_type`:
+For Cisco 8000 and NCS IOS-XR routers, use `xr-host` and `xr-appmgr`, without
+VLAN, SVI, app-address, VPG, or NAT fields. The app uses router networking and
+must reach the catalog; management SSH reachability alone does not prove that.
+This recipe does not select a VRF.
 
-```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
-```
-
-Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
-columns (`inband_vlan`, `app_*`) for inband devices. The Add Device form requires
-an explicit management type and `platform`: `guestshell`, `iox`, `router`, or
-`xr-appmgr`. Management type controls which network fields appear and bounds
-the installer choices; model can narrow those choices further. Model is free
-text and changing it does not change management type. Existing inventory
-and CSV imports may leave the field blank as an inventory-only transition state,
-in which case onboarding resolves known IOS-XE models and refuses uncertainty.
-See
-[Inventory](management-type.md#inventory).
-
-For a Catalyst 8000 router, use `router-routed` with a VPG number, plus routes
-you provide between the app subnet and IRIS, or `router-nat` with an outside
-interface, which adds static TCP PAT on port 6881. Both router modes stage to
-`bootflash:` only, so size it for about 2× the image plus 200 MB. Support is
-designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
-[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
-
-For a Cisco 8000-series or NCS IOS-XR router, use `management_type=xr-host` and
-`platform=xr-appmgr`; leave every VLAN, SVI, app-address, VPG, and NAT field
-empty. XR uses the router's host network, so no app IP is needed. Build
-`artifacts/iris-xr.rpm` and its manifest before onboarding.
-See [platform validation](validation.md) for the tested models and lifecycle
-coverage; NCS-540 package transfer and app startup are verified, while
-heartbeat and staging validation remain pending a working catalog network path.
-The app's network must reach the catalog; router management access alone
-does not establish that connectivity, and this recipe does not select a VRF.
-
-Onboard through the **Console** or API. The server creates a durable deployment
-record, delivers enrollment credentials and certificate trust, and uses the
-record to determine what it owns during undeploy.
+Onboard from the Console or `POST /api/v1/devices/{device_id}/onboard`.
+Follow the job and wait for an agent heartbeat before assigning an image.
+Onboarding creates a deployment record used for ownership-aware undeploy.
+Check [device requirements](device-agents.md) for the selected platform.
 
 ## Assign images
 
-Create assignments from the template:
+Select an image for the device in the Console. API automation uses
+`POST /api/v1/devices/{device_id}/assign`; its ordered `image_ids` list
+**replaces** the assignment rather than merging it. Preserve images you still
+want assigned and use the documented conflict checks when updating concurrently.
 
-```bash
-cp fleet/assignments.csv.example fleet/assignments.csv
-```
+Agents poll for assignments, transfer and verify the image, then report staging
+status. Confirm that status in the Console or
+`GET /api/v1/devices/{device_id}/reports`; a successful assignment request does
+not mean the download is complete.
 
-Each row maps a device to the approved image id:
-
-```text
-device_id,image_id
-```
-
-Apply the assignments from the server host:
-
-```bash
-tools/apply-assignments.sh fleet/assignments.csv
-```
-
-This requires the running `iris` container by that name; set
-`IRIS_CONTAINER=<name>` if yours differs.
-Each CSV device id appears once, and its image is merged into that device's
-existing ordered assignment. Use `iris-assign DEVICE IMAGE [IMAGE ...]` to add
-several directly, or `iris-assign --replace DEVICE IMAGE [IMAGE ...]` when the
-reviewed intent is to remove images omitted from the new set.
-
-Agents poll the catalog, transfer assigned images, verify them, and stage them
-on the device filesystem. Removing an assignment stops that image's torrent
-and clears its working copy after the next successful due policy poll and
-successful aria2 policy apply, including when the last assignment is removed.
-Signed logical cadence and catalog/RPC failures can delay that cleanup.
-IOS-XE keeps the placed root file for reuse. XR removes root files recorded as
-IRIS downloads; operator-adopted files and files with unknown ownership remain.
-See [Unassigned image park](device-agents.md#unassigned-image-park) for storage
-and ownership rules.
+Removing an assignment stops its torrent and cleans owned working files after
+a successful policy update. Platform storage and ownership rules differ; do not
+assume it deletes every staged image. See
+[unassigned image handling](device-agents.md#unassigned-image-park).
 
 ## Open the console
 

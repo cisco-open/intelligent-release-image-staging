@@ -885,7 +885,8 @@ class Telemetry:
     def emit_policy_event(self, entry, status):
         """Queue the canonical policy-operation record on this stable queue.
         This remains accepting when the OTLP transport is disabled."""
-        return self.log_queue.emit(otlp.build_policy_record(entry, status))
+        return self.log_queue.emit(otlp.build_policy_record(entry, status),
+                                   accept_duplicate=True)
 
     def note_announce(self):
         with self._lock:
@@ -1254,7 +1255,7 @@ class Telemetry:
                 self._emit_transfer_lifecycle()
             except Exception:
                 pass                        # telemetry never breaks on bad input
-            delivered = self._flush_logs(now)
+            self._flush_logs(now)
         if self.metrics_exporter is not None:
             # Every pass exports the latest snapshot (conflation, spec 7.5) —
             # NOT gated on transfers existing: the rejected-samples counter and

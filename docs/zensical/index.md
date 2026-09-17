@@ -6,117 +6,51 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRIS Documentation
 
-IRIS, Intelligent Release and Image Staging, stages Cisco images and patches across a network before an operator performs any install or reload activity. It combines a private BitTorrent swarm, an authenticated HTTPS catalog, per-device assignments, and a shared device agent.
+IRIS — Intelligent Release and Image Staging — distributes Cisco images and
+patches through a private peer-to-peer swarm. Devices verify and stage assigned
+images; operators remain responsible for software installation and reloads.
 
-IRIS reports staging progress and transfer measurements. These distinguish origin traffic, peer traffic, and bytes that could not be attributed to a device. See [Telemetry Export](telemetry-export.md) for the measurements and their limits.
+!!! warning "Stage only"
+    IRIS never installs or activates a staged software image, changes boot
+    variables, or reloads a device. Onboarding deploys the IRIS agent, not the
+    software image being staged.
 
-!!! warning "Stage-only invariant"
-    IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
-
-!!! note "You do not need the CLI to run IRIS"
-    Bringing the server up is a command-line task. After that, publishing images, assigning them, onboarding and undeploying devices, and watching progress are all done in the [web console](console.md). The command-line steps shown throughout these pages are the same operations for people who want them scripted or reviewed in CSV — see [When to use the CLI](console.md#when-to-use-the-cli).
+Use the [Console](console.md) for everyday operations and the
+[API reference](swagger/index.html) for automation. Server deployment and
+offline trust provisioning are separate administrative tasks.
 
 ## What IRIS provides
 
-| Area | Purpose |
-| --- | --- |
-| Server stack | A stateful tracker/catalog/seeder/artifact/telemetry tier plus a separate, stateless web Console and encrypted state. |
-| Web console | Browser workflow for images, devices, assignments, onboarding, swarm status, settings, and audit events. |
-| Management types | Per-device **routed**, **inband**, **router-routed**, **router-nat**, or **xr-host**, with a record-backed deployment lifecycle. |
-| Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
-| Catalyst 8000 router | Guest Shell or the IOx app through an IRIS-owned VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and record-backed undeploy. |
-| IOx app | The shared IOx/XR image packaged for IE-3400 (arm64, stages to `sdflash:`) or SSD-equipped Catalyst 9300 (amd64, stages to `flash:` through the SSD share; the CLI installer's own default is `sdflash:`). |
-| IOS-XR appmgr agent | The same device image packaged for appmgr on Cisco 8000 and NCS IOS-XR routers, using the router's network and a direct `harddisk:` bind mount. Cisco 8201 lifecycle is lab-validated; NCS-540 package transfer and app startup are verified, with heartbeat and staging validation pending a working catalog network path. See [validation](validation.md). |
-| Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
-| Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer transfer records naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |
-| Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, peer-distribution counters, and structured audit trail. |
-| Image verification | Compares catalog images against Cisco's published Bulk Hash feed by sha512 and quarantines a mismatch until an operator resolves it. |
+- Image upload/import, device inventory, assignments, and agent lifecycle management.
+- Peer-assisted delivery governed by device assignments and peer policy.
+- Staging status, transfer measurements, audit events, and optional telemetry export.
+- Guest Shell, IOx, and IOS-XR appmgr deployment paths for eligible Catalyst,
+  Industrial Ethernet, Cisco 8000, and NCS devices.
 
-## Release model
-
-```mermaid
-flowchart LR
-    Operator["Operator"] --> Publish["Publish image"]
-    Publish --> Catalog["Catalog metadata"]
-    Publish --> Torrent["Private torrent"]
-    Torrent --> Seeder["Seeder"]
-    Catalog --> Policy["Per-device assignment"]
-    Policy --> Agent["Device agent"]
-    Seeder --> Agent
-    Agent --> Verify["Hash verification"]
-    Verify --> Stage["Stage image on device storage"]
-    Stage -. "operator-controlled" .-> Install["Install or reload outside IRIS"]
-```
+Platform family names describe deployment paths, not compatibility with every
+model or software release. Check [device requirements](device-agents.md) before
+onboarding. Peer delivery depends on connectivity, policy, and available pieces;
+it is not a fixed performance guarantee.
 
 ## Where to start
 
-| If you want to… | Read |
+| Task | Guide |
 | --- | --- |
-| Drive the whole workflow from a browser | [Web Console](console.md) |
-| Stand up a lab and stage one image | [Getting Started](getting-started.md) |
-| Understand the trust boundaries before touching production | [Architecture](architecture.md), then [Security Model](security.md) |
-| Decide how a device attaches to the network | [Management Type and VLAN Ownership](management-type.md) |
-| Run a rollout across many devices | [Web Console](console.md), then [Network Workflows](fleet-workflows.md) |
-| Find out how much of a rollout the peers carried | [Telemetry Export](telemetry-export.md) |
-| Send IRIS telemetry to Splunk | [Splunk Setup](splunk.md) |
-| Find a day-two command or an env var | [Operations](operations.md), [Reference](reference.md) |
-| Troubleshoot a rollout or recover service | [Troubleshooting](troubleshooting.md) |
-| Integrate with the HTTP API | Open Console **Help → Local API reference (Swagger)** at `https://<console-host>:<console-port>/swagger/`, or use the [published API reference](swagger/index.html) and [OpenAPI 3.2 contract](openapi.yaml) |
+| Set up IRIS and stage an image | [Getting started](getting-started.md) |
+| Manage images and devices | [Console](console.md) |
+| Automate operations | [API reference](swagger/index.html), [API testing and limits](api-testing.md) |
+| Plan a fleet rollout | [Network workflows](fleet-workflows.md) |
+| Choose device connectivity | [Management types](management-type.md) |
+| Understand trust and network access | [Architecture](architecture.md), [Security](security.md), [Network ports](network-ports.md) |
+| Deploy on separate hosts or Kubernetes | [Docker hosts](docker-hosts.md), [Kubernetes](kubernetes.md) |
+| Investigate a problem | [Troubleshooting](troubleshooting.md) |
 
-## Documentation map
+## Further reference
 
-### Get started
+Use [Operations](operations.md) for recovery and maintenance,
+[Reference](reference.md) for configuration and API behavior, and
+[Observability](observability.md) for dashboards. [Telemetry export](telemetry-export.md)
+explains what transfer measurements do and do not establish.
 
-| Page | What it covers |
-| --- | --- |
-| [Getting Started](getting-started.md) | Lab/PoC bring-up from zero to a staged image. |
-| [AI-Guided PoC](aiagent.md) | Running the proof of value with an AI assistant driving the steps. |
-
-### How it works
-
-Read these before connecting production devices.
-
-| Page | What it covers |
-| --- | --- |
-| [Architecture](architecture.md) | Components, data flow, and trust boundaries. |
-| [Security Model](security.md) | Tokens, encryption at rest, TLS, non-root runtime, and threat model. |
-| [Network Ports and Flows](network-ports.md) | Every port, direction, and what rides it. |
-
-### Deploy the server
-
-| Page | What it covers |
-| --- | --- |
-| [Server](server.md) | Server services, state, bootstrap, and certificates. |
-| [Container Deployments](containers.md) | Server, Console, and shared device image. |
-| [Docker on Separate Hosts](docker-hosts.md) | Independent Docker deployments, private management HTTPS, and credential setup. |
-| [Kubernetes](kubernetes.md) | Optional split server and stateless Console manifests. |
-
-### Onboard devices
-
-| Page | What it covers |
-| --- | --- |
-| [Device Agents](device-agents.md) | Guest Shell, IOx, and IOS-XR appmgr agent behavior on the device. |
-| [Management Type and VLAN Ownership](management-type.md) | Switch and router management types, VPG/NAT ownership, deployment records, and network-preserving guarantees. |
-| [IOx App](iox.md) | Building, staging, and transfer paths for the IOx agent. |
-
-### Operate
-
-| Page | What it covers |
-| --- | --- |
-| [Web Console](console.md) | The admin browser workflow end to end. |
-| [Network Workflows](fleet-workflows.md) | CSV inventory, assignments, and batch operations. |
-| [Operations](operations.md) | Recovery, troubleshooting, backups, scaling, cleanup, and day-two commands. |
-| [Troubleshooting](troubleshooting.md) | Symptom-based recovery paths for service, rollout, device, telemetry, and API failures. |
-| [Observability](observability.md) | Metrics, swarm map, OTLP export, and dashboards. |
-| [Telemetry Export](telemetry-export.md) | Peer-distribution accounting: the metric families, the device peer transfer records, and what each figure does and does not measure. |
-| [Splunk Setup](splunk.md) | HTTPS collector setup, Splunk indexes, HEC, dashboard import, and verification searches. |
-
-### Reference and development
-
-| Page | What it covers |
-| --- | --- |
-| [Reference](reference.md) | Environment variables, file layouts, API behavior, and the machine-readable contract. |
-| [Browsable API reference](swagger/index.html) | Read-only Swagger UI bundled with the Console and published documentation; all runtime assets are local. |
-| [Problem type registry](problems.md) | Stable RFC 9457 error identifiers used by API clients. |
-| [Validation](validation.md) | The test suites and lab validation checklist. |
-| [Development](development.md) | Working on IRIS itself. |
+Implementation and verification details live in [Development](development.md)
+and [Validation](validation.md), separately from the operator workflow.

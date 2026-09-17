@@ -9,10 +9,24 @@
   if (!res.ok) throw new Error('Session check failed (' + res.status + ')');
   var info = await res.json();
   if (!info || typeof info !== 'object' || !info.csrf) throw new Error('Session check returned invalid data');
-  document.getElementById('who').textContent = info.username;
-  document.getElementById('logout').addEventListener('click', async function () {
-    await fetch('/api/v1/logout', { method: 'POST', headers: { 'X-CSRF-Token': info.csrf } });
-    window.location.href = '/login.html';
+  window.dispatchEvent(new CustomEvent('iris:shell-state', { detail: { username: info.username } }));
+  var logoutPending = false;
+  window.addEventListener('iris:logout', async function () {
+    if (logoutPending) return;
+    logoutPending = true;
+    window.dispatchEvent(new CustomEvent('iris:shell-state', { detail: { logoutPending: true, logoutError: '' } }));
+    try {
+      var response = await fetch('/api/v1/logout', { method: 'POST', headers: { 'X-CSRF-Token': info.csrf } });
+      if (!response.ok && response.status !== 401) throw new Error('HTTP ' + response.status);
+      window.location.href = '/login.html';
+    } catch (e) {
+      // A failed request does not revoke the session. Keep a visible retry
+      // instead of presenting the login page as proof that sign-out succeeded.
+      logoutPending = false;
+      window.dispatchEvent(new CustomEvent('iris:shell-state', { detail: {
+        logoutPending: false, logoutError: 'Sign out failed. Your session may still be active. Try again.'
+      } }));
+    }
   });
 
   // ---- one fetch for the whole console ------------------------------------
@@ -44,18 +58,19 @@
     document.addEventListener(ev, function () { backgroundPoll = false; }, true);
   });
   function markConnection(ok) {
-    var el = document.getElementById('conn-state');
-    if (!el) return;
     // == null on purpose: the session check above runs before this
     // closure's vars are assigned, so staleSince can still be undefined.
     if (ok) {
-      if (staleSince != null) { staleSince = null; el.hidden = true; el.textContent = ''; }
+      if (staleSince != null) {
+        staleSince = null;
+        window.dispatchEvent(new CustomEvent('iris:shell-state', { detail: { connection: '' } }));
+      }
       return;
     }
     if (staleSince == null) staleSince = new Date();
-    el.textContent = 'Live data unavailable since ' + staleSince.toLocaleTimeString() +
+    var connection = 'Live data unavailable since ' + staleSince.toLocaleTimeString() +
       ' — showing the last known state, retrying.';
-    el.hidden = false;
+    window.dispatchEvent(new CustomEvent('iris:shell-state', { detail: { connection: connection } }));
   }
   function onSessionLost() {
     if (sessionLost) return;
@@ -112,10 +127,9 @@
   var DEV_PAGE_SIZE = 200;
   var devOffset = 0;   // start of the CURRENTLY LOADED page, within the filtered set
   var devTotal = 0;    // server's total match count for the current filter (all pages)
-  // device_id -> true. Populated by row/header checkboxes and by
+  // device_id -> true. Populated by row clicks, page selection and by
   // selectAllMatchingDevices() (the real "every matching device" action);
-  // never scraped from '#dev-rows .mark:checked', which -- once the table is
-  // paged -- reflects only the page currently in the DOM.
+  // never scraped from the DOM, which reflects only the current page.
   var SELECTED = Object.create(null);
   // device_id -> the most relevant retained onboard/undeploy job (facelift
   // carried fix #2, step/elapsed in the status cell). Refreshed alongside
@@ -766,10 +780,17 @@
   var applyDeviceFiltersTimer = null;
   function applyDeviceFilters() {
     if (applyDeviceFiltersTimer) clearTimeout(applyDeviceFiltersTimer);
+    // Invalidate the previous query immediately, including during debounce.
+    devicesRefreshGeneration++;
+    if (devicesRefreshController) devicesRefreshController.abort();
+    updateMoreFiltersSummary();
+    updateFilterBarState();
     applyDeviceFiltersTimer = setTimeout(function () {
       applyDeviceFiltersTimer = null;
       devOffset = 0;
-      refreshDevices();
+      refreshDevices().catch(function () {
+        devStatus.textContent = 'Device refresh unavailable. Try the filter again.';
+      });
     }, 250);
   }
 
@@ -1243,6 +1264,9 @@
   var credListOk = false;
   var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
   var peerPolicyReadOk = false;
+  // Inventory and Policies share capability/revision state. Only the latest
+  // initiated read may replace it when routes or post-write reads overlap.
+  var peerPolicyReadGeneration = 0;
   // Image and device ids are operator-chosen strings (the server accepts
   // "constructor", "toString", ...), so every id-keyed map is
   // prototype-free; a plain {} made a device called "constructor" render
@@ -1284,8 +1308,8 @@
     var id = btn.closest('tr').getAttribute('data-id');
     var quarantined = !peerPolicyAssigned(id);
     var action = quarantined ? 'Quarantine' : 'Release';
-    if (!confirm(action + ' ' + id + '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
-        'It may not terminate existing device-to-device sessions immediately. It never installs or reloads a device.')) return;
+    if (!confirm(action + ' ' + id + '?\n\nChanges peer and server access for all images. ' +
+        'Existing device-to-device transfers may continue. Device software is unchanged.')) return;
     btn.disabled = true;
     peerPolicyBusy[id] = true;
     try {
@@ -1367,6 +1391,7 @@
   }
   async function refreshDevices() {
     var mine = ++devicesRefreshGeneration;
+    var policyMine = ++peerPolicyReadGeneration;
     if (devicesRefreshController) devicesRefreshController.abort();
     devicesRefreshController = new AbortController();
     var signal = devicesRefreshController.signal;
@@ -1389,7 +1414,7 @@
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
       if (e && e.name === 'AbortError') return;
-      if (mine === devicesRefreshGeneration) {
+      if (mine === devicesRefreshGeneration && policyMine === peerPolicyReadGeneration) {
         peerPolicyReadOk = false;
         renderPeerPolicyPanel();
       }
@@ -1400,9 +1425,11 @@
     var nextPolicy = null;
     try { if (pr.ok) nextPolicy = await pr.json(); } catch (e) { /* unreadable policy */ }
     if (mine !== devicesRefreshGeneration) return;
-    peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
-    if (peerPolicyReadOk) peerPolicy = nextPolicy;
-    renderPeerPolicyPanel();
+    if (policyMine === peerPolicyReadGeneration) {
+      peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
+      if (peerPolicyReadOk) peerPolicy = nextPolicy;
+      renderPeerPolicyPanel();
+    }
     var targetWarning = document.getElementById('dev-target-warning');
     if (!dr.ok) {
       devStatus.textContent = 'Device target preview unavailable (' + dr.status +
@@ -1410,15 +1437,15 @@
       LAST_DEVICES = [];
       LAST_DEV_NOW = 0;
       document.getElementById('dev-rows').innerHTML =
-        '<tr><td colspan="13" class="muted">Device target preview unavailable.</td></tr>';
+        '<tr><td colspan="12" class="muted">Device target preview unavailable.</td></tr>';
       document.getElementById('dev-count').textContent = 'Results unavailable';
       devTotal = 0;
       devOffset = 0;
       updateDevPager(0);
       var markAll = document.getElementById('mark-all');
       if (markAll) {
-        markAll.checked = false;
-        markAll.indeterminate = false;
+        markAll.disabled = true;
+        markAll.textContent = 'Select page';
       }
       if (targetWarning) {
         targetWarning.textContent =
@@ -1514,13 +1541,12 @@
     roleSel.value = keepRole;
   }
 
-  // The seven filter fields living inside the <details id="more-filters">
-  // disclosure panel (density pass, Task 8) -- Search/Agent
-  // install/Status stay above the fold and are not counted here.
+  // All structured filters share one expandable panel. Keep wire values
+  // stable: series labels are presentation, not a new targeting taxonomy.
   var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
                           'dev-filter-telemetry', 'dev-filter-peer',
                           'dev-filter-role', 'dev-filter-model-family',
-                          'dev-filter-os-family'];
+                          'dev-filter-os-family', 'dev-filter-platform', 'dev-filter-status'];
   function updateMoreFiltersSummary() {
     // Magnetic Filter bar > Anatomy fixes the overflow button's format as
     // "<icon> + Filters", so the label lives in its own span and the icon
@@ -1539,8 +1565,7 @@
   // Reset is "displayed when at least one filter has been selected or a
   // search term has been entered" (Magnetic Filter bar > Anatomy) -- it used
   // to sit there permanently, offering to clear nothing.
-  var ALL_FILTER_IDS = ['dev-filter-q', 'dev-filter-platform', 'dev-filter-status']
-    .concat(MORE_FILTER_IDS);
+  var ALL_FILTER_IDS = ['dev-filter-q'].concat(MORE_FILTER_IDS);
   function updateFilterBarState() {
     var reset = document.getElementById('dev-filter-clear');
     if (!reset) return;
@@ -1548,6 +1573,24 @@
       var f = document.getElementById(id);
       return f && f.value !== '';
     });
+    var chips = document.getElementById('dev-filter-chips');
+    if (!chips) return;
+    chips.replaceChildren();
+    ALL_FILTER_IDS.forEach(function (id) {
+      var field = document.getElementById(id);
+      if (!field || !field.value) return;
+      var chip = document.createElement('button');
+      chip.type = 'button'; chip.className = 'filter-chip';
+      var label = field.tagName === 'SELECT' ? field.selectedOptions[0].textContent : field.value;
+      chip.textContent = label + ' ×';
+      chip.setAttribute('aria-label', 'Remove filter: ' + label);
+      chip.addEventListener('click', function () {
+        field.value = ''; applyDeviceFilters();
+        document.getElementById('more-filters-summary').focus();
+      });
+      chips.appendChild(chip);
+    });
+    chips.hidden = !chips.childElementCount;
   }
   function renderDevices(devs, devNow, total) {
     var filters = deviceFilterState();
@@ -1597,12 +1640,13 @@
         ? 'Inventory only — management type not chosen'
         : managementType === 'xr-host' ? 'XR host'
         : (managementType + managementTypeDetail);
-      return '<tr data-id="' + esc(d.device_id) + '">' +
-        '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '" aria-label="Select ' + esc(d.device_id) + '"' +
-        (SELECTED[d.device_id] ? ' checked' : '') + '></td>' +
-        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="dev-role">' + dash(d.role) + '</td>' +
+      return '<tr data-id="' + esc(d.device_id) + '" tabindex="0" aria-selected="' +
+        (!!SELECTED[d.device_id]) + '" aria-label="' + esc(d.device_id) +
+        '" aria-description="Press Space or Enter to select or deselect this device.">' +
+        '<td class="dev-id"><button type="button" class="linkish dinfo">' + esc(d.device_id) + '</button></td><td class="dev-role">' + dash(d.role) + '</td>' +
         '<td class="machine">' + dash(d.device_ip) + '</td>' +
-        '<td class="machine">' + dash(d.model || d.heartbeat_model) + '</td>' +
+        '<td class="dev-series" title="' + esc(d.model || d.heartbeat_model || '') + '">' +
+        esc(deviceSeriesLabel(d.model_family, d.model || d.heartbeat_model)) + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
@@ -1620,7 +1664,7 @@
         (scheduled ? ' <span class="sched-chip badge badge-off" title="' +
           esc(scheduled) + '">Scheduled</span>' : '') +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
-    }).join('') : '<tr><td colspan="13" class="muted">' +
+    }).join('') : '<tr><td colspan="12" class="muted">' +
       (total ? 'No devices match the current filters.' : 'No devices yet.') + '</td></tr>';
     document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -1655,16 +1699,6 @@
     document.querySelectorAll('#dev-rows .peer-quarantine').forEach(function (btn) {
       btn.addEventListener('click', function () { setQuarantine(btn); });
     });
-    // The header checkbox can only ever speak for the page in the DOM right
-    // now (issue #112 prerequisite 2 -- a paged table cannot let "select
-    // all" silently mean "select everything" when only a page is loaded):
-    // checked when every rendered row is in SELECTED, indeterminate when
-    // some but not all are, unchecked otherwise. #sel-scope-all (wired in
-    // updateSelBar) is the one control that means "every matching device".
-    var markAll = document.getElementById('mark-all');
-    var selectedOnPage = devs.filter(function (d) { return !!SELECTED[d.device_id]; }).length;
-    markAll.checked = devs.length > 0 && selectedOnPage === devs.length;
-    markAll.indeterminate = selectedOnPage > 0 && selectedOnPage < devs.length;
     // The filter bar's Total (Magnetic Filter bar > Anatomy, "<number> +
     // results"). One readout, in the bar the filters live in: the page used
     // to carry two, "N devices" up in the table-level toolbar and "showing X
@@ -1708,6 +1742,23 @@
   var deployInfoOpener = null;
   var DEPLOY_STATE_BADGE = { active: 'badge-ok', removed: 'badge-queued',
                              superseded: 'badge-cancelled', 'needs-reconcile': 'badge-fail' };
+  function deviceHardwareRows(device, record) {
+    var d = device || {}, rec = record || {};
+    var pf = rec.preflight || {}, res = rec.resolved || {};
+    var aliases = ['IE3x00', 'IR1x00', 'C8xxx', 'C9xxx', 'NCS', 'XR8000', 'ISR/ASR/CSR'];
+    var candidates = [[pf.detected_model, 'last preflight'],
+      [res.model, 'deployment record'], [d.model, 'inventory'],
+      [d.heartbeat_model, 'agent-reported']];
+    var chassis = candidates.find(function (item) {
+      return typeof item[0] === 'string' && item[0].trim() &&
+        !aliases.some(function (alias) { return alias.toLowerCase() === item[0].trim().toLowerCase(); });
+    });
+    var series = deviceSeriesLabel(d.model_family, '');
+    return '<tr><td class="muted">Series</td><td>' + esc(series) + '</td></tr>' +
+      '<tr><td class="muted">Chassis model</td><td>' +
+      (chassis ? esc(chassis[0]) + ' <span class="muted">(' + esc(chassis[1]) + ')</span>'
+        : 'Not detected') + '</td></tr>';
+  }
   function deployRecordRows(rec, total) {
     var res = rec.resolved || {};
     var ts = rec.timestamps || {};
@@ -1748,7 +1799,6 @@
     }
     pairs.push(
       ['Swarm port', '<span class="machine">' + esc(res.swarm_port || '—') + '</span>'],
-      ['Model', esc(res.model || '—')],
       ['Agent install', esc(agentInstallLabel(res.platform))],
       ['Device identity', '<span class="machine">' + esc(res.device_identity || '—') + '</span>']
     );
@@ -1855,6 +1905,7 @@
     return [catalogued, sourceChecked, assigned, transferring, verified, staged];
   }
   async function openDeployInfo(id) {
+    closeActivity(false);
     deployInfoDev = id;
     deployInfoOpener = document.activeElement;
     var note = document.getElementById('di-note');
@@ -1862,6 +1913,7 @@
     document.getElementById('di-rows').innerHTML = '';
     document.getElementById('di-log-rows').innerHTML = '';
     var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
+    document.getElementById('di-rows').innerHTML = deviceHardwareRows(d, null);
     document.getElementById('di-img-rows').innerHTML = deployImageRows(d);
     document.getElementById('di-boundary').innerHTML =
       stagingBoundaryHTML(deviceBoundarySteps(d, LAST_DEV_NOW));
@@ -1888,7 +1940,7 @@
       } else {
         note.textContent = '';
         document.getElementById('di-rows').innerHTML =
-          deployRecordRows(body.record, body.total || 0);
+          deviceHardwareRows(d, body.record) + deployRecordRows(body.record, body.total || 0);
       }
     }
     renderDeviceDeployLogs(id);
@@ -1957,10 +2009,9 @@
   document.getElementById('di-forget-host-key').addEventListener('click', async function () {
     var id = deployInfoDev;
     if (!id) return;
-    if (!confirm('Forget the recorded SSH host key for ' + id + '?\n\n' +
-                 'Only do this if the device was legitimately re-imaged or ' +
-                 'replaced. The next session will trust and record whatever ' +
-                 'key that device presents.')) return;
+    if (!confirm('Forget the SSH host key for ' + id + '?\n\n' +
+                 'First verify the device was re-imaged or replaced. ' +
+                 'The next connection will trust and save any key it presents.')) return;
     var status = document.getElementById('di-forget-host-key-status');
     status.textContent = 'Forgetting…';
     var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/forget-host-key', {});
@@ -1975,15 +2026,17 @@
       status.textContent = 'Forget host key failed: ' + (err || r.status);
     }
   });
-  // ---- Per-job onboard log panels ----
-  // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
-  // its own close/abort — so two concurrent onboards never merge into (or
-  // blank) each other's window. Opening a job that already has a panel
-  // focuses it; at most MAX_ONBOARD_PANELS panels, oldest closed first.
+  // Job logs live in one activity drawer; each job retains its own bounded
+  // buffer/stream, but only the selected job is visible. Closing the drawer
+  // disconnects viewers, never cancels or aborts jobs.
   var onboardPanels = {};        // job_id -> { root, es }
   var onboardPanelOrder = [];    // job ids, oldest first
   var MAX_ONBOARD_PANELS = 6;
   var MAX_LOG_LINES = 500;
+  function deviceActionLabel(action) {
+    return {onboard: 'Onboard', undeploy: 'Undeploy',
+      'iox-recover': 'Recover', 'iox-reconcile-enabled': 'Reconcile'}[action] || 'Device action';
+  }
   function closeJobLog(jobId) {
     var p = onboardPanels[jobId];
     if (!p) return;
@@ -1993,25 +2046,29 @@
     var i = onboardPanelOrder.indexOf(jobId);
     if (i > -1) onboardPanelOrder.splice(i, 1);
   }
-  function openJobLog(jobId, deviceId, action, queued) {
+  function openJobLog(jobId, deviceId, action, queued, finished) {
+    Object.keys(onboardPanels).forEach(function (id) { onboardPanels[id].root.hidden = true; });
     if (onboardPanels[jobId]) {
-      onboardPanels[jobId].root.scrollIntoView({ block: 'nearest' });
-      return;
+      if (onboardPanels[jobId].es) {
+        onboardPanels[jobId].root.hidden = false;
+        onboardPanels[jobId].root.focus();
+        return;
+      }
+      closeJobLog(jobId); // Reopening a paused stream really reconnects.
     }
     while (onboardPanelOrder.length >= MAX_ONBOARD_PANELS) closeJobLog(onboardPanelOrder[0]);
     var root = document.createElement('div');
     root.className = 'job-log-panel';
+    root.tabIndex = -1;
     root.setAttribute('data-job', jobId);
     var head = document.createElement('div'); head.className = 'job-log-head';
     var title = document.createElement('h3');
-    title.textContent = deviceId + ' — ' + action;
+    title.textContent = deviceId + ' — ' + deviceActionLabel(action);
     var abortBtn = document.createElement('button');
     abortBtn.type = 'button'; abortBtn.className = 'btn ghost';
     abortBtn.textContent = 'Abort';
-    var closeBtn = document.createElement('button');
-    closeBtn.type = 'button'; closeBtn.className = 'btn ghost';
-    closeBtn.textContent = 'Close';
-    head.appendChild(title); head.appendChild(abortBtn); head.appendChild(closeBtn);
+    abortBtn.hidden = !!finished;
+    head.appendChild(title); head.appendChild(abortBtn);
     var log = document.createElement('pre'); log.className = 'log';
     root.appendChild(head); root.appendChild(log);
     document.getElementById('onboard-logs').appendChild(root);
@@ -2035,16 +2092,21 @@
       // "idle": the server closed a stream with no progress for its idle
       // budget; the job itself may still be running -- reopen to continue.
       if (e.data === 'idle') append('Log paused. Reopen it to follow the job.');
-      else if (e.data !== 'done') append('Job ' + e.data + '.');
+      else {
+        var actionName = deviceActionLabel(action);
+        var outcome = {done: 'completed', error: 'failed', cancelled: 'cancelled'}[e.data] || e.data;
+        var resultLine = actionName + ' ' + outcome + '.';
+        if (lines[lines.length - 1] !== resultLine) append(resultLine);
+      }
       flush();
       es.close(); entry.es = null; abortBtn.hidden = true;
       refreshDevices().catch(function () {});
     });
     es.onerror = function () { append('[stream closed]'); if (entry.es) { entry.es.close(); entry.es = null; } };
     abortBtn.addEventListener('click', async function () {
-      if (!confirm('Abort this ' + action + ' of ' + deviceId + '?\n\nThis stops ' +
-          'the running installer. The device may be left partially configured; ' +
-          're-onboard (idempotent) or undeploy to clean up.')) return;
+      if (!confirm('Abort ' + action + ' for ' + deviceId + '?\n\n' +
+          'A running job may leave the device partially configured. ' +
+          'Onboard again or undeploy to clean up.')) return;
       // A queued job has no registered process, so the abort route can only
       // 409 — take it out of the queue instead, scoped to just this job
       // (same endpoint the batch panel's cancel uses).
@@ -2059,9 +2121,30 @@
       var r = await jpost('/api/v1/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
       append(r.ok ? '[abort requested]' : '[abort failed (' + r.status + ')]');
     });
-    closeBtn.addEventListener('click', function () { closeJobLog(jobId); });
-    root.scrollIntoView({ block: 'nearest' });
+    root.focus();
   }
+  function showActivity() {
+    if (!document.getElementById('deploy-info-panel').hidden) closeDeployInfo();
+    document.getElementById('activity-panel').hidden = false;
+    document.getElementById('batch-close').focus();
+  }
+  function closeActivity(restoreFocus) {
+    var panel = document.getElementById('activity-panel');
+    if (!panel || panel.hidden) return;
+    panel.hidden = true;
+    Object.keys(onboardPanels).forEach(closeJobLog);
+    if (restoreFocus) document.getElementById('dev-activity').focus();
+  }
+  document.getElementById('dev-activity').addEventListener('click', async function () {
+    showActivity();
+    document.getElementById('batch-panel').hidden = false;
+    document.getElementById('batch-summary').textContent = 'Loading activity…';
+    await restoreBatch(true);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeActivity(true);
+  });
+  window.addEventListener('hashchange', function () { closeActivity(false); });
   // Telemetry flags for onboard job bodies (reports default on, streaming
   // default off — the server treats an absent key the same way).
   function telemetryFlags() {
@@ -2077,25 +2160,21 @@
     flags.log = !!(log && log.checked);
     return flags;
   }
-  // The header checkbox can only ever mean "every row on THIS page" -- once
-  // the table pages (issue #112 step 3), a page is a fraction of what the
-  // filter matches, and silently treating "select all" as "select the
-  // fleet" is exactly the ambiguity prerequisite 2 rules out. Selecting
-  // every device the filter matches, not just what is loaded, is
-  // selectAllMatchingDevices() below, offered explicitly via #sel-scope-all.
-  document.getElementById('mark-all').addEventListener('change', function (e) {
-    document.querySelectorAll('#dev-rows .mark').forEach(function (cb) {
-      var id = cb.getAttribute('data-id');
-      if (e.target.checked) SELECTED[id] = true; else delete SELECTED[id];
-      cb.checked = e.target.checked;
+  // Page selection never silently expands to the rest of the fleet.
+  document.getElementById('mark-all').addEventListener('click', function () {
+    var rows = Array.from(document.querySelectorAll('#dev-rows tr[data-id]'));
+    var clear = rows.length > 0 && rows.every(function (row) { return !!SELECTED[row.dataset.id]; });
+    rows.forEach(function (row) {
+      var id = row.dataset.id;
+      if (clear) delete SELECTED[id]; else SELECTED[id] = true;
     });
     updateSelBar();
   });
   // Bulk bar's "Select all N matching devices" (spec §5 scope copy, below in
   // updateSelBar): walks every page of the CURRENT filter server-side and
   // adds every id it returns to SELECTED. This is a REAL fetch, not a
-  // shortcut into the header checkbox -- the header checkbox only ever sees
-  // the page in the DOM, so replaying its change handler here would have
+  // shortcut into Select page, which only sees
+  // the page in the DOM, so replaying its click handler here would have
   // silently selected "this page" while the button claims "every matching
   // device" (the exact defect issue #112 flags).
   document.getElementById('sel-scope-all').addEventListener('click', function () {
@@ -2111,15 +2190,6 @@
     document.querySelectorAll('.menu-wrap [aria-expanded]').forEach(function (b) {
       b.setAttribute('aria-expanded', 'false');
     });
-    // The Settings/Monitoring flyout triggers live directly in the rail,
-    // not inside a .menu-wrap (their panel is positioned off .nav-rail
-    // itself, not off the trigger) -- reset their aria-expanded here too,
-    // or a flyout closed by an outside click / Escape leaves a stale
-    // aria-expanded="true" on an already-collapsed trigger.
-    var settingsTrigger = document.getElementById('nav-settings');
-    var monitoringTrigger = document.getElementById('nav-monitoring');
-    if (settingsTrigger) settingsTrigger.setAttribute('aria-expanded', 'false');
-    if (monitoringTrigger) monitoringTrigger.setAttribute('aria-expanded', 'false');
     openMenuPanel = null;
   }
   function wireMenu(btnId, panelId) {
@@ -2218,6 +2288,7 @@
   wireModal('cred-modal', ['cred-modal-cancel', 'cred-modal-x']);
   wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
   wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
+  wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
   wireModal('sched-modal', ['sched-modal-cancel', 'sched-modal-x']);
   document.getElementById('onboard-selected').addEventListener('click', function () {
     openModal('onboard-modal');
@@ -2236,21 +2307,7 @@
     syncCredSelected();
     openModal('cred-modal');
   });
-  wireMenu('help-btn', 'help-pop');
   wireMenu('status-legend-btn', 'status-legend-pop');
-  // Settings/Monitoring flyouts (Wave D fix 2, operator: "does not
-  // disappear when I click the site"): Wave B made these floating panels
-  // but left their visibility tied to the active route, so a flyout stayed
-  // open the entire time the operator was anywhere on Settings/Monitoring,
-  // never closing on an outside click the way every other .menu popover
-  // does. The rail item is both a real navigation link (href, unchanged)
-  // AND now this popover's trigger -- same wireMenu machinery as every
-  // other menu-wrap pair: open on trigger click, close on outside click or
-  // Escape (already wired above, generically, for every open .menu), or on
-  // choosing a sub-item (each carries .menu-close, so wireMenu's own panel
-  // click handler closes it the instant a destination is picked).
-  wireMenu('nav-settings', 'settings-submenu');
-  wireMenu('nav-monitoring', 'monitoring-submenu');
   // Status column legend (density pass, Task 8): one row per
   // DEVICE_STATUS_OPTIONS entry (the SAME 12-level Magnetic mapping the
   // Status filter and the cell itself already derive from -- STATUS_LEVELS,
@@ -2282,7 +2339,7 @@
     // IS every device the filter matches or only part of it, and -- when
     // it's only part -- offers a one-click way to the rest. Unlike before
     // paging existed, that click can no longer be a shortcut into the
-    // header checkbox (#mark-all only ever reaches the page in the DOM) --
+    // page toggle (#mark-all only ever reaches the page in the DOM) --
     // it runs selectAllMatchingDevices(), a real walk of every page.
     var scopeText = document.getElementById('sel-scope-text');
     var scopeAll = document.getElementById('sel-scope-all');
@@ -2295,39 +2352,56 @@
     // action bar: "An indicator displays the number of selected rows"), so
     // the buttons stop restating it. They used to read "Start onboard (3)"
     // and "Assign images to 3 devices…", which re-measured and reflowed the
-    // whole bar on every checkbox click -- Magnetic Button > Wrapping and
+    // whole bar on every row click -- Magnetic Button > Wrapping and
     // truncation wants button text brief and settled. Each modal repeats the
     // count in its own title instead, where it is the thing being confirmed.
     ['onboard', 'undeploy', 'cred'].forEach(function (k) {
       var el = document.getElementById(k + '-modal-count');
       if (el) el.textContent = n + ' selected';
     });
-    document.querySelectorAll('#dev-rows tr').forEach(function (tr) {
-      var cb = tr.querySelector('.mark');
-      tr.classList.toggle('sel', !!(cb && cb.checked));
+    var pageSize = 0, selectedOnPage = 0;
+    document.querySelectorAll('#dev-rows tr[data-id]').forEach(function (tr) {
+      var selected = !!SELECTED[tr.dataset.id];
+      tr.classList.toggle('sel', selected);
+      tr.setAttribute('aria-selected', String(selected));
+      pageSize++; if (selected) selectedOnPage++;
     });
+    // Reflect row clicks immediately, not only after the next table refresh.
+    // Off-page selections must never change this page's toggle action.
+    var markAll = document.getElementById('mark-all');
+    if (markAll) {
+      markAll.disabled = pageSize === 0;
+      markAll.textContent = pageSize > 0 && selectedOnPage === pageSize ? 'Clear page selection' : 'Select page';
+    }
     // An empty selection closes the selection-scoped popovers — but never
-    // the header help popover, or the Status legend (density pass, Task 8):
+    // the Status legend (density pass, Task 8):
     // the 10s devices poll re-renders the (empty) table and lands here with
     // n === 0, and yanking an open informational panel out from under the
     // operator reads as a broken control.
-    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'help-pop' &&
-        openMenuPanel.id !== 'status-legend-pop') closeMenus();
+    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'status-legend-pop') closeMenus();
     // The bulk modals are scoped to the selection exactly the way those
     // popovers were: with the last row deselected they are asking the
     // operator to confirm an action on nothing, so they close with the bar.
     if (n === 0) BULK_MODALS.forEach(closeModal);
   }
-  document.getElementById('dev-rows').addEventListener('change', function (e) {
-    if (!e.target.classList.contains('mark')) return;
-    var id = e.target.getAttribute('data-id');
-    if (e.target.checked) SELECTED[id] = true; else delete SELECTED[id];
+  function toggleDeviceRow(row) {
+    var id = row.dataset.id;
+    if (SELECTED[id]) delete SELECTED[id]; else SELECTED[id] = true;
     updateSelBar();
+  }
+  document.getElementById('dev-rows').addEventListener('click', function (e) {
+    if (e.button !== 0 || e.target.closest('button,a,input,select,textarea,label,summary,[role="button"],[contenteditable="true"]')) return;
+    var row = e.target.closest('tr[data-id]');
+    // Copying a device address should not also change the bulk target set.
+    if (row && window.getSelection().isCollapsed) toggleDeviceRow(row);
+  });
+  document.getElementById('dev-rows').addEventListener('keydown', function (e) {
+    if (!e.target.matches('tr[data-id]') || (e.key !== ' ' && e.key !== 'Enter')) return;
+    e.preventDefault();
+    if (!e.repeat) toggleDeviceRow(e.target);
   });
   document.getElementById('sel-clear').addEventListener('click', function () {
     SELECTED = Object.create(null);
-    document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) { cb.checked = false; });
-    document.getElementById('mark-all').checked = false;
     updateSelBar();
   });
   // ---- Batch onboarding ----
@@ -2390,13 +2464,17 @@
       .filter(function (s) { return counts[s]; })
       .map(function (s) { return counts[s] + ' ' + (s === 'error' ? 'failed' : s); });
     document.getElementById('batch-summary').textContent =
-      parts.join(' · ') + ' (max ' + listing.max_concurrent + ' parallel)';
+      jobs.length ? parts.join(' · ') : 'No recent device activity.';
+    document.getElementById('batch-cancel').hidden = !counts.queued;
+    document.getElementById('dev-activity').textContent = 'Activity' +
+      (counts.running || counts.queued ? ' (' + ((counts.running || 0) + (counts.queued || 0)) + ')' : '');
     document.querySelectorAll('#batch-rows .blog').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var tr = btn.closest('tr');
         openJobLog(tr.getAttribute('data-job'), tr.getAttribute('data-dev'),
                    tr.getAttribute('data-action') || 'onboard',
-                   tr.getAttribute('data-state') === 'queued');
+                   tr.getAttribute('data-state') === 'queued',
+                   ['queued', 'running'].indexOf(tr.getAttribute('data-state')) === -1);
       });
     });
     return jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; });
@@ -2420,19 +2498,21 @@
   // After a reload (or an accidental panel close + reload), re-attach to
   // whatever the server is still onboarding instead of losing sight of it —
   // the jobs live server-side; only this panel's tracking was in page memory.
-  async function restoreBatch() {
+  async function restoreBatch(includeFinished) {
     var r;
-    try { r = await fetch('/api/v1/onboard/jobs'); } catch (e) { return; }
-    if (!r.ok) return;
+    try { r = await fetch('/api/v1/onboard/jobs'); } catch (e) {
+      document.getElementById('batch-summary').textContent = 'Activity unavailable. Close and retry.'; return;
+    }
+    if (!r.ok) { document.getElementById('batch-summary').textContent = 'Activity unavailable (' + r.status + '). Close and retry.'; return; }
     var listing = await r.json();
     var jobs = listing.jobs || [];
-    if (!jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; })) return;
+    if (!includeFinished && !jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; })) return;
     var gen = ++batchGen;
     batchJobs = {};
     jobs.forEach(function (j) { batchJobs[j.id] = j.device_id; });
     document.getElementById('batch-panel').hidden = false;
-    renderBatch(listing);
-    startBatchPoll(gen);
+    stopBatchPoll();
+    if (renderBatch(listing)) startBatchPoll(gen);
   }
   // Per-device submission rejections (a router preflight failure, a busy
   // device, an unreachable device, etc.) must never read as a silent no-op:
@@ -2453,9 +2533,9 @@
     var options = jobFlags(action, forced);
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
-          ? '\n\nFORCE is on. For any device with no deployment record this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a record there is no proof IRIS created them; clean those up yourself if IRIS did. On an IOS-XR device, force removes the same IRIS-named footprint a normal undeploy would — the appmgr application iris, its iris-xr package source, the RPM, iris-work/, and the IRIS sidecar files at harddisk: root — but a staged image file there is never removed by IRIS teardown, and the agent deletes an adopted file only when the catalog republishes new content under that same image id — never otherwise.'
-          : '\n\nThis removes the device agent (Guest Shell or IOx app) and only record-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking.') +
-                 '\n\nStaged images at the filesystem root are left in place. Running jobs are never interrupted.')) {
+          ? '\n\nForce cleanup skips record and device identity checks. Removes only IRIS agent files and services; keeps VirtualPortGroup and NAT settings. Retires the old record on success.'
+          : '\n\nRemoves the IRIS agent and resources listed as IRIS-owned.') +
+                 '\n\nKeeps staged images in device storage. Does not stop running jobs.')) {
       setBulkBusy(false); return;
     }
     var gen = ++batchGen;
@@ -2464,6 +2544,7 @@
     document.getElementById('batch-rows').innerHTML = '';
     document.getElementById('batch-summary').textContent = 'starting…';
     document.getElementById('batch-panel').hidden = false;
+    showActivity();
     var failed = [];
     try {
       await Promise.all(ids.map(async function (id) {
@@ -2497,11 +2578,8 @@
   });
 
   // ---- bulk row actions (adopt / delete / assign credential) ----
-  // Every bulk action reads the SELECTED id set, never the checked DOM rows
-  // (issue #112 prerequisite 2): '#dev-rows .mark:checked' only ever holds
-  // the page currently rendered, so once the table pages that scrape would
-  // silently mean "this page" instead of whatever the operator actually
-  // checked across however many pages they visited.
+  // Every bulk action reads the SELECTED id set, never the DOM rows, which
+  // only represent the current page (issue #112 prerequisite 2).
   function selectedIds() {
     return Object.keys(SELECTED);
   }
@@ -2746,13 +2824,10 @@
     // its agent with no Console inventory entry for it, so say so before it
     // happens.
     return 'Delete ' + ids.length + ' device(s) from the inventory?\n\n' +
-      ids.join(', ') + '\n\nThis removes the device from the Console inventory only — it does NOT ' +
-      'undeploy. An onboarded device keeps its agent and staged image with no ' +
-      'inventory entry left to manage it. Undeploy first if that is what you want.' +
-      '\n\nAny deployment record is abandoned: it is kept as the account of what ' +
-      'IRIS built on the box, but it stops authorising a teardown, so re-adding ' +
-      'this device id later starts from scratch.' +
-      '\n\nThis cannot be undone.';
+      ids.join(', ') + '\n\nThis does NOT undeploy the agent or remove staged images. ' +
+      'Undeploy first if you want to remove IRIS from the device.' +
+      '\n\nOld deployment records can no longer be used for cleanup. ' +
+      'Re-adding a device starts fresh. This cannot be undone.';
   }
   // Run *fn* for each selected id, reporting per-device refusals rather than
   // failing the whole batch — same shape as startBatch's error handling.
@@ -2904,6 +2979,29 @@
         return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
       }).join('') +
       '<option value="__attention">Needs attention (any)</option>';
+  })();
+  (function organizeDeviceFilters() {
+    var panel = document.querySelector('#more-filters .more-filters-body');
+    ['dev-filter-status', 'dev-filter-platform'].forEach(function (id) {
+      panel.prepend(document.getElementById(id));
+    });
+    panel.prepend(document.getElementById('dev-filter-model-family'));
+    panel.querySelectorAll('select').forEach(function (field) {
+      var label = document.createElement('label');
+      label.className = 'device-filter-field';
+      var caption = document.createElement('span');
+      caption.textContent = field.getAttribute('aria-label').replace(/^Filter by /, '');
+      label.appendChild(caption); field.before(label); label.appendChild(field);
+    });
+    document.getElementById('more-filters-summary').addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') document.getElementById('more-filters').open = false;
+    });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        document.getElementById('more-filters').open = false;
+        document.getElementById('more-filters-summary').focus();
+      }
+    });
   })();
   ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
    'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
@@ -3106,9 +3204,11 @@
     var roles = p.roles || {}, drift = p.role_drift || {}, outbox = p.outbox || {};
     var origin = p.origin_qos || {}, enforcement = p.enforcement || {};
     var mutual = enforcement.mutual_origin || {};
-    var banner = document.getElementById('role-capability-banner');
-    banner.textContent = roleCapabilityMessage();
-    banner.hidden = !banner.textContent;
+    ['role-capability-banner', 'inventory-role-capability-banner'].forEach(function (id) {
+      var banner = document.getElementById(id);
+      banner.textContent = roleCapabilityMessage();
+      banner.hidden = !banner.textContent;
+    });
     syncRoleActionAvailability();
     renderInstructionPanel(p);
     document.getElementById('policy-roles-defined').textContent = policyCount(roles.defined);
@@ -3196,7 +3296,7 @@
     sel.disabled = false;
     if (!Object.keys((peerPolicy.roles || {}).members || {}).length) {
       document.getElementById('role-modal-msg').textContent =
-        'No roles are defined yet. Expand Peer policy above the table and choose New role.';
+        'No roles are defined yet. Open Policies and choose New role.';
     }
     openModal('role-modal');
   });
@@ -3290,7 +3390,7 @@
   });
   // ---- Role definitions: create, edit, delete, import, export ----
   // Definitions are the policy's own objects (GET /peer-policy/roles), read
-  // when the Peer policy panel is open and again after every definition
+  // while Policies is visible with its panel open, and after every definition
   // write. The Set role dialog and the Role filter keep reading the member
   // map from /peer-policy, which lists every defined role, so a new
   // definition reaches them on the next device refresh. Every write follows
@@ -3318,6 +3418,7 @@
   ];
   var roleDefinitions = {}, roleDefinitionsRevision = null, roleDefinitionsOk = false;
   var roleDefinitionsError = '', roleDefinitionsLoading = false;
+  var roleDefinitionsGeneration = 0, roleDefinitionsController = null;
   var roleDefEditing = null, roleDefPreview = null, roleDefBusy = false, roleDefGeneration = 0;
   var roleDefRevision = null, roleDefOriginal = {};
 
@@ -3369,6 +3470,7 @@
     }
   });
   document.getElementById('role-def-modal').addEventListener('change', function () {
+    updateRoleAccessControls();
     roleDefGeneration++;
     if (roleDefPreview && !roleDefBusy) {
       resetRoleDefinitionPreview();
@@ -3397,6 +3499,36 @@
     });
     document.querySelectorAll('#role-def-rows button').forEach(function (b) {
       b.disabled = unavailable || roleDefBusy;
+    });
+    publishPolicySummary();
+  }
+  // React owns the simple policy view; existing preview/CAS handlers retain
+  // write ownership. No duplicate API reads, writes or optimistic enforcement.
+  function publishPolicySummary() {
+    if (typeof window === 'undefined' || !window.dispatchEvent) return;
+    window.dispatchEvent(new CustomEvent('iris:policy-state', {detail: {
+      ready: peerPolicyReadOk, policy: peerPolicyReadOk ? peerPolicy : {},
+      definitionsReady: roleDefinitionsOk, definitions: roleDefinitions || {},
+      revision: roleDefinitionsRevision,
+      disabled: !!roleCapabilityMessage() || roleDefBusy
+    }}));
+  }
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('iris:policy-action', function (event) {
+      if (document.getElementById('view-policies').hidden) return;
+      var request = event.detail || {};
+      if (request.action === 'advanced') {
+        openModal('policy-advanced-modal');
+        document.getElementById('policy-advanced-close').focus();
+        return;
+      }
+      if (roleCapabilityMessage() || roleDefBusy) return;
+      if (request.action === 'new') openRoleDefinitionEditor(null);
+      else if (request.action === 'edit' && roleDefinitionsOk &&
+               roleDefinitionsRevision === peerPolicy.revision &&
+               Object.prototype.hasOwnProperty.call(roleDefinitions, request.name)) {
+        openRoleDefinitionEditor(request.name);
+      }
     });
   }
   function policyRevisionFromEtag(etag) {
@@ -3482,11 +3614,16 @@
   }
   async function loadRoleDefinitions(background) {
     if (roleDefinitionsLoading) return;
+    var mine = ++roleDefinitionsGeneration;
+    roleDefinitionsController = new AbortController();
     roleDefinitionsLoading = true;
     try {
-      var r = await fetch('/api/v1/peer-policy/roles', background ? { headers: { 'X-IRIS-Poll': '1' } } : {});
+      var options = { signal: roleDefinitionsController.signal };
+      if (background) options.headers = { 'X-IRIS-Poll': '1' };
+      var r = await fetch('/api/v1/peer-policy/roles', options);
       var body = null;
       try { body = r.ok ? await r.json() : null; } catch (e) { body = null; }
+      if (mine !== roleDefinitionsGeneration) return;
       roleDefinitionsOk = !!body && typeof body === 'object' && body.roles && typeof body.roles === 'object';
       if (roleDefinitionsOk) {
         roleDefinitions = body.roles;
@@ -3501,29 +3638,36 @@
           : 'Role definitions unavailable (' + r.status + ').';
       }
     } catch (e) {
+      if (mine !== roleDefinitionsGeneration || (e && e.name === 'AbortError')) return;
       roleDefinitionsOk = false;
       roleDefinitionsError = 'Role definitions unavailable.';
     } finally {
-      roleDefinitionsLoading = false;
-      renderRoleDefinitions();
+      if (mine === roleDefinitionsGeneration) {
+        roleDefinitionsLoading = false;
+        renderRoleDefinitions();
+      }
     }
   }
-  // Called from renderPeerPolicyPanel on every device refresh: keep the
-  // gating current and, while the panel is open, follow the policy revision
-  // so a definition written elsewhere (CLI, another session) shows up.
+  // Keep write gating current, but fetch definitions only while Policies is
+  // visible. Another API client/session's edits appear on the next poll.
   function syncRoleDefinitionsWithPolicy() {
     renderRoleDefinitionControls();
     var panel = document.getElementById('peer-policy-panel');
-    if (panel.open && peerPolicyReadOk && roleDefinitionsOk && !roleDefBusy &&
+    if (!document.getElementById('view-policies').hidden && panel.open &&
+        peerPolicyReadOk && roleDefinitionsOk && !roleDefBusy &&
         typeof peerPolicy.revision === 'number' && peerPolicy.revision !== roleDefinitionsRevision) {
       loadRoleDefinitions(true);
     }
   }
   document.getElementById('peer-policy-panel').addEventListener('toggle', function (e) {
-    if (e.target.open) loadRoleDefinitions();
+    if (e.target.open && !document.getElementById('view-policies').hidden) loadRoleDefinitions();
   });
 
   function openRoleDefinitionEditor(name) {
+    // Only one modal can own focus. Move from Advanced to the editor without
+    // leaving a hidden focus trap underneath it.
+    closeModal('policy-advanced-modal');
+    document.getElementById('role-editor-advanced').open = false;
     var d = JSON.parse(JSON.stringify(name ? (roleDefinitions[name] || {}) : {}));
     roleDefEditing = name || null;
     // The form and its unedited overlay belong to this exact read. Polling
@@ -3542,6 +3686,7 @@
     document.getElementById('rd-on-stale').value = d.on_stale || '';
     document.getElementById('rd-restricted').checked = !!d.restricted;
     document.getElementById('rd-origin').checked = d.origin !== false;
+    updateRoleAccessControls();
     var qos = d.qos || {};
     document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
       var key = el.getAttribute('data-qos');
@@ -3550,7 +3695,12 @@
     updateRateHints();
     document.getElementById('role-def-save').disabled = false;
     openModal('role-def-modal');
-    if (name) document.getElementById('rd-peers').focus();
+    if (name) document.getElementById('rd-restricted').focus();
+  }
+  function updateRoleAccessControls() {
+    var restricted = document.getElementById('rd-restricted').checked;
+    document.getElementById('rd-peers').disabled = !restricted;
+    document.getElementById('rd-origin').disabled = !restricted;
   }
   function roleDefinitionFromForm() {
     var name = document.getElementById('rd-name').value.trim();
@@ -3750,8 +3900,8 @@
     if (!ids.length || bulkBusy) return;
     var verb = quarantined ? 'Quarantine' : 'Release';
     if (!confirm(verb + ' ' + ids.length + ' device' + (ids.length === 1 ? '' : 's') +
-        '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
-        'It may not terminate existing device-to-device sessions immediately. ')) return;
+        '?\n\nChanges peer and server access for all images. ' +
+        'Existing device-to-device transfers may continue. Device software is unchanged.')) return;
     setBulkBusy(true);
     var ok = 0, failed = [];
     try {
@@ -3801,11 +3951,9 @@
     var ids = claimSelection();
     if (!ids) return;
     if (!confirm('Adopt ' + ids.length + ' device(s)?\n\n' + ids.join(', ') +
-      '\n\nAdoption creates an ownership record for a device IRIS did not onboard, ' +
-      'so undeploy may later remove resources IRIS did not create. Only adopt ' +
-      'devices whose inventory matches what is really on the box; re-onboarding ' +
-      '(idempotent) is the safer option. Router deployments cannot be adopted.' +
-      '\n\nProceed with adopt?')) { setBulkBusy(false); return; }
+      '\n\nMarks existing resources as IRIS-owned: undeploy may then remove them, ' +
+      'even if IRIS did not create them. Verify the inventory matches the device. ' +
+      'Onboarding again is safer. Routers cannot be adopted.')) { setBulkBusy(false); return; }
     await forSelected('Adopted', ids, function (id) {
       return jpost('/api/v1/devices/' + encodeURIComponent(id) + '/adopt',
                    { acknowledge_adopt: true });
@@ -3911,10 +4059,8 @@
           setBulkBusy(false); return;
         }
       } else if (removesAssignment &&
-          !confirm('This change removes one or more existing image assignments.\n\n' +
-                   'Applying gives every selected device the same set of ' +
-                   imgIds.length + ' checked image(s). Any image a device has ' +
-                   'that is not checked here is dropped from it.\n\nProceed?')) {
+          !confirm('Replace image assignments?\n\nAll selected devices will use these ' +
+                   imgIds.length + ' images. Existing assignments not selected here will be removed.')) {
         setBulkBusy(false); return;
       }
       assignImagesTo(claimed, imgIds, { expect: expect });
@@ -3926,9 +4072,8 @@
     if (setsDiffer) {
       var note = document.getElementById('img-picker-note');
       if (note) {
-        note.textContent = 'Some selected devices are missing assignments present on others. '
-          + 'Apply gives every selected device the same checked set; you will be asked '
-          + 'before any existing assignment is removed.';
+        note.textContent = 'These devices have different image assignments. '
+          + 'Apply gives them all the selected images. Confirm before removing existing assignments.';
         note.hidden = false;
       }
     }
@@ -3948,8 +4093,8 @@
     // actually fires against (issue #112 prerequisite 2).
     var count = selectedIds().length;
     if (!pid && !confirm('Clear the credential on ' + count + ' selected device(s)?\n\n' +
-        'Onboard and undeploy are refused for a device without a credential ' +
-        'until one is assigned again. Profiles themselves are not deleted.')) return;
+        'Onboard and undeploy will be unavailable until you assign another profile. ' +
+        'The credential profiles are kept.')) return;
     var ids = claimSelection();
     if (!ids) return;
     closeModal('cred-modal');
@@ -3973,9 +4118,7 @@
     }
   });
   document.getElementById('batch-close').addEventListener('click', function () {
-    batchGen++;                      // strand any in-flight start/poll work
-    stopBatchPoll();
-    document.getElementById('batch-panel').hidden = true;
+    closeActivity(true);
   });
   restoreBatch();
   var devForm = document.getElementById('dev-form');
@@ -4003,11 +4146,17 @@
   var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;
   function managementInstallOptions(managementType) {
     if (managementType === 'xr-host') return ['xr-appmgr'];
-    if (managementType === 'router-routed' || managementType === 'router-nat') return ['router'];
+    if (managementType === 'router-routed' || managementType === 'router-nat') return ['router', 'iox'];
     if (managementType === 'routed' || managementType === 'inband') return ['guestshell', 'iox'];
     return [];
   }
   var installOptionsGen = 0;
+  function deviceSeriesLabel(series, model) {
+    var labels = { IE3x00: 'IE Switches', IR1x00: 'IR Routers',
+      C8xxx: 'Catalyst Routers', C9xxx: 'Catalyst Switches',
+      NCS: 'NCS', XR8000: 'Cisco 8000 Series' };
+    return labels[series] || labels[model] || model || '—';
+  }
   async function refreshInstallOptions() {
     var model = document.getElementById('df-model').value.trim();
     var managementType = document.getElementById('df-management-type').value;
@@ -4036,7 +4185,7 @@
           return '<option value="' + esc(option) + '">' + esc(INSTALL_OPTION_LABELS[option]) + '</option>';
         }).join('');
       if (options.indexOf(kept) !== -1) platform.value = kept;
-      // XR host and router management explicitly identify their installer.
+      // XR host explicitly identifies its installer; router modes offer two.
       // A model match alone never selects an installer for a switch.
       else if (allowed.length === 1) platform.value = options[0];
     }
@@ -4059,7 +4208,7 @@
       renderOptions(null, 'Model compatibility could not be checked. It will be validated when saved.');
     }
   }
-  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);
+  document.getElementById('df-model').addEventListener('change', refreshInstallOptions);
   document.getElementById('add-dev').addEventListener('click', function () {
     // populate the credential dropdown from the latest profiles
     var sel = document.getElementById('df-cred');
@@ -4076,6 +4225,7 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
+    if (!document.getElementById('df-model').value) { derr.textContent = 'Choose a model series.'; return; }
     var managementType = document.getElementById('df-management-type').value;
     if (!managementType) { derr.textContent = 'Choose a management type for this device.'; return; }
     // The management type or explicit install choice identifies the installer.
@@ -4126,18 +4276,68 @@
     if (!r.ok) { derr.textContent = 'Add failed: ' + ((await r.json()).error || r.status); return; }
     devForm.hidden = true; devForm.reset(); refreshDevices();
   });
+  // ---- Device CSV import ----
+  // A dedicated status survives inventory polls. Never replay an uncertain
+  // write automatically, and clear the input so the same file can be retried.
+  var csvImportBusy = false;
+  function csvImportStatus(message, failed) {
+    var status = document.getElementById('csv-import-status');
+    status.hidden = false;
+    status.textContent = message;
+    status.className = failed ? 'err' : 'muted';
+  }
+  function csvImportProblem(body, status) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'HTTP ' + status;
+    var detail = [body.detail, body.message, body.error].find(function (value) {
+      return typeof value === 'string' && value.trim();
+    }) || ('HTTP ' + status);
+    ['role', 'device_id'].forEach(function (key) {
+      if (typeof body[key] === 'string') detail += ' · ' + key + ': ' + body[key];
+    });
+    if (body.error === 'role_not_found') detail += '. Define the role in Policies before importing.';
+    return detail.slice(0, 1200);
+  }
   document.getElementById('import-csv').addEventListener('click', function () { document.getElementById('csv-file').click(); });
-  document.getElementById('csv-file').addEventListener('change', function (e) {
-    var f = e.target.files[0]; if (!f) return;
-    var rd = new FileReader();
-    rd.onload = async function () {
-      var r = await fetch('/api/v1/devices/import-csv', { method: 'POST', headers: csrfHdr({ 'Content-Type': 'text/csv' }), body: rd.result });
-      var j = await r.json();
-      devStatus.textContent = r.ok ? ('Imported ' + j.imported) : ('Import failed: ' + j.error);
-      refreshDevices();
-    };
-    rd.readAsText(f);
+  document.getElementById('csv-file').addEventListener('change', async function (e) {
+    var f = e.target.files[0];
+    e.target.value = '';
+    if (!f || csvImportBusy) return;
+    if (f.size > 8 * 1024 * 1024) { csvImportStatus('Import failed: CSV exceeds 8 MiB. No request sent.', true); return; }
+    csvImportBusy = true;
+    document.getElementById('import-csv').disabled = true;
+    csvImportStatus('Reading CSV…', false);
+    try {
+      var csv;
+      try { csv = await f.text(); }
+      catch (e) { csvImportStatus('Cannot read this CSV file. No import request sent.', true); return; }
+      csvImportStatus('Importing CSV…', false);
+      var r, body = null;
+      try {
+        r = await fetch('/api/v1/devices/import-csv', { method: 'POST', headers: csrfHdr({ 'Content-Type': 'text/csv' }), body: csv });
+        var text = await r.text();
+        try { body = JSON.parse(text); } catch (e) { /* Never display a proxy HTML page. */ }
+      } catch (e) {
+        csvImportStatus('Import response unavailable. The import may have completed; refresh inventory before retrying.', true);
+        return;
+      }
+      if (!r.ok) {
+        csvImportStatus('Import failed: ' + csvImportProblem(body, r.status) +
+          (r.status >= 500 ? '. Refresh inventory before retrying; the outcome may be uncertain.' : ''), true);
+        return;
+      }
+      if (!body || !Number.isSafeInteger(body.imported) || body.imported < 0) {
+        csvImportStatus('Import response could not be confirmed. Refresh inventory before retrying.', true);
+        return;
+      }
+      csvImportStatus('Imported ' + body.imported + ' device(s).', false);
+      try { await refreshDevices(); }
+      catch (e) { csvImportStatus('Import completed; inventory refresh unavailable. Refresh the page.', false); }
+    } finally {
+      csvImportBusy = false;
+      document.getElementById('import-csv').disabled = false;
+    }
   });
+  // ---- End device CSV import ----
   // fetch + blob download (not a plain <a download> nav): Chrome blocks
   // download-attribute navigations over connections with certificate errors
   // (self-signed labs), which made these buttons appear dead.
@@ -4659,6 +4859,7 @@
   // means "no override" (server default), "mozilla" is this curated URL,
   // anything else is "custom" and shows the raw input.
   var CA_MOZILLA_URL = 'https://curl.se/ca/cacert.pem';
+  var CA_CISCO_URL = 'https://www.cisco.com/security/pki/trs/ios.p7b';
 
   // ---- Settings: post-install setup checklist ----
   // Chips render through the real Magnetic status-pill system (levelPillHTML)
@@ -5089,8 +5290,11 @@
   });
 
   async function refreshSettings() {
-    var r = await fetch('/api/v1/settings'); if (!r.ok) return;
-    var s = await r.json();
+    var r, s;
+    try {
+      r = await fetch('/api/v1/settings'); if (!r.ok) return;
+      s = await r.json();
+    } catch (e) { return; } // The shared fetch wrapper reports unavailable live data.
     var rows = [
       ['Version', s.version],
       ['Admin', s.admin_username],
@@ -5127,7 +5331,7 @@
     // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
     var trust = s.trust || [];
     var caSrcNow = (s.ca_trust || {}).url;
-    var bundleLabel = !caSrcNow ? 'Cisco Trusted Root Store'
+    var bundleLabel = !caSrcNow || caSrcNow === CA_CISCO_URL ? 'Cisco Trusted Root Store'
       : (caSrcNow === CA_MOZILLA_URL ? 'Mozilla CA bundle (curl.se)' : 'Custom URL');
     document.getElementById('trust-rows').innerHTML = trust.length
       ? trust.map(function (t) {
@@ -5152,14 +5356,13 @@
     document.querySelectorAll('#trust-rows .trust-del').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var name = btn.closest('tr').getAttribute('data-name');
-        if (!confirm('Remove trusted CA ' + name + '?\n\nOutbound TLS (telemetry ' +
-            'export, CA bundle download) stops trusting certificates issued by it ' +
-            'on the next connection.')) return;
+        if (!confirm('Remove trusted CA ' + name + '?\n\n' +
+            'New connections will no longer trust certificates from this CA. ' +
+            'Telemetry export and CA downloads may fail.')) return;
         var msg = document.getElementById('trust-msg');
         msg.textContent = ''; msg.classList.remove('ok');
-        var r = await fetch('/api/v1/settings/trust/' + encodeURIComponent(name),
-                            { method: 'DELETE', headers: csrfHdr() });
-        if (!r.ok) { msg.textContent = 'Remove failed (' + r.status + ')'; return; }
+        var r = await settingsWrite('/api/v1/settings/trust/' + encodeURIComponent(name), null, msg, 'DELETE');
+        if (!r) return;
         refreshSettings();
       });
     });
@@ -5167,7 +5370,7 @@
     document.getElementById('ca-url').value = ct.url || '';
     document.getElementById('ca-auto').checked = !!ct.auto;
     var caSourceSel = document.getElementById('ca-source');
-    caSourceSel.value = !ct.url ? 'cisco' : (ct.url === CA_MOZILLA_URL ? 'mozilla' : 'custom');
+    caSourceSel.value = !ct.url || ct.url === CA_CISCO_URL ? 'cisco' : (ct.url === CA_MOZILLA_URL ? 'mozilla' : 'custom');
     document.getElementById('ca-url').hidden = caSourceSel.value !== 'custom';
     // --- Telemetry destination (replaces the old read-only Observability row) ---
     var td = s.telemetry_destination || {};
@@ -5291,8 +5494,8 @@
     var msg = document.getElementById('iv-schedule-msg'); msg.textContent = ''; msg.classList.remove('ok');
     var mode = document.getElementById('iv-mode').value;
     var hour = parseInt(document.getElementById('iv-hour').value, 10);
-    var r = await jpost('/api/v1/settings/image-verification', { mode: mode, hour_utc: hour });
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/image-verification', { mode: mode, hour_utc: hour }, msg);
+    if (!r) return;
     msg.textContent = 'Schedule saved.'; msg.classList.add('ok');
     refreshImageVerificationSettings();
   });
@@ -5301,17 +5504,20 @@
     var msg = document.getElementById('iv-refresh-msg'); msg.textContent = ''; msg.classList.remove('ok');
     btn.disabled = true;
     try {
-      var r = await jpost('/api/v1/image-verification/refresh', {});
-      var body = {};
-      try { body = await r.json(); } catch (e) { }
+      var r = await settingsWrite('/api/v1/image-verification/refresh', {}, msg, null, [409]);
+      if (!r) return;
       if (r.status === 409) {
         msg.textContent = 'A refresh is already in progress.';
       } else if (r.ok) {
+        var body = await settingsResult(r, msg, function (result) {
+          return ['matched', 'mismatched', 'not_in_feed'].every(function (key) {
+            return Number.isInteger(result[key]) && result[key] >= 0;
+          });
+        });
+        if (!body) return;
         msg.textContent = 'Refresh complete: ' + body.matched + ' matched, ' +
           body.mismatched + ' mismatched, ' + body.not_in_feed + ' not in feed.';
         msg.classList.add('ok');
-      } else {
-        msg.textContent = 'Refresh failed: ' + (body.detail || ('status ' + r.status));
       }
     } finally {
       btn.disabled = false;
@@ -5363,13 +5569,19 @@
       if (xhr.status === 409) {
         finish('A refresh is already in progress.', false);
       } else if (xhr.status === 200) {
+        if (!body || !['matched', 'mismatched', 'not_in_feed'].every(function (key) {
+          return Number.isInteger(body[key]) && body[key] >= 0;
+        })) {
+          finish('Response unavailable. The check may have completed; refresh its status before retrying.', false);
+          return;
+        }
         finish('Offline check complete: ' + body.matched + ' matched, ' +
           body.mismatched + ' mismatched, ' + body.not_in_feed + ' not in feed.', true);
       } else {
         finish('Offline check failed: ' + (body.detail || body.error || ('status ' + xhr.status)), false);
       }
     };
-    xhr.onerror = function () { finish('Upload error.', false); };
+    xhr.onerror = function () { finish('Response unavailable. The check may have started; refresh its status before retrying.', false); };
     xhr.send(file);
   }
   wireDropzone(document.getElementById('iv-offline-dropzone'), document.getElementById('iv-offline-dropzone-input'),
@@ -5382,17 +5594,19 @@
     var cf = document.getElementById('pw-confirm').value;
     if (nw.length < 8) { msg.textContent = 'New password must be at least 8 characters.'; return; }
     if (nw !== cf) { msg.textContent = 'Passwords do not match.'; return; }
-    var r = await jpost('/api/v1/settings/password', { current: cur, new: nw, confirm: cf });
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/password', { current: cur, new: nw, confirm: cf }, msg);
+    if (!r) return;
     document.getElementById('pw-form').reset();
     msg.textContent = 'Password changed. Other sessions signed out.'; msg.classList.add('ok');
     refreshSettings();
   });
   document.getElementById('revoke-others').addEventListener('click', async function () {
     var m = document.getElementById('revoke-msg'); m.textContent = '';
-    var r = await jpost('/api/v1/settings/sessions/revoke-others', {});
-    if (!r.ok) { m.textContent = 'Failed (' + r.status + ')'; return; }
-    m.textContent = 'Signed out ' + (await r.json()).revoked + ' other session(s).';
+    var r = await settingsWrite('/api/v1/settings/sessions/revoke-others', {}, m);
+    if (!r) return;
+    var result = await settingsResult(r, m, function (body) { return Number.isInteger(body.revoked) && body.revoked >= 0; });
+    if (!result) return;
+    m.textContent = 'Signed out ' + result.revoked + ' other session(s).';
     refreshSettings();
   });
   // ---- Shared settings forms: one markup source, mounted where it is needed
@@ -5446,6 +5660,37 @@
 
 
   // ---- Settings: certificate / trust store / telemetry destination ----
+
+  function settingsUnknown(msg) {
+    msg.dataset.uncertain = 'true';
+    msg.textContent = 'Response unavailable. Settings may have changed; reload to check before retrying.';
+  }
+  async function settingsResult(response, msg, validate) {
+    try {
+      var result = await response.json();
+      if (!result || typeof result !== 'object' || Array.isArray(result) || !validate(result)) throw new Error('Invalid response');
+      return result;
+    } catch (e) { settingsUnknown(msg); return null; }
+  }
+  async function settingsWrite(url, body, msg, method, acceptedStatuses) {
+    // Network loss can happen after a write commits. Never imply rollback or
+    // silently retry, and tolerate non-JSON proxy errors without losing feedback.
+    delete msg.dataset.uncertain;
+    try {
+      var response = method === 'DELETE'
+        ? await fetch(url, { method: 'DELETE', headers: csrfHdr() })
+        : await jpost(url, body);
+      if (!response.ok && !(acceptedStatuses || []).includes(response.status)) {
+        var problem = await response.json().catch(function () { return {}; });
+        msg.textContent = (problem && (problem.detail || problem.error)) || ('Request failed (' + response.status + ').');
+        return null;
+      }
+      return response;
+    } catch (e) {
+      settingsUnknown(msg);
+      return null;
+    }
+  }
 
   // Drag-and-drop onto the TLS pane (Feature 2). Client-side only: a
   // FileReader read plus content sniffing, then the existing textareas /
@@ -5548,10 +5793,12 @@
       }
       body.key_passphrase = pw;
     }
-    var r = await jpost('/api/v1/settings/gui-cert', body);
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
-    var certRes = await r.json().catch(function () { return {}; });
+    var r = await settingsWrite('/api/v1/settings/gui-cert', body, msg);
+    if (!r) return;
+    var certRes = await settingsResult(r, msg, function (body) { return typeof body.applied === 'boolean'; });
+    if (!certRes) return;
     document.getElementById('cert-form').reset();   // never leave the key in the DOM
+    syncPassphraseRow();
     msg.textContent = certRes.applied === false
       ? 'Certificate ' + (certRes.note || 'saved; takes effect at the next restart') + '.'
       : 'Certificate replaced. New connections use it now; reload to see it on this one.';
@@ -5560,12 +5807,13 @@
   });
   document.getElementById('cert-revert').addEventListener('click', async function () {
     var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    if (!confirm('Use the deployment default certificate?\n\nThe uploaded certificate and key ' +
-        'are deleted and the Console serves its deployment certificate again. New ' +
-        'connections switch immediately; open sessions continue.')) return;
-    var r = await fetch('/api/v1/settings/gui-cert', { method: 'DELETE', headers: csrfHdr() });
-    if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
-    var certRes = await r.json().catch(function () { return {}; });
+    if (!confirm('Use the default Console certificate?\n\n' +
+        'Deletes the uploaded certificate and key. New connections use the default; ' +
+        'open sessions continue.')) return;
+    var r = await settingsWrite('/api/v1/settings/gui-cert', null, msg, 'DELETE');
+    if (!r) return;
+    var certRes = await settingsResult(r, msg, function (body) { return typeof body.applied === 'boolean'; });
+    if (!certRes) return;
     msg.textContent = certRes.applied === false
       ? 'Certificate ' + (certRes.note || 'saved; takes effect at the next restart') + '.'
       : 'Reverted to the deployment default certificate.';
@@ -5579,8 +5827,8 @@
     if (pem.indexOf('BEGIN CERTIFICATE') < 0) {
       msg.textContent = 'Paste at least one PEM certificate block.'; return;
     }
-    var r = await jpost('/api/v1/settings/trust', { pem: pem });
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/trust', { pem: pem }, msg);
+    if (!r) return;
     document.getElementById('trust-form').reset();
     msg.textContent = 'CA installed.'; msg.classList.add('ok');
     refreshSettings();
@@ -5588,20 +5836,22 @@
   wireDropzone(document.getElementById('trust-dropzone'), document.getElementById('trust-dropzone-input'),
     async function (files) {
       var msg = document.getElementById('trust-msg'); msg.textContent = ''; msg.classList.remove('ok');
-      var ok = 0, fail = 0, skipped = 0;
+      var ok = 0, fail = 0, skipped = 0, uncertain = false;
       for (var i = 0; i < files.length; i++) {
         var file = files[i];
         var text;
         try { text = await readFileAsText(file); } catch (err) { fail++; continue; }
         if (!PEM_CERTIFICATE_RE.test(text)) { skipped++; continue; }
-        var r = await jpost('/api/v1/settings/trust', { pem: text });
-        if (r.ok) ok++; else fail++;
+        var r = await settingsWrite('/api/v1/settings/trust', { pem: text }, msg);
+        if (r) ok++; else fail++;
+        uncertain = uncertain || msg.dataset.uncertain === 'true';
       }
       var parts = [];
       if (ok) parts.push(ok + ' added');
       if (fail) parts.push(fail + ' failed');
       if (skipped) parts.push(skipped + ' skipped (no certificate PEM found)');
       msg.textContent = parts.length ? (parts.join(', ') + '.') : 'No files processed.';
+      if (uncertain) msg.textContent += ' Some results are unknown; reload to check installed CAs before retrying.';
       if (ok && !fail && !skipped) msg.classList.add('ok');
       refreshSettings();
     });
@@ -5621,9 +5871,9 @@
       document.getElementById('ca-url').value.trim();
     var auto = document.getElementById('ca-auto').checked;
     if (url && url.indexOf('https://') !== 0) { msg.textContent = 'Bundle URL must be https://'; return; }
-    if (auto && !url) { msg.textContent = 'Auto-refresh needs a bundle URL.'; return; }
-    var r = await jpost('/api/v1/settings/ca-trust', { url: url || null, auto: auto });
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    if (source === 'custom' && !url) { msg.textContent = 'Enter a custom HTTPS bundle URL.'; return; }
+    var r = await settingsWrite('/api/v1/settings/ca-trust', { url: url || null, auto: auto }, msg);
+    if (!r) return;
     msg.textContent = 'CA download settings saved.'; msg.classList.add('ok');
     refreshSettings();
   });
@@ -5660,10 +5910,12 @@
   }
   document.getElementById('ca-refresh').addEventListener('click', async function () {
     var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var r = await jpost('/api/v1/settings/ca-trust/refresh', {});
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/ca-trust/refresh', {}, msg);
+    if (!r) return;
+    var result = await settingsResult(r, msg, function (body) { return typeof body.job === 'string' && !!body.job; });
+    if (!result) return;
     msg.textContent = 'Downloading…';
-    pollCaRefresh((await r.json()).job);
+    pollCaRefresh(result.job);
   });
   function wireTelemetryForm() {
   document.getElementById('td-form').addEventListener('submit', async function (e) {
@@ -5675,20 +5927,19 @@
     if (endpoint && !(endpoint.indexOf('http://') === 0 || endpoint.indexOf('https://') === 0)) {
       msg.textContent = 'Endpoint must be an http:// or https:// URL.'; return;
     }
-    var r = await jpost('/api/v1/settings/telemetry-destination',
-                        { endpoint: endpoint || null, enabled: enabled });
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/telemetry-destination',
+                        { endpoint: endpoint || null, enabled: enabled }, msg);
+    if (!r) return;
     msg.textContent = 'Telemetry destination saved. The exporter picks it up on the next sample pass.';
     msg.classList.add('ok');
     refreshSettings();
   });
   document.getElementById('td-revert').addEventListener('click', async function () {
     var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    if (!confirm('Revert the telemetry destination to the deployment default?\n\n' +
-        'The console override is deleted and the exporter goes back to the environment configuration ' +
-        '(IRIS_OTLP_ENDPOINT / IRIS_OBSERVABILITY) on the next sample pass.')) return;
-    var r = await fetch('/api/v1/settings/telemetry-destination', { method: 'DELETE', headers: csrfHdr() });
-    if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
+    if (!confirm('Use the default telemetry destination?\n\n' +
+        'Removes the Console override. Telemetry uses the deployment settings from the next sample.')) return;
+    var r = await settingsWrite('/api/v1/settings/telemetry-destination', null, msg, 'DELETE');
+    if (!r) return;
     msg.textContent = 'Reverted to the deployment default.'; msg.classList.add('ok');
     refreshSettings();
   });
@@ -5717,8 +5968,8 @@
                  age_recipient: recipient,
                  auto: document.getElementById('ae-auto').checked };
     if (pass) body.password = pass;    // absent password keeps the stored one
-    var r = await jpost('/api/v1/settings/audit-export', body);
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/audit-export', body, msg);
+    if (!r) return;
     document.getElementById('ae-pass').value = '';   // never leave the password in the DOM
     msg.textContent = 'Audit export settings saved.'; msg.classList.add('ok');
     refreshSettings();
@@ -5756,29 +6007,29 @@
   }
   document.getElementById('ae-run').addEventListener('click', async function () {
     var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var r = await jpost('/api/v1/settings/audit-export/run', {});
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var r = await settingsWrite('/api/v1/settings/audit-export/run', {}, msg);
+    if (!r) return;
+    var result = await settingsResult(r, msg, function (body) { return typeof body.job_id === 'string' && !!body.job_id; });
+    if (!result) return;
     msg.textContent = 'Exporting…';
-    pollAuditExport((await r.json()).job_id);
+    pollAuditExport(result.job_id);
   });
   document.getElementById('ae-clear').addEventListener('click', async function () {
     var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    if (!confirm('Clear the audit export configuration?\n\nThe stored settings and ' +
-        'password are deleted and the daily export stops. Audit events stay on ' +
-        'this server; files already exported to the remote host are untouched.')) return;
-    var r = await fetch('/api/v1/settings/audit-export', { method: 'DELETE', headers: csrfHdr() });
-    if (!r.ok) { msg.textContent = 'Clear failed (' + r.status + ')'; return; }
+    if (!confirm('Stop daily audit exports?\n\n' +
+        'Deletes the export settings and saved password. ' +
+        'Keeps audit events on this server and files already exported.')) return;
+    var r = await settingsWrite('/api/v1/settings/audit-export', null, msg, 'DELETE');
+    if (!r) return;
     msg.textContent = 'Audit export configuration cleared.'; msg.classList.add('ok');
     refreshSettings();
   });
 
-  // ---- Settings: sidebar feature sub-menu (General / TLS & trust / Telemetry) ----
+  // ---- Settings section routes (React renders the tab navigation) ----
   // refreshSettings() above always populates all panes' ids regardless of
   // which is visible, so switching sub-pages is pure class/hidden toggling.
-  // The sub-menu entries live in the sidebar under Settings and are plain
-  // hash links (#settings/<sub>), so the router below owns selection and the
-  // sub-pages are deep-linkable; the menu itself is revealed only while a
-  // settings sub-page is showing.
+  // The tabs use plain hash links (#settings/<sub>), so the router below
+  // owns pane visibility and the sections remain deep-linkable.
   var SETTINGS_SUBS = ['general', 'tls', 'telemetry'];
   // The audit-export pane rides the same pane/nav id pattern; appended
   // separately so the original trio stays a literal for the source guard
@@ -5796,7 +6047,6 @@
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
-      document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
     });
     // Claim the shared form back from the wizard, then repopulate it --
     // a freshly cloned form is empty until refreshSettings writes to it.
@@ -5815,7 +6065,6 @@
     if (MONITORING_SUBS.indexOf(sub) < 0) sub = 'audit';
     MONITORING_SUBS.forEach(function (t) {
       document.getElementById('monitoring-pane-' + t).hidden = t !== sub;
-      document.getElementById('nav-monitoring-' + t).classList.toggle('active', t === sub);
     });
     updateMonitoringScopeTags();
   }
@@ -6651,57 +6900,63 @@
     });
   });
 
-  // ---- header help popover ----
-  // Version / deployment id / docs links come from GET /api/v1/help, fetched
-  // lazily on the first open and cached for the session.
-  var helpLoaded = false;
-  document.getElementById('help-btn').addEventListener('click', async function () {
-    if (helpLoaded) return;
+  // React owns header rendering; the existing authenticated client supplies
+  // its public help metadata without exposing the session's CSRF token.
+  async function publishHelp() {
     var r;
     try { r = await fetch('/api/v1/help'); } catch (e) { return; }
     if (!r.ok) return;
-    var h = await r.json();
-    helpLoaded = true;
-    document.getElementById('help-version').textContent = 'Version ' + (h.version || 'unknown');
-    document.getElementById('help-deployment-id').textContent = h.deployment_id || '';
-    if (h.docs_url) document.getElementById('help-docs-link').href = h.docs_url;
-    var g = h.guides || {};
-    if (g.device) document.getElementById('help-device-guide').href = g.device;
-    if (g.server) document.getElementById('help-server-guide').href = g.server;
-  });
-  document.getElementById('help-copy-id').addEventListener('click', async function () {
-    var id = document.getElementById('help-deployment-id').textContent;
-    if (!id) return;
-    var btn = document.getElementById('help-copy-id');
-    try { await navigator.clipboard.writeText(id); btn.textContent = 'copied'; }
-    catch (e) { btn.textContent = 'copy failed'; }
-    setTimeout(function () { btn.textContent = 'copy'; }, 1500);
-  });
-
-  // ---- off-canvas nav (mobile, <=768px; Task 6) ----
-  // The nav rail slides in from the left below the 768px breakpoint (CSS);
-  // this just flips the open state and keeps aria-expanded honest for
-  // assistive tech. show() below closes it on every navigation, so picking
-  // a page never leaves the rail covering the content it just opened.
-  var navToggle = document.getElementById('nav-toggle');
-  var navRail = document.querySelector('.nav-rail');
-  function setNavOpen(open) {
-    navRail.classList.toggle('open', !!open);
-    navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    try {
+      var h = await r.json();
+      window.dispatchEvent(new CustomEvent('iris:shell-state', { detail: { help: h } }));
+    } catch (e) { /* Help metadata must not prevent operational views loading. */ }
   }
-  navToggle.addEventListener('click', function () { setNavOpen(!navRail.classList.contains('open')); });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && navRail.classList.contains('open')) setNavOpen(false);
-  });
+  publishHelp();
+
+  // ---- Policies view reads ----
+  // Keep the page independent of Inventory's paging/credential/job requests.
+  // Reads never replace editor fields or the revision captured by a preview.
+  var policiesRefreshGeneration = 0, policiesRefreshController = null;
+  function cancelPolicyReads() {
+    policiesRefreshGeneration++;
+    if (policiesRefreshController) policiesRefreshController.abort();
+    roleDefinitionsGeneration++;
+    if (roleDefinitionsController) roleDefinitionsController.abort();
+    roleDefinitionsLoading = false;
+  }
+  async function refreshPolicies() {
+    if (document.getElementById('view-policies').hidden) return;
+    var mine = ++policiesRefreshGeneration;
+    var policyMine = ++peerPolicyReadGeneration;
+    if (policiesRefreshController) policiesRefreshController.abort();
+    policiesRefreshController = new AbortController();
+    var nextPolicy = null;
+    try {
+      var response = await fetch('/api/v1/peer-policy', { signal: policiesRefreshController.signal });
+      if (response.ok) nextPolicy = await response.json();
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+    if (mine !== policiesRefreshGeneration || policyMine !== peerPolicyReadGeneration ||
+        document.getElementById('view-policies').hidden) return;
+    peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
+    if (peerPolicyReadOk) peerPolicy = nextPolicy;
+    renderPeerPolicyPanel();
+    if (!roleDefBusy && document.getElementById('peer-policy-panel').open &&
+        (!roleDefinitionsOk || roleDefinitionsRevision !== peerPolicy.revision)) {
+      await loadRoleDefinitions();
+    }
+  }
+  // ---- End Policies view reads ----
 
   // ---- hash router ----
-  var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring', 'setup'];
+  var VIEWS = ['overview', 'images', 'devices', 'policies', 'swarm', 'settings', 'monitoring', 'setup'];
 
   // Periodic refresh of whatever view is on screen. Without this the console
   // only updated on navigation or after an explicit action, so device state
   // that changes server-side -- heartbeats, staging progress, deployment
   // state -- stayed invisible until the operator navigated away and back.
-  // refreshDevices() already preserves batch checkbox selections across a
+  // refreshDevices() already preserves device selections across a
   // re-render, so a poll does not cost the operator their selection.
   var VIEW_POLL_MS = 10000;
   var viewPollTimer = null;
@@ -6730,32 +6985,29 @@
   });
 
   function show(view) {
-    // A navigation is exactly when the mobile off-canvas nav should close --
-    // the operator picked a page, so the rail covering it has done its job.
-    setNavOpen(false);
     // "#settings/tls" style hashes: the part before the slash picks the view,
     // the rest picks the view's sub-page (showSettingsSub / showMonitoringSub
     // validate it).
     var sub = view.indexOf('/') > -1 ? view.slice(view.indexOf('/') + 1) : '';
     view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
+    if (view !== 'policies') {
+      cancelPolicyReads();
+      closeModal('role-def-modal');
+      closeModal('policy-advanced-modal');
+    } else {
+      // A late Inventory read must not replace this route's policy state.
+      devicesRefreshGeneration++;
+      if (devicesRefreshController) devicesRefreshController.abort();
+    }
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
-      var nav = document.getElementById('nav-' + v);
-      if (nav) nav.classList.toggle('active', v === view);
     });
     var swarmFrame = document.getElementById('swarm-frame');
     if (swarmFrame && swarmFrame.contentWindow) {
       swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);
     }
-    // Wave D fix 2: the flyouts are now trigger-driven popovers (wireMenu,
-    // above) rather than tied to the active route -- but navigating to a
-    // DIFFERENT view still has to close one left open over a page it no
-    // longer applies to. A click-driven navigation already closes it via
-    // wireMenu's own outside-click handler; this covers the paths that
-    // never dispatch a click on the page at all -- the browser back/
-    // forward buttons, or a hashchange from code elsewhere in the app
-    // (e.g. the Overview attention cards' router jump).
+    // Close legacy workflow popovers on navigation; React owns shell menus.
     if (view !== 'settings' && view !== 'monitoring') closeMenus();
     if (view === 'settings') showSettingsSub(sub || 'general');
     if (view === 'monitoring') showMonitoringSub(sub || 'audit');
@@ -6768,8 +7020,9 @@
       refreshImages(); refreshImportable();
       poll = function () { refreshImages(); refreshImportable(); };
     } else if (view === 'devices') { refreshDevices(); poll = pollDevices; }
+    else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
-    else if (view === 'settings') { refreshSettings(); refreshSetup(); }
+    else if (view === 'settings') { refreshSetup(); } // showSettingsSub already refreshes the form data.
     else if (view === 'monitoring') { refreshMonitoring(); poll = pollMonitoring; }
     else if (view === 'setup') enterSetupWizard();
     startViewPoll(poll);

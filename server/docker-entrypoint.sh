@@ -155,16 +155,12 @@ fi
 # CA-verified management hop into the console's tmpfs. Kubernetes instead
 # mounts its operator-issued console identity and leaves generation disabled.
 if [ "${IRIS_GUI_FALLBACK_GENERATE:-0}" = "1" ]; then
-  fallback_key="$IRIS_RUN/tls/.console-fallback-key.pem"
-  fallback_crt="$IRIS_RUN/tls/.console-fallback-crt.pem"
-  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-    -subj "/CN=${IRIS_HOST_IP}" \
-    -addext "subjectAltName=IP:${IRIS_HOST_IP}" \
-    -keyout "$fallback_key" -out "$fallback_crt" >/dev/null 2>&1
-  cat "$fallback_crt" "$fallback_key" > "${IRIS_GUI_FALLBACK_CERT}.tmp"
-  chmod 600 "${IRIS_GUI_FALLBACK_CERT}.tmp"
-  mv -f "${IRIS_GUI_FALLBACK_CERT}.tmp" "$IRIS_GUI_FALLBACK_CERT"
-  rm -f "$fallback_key" "$fallback_crt"
+  IRIS_CONFIG="$IRIS_CONFIG" IRIS_GUI_FALLBACK_CERT="$IRIS_GUI_FALLBACK_CERT" \
+    IRIS_AGE_KEY_FILE="$IRIS_AGE_KEY_FILE" IRIS_AGE_BIN="$IRIS_AGE_BIN" \
+    PYTHONPATH="$script_dir" python3 "$script_dir/console_identity.py" || {
+      echo "FATAL: default Console identity unavailable; restore its encrypted identity or configure recovery before restarting" >&2
+      exit 1
+    }
 fi
 
 # Local Compose bootstrap for the narrowly scoped tier credential. The named

@@ -679,14 +679,46 @@ def apply_verified(verified, state, authenticated_date, monotonic_now, boot_id):
 
 
 def _read_bytes(path, cap):
+    # Cache/keylist files are untrusted local input just like the bootstrap.
+    # A FIFO or a symlink must not hang an otherwise healthy agent tick or
+    # redirect a read outside its work directory. Inspect the opened inode,
+    # not only its pathname, and reject mutation during the bounded read.
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        raise OSError(errno.ENOTSUP, "safe instruction file reads unavailable")
     try:
-        with open(path, "rb") as stream:
-            data = stream.read(cap + 1)
+        fd = os.open(path, os.O_RDONLY | nofollow | nonblock
+                     | getattr(os, "O_CLOEXEC", 0))
     except FileNotFoundError:
         return None
-    if len(data) > cap:
-        raise InstructionError("oversize")
-    return data
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError(errno.EINVAL, "instruction file is not regular")
+        if before.st_size > cap:
+            raise InstructionError("oversize")
+        chunks = []
+        remaining = cap + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(fd)
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_size,
+                    getattr(value, "st_mtime_ns", value.st_mtime),
+                    getattr(value, "st_ctime_ns", value.st_ctime))
+        if identity(before) != identity(after) or len(data) != after.st_size:
+            raise OSError(errno.ESTALE, "instruction file changed during read")
+        if len(data) > cap:
+            raise InstructionError("oversize")
+        return data
+    finally:
+        os.close(fd)
 
 
 def _read_bootstrap(path):

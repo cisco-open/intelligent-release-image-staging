@@ -312,7 +312,7 @@ setup_stage_local() {
   # kill the script right after [2/6] finishes. The [pre] PREREQ step now
   # sits between [1/6] and [2/6] (routed by default), so the stub must also
   # answer the ip-routing / clock checks — FAKE_IP_ROUTING defaults "yes" and
-  # FAKE_CLOCK_LINE defaults to a recent year so every pre-existing test below
+  # FAKE_CLOCK_LINE defaults to synchronized NTP so every pre-existing test below
   # still sails past [pre] unmodified; only the dedicated PREREQ tests further
   # down override those.
   #
@@ -347,7 +347,7 @@ case "$cmds" in
         ;;
     esac
     echo "__IRIS_PRECHECK_CLOCK__"
-    echo "${FAKE_CLOCK_LINE:-14:23:07.512 UTC Thu Aug 20 2026}"
+    echo "${FAKE_CLOCK_LINE:-Clock is synchronized, stratum 5, reference is 192.0.2.123}"
     ;;
   *"more "*"guest-share/iris/iris-agent.conf"*)
     [ -n "${FAKE_LKG_KEY:-}" ] && echo "lkg_key = $FAKE_LKG_KEY"
@@ -373,6 +373,8 @@ STUB
   # HERE is the dir containing device-install.sh itself, so symlink the real
   # script into a scratch tree that mirrors <root>/device and <root>/lab.
   mkdir -p "$STUBDIR/device"
+  mkdir -p "$STUBDIR/server"
+  cp "$BATS_TEST_DIRNAME/../../server/time_preflight.py" "$STUBDIR/server/"
   ln -s "$INSTALL" "$STUBDIR/device/device-install.sh"
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh" 2>/dev/null || true
 
@@ -633,8 +635,8 @@ _inband() {
   [ "$status" -eq 0 ]
 }
 
-@test "warns (not fails) on a stale device clock (PREREQ)" {
-  run grep -F 'PREREQ WARNING: device clock is' "$INSTALL"
+@test "requires synchronized device time before staging (PREREQ)" {
+  run grep -F 'server/time_preflight.py' "$INSTALL"
   [ "$status" -eq 0 ]
 }
 
@@ -701,7 +703,7 @@ _inband() {
   [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 1 ]
 }
 
-@test "old device clock: real run warns but continues past the check" {
+@test "unsynchronized device clock: real run stops before staging" {
   setup_stage_local
   unset HOST_USER HOST_PASS
 
@@ -710,18 +712,15 @@ _inband() {
     GUEST_IP=203.0.113.126 CATALOG_URL=https://192.0.2.10:8443 \
     CATALOG_TOKEN=deadbeef DEVICE_ID=203.0.113.3 STAGE_HOST=192.0.2.10 \
     IRIS_CRT_FILE="$CRTFILE" FAKE_IP_ROUTING=yes \
-    FAKE_CLOCK_LINE="14:23:07.512 UTC Thu Aug 20 2018" \
+    FAKE_CLOCK_LINE="Clock is unsynchronized, stratum 16, no reference clock" \
     bash "$STUBDIR/device/device-install.sh"
 
-  [[ "$output" == *"PREREQ WARNING: device clock is 2018"* ]]
-  [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 1 ]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"time preflight failed"* ]]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 0 ]
 }
 
-@test "unparseable device clock: the optional probe must not abort the install" {
-  # `show clock` output with no four-digit year (odd platform format, or a
-  # transport hiccup on just this probe) must leave clock_year empty and skip
-  # the warning — under `set -euo pipefail` a bare failing grep here used to
-  # kill the whole installer at a check that is documented as optional.
+@test "unparseable time status: fail closed before staging" {
   setup_stage_local
   unset HOST_USER HOST_PASS
 
@@ -733,8 +732,9 @@ _inband() {
     FAKE_CLOCK_LINE="% Clock is not set" \
     bash "$STUBDIR/device/device-install.sh"
 
-  [[ "$output" != *"PREREQ WARNING"* ]]
-  [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 1 ]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"time preflight failed"* ]]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 0 ]
 }
 
 @test "dry-run and real run use the same capability-bearing staged filenames" {
@@ -765,9 +765,9 @@ case "\$cmds" in
     echo 'show running-config | include no ip routing'
     echo 'Gateway of last resort is 192.0.2.1 to network 0.0.0.0'
     echo '__IRIS_PRECHECK_CLOCK__'
-    echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
+    echo 'Clock is synchronized, stratum 5, reference is 192.0.2.123' ;;
   *'show running-config | include ^ip routing'*) echo 'ip routing' ;;
-  *'show clock'*) echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
+  *'show ntp status'*) echo 'Clock is synchronized, stratum 5, reference is 192.0.2.123' ;;
   *'show app-hosting list'*) echo 'guestshell RUNNING' ;;
   *'copy https://'*) echo '123 bytes copied' ;;
   *'copy running-config startup-config'*) echo '[OK]' ;;
@@ -818,7 +818,7 @@ case "\$cmds" in
     echo "show running-config | include no ip routing"
     echo "Gateway of last resort is 192.0.2.1 to network 0.0.0.0"
     echo "__IRIS_PRECHECK_CLOCK__"
-    echo "14:23:07.512 UTC Thu Aug 20 2026"
+    echo "Clock is synchronized, stratum 5, reference is 192.0.2.123"
     ;;
   *"show app-hosting list"*) echo "guestshell RUNNING" ;;
   *) echo "bytes free stub" ;;
@@ -857,7 +857,7 @@ case "$cmds" in
     echo "__IRIS_PRECHECK_FLASH__"
     echo "bytes free stub"
     echo "__IRIS_PRECHECK_CLOCK__"
-    echo "14:23:07.512 UTC Thu Aug 20 2026"
+    echo "Clock is synchronized, stratum 5, reference is 192.0.2.123"
     ;;
   *) echo "bytes free stub" ;;
 esac

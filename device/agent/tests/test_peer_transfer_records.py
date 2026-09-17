@@ -642,6 +642,22 @@ class TestTerminalTickIngest:
         assert state["img1"]["tele"]["done_ts"] == 1100.0
         assert "peer_transfer_records" not in state["img1"]["tele"]
 
+    def test_download_hook_timing_matches_attempt_and_not_copy_tick(self, tmp_path):
+        stage = tmp_path / "img.bin"
+        sidecar = tmp_path / ("img.bin" + tr.PEER_TRANSFER_SIDECAR_SUFFIX)
+        for gid, start, expected in [
+                ("2089b05ecca3d829", 1000, True),
+                ("different", 1000, False),
+                ("2089b05ecca3d829", None, False),
+                ("2089b05ecca3d829", 1090, False)]:
+            sidecar.write_text(_doc([], captured_at=1080))
+            tele = {"download_start": start, "download_gid": gid}
+            iris_agent._ingest_peer_transfer_records(
+                self._deps(), tele, str(stage), 1200)
+            assert ("download" in tele) is expected
+            if expected:
+                assert tele["download"] == {"start": 1000, "end": 1080}
+
     def test_seeding_only_completion_also_ingests(self, tmp_path):
         stage = tmp_path / "img.bin"
         (tmp_path / ("img.bin" + tr.PEER_TRANSFER_SIDECAR_SUFFIX)).write_text(

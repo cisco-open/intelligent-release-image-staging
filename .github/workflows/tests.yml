@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Run the documented test suites (CLAUDE.md / TESTING.md "Tests") on every
+# Run the documented test suites (TESTING.md) on every
 # pull request and on pushes to main. Everything here is what a fresh
 # ubuntu runner has plus `pip install -r requirements-dev.txt` and
 # `apt-get install age bats mktorrent`; no docker build, no network access
@@ -35,6 +35,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: server/console-ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: server/console-ui/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build and check public assets
+        run: npm test
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Mocked Console browser checks
+        run: npm run test:browser
+      - name: Read-only Swagger browser checks
+        run: npm run test:swagger
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -58,8 +84,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 -m pytest -p no:cacheprovider -q \
-            server/tests/ device/agent/tests/ device/iox/tests/ lab/tests/ \
-            device/test_verify_image.py
+            server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ \
+            lab/tests/ device/test_verify_image.py tools/test_api_exercise.py
 
       - name: bats
         # Report the shell suite even when pytest failed: one push should

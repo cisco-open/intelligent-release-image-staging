@@ -59,6 +59,63 @@ _DEFAULTS = {"host": "", "port": 22, "user": "", "path": "",
 SETTINGS_LOCK = threading.Lock()
 
 
+class ConfigurationSaveError(Exception):
+    """A save failed; disabled distinguishes a deliberately paused export."""
+
+    def __init__(self, disabled):
+        self.disabled = disabled
+        super().__init__("audit export configuration save failed")
+
+
+class ConfigurationPasswordRequired(ValueError):
+    """An unconfigured destination cannot reuse an ambiguous retained secret."""
+
+
+def read_configuration(path, secrets_fn):
+    """Snapshot destination and secret together, never across a settings edit."""
+    with SETTINGS_LOCK:
+        return read_settings(path), secrets_fn() if secrets_fn else None
+
+
+def save_configuration(path, candidate, password, save_secret):
+    """Replace settings without exposing a mixed destination/password pair.
+
+    A supplied password spans two stores. First publish an unconfigured,
+    non-exportable settings document; only publish the destination after the
+    secret succeeds. A failed or interrupted save stays disabled until the
+    operator saves again with an explicit password. An absent/empty password
+    only reuses the existing secret when the previous configuration is valid.
+    No password is ever copied into the settings file.
+    """
+    disabled = False
+    with SETTINGS_LOCK:
+        try:
+            previous = read_settings(path)
+            if not password and validate_settings(previous) is not None:
+                raise ConfigurationPasswordRequired(
+                    "password is required when audit export is not configured; "
+                    "re-enter the destination and password")
+            candidate = dict(candidate, last_run_ts=previous["last_run_ts"],
+                             last_result=previous["last_result"])
+            if password:
+                paused = dict(_DEFAULTS, last_run_ts=previous["last_run_ts"],
+                              last_result=previous["last_result"])
+                # The encrypted secret writer is durable. Make this safety
+                # fence durable FIRST, or power loss could recover the old
+                # active destination alongside the newly persisted password.
+                write_settings(path, paused, durable=True)
+                disabled = True
+                save_secret(password)
+            # An interrupted final publication may leave the durable pause or
+            # the complete matching pair; neither can expose a mixed pair.
+            write_settings(path, candidate)
+        except ConfigurationPasswordRequired:
+            raise
+        except Exception as exc:
+            raise ConfigurationSaveError(disabled) from exc
+    return previous
+
+
 def settings_path(state_dir):
     return os.path.join(state_dir, BASENAME)
 
@@ -93,9 +150,12 @@ def read_settings(path):
     return out
 
 
-def write_settings(path, settings):
+def write_settings(path, settings, *, durable=False):
     """Atomic write: mkstemp in the same dir + os.replace (house idiom).
-    Persists exactly the known keys, filling absent ones with defaults."""
+    Persists exactly the known keys, filling absent ones with defaults.
+    The cross-store password-change fence additionally requires both file and
+    directory fsync before its caller can mutate the encrypted secret.
+    """
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".audit-export-", suffix=".tmp")
@@ -103,7 +163,16 @@ def write_settings(path, settings):
         with os.fdopen(fd, "w") as f:
             json.dump({k: settings.get(k, _DEFAULTS[k]) for k in _DEFAULTS},
                       f, sort_keys=True)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, path)
+        if durable:
+            dir_fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -335,11 +404,10 @@ def export_loop(stop_event, audit_path, state_dir, secrets_fn, audit_fn=None,
     while not stop_event.wait(delay):
         delay = wake
         try:
-            settings = read_settings(settings_path(state_dir))
+            settings, secret = read_configuration(settings_path(state_dir), secrets_fn)
             if not export_due(settings, now_fn()):
                 continue
-            password = ((secrets_fn() if secrets_fn is not None else None)
-                        or {}).get("password", "")
+            password = (secret or {}).get("password", "")
             try:
                 ok, detail = (export_fn or export_once)(
                     audit_path, settings, password, state_dir, now_fn=now_fn)

@@ -65,18 +65,39 @@ the file the error points at is enough to find them. See
 the full procedure.
 """
 import contextlib
+import copy
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import stat
 import tempfile
+import threading
 import zlib
 
 # Number of shard files a store is spread over. 256 keeps a shard small at the
 # supported fleet size (10,000 devices -> ~39 rows per shard) while keeping a
 # whole-fleet scan to 256 file opens rather than one per device.
 SHARD_COUNT = 256
+
+_JSON_SCALAR_TYPES = frozenset((str, int, float, bool, type(None)))
+
+
+def _copy_snapshot_rows(rows):
+    """Defensive copies without recursively copying immutable fleet fields.
+
+    Normal inventory rows are flat JSON objects. Copy both dictionary levels
+    when their keys/values are exactly immutable JSON scalars; retain deepcopy
+    for nested rows or validator-produced non-JSON values. This changes neither
+    cache freshness nor the caller's isolation from the cached dictionaries.
+    """
+    for key, row in rows.items():
+        if type(key) is not str or type(row) is not dict or any(
+                type(field) is not str or type(value) not in _JSON_SCALAR_TYPES
+                for field, value in row.items()):
+            return copy.deepcopy(rows)
+    return {key: row.copy() for key, row in rows.items()}
 
 
 def _fsync_directory(path):
@@ -162,7 +183,7 @@ class KeyedState:
 
     def __init__(self, path, error=KeyedStateError, validate=None,
                  legacy_extract=None, shards=SHARD_COUNT, indent=2,
-                 durable=False):
+                 durable=False, cache_snapshots=False):
         self.legacy_path = path
         self.dir = shard_dir(path)
         self.error = error
@@ -171,7 +192,10 @@ class KeyedState:
         self._validate = validate
         self._legacy_extract = legacy_extract
         self.durable = bool(durable)
+        self.cache_snapshots = bool(cache_snapshots)
         self._migrated = False
+        self._snapshot_cache_lock = threading.Lock()
+        self._snapshot_cache = {}
 
     # -- shard I/O ---------------------------------------------------------
 
@@ -205,6 +229,60 @@ class KeyedState:
                     raise self.error("keyed state row is corrupt: %s (%s)"
                                      % (self._shard_path(bucket), exc))
         return data
+
+    @staticmethod
+    def _snapshot_signature(path):
+        """Return a fresh signature for an atomically replaced shard.
+
+        Include metadata and current content: rapid in-place writes can share
+        timestamps, even with nanosecond stat fields. Reopen on every snapshot
+        so changed access permissions also fail closed. The cache saves JSON
+        parsing/validation, never the freshness read. A missing file is explicit;
+        other stat failures are not cache misses because doing so could hide
+        unreadable state behind a previously cached value.
+        """
+        try:
+            st = os.stat(path)
+            with open(path, "rb") as stream:
+                digest = hashlib.sha256(stream.read()).digest()
+        except FileNotFoundError:
+            return None
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                st.st_ctime_ns, st.st_mode, st.st_uid, st.st_gid, digest)
+
+    def _snapshot_shard(self, bucket):
+        """Read one snapshot shard, reusing only a metadata/content-identified
+        copy. Cache access is opt-in because many keyed stores are hot-path
+        state and snapshots there must remain strictly uncached.
+        """
+        path = self._shard_path(bucket)
+        with self._snapshot_cache_lock:
+            try:
+                before = self._snapshot_signature(path)
+            except OSError as exc:
+                self._snapshot_cache.pop(bucket, None)
+                raise self.error("keyed state unreadable: %s (%s)"
+                                 % (path, type(exc).__name__))
+            cacheable = 0 <= bucket < self.shards
+            cached = self._snapshot_cache.get(bucket) if cacheable else None
+            if before is not None and cached is not None \
+                    and cached[0] == before:
+                return _copy_snapshot_rows(cached[1])
+
+            # Never fall back to cached state when a read fails or the file
+            # changes while being read. _read_shard preserves normal strict
+            # validation/error behavior for malformed or inaccessible rows.
+            self._snapshot_cache.pop(bucket, None)
+            rows = self._read_shard(bucket)
+            try:
+                after = self._snapshot_signature(path)
+            except OSError:
+                # The parsed rows are usable for this in-flight snapshot, but
+                # the next request must retry the filesystem read.
+                return rows
+            if cacheable and before is not None and before == after:
+                self._snapshot_cache[bucket] = (after, _copy_snapshot_rows(rows))
+            return rows
 
     def _write_shard(self, bucket, rows):
         path = self._shard_path(bucket)
@@ -483,8 +561,17 @@ class KeyedState:
         reconciler derivation and purge only, never a per-device request."""
         self._ensure_migrated()
         out = {}
-        for bucket in self._buckets():
-            out.update(self._read_shard(bucket))
+        buckets = self._buckets()
+        if not self.cache_snapshots:
+            for bucket in buckets:
+                out.update(self._read_shard(bucket))
+            return out
+        live = set(buckets)
+        with self._snapshot_cache_lock:
+            for bucket in set(self._snapshot_cache) - live:
+                del self._snapshot_cache[bucket]
+        for bucket in buckets:
+            out.update(self._snapshot_shard(bucket))
         return out
 
     def sweep(self, fn):

@@ -130,6 +130,16 @@ def _v2_report():
     }
 
 
+def test_download_duration_is_measured_not_report_or_tracker_latency():
+    report = _v2_report()
+    assert not any(a["key"].startswith("iris.download.") for a in
+                   otlp.build_report_record(report, "sw1")["attributes"])
+    report["download"] = {"start": 1755743000.0, "end": 1755743060.0}
+    attrs = {a["key"]: a["value"] for a in
+             otlp.build_report_record(report, "sw1")["attributes"]}
+    assert attrs["iris.download.duration_seconds"] == {"doubleValue": 60.0}
+
+
 def _v1_report():
     return {
         "v": 1, "schema": "v1",

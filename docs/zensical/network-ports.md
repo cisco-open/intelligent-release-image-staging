@@ -29,9 +29,10 @@ shared device image; their connectivity differs by platform.
 
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
-| 22 | TCP | Server tier or manual installer host -> device IOS | SSH/SCP | Drive onboarding. Guest Shell and IOx are configured over SSH and fetch their own files (below); only the IOS-XR package is pushed over SCP. |
+| 22 | TCP | Server tier or manual installer host -> device IOS | SSH | Drive onboarding and establish initial HTTPS trust. Packages are downloaded by the device, not pushed over SCP. |
 | 8000 | TCP | Guest Shell device IOS -> artifact server | HTTPS capability URL | Guest Shell bootstrap, bundle, certificate, and short-lived per-install configuration fetch. |
 | 8000 | TCP | IOx device IOS -> artifact server | Authenticated HTTPS | `copy https:` of the IOx package, catalog certificate and per-device instruction envelope, HTTP Basic (device id + enrollment token) over the catalog trustpoint. |
+| 8000 | TCP | IOS-XR host -> artifact server | Authenticated HTTPS | XR-host curl downloads the RPM and instruction envelope with explicit certificate verification and device-bound authentication. |
 | 8000 | TCP | Explicit artifact API client -> server tier | Authenticated HTTPS | Optional resource-bound `/v1/devices/.../artifacts/...` GET/HEAD. |
 
 The Console and artifact server are separate. Console onboarding asks the
@@ -41,8 +42,9 @@ For Guest Shell and IOx, the server-side installer sends
 verified `copy https:` commands through SSH after installing the catalog
 trustpoint; an IOx copy additionally carries the device's own HTTP Basic
 credential, configured on IOS for the span of that copy and removed after it.
-XR package delivery uses authenticated, host-key-checked SCP; its password
-reaches `sshpass` through the environment, never a URL, argument, or log. A
+XR package delivery uses certificate-verified HTTPS. Its initial certificate
+and curl authentication arrive through a host-key-checked SSH session with
+terminal echo disabled; the token is never a URL or process argument. A
 remote stage-host hop exists only for a manual Guest Shell installer run; the
 Console has no UI for it.
 
@@ -57,7 +59,7 @@ Console has no UI for it.
 | 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. Bind it to the Console host's operator-facing address; `IRIS_GUI_PUBLISH` sets the host port. |
 | 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTPS | Anonymous, non-disclosing `/healthz` and `/readyz`; authenticated optional `/metrics`. Swarm data is reserved for the authenticated management API. |
 | 9443 | TCP | Console -> server tier | Authenticated HTTPS | Management API. Keep it on the Compose network, a private server-host binding restricted to the Console host, or the Kubernetes ClusterIP Service. |
-| 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before the final IOS placement copy on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
+| 22 | TCP | IOx agent -> its IOS gateway | SSH/SCP | SSH-to-self control; SCP image hand-off on share-less deployments, including IE-3400 and the current Catalyst 8000V IOx profile. A configured SSD share has no SCP fallback. |
 
 External telemetry is opt-in, and the 9101 listener runs either way.
 `/healthz` and `/readyz` disclose no state and are the only anonymous registered
@@ -146,7 +148,7 @@ to IRIS and is not published by the Compose stack.
   Preflight checks prerequisites over SSH from the server; it does not prove
   the agent's route back to the server. Guest Shell enrollment and IOx
   onboarding fetch their install files from the HTTPS artifact listener (IOx
-  with the device's own credential); only the XR package is delivered over SCP.
+  with the device's own credential); XR uses authenticated HTTPS from its host.
   See [Management Type and VLAN Ownership](management-type.md).
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside

@@ -13,6 +13,7 @@ from __future__ import print_function
 
 import argparse
 import base64
+import calendar
 import copy
 import errno
 import fcntl
@@ -512,6 +513,36 @@ def _command_bytes(lines):
         raise _ControllerFailure(
             "unsupported_syntax", "rendered IOx command is invalid", 2)
     return body
+
+
+def _check_device_certificate_clock(stdout, not_before, not_after):
+    """Reject a known UTC clock outside the certificate window, before PKI writes.
+
+    IOS remains the TLS verifier. Unknown/local timezone output is not guessed
+    and cannot waive the device's own certificate verification.
+    """
+    matches = re.findall(
+        br"(?m)^[*.]?(\d{2}:\d{2}:\d{2})(?:\.\d+)?\s+(?:UTC|GMT)\s+"
+        br"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+([A-Z][a-z]{2})\s+"
+        br"(\d{1,2})\s+(\d{4})\s*$", bytes(stdout))
+    if len(matches) != 1:
+        return
+    clock, month, day, year = (part.decode("ascii") for part in matches[0])
+    try:
+        observed = calendar.timegm(time.strptime(
+            "%s %s %s %s" % (month, day, year, clock), "%b %d %Y %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return
+    if observed < not_before:
+        raise _ControllerFailure(
+            "rejected", "IOx device clock is before the artifact certificate's "
+            "validity period; synchronize device time or wait until the "
+            "certificate is valid, then retry. IRIS trustpoint was not changed.", 4)
+    if observed > not_after:
+        raise _ControllerFailure(
+            "rejected", "IOx device clock is after the artifact certificate's "
+            "validity period; check device time and renew an expired server "
+            "certificate before retrying. IRIS trustpoint was not changed.", 4)
 
 
 def _open_public_certificate(path, validate_x509=True):
@@ -2746,6 +2777,103 @@ class IoxController(object):
             os.close(attempt.lock_fd)
             attempt.lock_fd = None
 
+    def _scp_state(self, attempt, **kwargs):
+        try:
+            return self._store_call(
+                "iox_scp_state", (attempt.record_id, self.controller_id,
+                                  attempt.board),
+                attempt=attempt, kwargs=kwargs, mutation=bool(kwargs))
+        except _ControllerFailure:
+            raise
+        except Exception as exc:
+            if isinstance(exc, ValueError) and str(exc) == "prior SCP ownership requires recorded cleanup":
+                raise _ControllerFailure("reconciliation_required",
+                    "A prior deployment owns SCP; complete its recorded undeploy before onboarding again", 5)
+            raise _ControllerFailure(
+                "journal_durability", "SCP ownership record unavailable: %s" %
+                type(exc).__name__, 5)
+
+    def _scp_read(self, attempt):
+        result, _ = self._command(
+            attempt, "scp_read", _command_bytes([
+                "show running-config | include ^hostname|^ip scp server enable"]),
+            ordinary=True)
+        output = _get(result, "stdout", b"")
+        scp_lines = [line.strip() for line in output.splitlines()
+                     if line.strip().startswith(b"ip scp")]
+        # The hostname is a positive response marker: silence is not proof
+        # that SCP is disabled. Framing/truncation failures are never absence.
+        if (not self._transport_ok(result) or _get(result, "error_category") or
+                _get(result, "stdout_truncated") or
+                not _get(result, "framing_complete") or
+                len(re.findall(br"(?m)^hostname [^\r\n]+\r?$", output)) != 1 or
+                re.search(br"(?m)^[ \t]*%", output) or
+                scp_lines not in ([], [b"ip scp server enable"])):
+            raise _ControllerFailure("readback_unknown", "Cannot determine SCP server state", 4)
+        return bool(scp_lines)
+
+    def _scp_set(self, attempt, enabled):
+        result, _ = self._command(
+            attempt, "scp_enable" if enabled else "scp_disable",
+            _command_bytes(["configure terminal",
+                            ("" if enabled else "no ") + "ip scp server enable",
+                            "end"]), ordinary=True)
+        if (not self._transport_ok(result) or _get(result, "error_category") or
+                self._scp_read(attempt) != enabled):
+            raise _ControllerFailure("readback_mismatch", "SCP server change not verified", 4)
+
+    def _prepare_scp(self, attempt):
+        claim = self._scp_state(attempt)
+        if attempt.target.get("share_ios_path"):
+            return
+        if claim is not None:
+            if claim["phase"] == "enable_intent":
+                raise _ControllerFailure("reconciliation_required",
+                    "Interrupted SCP enable needs operator reconciliation", 5)
+            if not self._scp_read(attempt):
+                raise _ControllerFailure("readback_mismatch",
+                    "SCP was disabled outside this deployment; refusing to override it", 4)
+            return
+        enabled = self._scp_read(attempt)
+        self._scp_state(attempt, prior_enabled=enabled)
+        if not enabled:
+            self._scp_set(attempt, True)
+            self._scp_state(attempt, phase="enabled")
+
+    def _restore_scp(self, attempt):
+        claim = self._scp_state(attempt)
+        if claim is None or claim["phase"] in ("preserved", "restored"):
+            return False
+        result, _ = self._command(attempt, "scp_apps",
+            _command_bytes(["show app-hosting list"]), ordinary=True)
+        output = _get(result, "stdout", b"")
+        # A device-global service may also be used by another app. Require
+        # an authoritative empty app table, not just a successful SSH exit.
+        headers = absent = 0
+        empty_table = True
+        for line in output.splitlines():
+            row = line.strip()
+            if re.fullmatch(br"App id[ \t]+State", row):
+                headers += 1
+            elif row == b"No App found":
+                absent += 1  # Actual empty response on IE-3400/C8000V.
+            elif (row and re.fullmatch(br"[- ]+", row) is None and
+                  re.fullmatch(br"[A-Za-z0-9_.:/()-]+#(?:show app-hosting list|terminal length 0)?", row) is None):
+                empty_table = False
+        empty_table = empty_table and headers <= 1 and absent <= 1 and bool(headers or absent)
+        if (not self._transport_ok(result) or _get(result, "error_category") or
+                _get(result, "stdout_truncated") or
+                not _get(result, "framing_complete") or
+                not empty_table or re.search(br"(?m)^[ \t]*%", output)):
+            raise _ControllerFailure("readback_unknown",
+                "Cannot confirm apps are absent; SCP preserved", 4)
+        if self._scp_read(attempt):
+            if claim["phase"] == "enable_intent":
+                raise _ControllerFailure("reconciliation_required",
+                    "Interrupted SCP enable: confirm ownership and disable SCP manually, then retry recorded undeploy", 5)
+            self._scp_set(attempt, False)
+        return True
+
     def _command(self, attempt, purpose, body, seconds=45, ordinary=False,
                  record=True, transport=None, deadline=None):
         if attempt.durability_uncertain:
@@ -2753,6 +2881,13 @@ class IoxController(object):
                 "journal_durability",
                 "device work blocked after durability failure", 5)
         attempt.check()
+        restored_scp = False
+        if transport is None and purpose in ("prepare_iox_scp", "configure_network"):
+            self._prepare_scp(attempt)
+        if (transport is None and purpose == "save" and
+                _get(attempt.request, "action") == "uninstall" and
+                _get(attempt.request, "teardown_mode") == "recorded"):
+            restored_scp = self._restore_scp(attempt)
         context = attempt.next_context(purpose, record=record)
         active = transport or attempt.transport
         config = getattr(active, "_iris_config", None)
@@ -2777,6 +2912,8 @@ class IoxController(object):
             attempt.operation_results.append(result)
         if transport is None and attempt.fence is not None:
             self._fence_barrier(attempt)
+        if restored_scp and self._transport_ok(result) and not _get(result, "error_category"):
+            self._scp_state(attempt, phase="restored")
         return result, context
 
     def _adopt_synthetic_result(self, attempt, result, context, transport):
@@ -3443,7 +3580,7 @@ class IoxController(object):
         self._fence_barrier(attempt)
         return updated
 
-    def _recover_journal(self, attempt, journal, initiating=False):
+    def _recover_journal(self, attempt, journal):
         if attempt.durability_uncertain:
             raise _ControllerFailure(
                 "journal_durability",
@@ -3451,12 +3588,11 @@ class IoxController(object):
         previous = attempt.safety_recovery
         attempt.safety_recovery = True
         try:
-            return self._recover_journal_owned(
-                attempt, journal, initiating=initiating)
+            return self._recover_journal_owned(attempt, journal)
         finally:
             attempt.safety_recovery = previous
 
-    def _recover_journal_owned(self, attempt, journal, initiating=False):
+    def _recover_journal_owned(self, attempt, journal):
         if (not isinstance(journal, dict) or
                 journal.get("controller_id") != self.controller_id):
             raise _ControllerFailure(
@@ -3501,7 +3637,6 @@ class IoxController(object):
             self._event(attempt, "ownership_probe", {}, ack=True)
             probe_read = self._issue_continuation(attempt, "probe_read")
             phase = "ownership_probe"
-            initiating = True
         if phase == "ownership_probe":
             self._consume_continuation(
                 attempt, probe_read, "probe_read")
@@ -3541,7 +3676,6 @@ class IoxController(object):
                                        "transcript_refs": refs(result)}), ack=True)
             enable_send = self._issue_continuation(attempt, "enable_send")
             phase = "restore_intent"
-            initiating = True
         if phase == "restore_intent":
             if enable_send is None:
                 observation, result, unused = self._verification_read(attempt)
@@ -3632,8 +3766,7 @@ class IoxController(object):
         incoming_target = attempt.target
         try:
             self._strict_recovery_binding(attempt, obligations[0])
-            code = self._recover_journal(
-                attempt, obligations[0], initiating=False)
+            code = self._recover_journal(attempt, obligations[0])
         finally:
             # Recovery uses only the predecessor record's closed projection;
             # the admitted retry resumes with its independently validated
@@ -3739,6 +3872,17 @@ class IoxController(object):
         appid = _get(attempt.target, "iox_appid",
                      self.config.get("application_id", "iris"))
         commands = _preflight_commands(appid, _get(attempt.request, "device_id"))
+        from time_preflight import require_device_time
+        time_result, _ = self._command(
+            attempt, "preflight", _command_bytes(b"show ntp status"),
+            30, ordinary=True, record=False)
+        if not self._transport_ok(time_result) or _get(time_result, "error_category"):
+            raise _ControllerFailure(
+                "rejected", "time preflight could not read 'show ntp status'", 4)
+        try:
+            require_device_time(_get(time_result, "stdout", b""))
+        except ValueError as exc:
+            raise _ControllerFailure("rejected", str(exc), 4) from None
         result, context = self._command(
             attempt, "preflight",
             _command_bytes(b"\n".join(commands)),
@@ -4402,7 +4546,7 @@ class IoxController(object):
             attempt.transport = self._make_transport(attempt, attempt.supervisor)
             self._strict_recovery_binding(attempt, journal)
             self._revalidate_known_identity(attempt, journal)
-            code = self._recover_journal(attempt, journal, initiating=False)
+            code = self._recover_journal(attempt, journal)
             attempt.recovery_code = code
             if code == 3:
                 attempt.primary = _ControllerFailure(
@@ -4630,13 +4774,12 @@ class IoxController(object):
             # target with NO bind-mounted share: an IE-3x00 cannot mount
             # sdflash: into the app, so its agent hands the image over by
             # SCP-pushing to guest-share (device/agent/iris_agent.py,
-            # _push_scratch). Every share-configured target (Catalyst 9300,
-            # Catalyst 8000) hands the image to IOS through the mount plus an
+            # _push_scratch). A share-configured target hands the image to
+            # IOS through the mount plus an
             # IOS-internal plain `copy` and has NO scp fallback, so IRIS must
             # not switch the device's SCP server on there (issue #228).
             lines = ["configure terminal", "iox", "file prompt quiet"]
-            if not share_ios:
-                lines.append("ip scp server enable")
+            # SCP is managed by _prepare_scp with durable prior-state capture.
             lines.append("end")
         elif name == "configure_trustpoint":
             # The block device/device-install.sh pastes: drop any earlier
@@ -4732,10 +4875,9 @@ class IoxController(object):
                     " switchport trunk allowed vlan add %s" % vlan])
             # Same rule as prepare_iox_scp above: the SCP server goes on only
             # where the app has no bind-mounted share to hand the image
-            # through (IE-3x00). Issue #228.
+            # through (IE-3x00 and the current C8000V profile). Issue #228.
             lines.append("file prompt quiet")
-            if not share_ios:
-                lines.append("ip scp server enable")
+            # SCP is managed by _prepare_scp with durable prior-state capture.
             lines.append("end")
         elif name == "mkdir_share":
             lines = (["mkdir %s" % share_ios] if share_ios
@@ -4996,6 +5138,29 @@ class IoxController(object):
         device-side `copy https:` has to validate the artifact server."""
         if protocol.get("trust_configured"):
             return
+        if self._strict_target:
+            # A recently issued server certificate can be ahead of an
+            # unsynchronized IOS clock even when its year looks reasonable.
+            # Check before removing the previous IRIS trustpoint; the recipe's
+            # later clock warning is too late for its first HTTPS download.
+            descriptor = _open_public_certificate(
+                self.config.get("catalog_certificate_path"))
+            try:
+                certificate = ssl._ssl._test_decode_cert(
+                    "/proc/self/fd/%d" % descriptor)
+            finally:
+                os.close(descriptor)
+            result, unused = self._command(
+                attempt, "clock", self._render_command(attempt, "clock"),
+                30, ordinary=True)
+            if not self._transport_ok(result) or _get(result, "error_category"):
+                raise _ControllerFailure(
+                    _get(result, "error_category") or "readback_unknown",
+                    _command_failure_detail("clock", result), 4)
+            _check_device_certificate_clock(
+                _get(result, "stdout", b""),
+                ssl.cert_time_to_seconds(certificate["notBefore"]),
+                ssl.cert_time_to_seconds(certificate["notAfter"]))
         result, unused = self._command(
             attempt, "configure_trustpoint",
             self._render_command(attempt, "configure_trustpoint"),
@@ -5728,7 +5893,7 @@ class IoxController(object):
                                               _get(transport_result, "stdout", b""))):
                             raise _ControllerFailure(_get(transport_result, "error_category") or
                                                      "rejected", "IRIS application not DEPLOYED")
-                        code = self._recover_journal(attempt, attempt.journal, initiating=True)
+                        code = self._recover_journal(attempt, attempt.journal)
                         if code:
                             attempt.recovery_code = code
                             raise _ControllerFailure("readback_unknown", "verification restoration failed", code)
@@ -5821,7 +5986,7 @@ class IoxController(object):
                                 attempt.journal["unresolved"] and
                                 not attempt.durability_uncertain):
                             attempt.recovery_code = self._recover_journal(
-                                attempt, attempt.journal, initiating=True)
+                                attempt, attempt.journal)
                     elif operation == "finish" and isinstance(arguments, dict) and set(arguments) == {"exit_intent"}:
                         intent = arguments["exit_intent"]
                         if type(intent) is not int or not 0 <= intent <= 255:
@@ -5832,7 +5997,7 @@ class IoxController(object):
                                     attempt.journal["unresolved"] and
                                     not attempt.durability_uncertain):
                                 attempt.recovery_code = self._recover_journal(
-                                    attempt, attempt.journal, initiating=True)
+                                    attempt, attempt.journal)
                             if (action == "install" and
                                     attempt.journal is not None and
                                     not attempt.journal["unresolved"] and
@@ -5911,7 +6076,7 @@ class IoxController(object):
                 not attempt.durability_uncertain):
             try:
                 recovery_code = self._recover_journal(
-                    attempt, attempt.journal, initiating=False)
+                    attempt, attempt.journal)
                 if recovery_code:
                     attempt.recovery_code = recovery_code
             except _ControllerFailure as recovery_failure:

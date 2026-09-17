@@ -1,0 +1,208 @@
+/* Copyright 2026 Cisco Systems, Inc. and its affiliates
+ * SPDX-License-Identifier: Apache-2.0 */
+
+.iris-react-shell {
+  /* Independent IRIS theme; no external component or theme assets required. */
+  --iris-header: #102942;
+  --iris-header-hover: #284057;
+  --iris-header-text: #ffffff;
+  --iris-rail: var(--surface-subtle);
+  --iris-canvas: var(--canvas);
+  --iris-text: var(--text-heading);
+  --iris-muted: #59616b;
+  --iris-action: var(--action);
+  --iris-rule: var(--rule);
+  --font-display: var(--font-sans);
+  font-family: var(--font-sans);
+  color: var(--iris-text);
+  background: var(--iris-canvas);
+}
+.iris-react-shell #iris-header-root { padding-top: 56px; }
+.iris-react-shell .iris-header { position: fixed; top: 0; left: 0; width: 100%; z-index: 120; height: 56px; display: flex; align-items: center; gap: 16px; padding: 0 24px 0 16px; background: var(--iris-header); color: var(--iris-header-text); }
+.iris-react-shell .iris-header-button { background: transparent; border: 0; color: var(--iris-header-text); cursor: pointer; display: inline-flex; gap: 8px; align-items: center; min-height: 36px; padding: 8px 12px; font: inherit; font-size: 14px; border-radius: var(--radius-control); }
+.iris-react-shell .iris-header-button:hover { background: var(--iris-header-hover); }
+.iris-react-shell .iris-shell-icon { width: 20px; height: 20px; flex-shrink: 0; fill: currentColor; }
+.iris-react-shell .iris-brand { color: var(--iris-header-text); text-decoration: none; font-size: 20px; font-weight: 700; letter-spacing: 1px; }
+.iris-react-shell .iris-product-title { font-size: 14px; padding-left: 16px; border-left: 1px solid #64788a; }
+.iris-react-shell .iris-stage-label { font-size: 12px; padding: 4px 8px; border: 1px solid #718397; border-radius: var(--radius-control); white-space: nowrap; }
+.iris-react-shell .iris-header-spacer { flex: 1; }
+.iris-react-shell .iris-account { font-size: 14px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.iris-react-shell .iris-connection { display: block; padding: 8px 24px; color: var(--text-heading); background: var(--warning-tint); border-bottom: 1px solid var(--warning); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.iris-react-shell .iris-help-wrap { position: relative; }
+.iris-react-shell .iris-help-panel { position: absolute; right: 0; top: 44px; width: 320px; max-width: calc(100vw - 32px); padding: 8px 0; color: var(--iris-text); background: var(--surface); border: 1px solid var(--iris-rule); border-radius: var(--radius-card); box-shadow: var(--shadow-md); z-index: 120; }
+.iris-react-shell .iris-help-heading { padding: 12px 16px; font-weight: 600; font-size: 14px; }
+.iris-react-shell .iris-help-heading span { display: block; font-weight: 400; font-size: 12px; color: var(--iris-muted); margin-top: 4px; }
+.iris-react-shell .iris-help-panel a { display: block; color: var(--iris-action); text-decoration: none; padding: 8px 16px; font-size: 14px; font-weight: 600; }
+.iris-react-shell .iris-help-panel a:hover { background: var(--iris-rail); text-decoration: underline; }
+.iris-react-shell .iris-deployment-id { border-top: 1px solid var(--iris-rule); margin-top: 8px; padding: 16px; font-size: 12px; }
+.iris-react-shell .iris-deployment-id code { display: block; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; margin: 8px 0; }
+.iris-react-shell .iris-deployment-id button { background: transparent; border: 0; color: var(--iris-action); padding: 0; cursor: pointer; font: inherit; margin-right: 8px; }
+.iris-react-shell .iris-signout { display: block; width: 100%; padding: 12px 16px; text-align: left; border: 0; border-top: 1px solid var(--iris-rule); background: var(--surface); font: inherit; font-weight: 600; cursor: pointer; color: var(--iris-action); }
+.iris-react-shell .iris-signout:hover { background: var(--iris-rail); }
+.iris-react-shell .iris-signout-error { margin: 8px 16px; font-size: 14px; }
+.iris-react-shell .shell { display: flex; min-height: calc(100vh - 56px); }
+.iris-react-shell #iris-navigation-root { flex: 0 0 280px; width: 280px; background: var(--iris-rail); border-right: 1px solid var(--iris-rule); }
+.iris-react-shell .iris-navigation { position: sticky; top: 56px; min-height: calc(100vh - 56px); max-height: calc(100vh - 56px); overflow-y: auto; padding: 16px 0; background: var(--iris-rail); }
+.iris-react-shell .iris-nav-caption { padding: 8px 24px; color: var(--iris-muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+.iris-react-shell .iris-navigation-link { display: flex; align-items: center; gap: 12px; min-height: 44px; width: 100%; padding: 12px 24px; border: 0; border-left: 3px solid transparent; text-decoration: none; color: var(--iris-text); background: transparent; text-align: left; font: inherit; font-size: 14px; cursor: pointer; }
+.iris-react-shell .iris-navigation-link:hover { color: var(--action-hover); background: var(--action-tint); }
+.iris-react-shell .iris-navigation-link.is-active { border-left-color: var(--iris-action); background: var(--action-tint); color: var(--action-active); font-weight: 600; }
+.iris-react-shell .iris-navigation-link.is-current-group { font-weight: 600; }
+.iris-react-shell .iris-chevron { margin-left: auto; font-size: 16px; }
+.iris-react-shell .iris-navigation-children .iris-navigation-link { padding-left: 60px; min-height: 36px; font-size: 12px; }
+.iris-react-shell .iris-navigation-children[hidden] { display: none; }
+.iris-react-shell .iris-nav-divider { height: 1px; background: var(--iris-rule); margin: 16px 24px 8px; }
+.iris-react-shell .iris-navigation-footer { display: flex; align-items: center; gap: 8px; margin: 32px 24px 8px; font-size: 12px; color: var(--iris-muted); white-space: nowrap; }
+.iris-react-shell .iris-stage-dot { width: 4px; height: 4px; background: var(--iris-action); border-radius: 50%; }
+.iris-react-shell .shell > .main { flex: 1; min-width: 0; padding: 24px 32px; background: var(--iris-canvas); }
+.iris-react-shell .page-header { margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
+.iris-react-shell :is(h1,h2,h3,h4,.page-title) { font-family: var(--font-display); font-weight: 700; }
+.iris-react-shell .page-title { font-size: 24px; line-height: 32px; letter-spacing: 0; }
+.iris-react-shell .main table { background: var(--surface); }
+.iris-react-shell .main th { background: var(--iris-rail); font-size: 12px; font-weight: 600; }
+.iris-react-shell .main :is(th,td) { border-color: var(--iris-rule); }
+/* Workflow controls retain their existing sizes, radii and status semantics. */
+.iris-react-shell .iris-nav-scrim { display: none; }
+/* Inventory: a calm search row, an in-flow filter surface, and direct row
+   selection. Activity stays beside the inventory, never below it. */
+.iris-react-shell #view-devices .table-controls { flex-direction: column; align-items: stretch; gap: 16px; }
+.iris-react-shell #dev-filters { flex: none; width: 100%; gap: 12px; }
+.iris-react-shell #dev-filter-q { flex: 1 1 240px; min-width: 0; height: 38px; }
+.iris-react-shell #more-filters { display: contents; }
+.iris-react-shell #more-filters-summary { height: 38px; box-sizing: border-box; }
+.iris-react-shell #more-filters .more-filters-body { position: static; order: 4; flex: 1 0 100%; min-width: 0; box-sizing: border-box; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; padding: 20px; box-shadow: none; background: var(--surface); border-color: var(--iris-rule); }
+.iris-react-shell #more-filters:not([open]) .more-filters-body { display: none; }
+.iris-react-shell .device-filter-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--iris-muted); font-size: 12px; text-transform: capitalize; }
+.iris-react-shell .device-filter-field select { width: 100%; min-width: 0; text-transform: none; }
+.iris-react-shell #dev-filter-chips:not([hidden]) { display: flex; flex-wrap: wrap; gap: 8px; flex-basis: 100%; order: 3; }
+.iris-react-shell .filter-chip { background: var(--surface); color: var(--iris-text); border: 1px solid var(--iris-rule); border-radius: 4px; padding: 5px 8px; font: inherit; cursor: pointer; }
+.iris-react-shell .filter-chip:focus-visible { outline: 2px solid var(--iris-action); outline-offset: 2px; }
+.iris-react-shell #view-devices .table-actions { justify-content: flex-end; gap: 8px; }
+.iris-react-shell #dev-selection-hint { margin-right: auto; align-self: center; font-size: 12px; }
+.iris-react-shell #dev-rows tr[data-id] { cursor: pointer; }
+.iris-react-shell #dev-rows tr[data-id]:focus-visible { outline: 2px solid var(--iris-action); outline-offset: -2px; }
+.iris-react-shell #dev-rows tr.sel td:first-child { box-shadow: inset 3px 0 var(--iris-action); }
+.iris-react-shell #dev-rows .dev-id .dinfo { font: inherit; font-size: 14px; text-align: left; }
+.iris-react-shell #dev-rows .dev-id { min-width: 128px; white-space: nowrap; }
+.iris-react-shell #dev-rows .machine { white-space: nowrap; }
+.iris-react-shell #dev-rows .dev-series { min-width: 144px; white-space: nowrap; }
+.iris-react-shell .drawer { top: 56px; z-index: 105; }
+.iris-react-shell #activity-panel { width: min(880px, 96vw); }
+.iris-react-shell #activity-panel .drawer-head { padding: 16px 20px; }
+.iris-react-shell #activity-title { margin: 0; font-size: 20px; }
+.iris-react-shell #activity-panel .drawer-body { padding: 20px; }
+.iris-react-shell #batch-panel { margin: 0; padding: 0; border: 0; }
+.iris-react-shell #batch-panel .table-scroll { max-height: 28vh; overflow: auto; }
+.iris-react-shell #batch-panel .out { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.iris-react-shell #onboard-logs .job-log-panel[hidden] { display: none; }
+.iris-react-shell #onboard-logs .job-log-panel { margin-top: 20px; }
+.iris-react-shell #onboard-logs .job-log-panel:focus { outline: none; }
+.iris-react-shell #onboard-logs .log { height: 42vh; max-height: none; margin-bottom: 0; }
+@media (max-width: 800px) {
+  .iris-react-shell #more-filters .more-filters-body { grid-template-columns: minmax(0,1fr); padding: 16px; }
+  .iris-react-shell #activity-panel .drawer-body { padding: 12px; }
+}
+.iris-react-shell .iris-skip { position: absolute; left: 12px; top: -80px; padding: 8px 14px; color: var(--iris-header); background: white; z-index: 200; }
+.iris-react-shell .iris-skip:focus { top: 8px; }
+.iris-react-shell :is(.iris-header,.iris-navigation) :is(a,button):focus-visible { outline: 2px solid #2998fa; outline-offset: -2px; }
+
+/* The selection column is a control gutter, not a text-input column. Keep
+   native checked/mixed/disabled states and high-contrast OS rendering. */
+.iris-react-shell input[type="checkbox"] {
+  appearance: auto;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  flex: 0 0 16px;
+  vertical-align: middle;
+  accent-color: var(--iris-action);
+  cursor: pointer;
+}
+.iris-react-shell input[type="checkbox"]:disabled { cursor: default; }
+.iris-react-shell input[type="checkbox"]:focus-visible { outline: 2px solid var(--iris-action); outline-offset: 3px; }
+.iris-react-shell .tbl :is(th,td):has(> input[type="checkbox"]) { width: 44px; min-width: 44px; text-align: center; vertical-align: middle; }
+
+/* Settings has one local navigation row and task-sized surfaces. The forms
+   keep their existing IDs, validation and submit handlers. */
+.iris-react-shell .iris-settings-tabs { display: flex; gap: 24px; overflow-x: auto; border-bottom: 1px solid var(--iris-rule); }
+.iris-react-shell .iris-settings-tabs a { display: block; flex: 0 0 auto; padding: 12px 0; border-bottom: 3px solid transparent; color: var(--iris-muted); font-size: 14px; font-weight: 600; text-decoration: none; }
+.iris-react-shell .iris-settings-tabs a:hover { color: var(--iris-action); }
+.iris-react-shell .iris-settings-tabs a[aria-current="page"] { color: var(--action-active); border-bottom-color: var(--iris-action); }
+.iris-react-shell .iris-settings-tabs a:focus-visible { outline: 2px solid var(--iris-action); outline-offset: -2px; }
+.iris-react-shell .iris-settings-description { margin: 20px 0 24px; color: var(--iris-muted); }
+.iris-react-shell #view-settings .card { box-shadow: none; padding: 24px; min-width: 0; }
+.iris-react-shell #view-settings .card > h3 { margin: 0 0 16px; font-size: 16px; line-height: 24px; }
+.iris-react-shell #view-settings .card > .muted { max-width: 80ch; }
+.iris-react-shell #view-settings .inline-form:not([hidden]) { display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding: 0; border: 0; border-radius: 0; margin: 16px 0 0; background: transparent; max-width: 640px; }
+.iris-react-shell #view-settings .inline-form .field { display: flex; align-items: stretch; gap: 8px; flex: none; width: 100%; }
+.iris-react-shell #view-settings .inline-form .field[hidden],
+.iris-react-shell #view-settings .inline-form .field:has(> [hidden]) { display: none; }
+.iris-react-shell #view-settings .field-label { color: var(--iris-text); font-size: 14px; }
+.iris-react-shell #view-settings .inline-form :is(input:not([type="checkbox"]),select,textarea) { width: 100%; font-size: 14px; }
+.iris-react-shell #view-settings .form-actions { padding-top: 8px; }
+.iris-react-shell #settings-pane-general .setup-cards { display: grid; grid-template-columns: minmax(0,1.25fr) minmax(0,1fr); gap: 24px; align-items: start; }
+.iris-react-shell #settings-pane-general .card:nth-child(2) { grid-column: 2; grid-row: 1 / span 2; }
+.iris-react-shell #settings-pane-general .card:nth-child(3) { grid-column: 1; }
+.iris-react-shell #settings-info td { text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.iris-react-shell #settings-info td:first-child { width: 128px; padding-left: 0; }
+.iris-react-shell #settings-info td:last-child { padding-right: 0; }
+.iris-react-shell #settings-info tr:last-child td { border-bottom: 0; }
+.iris-react-shell #view-policies .policy-panel { border: 0; background: transparent; }
+.iris-react-shell #view-policies .policy-panel-body { padding: 0; border: 0; }
+.iris-react-shell #view-policies .policy-counts { gap: 16px; padding: 16px; border: 1px solid var(--iris-rule); border-radius: var(--radius-card); background: var(--surface); }
+.iris-react-shell #view-policies .policy-counts dd { font-family: var(--font-sans); font-size: 20px; line-height: 28px; }
+.policy-simple-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 24px 0 16px; flex-wrap: wrap; }
+.policy-simple-heading h3 { margin: 0 0 6px; }
+.policy-simple-heading p { margin: 0; }
+.policy-sharing-table { border: 1px solid var(--rule); border-radius: var(--radius-card); background: var(--surface); }
+.policy-sharing-table th, .policy-sharing-table td { padding: 16px; vertical-align: top; }
+.policy-sharing-table th[scope="row"] { text-align: left; min-width: 140px; }
+.policy-member-count { display: block; font-size: 12px; font-weight: 400; color: var(--text-secondary); margin-top: 5px; }
+.policy-peer-list { display: flex; flex-wrap: wrap; gap: 6px; min-width: 180px; }
+.policy-peer-name { display: inline-block; background: var(--surface-subtle); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 8px; overflow-wrap: anywhere; }
+.policy-access-yes { color: var(--success); }
+.policy-access-no { color: var(--warning); }
+.policy-enforcement-summary { border-top: 1px solid var(--rule); margin-top: 28px; padding-top: 12px; }
+.policy-enforcement-summary dl { margin: 0; }
+.policy-enforcement-summary dl > div { display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 16px; padding: 12px 0; }
+.policy-enforcement-summary dt { font-weight: 500; }
+.policy-enforcement-summary dd { margin: 0; }
+#role-editor-advanced { margin-top: 20px; }
+#role-editor-advanced > summary { cursor: pointer; padding: 12px 0; }
+#policy-advanced-modal .modal-wide { width: min(1100px, calc(100vw - 32px)); }
+@media (max-width: 640px) {
+  .policy-enforcement-summary dl > div { grid-template-columns: 1fr; gap: 6px; }
+  .policy-simple-heading .role-def-actions { flex-wrap: wrap; }
+}
+.iris-react-shell #view-policies .policy-counts dt { color: var(--iris-muted); }
+.iris-react-shell #view-policies .table-scroll { border: 1px solid var(--iris-rule); border-radius: var(--radius-card); }
+.iris-react-shell #view-policies .policy-members { font-size: 12px; }
+@media (min-width: 801px) {
+  .iris-react-shell.iris-nav-collapsed #iris-navigation-root { flex-basis: 72px; width: 72px; }
+  .iris-react-shell.iris-nav-collapsed .iris-navigation-link { justify-content: center; padding-left: 0; padding-right: 0; }
+  .iris-react-shell.iris-nav-collapsed :is(.iris-navigation-link > span,.iris-nav-caption,.iris-navigation-children,.iris-navigation-footer) { display: none; }
+  .iris-react-shell.iris-nav-collapsed .iris-nav-divider { margin: 16px; }
+}
+@media (max-width: 1100px) {
+  .iris-react-shell .iris-product-title { display: none; }
+  .iris-react-shell #settings-pane-general .setup-cards { grid-template-columns: minmax(0,1fr); }
+  .iris-react-shell #settings-pane-general .card:nth-child(n) { grid-column: auto; grid-row: auto; }
+}
+@media (max-width: 800px) {
+  .iris-react-shell .iris-header { gap: 8px; padding: 0 12px; }
+  .iris-react-shell .iris-stage-label { display: none; }
+  .iris-react-shell .iris-account { max-width: 90px; }
+  .iris-react-shell .iris-connection { padding: 8px 16px; }
+  .iris-react-shell #iris-navigation-root { position: fixed; top: 56px; left: 0; bottom: 0; width: 280px; z-index: 110; visibility: hidden; transform: translateX(-100%); }
+  .iris-react-shell .iris-navigation { position: relative; top: 0; height: 100%; min-height: 0; max-height: 100%; }
+  .iris-react-shell.iris-nav-open #iris-navigation-root { transform: translateX(0); visibility: visible; }
+  .iris-react-shell.iris-nav-open .iris-nav-scrim { display: block; position: fixed; top: 0; left: 280px; width: calc(100vw - 280px); height: 100vh; background: #10294266; border: 0; }
+  .iris-react-shell .shell > .main { padding: 20px 16px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .iris-react-shell .iris-navigation-link { transition: background-color 100ms ease; }
+}

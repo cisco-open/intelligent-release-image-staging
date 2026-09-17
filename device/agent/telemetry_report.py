@@ -71,8 +71,6 @@ SAMPLING_CLASSES = ("good", "constrained")
 LIVE_PEER_ROWS_MAX = 32     # peer_connections[] cap in a v2 observation envelope
 _HEX32 = re.compile(r"^[a-f0-9]{32}$")
 CONTENT_SHA256_STATES = ("verified", "mismatch", "not_checked")
-IOS_COPY_VERIFY_STATES = ("ok", "failed", "not_run", "unsupported")
-
 # --- exact per-peer received bytes (peer_transfer_records) -------------------------
 # Produced by device/agent/peer-transfer-hook.sh, aria2's
 # --on-bt-download-complete hook: aria2-next's own cumulative per-peer session
@@ -1055,6 +1053,8 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "agent": {"version": cfg.get("agent_version", "unknown"),
                   "runtime_mode": runtime_mode},
     }
+    if isinstance(tele.get("download"), dict):
+        report["download"] = dict(tele["download"])
     # An unknown start still cannot PLACE a capture inside the window, so the
     # records keep the documented drop (bounded at the end) rather than
     # riding along on a window whose start nobody observed.

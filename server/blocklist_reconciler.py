@@ -310,7 +310,7 @@ def apply_blocklist(aria, denied_ips, apply_empty, session_id=_SESSION_UNSET):
                else session_id)
     try:
         ret = aria.set_blocklist(ordered)
-    except Exception as exc:  # RPC failure is never success / never permit-all
+    except Exception:  # RPC failure is never success / never permit-all
         return ApplyOutcome(
             applied=True, success=False, aria_session_id=session,
             desired_hash=desired_hash, applied_revision=None,

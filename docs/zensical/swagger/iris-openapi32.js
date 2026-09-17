@@ -82,6 +82,9 @@
   window.renderIrisOpenAPI32 = (spec) => {
     const target = document.getElementById("iris-streaming-responses");
     if (!target || !spec || !spec.paths) return;
+    // Swagger may complete more than once (for example after reloading a spec).
+    // Replace the previous explorer and its listeners instead of appending it.
+    target.replaceChildren();
 
     const operations = [];
     Object.entries(spec.paths).forEach(([path, pathItem]) => {
@@ -92,27 +95,27 @@
       });
     });
 
-    appendText(target, "h2", "Canonical JSON Schema 2020-12 explorer");
+    appendText(target, "h2", "Endpoint and schema definitions");
     appendText(
       target,
       "p",
-      "IRIS schemas are JSON Schema 2020-12, under the OpenAPI 3.2 default dialect. Expand an operation or component below to inspect its exact canonical JSON, including conditionals that a Swagger model preview may omit.",
+      "Exact definitions from the OpenAPI 3.2 contract. Includes JSON Schema 2020-12 conditionals and streaming examples that Swagger previews may omit.",
     );
     const rawLink = document.createElement("a");
     rawLink.href = "../openapi.yaml";
     rawLink.textContent = "Open the complete raw OpenAPI 3.2 contract";
     target.appendChild(rawLink);
 
-    appendStreamingResponses(target, operations);
-
     const filterLabel = document.createElement("label");
     filterLabel.className = "iris-schema-filter";
-    filterLabel.append("Filter canonical operations and components ");
+    filterLabel.append("Find an endpoint or schema ");
     const filter = document.createElement("input");
     filter.type = "search";
     filter.placeholder = "path, method, operation ID, or component";
     filterLabel.appendChild(filter);
     target.appendChild(filterLabel);
+    const searchStatus = appendText(target, "p", "", "iris-search-status");
+    searchStatus.setAttribute("role", "status");
 
     appendText(target, "h3", `Operations (${operations.length})`);
     const operationList = document.createElement("div");
@@ -149,12 +152,20 @@
     });
     target.appendChild(componentList);
 
-    filter.addEventListener("input", () => {
+    const updateSearch = () => {
       const query = filter.value.trim().toLowerCase();
+      let matches = 0;
       target.querySelectorAll(".iris-canonical-list details").forEach((details) => {
         details.hidden = query !== "" && !details.dataset.search.includes(query);
+        if (!details.hidden) matches++;
       });
-    });
+      searchStatus.textContent = matches
+        ? `${matches} matching endpoints and components across all services.`
+        : "No matching endpoints or schemas. Try a path, HTTP method, operation ID or component name.";
+    };
+    filter.addEventListener("input", updateSearch);
+    updateSearch();
+    appendStreamingResponses(target, operations);
     target.hidden = false;
   };
 })();

@@ -32,17 +32,10 @@ against the stored administrator credentials and normally fails.
     immediately after deployment. Do not expose a brand-new Console to an
     untrusted network while no administrator exists.
 
-Or create the initial admin from the container instead:
-
-```bash
-docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
-```
-
 ### Finishing setup
 
 Creating the admin is the first of four things a new server needs. The sign-in
-straight after it lands on the **setup flow** (`#setup`) — a real Magnetic
-Stepper, not a linking checklist: a step panel on the left, the active step's
+straight after it lands on the **setup flow** (`#setup`): a step panel on the left, the active step's
 own controls on the right — which walks the other three in order:
 
 1. **Telemetry destination** — where swarm progress, device reports and export
@@ -83,17 +76,14 @@ worded distinctly from one never configured at all.
 
 ### Branding
 
-The console's headings render in Cisco's Sharp Sans Bold typeface where it is
-available, and in the browser's default sans-serif font otherwise
-(`font-display: swap`) — a cosmetic difference only, never a functional one.
-The `.woff2` file is excluded from the Docker build context and the release
-tarball (`.dockerignore`): Cisco's license for it does not permit
-redistribution, so it can never ship inside the image. A deployment that
-independently holds the license restores it at runtime, without ever
-touching the image, by bind-mounting the file over Compose's
-`IRIS_SHARP_SANS_FONT_HOST` variable — see [Reference](reference.md) —
-before `docker compose up`. Left unset, the console looks identical apart
-from the fallback font.
+The Console uses self-hosted Inter for headings, body text, IP addresses and
+logs, with system sans-serif fallbacks. React and legacy pages share this
+font stack. The independent IRIS theme includes no proprietary component
+assets and does not require Cisco fonts.
+
+The legacy `IRIS_SHARP_SANS_FONT_HOST` mount remains for compatibility but
+does not change the current theme. Licensed font files are excluded from
+Docker builds and release tarballs; see [Reference](reference.md).
 
 ## Console areas
 
@@ -101,7 +91,8 @@ from the fallback font.
 | --- | --- |
 | Overview | Rollout counters and per-image staging progress. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`, or `unknown` when the health endpoint cannot be read), fed by the hub's OTLP export health. |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on disk. |
-| Devices | Lists known devices, their **management type**, **Agent install** choice, assigned images, and recent reports. |
+| Inventory | Lists known devices, their **management type**, **Agent install** choice, assigned images, and recent reports. Assign or clear device roles here. |
+| Policies | Creates, edits, imports, and exports role definitions; shows peer-policy health and instruction delivery diagnostics. |
 | Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
 | Swarm | Shows peer progress and seeder/device participation. |
 | Monitoring | Holds the audit trail and per-job deployment logs. |
@@ -207,17 +198,19 @@ A device without a management type reads **Inventory only — management type
 not chosen**. Choose a management type before onboarding it. See
 [Inventory](fleet-workflows.md#inventory).
 
-Management type alone controls the network fields in Add Device. Model is
-optional free text; known models narrow the **Agent install** choices without
-changing the management type. A model such as `C3650` can be saved, but that
-does not confirm hardware support. XR host selects `xr-appmgr`, router modes
+Management type controls the network fields in Add Device. **Model series** is
+a dropdown: IE Switches, IR Routers, Catalyst Routers, Catalyst Switches, NCS,
+or Cisco 8000 Series. Series narrow **Agent install** choices without changing
+the management type. Choosing a series does not confirm hardware support.
+Existing devices display their series while retaining their actual model for
+diagnostics. The API and CSV still accept exact model numbers. XR host selects
+`xr-appmgr`, router modes
 offer `router` (Guest Shell) or `iox`, and routed/inband modes require a
 compatible Guest Shell or IOx choice.
 
 Router choices show the VPG number and app addressing; Router NAT also requires
-the outside interface. Both target the Catalyst 8000 family and are validated on
-Catalyst 8000V across onboarding, image staging, record-backed undeploy, Swarm Map, and
-OpenTelemetry (OTLP) export.
+the outside interface. Both target the Catalyst 8000 family. Current hardware
+coverage is recorded in [Validated platforms](validation.md#validated-platforms).
 
 Each onboard creates a durable **deployment record** of what it applied, and **Undeploy**
 runs only from that deployment record, so editing inventory after onboarding cannot
@@ -272,12 +265,12 @@ participant are unavailable.
 
 ### Roles and peer-policy status
 
-The Devices table's **Role** column shows the declared fleet role, or a dash
+The Inventory table's **Role** column shows the declared fleet role, or a dash
 when none is declared. **Filters → Role** offers *Role: any*, *— no role —*,
 and the complete policy role list, including roles absent from the current
 page. The filter is applied by the server before paging.
 
-For a selection, open **More actions → Set role…**. Leaving the disabled initial
+For a selection in **Inventory**, open **More actions → Set role…**. Leaving the disabled initial
 placeholder untouched is a no-op; choosing the explicit *— no role —* option
 clears membership. **Preview change** sends one aggregate dry run for every
 selected device and shows the four access/membership impact counts, whether QoS
@@ -290,9 +283,15 @@ If the commit connection or response is
 unreadable, **changes may have been saved**: refresh policy and Fleet state,
 review drift, and preview again rather than repeating the request.
 
-The collapsed **Peer policy** disclosure above Devices summarizes role and
-restricted-role counts, drift, and outbox occupancy (`N/256`). Expanding it
-shows per-role member counts, the last origin-QoS state and download counts,
+Open **Policies** to see which roles can share images and use the distribution
+server. Sharing needs permission from both roles. This is configured intent,
+not a connectivity test: quarantine and explicit device/server ACLs may further
+restrict access. The Enforcement section distinguishes the existing server
+blocklist from additional role restrictions, which remain **preview-only**.
+
+**Advanced** opens role and restricted-role counts, drift, and outbox
+occupancy (`N/256`). Its **Peer access and roles** panel also shows per-role
+member counts, the last origin-QoS state and download counts,
 the mutual-origin **preflight count only**, and the explicit-ACL shadowing rule.
 It never displays peer addresses or raw deny lists. Degraded, fail-closed, and
 unavailable states remain distinct. A capability banner blocks role changes
@@ -312,12 +311,14 @@ tracker's last enforcement state.
 
 ### Role definitions
 
-The **Peer policy** disclosure also holds the **Role definitions** table: one
+The **Policies → Advanced → Role definitions** table shows one
 row per defined role with its restricted flag, peer roles, origin access,
 networks, and QoS overrides, plus **Edit** and **Delete** per row. **New
-role…** opens the editor: role name, peer roles (the role itself is implied),
-IPv4 networks, the instruction-expiry fallback, the restricted and origin
-switches, the eight speed limits in bytes per second (0 = unlimited, otherwise
+role** or **Edit** opens sharing permissions. **Limit sharing to these roles**
+enables the peer list and distribution-server restriction; without it, this
+role permits all roles and the server, but the other role must still permit it.
+The editor's **Advanced** section holds IPv4 networks, instruction-expiry
+fallback, the eight speed limits in bytes per second (0 = unlimited, otherwise
 at least 8192; a live hint shows the Mbit/s equivalent), and the swarm and
 agent cadence values. A blank QoS field inherits the global default. Saving
 follows the Set role contract exactly: **Preview change** sends one dry run
@@ -327,21 +328,21 @@ a preview discards it. Delete previews first and asks for confirmation before
 the committed DELETE. Editing an existing role carries its tracker `qos_state`
 overlay along unchanged, because a definition write is a full replacement.
 
-**Import CSV…** replaces every definition with the chosen file, in the same
-grammar `iris-role import` and `fleet/roles.csv.example` use, after a preview
+**Import CSV…** replaces every definition with the chosen file, using the
+`fleet/roles.csv.example` format, after a preview
 and an explicit confirmation that names how many roles the file holds; roles
 missing from the file are removed, and a role a device still declares refuses
 the import as `role_in_use`. **Export CSV** downloads the current definitions
-in that grammar, so a file exported here imports unchanged with `iris-role`
-and vice versa. All three controls, like Set role, are disabled while the
+in that format. All three controls, like Set role, are disabled while the
 capability banner shows or the policy is degraded.
 
-The Console still has no role-policy JSON editor: definitions are edited as
-typed fields, and global QoS defaults and tracker `qos_state` stay API-only.
-There is no public per-device QoS write API. Configure, preserve, or remove
-`qos_state` through the documented management API; the Console never edits the
-nested tracker state map. Role pair explanations are available only through
-the documented API.
+The Console has no role-policy JSON editor: definitions are edited as typed
+fields. Global/role QoS and tracker `qos_state` are API-only, managed through the
+versioned API's `PUT /api/v1/peer-policy/qos`; there is no per-device QoS write
+route. Mutual-access pair explanations are available only through
+`GET /api/v1/peer-policy/explain`. See the [interactive API reference](swagger/index.html)
+for schemas and conditional-write requirements; do not edit server state files
+directly.
 
 Tracker/quarantine discovery alone does not sever existing connections or
 remove retained peers. Applied verified device deny lists may cooperatively
@@ -377,7 +378,7 @@ The separate raw and display state vocabularies, including legacy
 Capability comes from `instr_protocol: 1`, not IOS `version`. Labels retain exact
 i63 values as strings, so browser rounding cannot change identity.
 
-The Peer policy disclosure shows issued policy revision, accepted application
+Open **Policies → Advanced → Instruction delivery and key custody** for issued policy revision, accepted application
 counts grouped by policy revision, state counts, current `instr_stamp_missing`
 and `pointer_skew` device counts, and observation time. It excludes orphan
 heartbeats and retains accepted identities beneath stale/rejected/revoked
@@ -412,28 +413,26 @@ before onboarding other applications on the same device.
 
 ## Bulk device actions
 
-The Devices toolbar acts on the current *selection*, so a CSV import can be
-finished without touching each device.
+In **Inventory**, click a row to select or deselect it. Selected rows are
+highlighted and expose bulk actions; there are no selection checkboxes. You can
+also focus a row and press **Space** or **Enter**. Device names open details,
+and buttons or dropdowns inside a row do not change its selection.
+**Select page** selects the visible page; **Clear page selection** reverses it.
+**Cancel** clears the entire selection.
 
-Above it, the filter bar narrows what the table shows — free text across
-device, IP and model, plus management type, **Agent install**, credential,
-telemetry, peer policy and status. Filtering happens on the server, not just
-in the browser: every one of these controls (and the free-text search) is
-applied by the same `GET /api/v1/devices` request the table polls, so the count
-next to the filter bar and the rows on screen can never disagree about what
-"matches" means, no matter how large the fleet is. The **Status** choices are
-generated from the same derivation the Status column renders, so every state
-a row can show can be filtered for. Each dropdown choice shows the same
-sentence-case label the column renders: `Onboarding`, `Undeploying`, `Waiting
-for heartbeat`, `Waiting for staging`, `Onboard failed`, `Undeploy failed`, `Staged`, `Staging
-failed`, `Image(s) failed`, `Copying to IOS storage`, `Staging (other)`,
-`Enrolled`, `Not enrolled`, and `Offline (no recent heartbeat)` — but its
-`<option>` value, and the wire status the cell itself carries, is the
-lowercase/kebab form underneath: `onboarding`, `undeploying`,
-`waiting-heartbeat`, `waiting-staging`, `onboard-failed`, `undeploy-failed`, `deployed`,
-`placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
-`not-enrolled`, and `offline` — the last being a modifier, since a device
-filtered on `deployed` (rendered `Staged`) can still have gone quiet.
+Search by device, IP or model. **Filters** expands the structured filters;
+remove an individual filter chip or use **Reset** to clear all filters. Filters
+apply on the server before paging. **Device series** includes IE Switches,
+IR Routers, Catalyst Routers, Catalyst Switches, NCS and Cisco 8000 Series,
+with legacy and unknown categories retained. These are display labels for the
+existing API families, not a promise that every model in a series is supported.
+The table shows series names; hover the series cell to see the stored model.
+
+CSV import results stay visible independently of inventory refreshes. A refused
+role import names the role/device when the API provides them; define missing
+roles in Policies first. You can select the same file again after correcting it.
+If the response is unavailable, refresh inventory before retrying: the request
+may already have completed, and the Console does not resend it automatically.
 
 ### Schedules
 
@@ -449,9 +448,10 @@ counts.
 filter**, not the rows that happen to be checked: the filter is re-resolved at
 each run, which is the reason to schedule against it. The modal says how many
 devices that filter matches now and offers naming the selected devices instead
-as the explicit second choice. Editing a window, its wave gate or its payload
-is not in the console — that stays with `iris-schedule` and the API, which own
-the full closed schema.
+as the explicit second choice. Editing a window, wave gate, or full payload is
+not available in the Console. Use only schedule operations and fields listed
+in the [OpenAPI contract](openapi.yaml); do not assume schedule CSV
+import/export is available.
 
 A schedule whose creator is gone shows `created_by <actor> (actor no longer
 exists)`, and **Re-affirm** on that row takes ownership of it. Firing never
@@ -468,145 +468,55 @@ answer, not a promise about the next run.
 
 ### Paging and selection at fleet scale
 
-A fleet larger than 200 devices (after filtering) pages: the table shows 200
-rows at a time with **Previous**/**Next** controls and a "Page *X* of *Y*"
-readout next to the results count, instead of re-fetching and re-rendering
-every device on every 10-second poll. This is deliberately the *last* piece
-of this design, not the first — a table that silently showed a page as if it
-were the whole fleet, or a **select all** that silently meant "this page,"
-would be worse than a slow table, so two things had to be true first:
+The Devices table pages large filtered inventories. Selection follows device
+IDs across pages. **Select page** selects the current page only;
+**Select all N matching devices** expands it to the active filter. **Cancel**
+clears the entire selection. Review the selected count before any bulk action.
 
-- Every filter above is enforced **server-side**, so a page can never hold
-  rows the filter bar disagrees with.
-- Selection is tracked by **device ID**, not by which checkboxes happen to be
-  rendered. Checking rows on page 1, turning to page 2, and checking more
-  there keeps every earlier check — the selection count in the bulk bar
-  always reflects everything you have checked across every page, filter
-  change, and 10-second poll, not just what is currently on screen.
+| Action | Effect |
+| --- | --- |
+| Onboard | Queues an agent deployment for each selected device. |
+| Undeploy | Removes the agent using its deployment record. |
+| Adopt | Records a reviewed existing deployment; router adoption is not supported. |
+| Delete | Retires inventory and server-side device state; does not uninstall the agent. |
+| Set credential or role | Updates the selected devices; review clears and policy previews carefully. |
+| Assign images | Replaces each selected device's image set with the checked images. |
 
-The header checkbox (above the **Device** column) only ever selects or
-clears the page currently on screen — with paging, it cannot mean anything
-else, and its accessible name says "on this page" to make that explicit.
-Once every row on a page is checked, the bulk bar offers **Select all *N*
-matching devices**, naming the server's own count for the active filter. That
-control performs a real walk of every remaining page under the current
-filter and adds each device's ID to the selection; it is never a shortcut
-that quietly re-checks the header box. Once every matching device really is
-selected, the bar says so plainly ("All *N* matching devices selected")
-rather than leaving you to infer it from a checkbox state. Clearing the
-selection (**Cancel**) always clears the full cross-page set, not just the
-rows in view.
+The image picker allows up to ten images. For a mixed selection it initially
+checks only images common to every device. Applying the set can therefore
+remove assignments; review the warning and the full checked set. Empty means
+unassign all. Cleanup after unassignment follows
+[platform ownership rules](device-agents.md#unassigned-image-park), not a promise
+to delete every staged image.
 
-| Control | What it does | Confirms first |
-| --- | --- | --- |
-| Onboard selected | Queues an onboard job per device and tracks them in the batch panel; the server runs a bounded number at a time and queues the rest. | No |
-| *Telemetry reports* / *Telemetry streaming* checkboxes | Set the deployed agent's telemetry posture for every onboard started from this toolbar (single-row onboards included). Reports default on; streaming defaults off ([Transfer streaming](observability.md#transfer-streaming)). A bulk redeploy with the boxes toggled is the site-scale enable/disable path. | No |
-| Undeploy selected | Runs record-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
-| Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
-| Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
-| *Set credential…* + **Apply** | Assigns one credential profile to every checked device. The picker opens on a disabled placeholder, so Apply with nothing chosen does nothing; choosing *no credential (clear the assignment)* clears it instead. The modal does not open while the profile list has failed to load. | Only when clearing — a dialog naming the device count |
-| More actions → Set role… | Previews and applies one role (or an explicit clear) to the whole cross-page selection in a single CAS-protected operation. | Always when effective membership/access or QoS changes; uses the reviewed preview token |
-| Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
+Bulk actions report individual successes and refusals. Review each result and
+follow asynchronous jobs to completion. HTTP 207 means partial cleanup, not a
+fully successful operation; HTTP 429 is admission rejection and includes
+`Retry-After`. See [API limits](api-testing.md#api-admission-limits).
 
-A device can have up to ten images assigned at once, staged and transferred in
-parallel; the per-row control in the **Assigned images** column (reading `N
-image(s)` when images are assigned, `— assign —` when none are) and the
-toolbar's **Assign images to *N* devices…** button open the same checkbox
-picker, reading `Choose images` with a live `n/10` count — an eleventh box
-disables itself rather than waiting for a server-side rejection. Applying to
-a multi-device selection pre-checks the *intersection* of what the selection
-already has assigned — never the union — so **Apply** can never silently add an
-image to a device that lacks it. Apply then writes the checked set to *every*
-selected device, so an image a device has that you leave unchecked is dropped
-from it: whenever the selection's assignments are not all identical, the picker
-says so and **Apply** asks you to confirm before it posts. Applying an empty pick is a
-deliberate unassign and confirms first, whether for one device or for the
-whole selection. On the next policy poll, the agent stops an unassigned
-torrent and removes its download data. IOS-XE keeps an already placed root
-image for reuse or later guarded reclaim. IOS-XR downloads directly to the
-root, so it removes an IRIS-downloaded file but preserves an operator-adopted
-file or one whose origin is unknown. See
-[Unassigned image park](device-agents.md#unassigned-image-park) for what
-reclaims that space and when.
+#### Force undeploy
 
-The **Adopt** dialog names the whole selection. It warns that you should only
-adopt a device whose inventory row matches what is really on the box, points at
-re-onboarding as the safer and idempotent alternative, states up front that
-routers cannot be adopted, and sends the acknowledgement the server requires —
-an adopt that omits it is refused.
+Use **Force** only when the normal deployment record is missing or no longer
+describes the device. Review the platform's cleanup scope: it removes IRIS
+agent configuration without treating unproven network resources as IRIS-owned.
+Do not use it as an image-deletion shortcut. Successful forced teardown
+abandons the old deployment records.
 
-The **Undeploy** dialog's **Force** checkbox covers a device stranded with no
-*usable* deployment record. That is either no deployment record at all — typically an
-onboard that enabled the agent but died before its deployment record was written — or a
-deployment record that no longer describes the box in front of it. The second case is a
-device that was rebuilt or replaced: it keeps its device id and its address but
-reports a new board ID, so the teardown recipe refuses it with `device identity
-mismatch`, while onboard refuses too and names that same teardown as the fix.
-Force is read before the deployment record is, so neither a mismatched deployment record nor two
-conflicting recoverable deployment records can keep you from it. Forcing removes every
-artifact that
-carries IRIS's own name — the EEM applets, Guest Shell or the IOx app and its
-app-hosting stanza, the IRISQ logging discriminator and its
-buffered/console/monitor bindings, `crypto pki trustpoint IRIS` and `ip http
-client secure-trustpoint IRIS`, and the staged files — and preserves only the
-operator's network: the VLAN and SVI, the VirtualPortGroup, and the NAT rules,
-which without a deployment record nothing proves IRIS created. Everything IRIS-named has
-to go, or the next onboard's preflight refuses the device the forced teardown
-just rescued. It behaves the same on every platform, including a router, which
-has no other way to clear an agent with no deployment record — it cannot be adopted, and
-its preflight refuses to re-onboard over an already-enabled Guest Shell.
-Recorded in Audit as `undeploy_forced`.
+Force does not bypass an unresolved IOx signature-verification recovery
+obligation. Recover and reconcile the journal first; see
+[interrupted IOx attempts](operations.md#recovering-an-iox-attempt-cut-off-mid-run).
+An app activation failure may be resumable through **Onboard**, without Force.
 
-Force does not get past an unresolved IOx verification obligation on the board
-itself. The controller recovers that obligation under the board lock before any
-teardown, forced or not, and a journal in phase `indeterminate` — an attempt
-cut off after IRIS began disabling device-global app signature verification
-and before it could restore it — refuses every attempt with
-`predecessor recovery failed` (`reconciliation_required`). Restore verification
-on the device and reconcile the journal first:
-[Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run).
-
-An IOx onboard that failed while the app was activating is also **not** a case
-for Force. It leaves the app installed but never started, which preflight reads
-as a resumable retry: press Onboard again and the second attempt finds the
-package's layers already cached. See
-[First install of a new package version](iox.md#first-install-of-a-new-package-version).
-
-One refusal is **not** a case for Force or for adopt: an Undeploy that answers
-`503` naming an unreadable `deployment_records.json`. The records exist and
-cannot be parsed, so nothing yet knows whether IRIS deployed this device.
-Repair or remove that file — adopting the device instead would write a
-deployment record asserting a deployment nobody verified.
-
-Once a forced teardown succeeds, every deployment record the device still held is marked
-`abandoned` — only on success, because failing to reach a device is not proof
-that its deployment record is wrong. Without that step the next onboard would be refused
-on the very deployment record the force was run to get past.
-
-Bulk operations report per-device refusals rather than failing the whole batch:
-the status line shows how many devices succeeded and names the ones that did
-not, with the server's reason. Adopting a router, for example, comes back as a
-`409` for that device while the rest of the batch proceeds.
-
-Creating or deleting a credential profile re-renders the device rows
-immediately, so a device imported before any profile existed becomes assignable
-at once instead of after the next ten-second poll.
+An unreadable deployment-record store is a storage/recovery problem, not proof
+that no record exists. Repair it from verified state; do not delete evidence or
+adopt an unverified deployment to bypass the error.
 
 !!! warning "Deleting inventory is not an undeploy"
-    Delete removes the Console inventory entry — it does not touch the box. An onboarded
-    device keeps its agent and its staged image, with no inventory entry left to
-    manage it. Undeploy first if that is what you meant. The deletion cannot be
-    undone.
-
-    Delete *is* terminal for the device id, though. Alongside the inventory row
-    it revokes the device's credentials, clears its image assignment, heartbeat,
-    telemetry history, pending pull and seen-report ledger, marks its
-    deployment records `abandoned`, and cancels any onboard or undeploy still
-    queued or running for it. Re-adding the same device id afterwards starts
-    from scratch: nothing the previous device left behind can block or
-    authorise anything for its replacement. Peer endpoint rows are the one
-    deliberate exception — they are retained until they age out, so the revoked
-    principal keeps deriving a deny.
+    Undeploy first if you intend to remove the agent. Delete does not contact
+    the device to remove it, but does revoke credentials and retire associated
+    server-side assignments, reports, records, and jobs. Re-adding the ID does
+    not restore that state. Peer endpoint records are retained until expiry so
+    revoked principals remain denied. Check partial-cleanup responses.
 
 ## Onboarding from the console
 
@@ -621,37 +531,34 @@ busy device, an unreachable device, a router already holding a deployment
 record — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
 
-### Job log windows
+### Device activity
 
-The batch panel's per-row **log** button opens one log window per job, each
-with its own live stream, **Abort**, and **Close**, so concurrent onboards
-never write into (or blank) each other's window. At most six windows stay
-open; opening more closes the oldest. **Abort** is queue-aware: a job still
-waiting for an install slot is taken out of the queue instead — scoped to
-just that job, other queued work is untouched — while aborting a running job
-stops the installer, with the confirmation warning that the device may be
-left partially configured (re-onboard, which is idempotent, or undeploy to
-clean up). A window opened on a queued job says so and starts streaming the
-moment the job wins a slot.
+**Inventory → Activity** opens recent jobs in a side panel. Choose **log** on
+a job to read its output; only one log is displayed at a time and job streams
+remain separate. **Close** or **Esc** closes the viewer, not the jobs. Reopening
+a log reconnects its stream. Older persisted logs remain under **Monitoring →
+Deployment logs**.
 
-Successful jobs end with `onboard complete: <IP>` or `undeploy complete: <IP>`.
-Errors name the failed check and any recovery steps. Onboarding completion
-means the agent is set up; check Devices for image staging progress.
+**Abort** requires confirmation: it cancels that queued job or stops its running
+installer, which can leave the agent partly configured. Re-onboard or undeploy
+to recover. Completed jobs do not offer Abort.
 
-The log is step-level on every platform. Guest Shell, router and XR jobs
-stream their installer's `[n/N]` banners and notices. An IOx job streams the
-recipe's `[n/8]` (install) or `[n/4]` (undeploy) headers, its prerequisite
-notices and poll outcomes (`app is DEPLOYED (poll 2/24)`), and one indented
-line per controller operation with its duration -- `  configure_app ok (2.1s)`
--- as each step completes. A failed step is named the same way
-(`  configure_app failed (2.1s)`), followed by the device's own `% ...`
-verdict and the controller's `IOx command failed: ...` detail. The raw IOS
-session the controller drove is not in the default job log; it is kept as the job's
-persisted transcript under the state directory's `iox/transcripts`. To stream
-it into the job log for a debugging run, select **Detailed logs** in the
-Onboard or Undeploy dialog, or submit `{"log": true}` through the API.
-It defaults to off; credential redaction remains active. Onboarding with this
-option also enables `aria2c.log` on IOx and IOS-XR. Guest Shell logging is
+New jobs use the same broad progress across Guest Shell, IOx and IOS-XR:
+**Prepare → Deploy/remove IRIS agent → Finalize**. The heading identifies the
+device series and installer. Device Details lists the chassis model separately,
+with its source; a series selection is never presented as a detected chassis.
+Completion is reported as `Onboard completed.` or `Undeploy completed.` only
+after the job finishes successfully. This concerns the agent, not completion of
+an image download or installation of device software.
+
+Errors, warnings and recovery instructions remain visible. For individual
+installer steps, timings and available command diagnostics, select **Detailed
+logs before starting** Onboard or Undeploy, or submit `{"log": true}` through
+the API. The job confirms `Detailed logs enabled.`; the option defaults to off.
+IOx additionally includes its redacted device session, which is retained under
+the state directory's `iox/transcripts`. Existing saved logs are not rewritten,
+and enabling detail on a later job does not expand an earlier summary log.
+Onboarding with this option also enables `aria2c.log` on IOx and IOS-XR. Guest Shell logging is
 configured separately through `iris_log` in its agent configuration (see the
 [reference](reference.md#device-container-environment-variables)).
 
@@ -680,11 +587,11 @@ later verification step instead of exposing only one total duration.
 
 ## Settings
 
-Settings is a sidebar feature with its own sub-menu — **Setup**, **Device
-packages**, **General**, **TLS & trust**, **Telemetry**, and **Audit export** —
-rather than an in-page tab strip. Each sub-page is deep-linkable, including
-`#settings/setup`, `#settings/packages`, `#settings/general`,
-`#settings/tls`, `#settings/telemetry`, and `#settings/audit`.
+Open **Settings** in the navigation rail, then use the section bar: **General**,
+**TLS & trust**, **Telemetry**, **Image verification**, **Device packages**,
+**Audit export**, and **Setup checklist**. Each section keeps its deep link:
+`#settings/general`, `#settings/tls`, `#settings/telemetry`,
+`#settings/bulkhash`, `#settings/packages`, `#settings/audit`, and `#settings/setup`.
 
 General shows the device-facing server IP and the Console's browser URL
 separately. They can belong to different hosts. `IRIS_CONSOLE_URL` on the
@@ -693,7 +600,7 @@ controls where it actually listens.
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+The **Setup checklist** section (`#settings/setup`) is a post-install status panel: four
 cards — **admin account**, **telemetry destination**, **device packages**, and
 **image verification** — each carrying a live status chip and a short
 rationale, meant to be revisited any time after installing a server rather
@@ -774,21 +681,26 @@ and carries the **Export now** button plus a status line showing the
 configured destination and the last run's outcome. The operational behaviour
 is described in [Audit export](operations.md#audit-export).
 
-## When to use the CLI
+<a id="when-to-use-the-cli"></a>
 
-Nothing in the everyday workflow requires it. Publishing images, assigning them,
-onboarding and undeploying devices, importing inventory, and watching progress
-are all console operations, and most entries in the
-[command quick reference](reference.md#command-quick-reference) have a console
-equivalent.
+## Console and API
 
-The command line stays the right tool for four things:
+Use the Console for routine image publishing/import, inventory, assignments,
+onboarding, schedules, and monitoring. IRIS distributes, verifies, and stages
+images only: it never installs or activates them, reloads a device, changes
+boot variables, or alters running software.
 
-| Task | Why it stays on the CLI |
-| --- | --- |
-| Bringing the deployment up | Build and start the containers and provision their certificates and credentials on the hosts. |
-| Reproducible batch operations | Reviewed CSV files give you a diff and a rollback path. |
-| Building agent bundles and IOx packages | Build-time tooling, not a runtime operation. |
-| Credential minting, revocation, and seeder rotation | Deliberately kept off the browser surface. |
+For automation or the exact request/response contract, use the authenticated
+Console API under `/api/v1` and consult the [interactive API reference](swagger/index.html)
+or [OpenAPI contract](openapi.yaml). The compact [API quick reference](reference.md#api-quick-reference)
+lists operations without replacing their full schemas. The registry defines
+the supported methods and paths; a Console capability is not evidence that an
+unlisted API operation exists. In particular, image assignment is per-device
+at the API layer; the Console implements bulk selection by coordinating device
+operations.
 
-Use the console when you need visibility, one-off onboarding, or fast assignment changes during a lab.
+Protected mutations require a Console session and CSRF token; each operation's
+security and conditional-write requirements are in OpenAPI. For server
+provisioning and offline instruction-root custody, follow the separate
+[deployment](getting-started.md) and [custody](operations.md#instruction-root-ceremony-and-recovery)
+procedures rather than inferring a workflow from the browser API.

@@ -41,6 +41,17 @@ pushes the downloaded image to `guest-share` through the device's SCP server.
 A Catalyst 9300 job uses its configured SSD share, and onboarding leaves that
 device's SCP server untouched.
 
+IRIS records the SCP server's prior state before enabling it. It remains
+enabled while a share-less app needs it for image placement. Recorded undeploy
+disables it only when IRIS confirmed its own enable, after verifying that no
+hosted apps remain, and saves the restored configuration. An operator's
+pre-existing SCP setting is preserved. Legacy deployments and recordless force
+undeploy have no ownership proof and leave SCP unchanged. An interrupted enable
+with no confirmation requires operator reconciliation; IRIS does not guess.
+After confirming that SCP is no longer needed, disable it on the device and
+retry recorded undeploy. New onboarding is blocked while an older deployment
+has an outstanding SCP ownership claim.
+
 IOx preflight requests the app list, narrowly filtered IRIS collision lines,
 and counts of HTTP client credential settings. It does not request the full
 running configuration or stored password values. Each count is checked against
@@ -117,7 +128,7 @@ envelope through the controller's application-data channel; see
 | `device/iox/install.sh` | Private controller recipe for IOx onboarding. |
 | `device/iox/uninstall.sh` | Private controller recipe for IOx removal. |
 
-Submit jobs through the Console, API, or [IOx control CLI](reference.md#iox-control-cli).
+Submit jobs through the Console or the [onboard and undeploy API](reference.md#devices).
 The recipes require the controller's private channel and cannot be run standalone.
 
 ## Runtime behavior
@@ -155,7 +166,8 @@ The hand-off of the verified scratch file to IOS depends on the platform:
   leftovers, a tiny probe proves IOS can actually read the share before any
   multi-GB copy is committed, the transient copy is removed after placement,
   and undeploy deletes the prefixed files.
-- **Catalyst 8000V (scp push)**: the router exposes no IOS-visible directory
+- **Catalyst 8000V (scp push)**: the current IOx profile uses SCP because the
+  tested mount did not expose an IOS-visible directory
   to an IOx app (verified on IOS-XE 17.15.5: CAF accepts a `-v` run option for
   `bootflash:iox_host_data_share` but never mounts it, and `app-hosting data`
   copies only into the app), so it uses the same scp push as the IE-3400 and
@@ -214,8 +226,7 @@ job to include its command output.
 An onboard that fails at activation leaves the app-hosting configuration in
 place, because the activation may still be in flight. That is deliberate and
 does **not** need an undeploy or a forced teardown: press **Onboard** again in
-the Console, submit the onboard API request, or use the IOx control CLI's
-`submit-install` command. Preflight treats an IRIS app that
+the Console or submit `POST /api/v1/devices/<id>/onboard`. Preflight treats an IRIS app that
 is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry. The
 installer removes that incomplete app before retrying. An app that is
 `RUNNING` is a live deployment and requires undeploy first.

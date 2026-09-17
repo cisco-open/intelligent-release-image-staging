@@ -14,6 +14,12 @@ Services. The alpha manifests live under `kubernetes/` and use Kustomize; the
 server owns persistent state; the Console reaches it through authenticated
 HTTPS on the internal management Service.
 
+Before deployment, run `bash tools/check-host-time.sh` on **every eligible node**.
+Pods inherit the node clock, including after rescheduling. Keep node time
+synchronization monitored; do not add NTP or `SYS_TIME` inside the pods.
+See [time checks](aiagent.md#verify-time-before-deployment) and
+[time troubleshooting](troubleshooting.md#time-synchronization).
+
 ## Topology
 
 | Resource | Purpose |
@@ -62,7 +68,10 @@ again: the agents must be file-identical across packages. Copy each package's
 adjacent `.manifest` as well, because readiness binds the served wrapper bytes
 to their canonical OCI provenance. Kubernetes does not run host-side package
 builders. Build the deployment-neutral packages elsewhere and copy them to the
-server pod with `kubectl cp --no-preserve`. Rebuild and re-copy every package
+server pod with `kubectl cp --no-preserve`. For the complete ARM build and PVC
+copy commands, use [Build and publish the ARM64 IOx
+package](aiagent.md#build-and-publish-the-arm64-iox-package).
+Rebuild and re-copy every package
 after a shared-agent or common image-definition change, and rebuild/redeploy
 the server image to refresh its Guest Shell bundle. A certificate rotation
 does not require rebuilding them: server startup refreshes the distributed
@@ -372,6 +381,7 @@ a valid credential file, and the presence of its management CA file, not
 server availability; the independent
 `iris-console-tls` identity lets it start while the server is cold. API
 requests arriving while server is down get a redacted 503 with `Retry-After`.
+Silent transport failures can wait for the Console's 60-second upstream timeout.
 
 After a rollout, verify an authenticated Console API request before starting
 device jobs. Allow Service routing and the server connection to settle; pod

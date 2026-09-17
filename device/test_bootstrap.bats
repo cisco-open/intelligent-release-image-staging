@@ -704,6 +704,50 @@ PYTHON
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (signer-mismatch)"* ]]
 }
 
+@test "unreadable promoted trust rolls back before the new agent runs" {
+  install_prior_agent
+  hook="$TMP/trust-read-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_replace = os.replace
+_open = os.open
+_promoted = False
+
+def replace(source, destination, *args, **kwargs):
+    global _promoted
+    result = _replace(source, destination, *args, **kwargs)
+    if '/new/' in str(source) and str(destination) == os.environ['IRIS_TEST_TRUST_PATH']:
+        _promoted = True
+    return result
+
+def open_file(path, flags, *args, **kwargs):
+    global _promoted
+    if _promoted and str(path) == os.environ['IRIS_TEST_TRUST_PATH']:
+        _promoted = False  # one failed read; rollback restores the old file
+        raise PermissionError('fixture: guest user cannot read promoted trust')
+    return _open(path, flags, *args, **kwargs)
+
+os.replace = replace
+os.open = open_file
+PYTHON
+  for trust_name in iris-root.allowed_signers iris-signers.allowed_signers; do
+    pack_valid_bundle "$SRC/bundle.tgz"
+    write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+    run env PYTHONPATH="$hook" IRIS_TEST_TRUST_PATH="$STAGE/$trust_name" \
+        PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+        bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"bundle rejected (trust-unreadable)"* ]]
+    [ ! -e "$TMP/new-agent-invoked" ]
+    [ -f "$TMP/prior-agent-invoked" ]
+    [ ! -e "$STAGE/.bundle-transaction" ]
+    [ "$(cat "$STAGE/iris-root.allowed_signers")" = "prior root signer trust" ]
+    [ "$(cat "$STAGE/iris-signers.allowed_signers")" = "prior instruction signer trust" ]
+  done
+}
+
 @test "an incomplete promotion is rolled back before anything launches" {
   TX="$STAGE/.bundle-transaction"
   mkdir -p "$TX/prior/files/agent" "$TX/prior/absent"

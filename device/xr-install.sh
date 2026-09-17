@@ -12,12 +12,12 @@
 # write-through is hardware-proven, so there is no separate placement step
 # the way every IOS-XE recipe here needs one).
 #
-# Delivery rides the OTHER hardware-proven path from that same addendum: an
-# scp PUSH of the pre-built iris-xr.rpm straight to /harddisk:/, from a local
-# file this script reads directly (no PKI trustpoint dance, no `copy https:`
-# -- those are IOS-XE machinery this platform simply does not need. Catalog
-# TLS is verified INSIDE the container against the current public certificate
-# this installer places on harddisk: beside the RPM.  The canonical image is
+# Delivery uses XR-host curl over authenticated, certificate-verified HTTPS.
+# Host-key-verified SSH bootstraps the public certificate and supplies curl
+# authentication on protected stdin, never in a URL or process argument.
+# The RPM and sealed bootstrap are private per-device artifact snapshots.
+# Both downloads are SHA-256 checked before their final harddisk placement.
+# Catalog TLS is also verified inside the container. The canonical image is
 # therefore deployment-neutral and can remain signed. This script is the console-drivable
 # shape: DEVICE_IP/CATALOG_URL/CATALOG_TOKEN/DEVICE_ID/DEVICE_USER/DEVICE_PASS
 # are the fields the onboarding service supplies. The split console/server
@@ -33,10 +33,12 @@
 # Required env:
 #   DEVICE_IP CATALOG_URL CATALOG_TOKEN DEVICE_ID
 #   DEVICE_USER DEVICE_PASS  -- device login (admin, never the IOS-XE 'dnac'
-#     default); used by lab/xr-run.sh and this script's own scp push
+#     default); used by lab/xr-run.sh and the HTTPS bootstrap SSH session
 # Optional env (defaults):
 #   APPID=iris  SOURCE_NAME=iris-xr
 #   IRIS_ARTIFACTS_DIR=<repo>/artifacts  XR_RPM_FILE=$IRIS_ARTIFACTS_DIR/iris-xr.rpm
+#   IRIS_ARTIFACT_URL=https://<catalog-host>:8000 (optional origin override)
+#   IRIS_ARTIFACTS_PORT=8000 (used when no origin override is set)
 #   IRIS_CRT_FILE=$IRIS_ARTIFACTS_DIR/iris-catalog.pem (public server cert)
 #   IRIS_INSTRUCTION_BOOTSTRAP_FILE=<controller-owned private envelope snapshot>
 #   XR_MIN_FREE_BYTES=2147483648 (2 GiB headroom floor on harddisk: -- raise
@@ -347,10 +349,10 @@ if [ "$DRY" -eq 1 ]; then
   echo "[1/5] check IOS-XR and harddisk: free space (minimum $XR_MIN_FREE_BYTES bytes)"
   echo "show version"
   echo "dir harddisk: | include bytes free"
-  echo "[2/5] upload package, certificate, and bootstrap to harddisk:"
-  printf 'scp -O %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
-  printf 'scp -O <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
-  printf 'scp -O <instruction-envelope> <user>@%s:/harddisk:/iris-instructions.bootstrap\n' "$DEVICE_IP"
+  echo "[2/5] download package and bootstrap over authenticated HTTPS"
+  echo "SSH: supply public certificate and protected curl configuration on stdin"
+  echo 'curl -q --fail --proto =https --cacert <trusted-certificate> --config - --output <temporary-file>'
+  echo "Verify SHA-256 before placing $SOURCE_NAME.rpm and iris-instructions.bootstrap on harddisk:"
   echo "[3/5] register package"
   echo "appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
   echo "show appmgr source-table"
@@ -365,7 +367,8 @@ fi
 
 # A reset session is retried this many times, this far apart: the vty pool
 # frees a line when another session ends, so waiting is usually enough. Used by
-# the preflight and by the upload.
+# the preflight and package registration. The historical variable names stay
+# compatible with existing configuration; delivery no longer uses SCP.
 XR_SCP_ATTEMPTS="${XR_SCP_ATTEMPTS:-3}"
 XR_SCP_RETRY_SECONDS="${XR_SCP_RETRY_SECONDS:-10}"
 XR_SSH_CONNECT_DELAY="${XR_SSH_CONNECT_DELAY:-2}"
@@ -396,7 +399,7 @@ run_rc=0
 preflight_attempt=1
 while : ; do
   run_rc=0
-  PREFLIGHT_OUT="$(printf 'show version\ndir harddisk: | include bytes free\n' \
+  PREFLIGHT_OUT="$(printf 'show version\ndir harddisk: | include bytes free\nshow ntp status\n' \
     | RUN 2>"$RUN_ERR")" || run_rc=$?
   [ "$run_rc" -eq 0 ] && [ -n "$PREFLIGHT_OUT" ] && break
   [ "$preflight_attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
@@ -412,6 +415,7 @@ if [ "$run_rc" -ne 0 ] || [ -z "$PREFLIGHT_OUT" ]; then
   tail -5 "$RUN_ERR" >&2 || true
   exit 1
 fi
+printf '%s' "$PREFLIGHT_OUT" | python3 "$HERE/../server/time_preflight.py"
 VERSION_OUT="$PREFLIGHT_OUT"
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"
@@ -463,59 +467,21 @@ if [ "$FREE_BYTES" -lt "$XR_MIN_FREE_BYTES" ]; then
   exit 1
 fi
 
-echo "[2/5] upload package, certificate, and bootstrap"
-# The router's identity is verified with the same policy the transport uses
-# (lab/iris-ssh-policy.sh), so the scp cannot hand the admin password to a
-# host merely answering at the address.
+echo "[2/5] download package and bootstrap over HTTPS"
+# SSH authenticates the initial public trust anchor; HTTPS authenticates
+# device-bound artifact downloads. No SCP server is used or enabled.
 # shellcheck source=lab/iris-ssh-policy.sh
 . "$HERE/../lab/iris-ssh-policy.sh" || { echo "ERROR: cannot load lab/iris-ssh-policy.sh" >&2; exit 1; }
 iris_ssh_policy "$DEVICE_IP" || exit 1
-# One push per file. Select the SCP protocol explicitly: modern OpenSSH
-# defaults to SFTP, and NCS-540 / XR 25.2.2 returns SSH status 255 after an
-# otherwise completed SFTP upload. SCP (-O) is transfer-verified on that router
-# and Cisco 8201 / XR 25.4.2. This does not enable legacy SSH algorithms.
-# Retry transport failures and retain the destination and exit code even
-# when the client produces no error text.
-_xr_push() {
-  local src="$1" dest="$2" attempt=1 rc=0
-  while : ; do
-    rc=0
-    sleep "$XR_SSH_CONNECT_DELAY"
-    SSHPASS="$DEVICE_PASS" sshpass -e scp -O -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
-          "$src" "${DEVICE_USER}@${DEVICE_IP}:$dest" 2>"$RUN_ERR" || rc=$?
-    [ "$rc" -eq 0 ] && return 0
-    [ "$attempt" -ge "$XR_SCP_ATTEMPTS" ] && break
-    echo "   upload attempt $attempt failed: $dest (scp/sshpass exit $rc): $(tail -1 "$RUN_ERR" 2>/dev/null)" >&2
-    echo "   retrying in ${XR_SCP_RETRY_SECONDS}s" >&2
-    sleep "$XR_SCP_RETRY_SECONDS"
-    attempt=$((attempt + 1))
-  done
-  scp_attempt="$attempt"
-  scp_failed_dest="$dest"
-  return "$rc"
-}
-
-scp_rc=0
-scp_attempt=1
-_xr_push "$XR_RPM_FILE" "/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
-if [ "$scp_rc" -eq 0 ]; then
-  _xr_push "$CATALOG_CA_FILE" "/harddisk:/iris-catalog.pem" || scp_rc=$?
-fi
-if [ "$scp_rc" -eq 0 ]; then
-  _xr_push "$INSTRUCTION_SNAPSHOT_FILE" "/harddisk:/iris-instructions.bootstrap" \
-    || scp_rc=$?
-fi
+export IRIS_ARTIFACTS_DIR XR_RPM_FILE SOURCE_NAME CATALOG_CA_FILE INSTRUCTION_SNAPSHOT_FILE
+https_rc=0
+sleep "$XR_SSH_CONNECT_DELAY"
+SSHPASS="$DEVICE_PASS" python3 "$HERE/xr_https.py" \
+  sshpass -e ssh -tt -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+  "${DEVICE_USER}@${DEVICE_IP}" || https_rc=$?
 iris_ssh_cleanup
-if [ "$scp_rc" -ne 0 ]; then
-  echo "ERROR: XR package/catalog/bootstrap upload failed after $scp_attempt attempt(s): $scp_failed_dest (scp/sshpass exit $scp_rc)" >&2
-  echo "       Check the transport error, credentials, destination permissions, and storage." >&2
-  echo "       For connection resets, check 'show users' for VTY contention." >&2
-  # scp's own words, which are the difference between guessing and knowing.
-  # iris_ssh_explain adds host-key hints; neither prints a credential.
-  tail -5 "$RUN_ERR" >&2 || true
-  iris_ssh_explain "$RUN_ERR" "$DEVICE_IP" 2>/dev/null || true
-  exit 1
-fi
+[ "$https_rc" -eq 0 ] || exit "$https_rc"
 
 echo "[3/5] register package: $SOURCE_NAME"
 source_registered() {

@@ -1053,3 +1053,210 @@ def test_strict_read_nonregular_json_candidate_is_not_silently_ignored(tmp_path)
         keyed_state.read_all(path, strict=True)
     assert keyed_state.read_all(path) == rows
     assert _snapshot_disk(tmp_path) == before
+
+
+def test_opt_in_snapshot_cache_tracks_atomic_cross_instance_updates(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    first = keyed_state.KeyedState(path, cache_snapshots=True)
+    second = keyed_state.KeyedState(path, cache_snapshots=True)
+    first.put("edge-a", {"value": "old"})
+    assert first.snapshot() == {"edge-a": {"value": "old"}}
+
+    # A second process/store instance atomically replaces the shard. Snapshot
+    # must stat it afresh and never return a stale process-local copy.
+    second.put("edge-a", {"value": "new"})
+    assert first.snapshot() == {"edge-a": {"value": "new"}}
+
+
+def test_opt_in_snapshot_cache_returns_defensive_copies(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"nested": {"value": [1, 2]}})
+    result = store.snapshot()
+    result["edge-a"]["nested"]["value"].append(3)
+    assert store.snapshot() == {"edge-a": {"nested": {"value": [1, 2]}}}
+
+
+def test_flat_snapshot_cache_copies_both_dict_levels_without_deepcopy(
+        tmp_path, monkeypatch):
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"),
+                                   cache_snapshots=True)
+    expected = {"model": "NCS", "count": 7, "rate": 1.5,
+                "ready": False, "optional": None}
+    store.put("edge-a", expected)
+
+    def unexpected_deepcopy(*args, **kwargs):
+        pytest.fail("Flat JSON snapshot should not recursively copy scalars")
+
+    monkeypatch.setattr(keyed_state.copy, "deepcopy", unexpected_deepcopy)
+    cold = store.snapshot()
+    cold["edge-a"]["model"] = "changed-cold"
+    warm = store.snapshot()
+    assert warm == {"edge-a": expected}
+    warm["edge-a"]["count"] = -1
+    warm["extra"] = {}
+    assert store.snapshot() == {"edge-a": expected}
+
+
+def test_snapshot_copy_falls_back_for_nested_and_non_json_values():
+    shared = {"values": [1, {"two": 2}]}
+    rows = {"a": shared, "b": shared, "c": {"set": {3}}}
+    copied = keyed_state._copy_snapshot_rows(rows)
+    assert copied == rows
+    assert copied["a"] is copied["b"]
+    copied["a"]["values"][1]["two"] = 9
+    copied["c"]["set"].add(4)
+    assert rows["a"]["values"][1]["two"] == 2
+    assert rows["c"]["set"] == {3}
+
+
+def test_opt_in_snapshot_cache_invalidates_on_chmod_and_fails_closed_on_corruption(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    shard = Path(keyed_state.shard_dir(path)) / (
+        "%02x.json" % keyed_state.bucket_of("edge-a"))
+
+    reads = []
+    original = store._read_shard
+
+    def observed_read(bucket):
+        reads.append(bucket)
+        return original(bucket)
+
+    monkeypatch.setattr(store, "_read_shard", observed_read)
+    shard.chmod(0o400)
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    assert reads == [keyed_state.bucket_of("edge-a")]
+
+    shard.chmod(0o600)
+    shard.write_text("not-json")
+    with pytest.raises(keyed_state.KeyedStateError):
+        store.snapshot()
+
+
+def test_opt_in_snapshot_cache_detects_same_size_in_place_rewrite(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    shard = Path(keyed_state.shard_dir(path)) / (
+        "%02x.json" % keyed_state.bucket_of("edge-a"))
+    original = shard.stat()
+    original_text = shard.read_text()
+    updated_text = original_text.replace('"value": 1', '"value": 2')
+    assert len(updated_text) == len(original_text)
+    shard.write_text(updated_text)
+    os.utime(shard, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert store.snapshot() == {"edge-a": {"value": 2}}
+
+
+def test_opt_in_snapshot_cache_tracks_shard_deletion_and_recreation(tmp_path):
+    path = str(tmp_path / "fleet.json")
+    first = keyed_state.KeyedState(path, cache_snapshots=True)
+    second = keyed_state.KeyedState(path, cache_snapshots=True)
+    first.put("edge-a", {"value": 1})
+    assert first.snapshot() == {"edge-a": {"value": 1}}
+    assert second.delete("edge-a")
+    assert first.snapshot() == {}
+    second.put("edge-a", {"value": 2})
+    assert first.snapshot() == {"edge-a": {"value": 2}}
+
+
+@pytest.mark.parametrize("replacement", ["2", "x"])
+def test_snapshot_cache_checks_content_when_all_stat_fields_collide(
+        tmp_path, monkeypatch, replacement):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path, cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    shard = Path(store._shard_path(keyed_state.bucket_of("edge-a")))
+    frozen = shard.stat()
+    original_stat = keyed_state.os.stat
+    original_text = shard.read_text()
+    updated = original_text.replace('"value": 1', '"value": ' + replacement)
+    assert len(updated) == len(original_text)
+    shard.write_text(updated)
+
+    def colliding_stat(filename, *args, **kwargs):
+        if os.fspath(filename) == os.fspath(shard):
+            return frozen
+        return original_stat(filename, *args, **kwargs)
+
+    monkeypatch.setattr(keyed_state.os, "stat", colliding_stat)
+    if replacement == "x":
+        with pytest.raises(keyed_state.KeyedStateError):
+            store.snapshot()
+    else:
+        assert store.snapshot() == {"edge-a": {"value": 2}}
+
+
+def test_opt_in_snapshot_cache_is_safe_under_concurrent_reads_and_updates(
+        tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = str(tmp_path / "fleet.json")
+    reader = keyed_state.KeyedState(path, cache_snapshots=True)
+    writer = keyed_state.KeyedState(path, cache_snapshots=True)
+    writer.put("edge-a", {"nested": {"value": 0}})
+
+    def read_many(_):
+        for _ in range(30):
+            result = reader.snapshot()
+            assert type(result["edge-a"]["nested"]["value"]) is int
+            result["edge-a"]["nested"]["value"] = -1
+
+    def write_many():
+        for value in range(1, 31):
+            writer.put("edge-a", {"nested": {"value": value}})
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [pool.submit(read_many, i) for i in range(4)]
+        futures.append(pool.submit(write_many))
+        for future in futures:
+            future.result()
+    assert reader.snapshot() == {"edge-a": {"nested": {"value": 30}}}
+
+
+def test_snapshot_cache_reopens_current_content_and_refuses_lost_read_access(
+        tmp_path, monkeypatch):
+    import builtins
+
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"),
+                                   cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    bucket = keyed_state.bucket_of("edge-a")
+    shard = store._shard_path(bucket)
+    original_open = builtins.open
+
+    def denied(filename, *args, **kwargs):
+        if os.fspath(filename) == shard:
+            raise PermissionError("fixture denies the cached shard")
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", denied)
+        with pytest.raises(keyed_state.KeyedStateError):
+            store.snapshot()
+    assert bucket not in store._snapshot_cache
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+
+
+def test_snapshot_cache_is_disabled_by_default(tmp_path, monkeypatch):
+    path = str(tmp_path / "fleet.json")
+    store = keyed_state.KeyedState(path)
+    store.put("edge-a", {"value": 1})
+    reads = []
+    original = store._read_shard
+
+    def observed_read(bucket):
+        reads.append(bucket)
+        return original(bucket)
+
+    monkeypatch.setattr(store, "_read_shard", observed_read)
+    store.snapshot()
+    store.snapshot()
+    assert len(reads) == 2

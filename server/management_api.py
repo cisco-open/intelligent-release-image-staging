@@ -29,7 +29,6 @@ import tempfile
 import threading
 import time
 import traceback
-import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, parse_qs, urlsplit
@@ -72,6 +71,7 @@ import telemetry_destination
 import trust
 import api_problem
 import api_routes
+import api_rate_limit
 import tier_auth
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
@@ -3044,7 +3044,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                  record_store=None, now_fn=time.time, keyfile=None,
                  management_token_file=None,
                  management_previous_token_file=None, iox_controller=None,
-                 schedule_wake=None):
+                 schedule_wake=None, api_rate_limiter=None):
+    api_rate_limiter = (api_rate_limiter or
+                        api_rate_limit.AggregateRateLimiter.from_env())
     login_limiter = gui_auth.LoginRateLimiter()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
@@ -3414,6 +3416,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     ("POST", "/internal/v1/devices/{device_id}/role"),
                     ("POST", "/internal/v1/devices/bulk-role"),
                 }
+                # Admission follows tier auth, browser session/CSRF, and
+                # registry matching, but precedes body reads and all handler
+                # state work. Management-only controls and pre-auth account
+                # creation/login are deliberately outside these work budgets.
+                if not management_only and not body_authenticated:
+                    admitted, retry_after = api_rate_limiter.admit(
+                        route.method)
+                    if not admitted:
+                        api_problem.send(
+                            self, 429, "rate-limit-exceeded",
+                            "Rate limit exceeded",
+                            headers=(("Retry-After", str(retry_after)),))
+                        self.close_connection = True
+                        return False
                 self.path = mapped
             # A background view poll (GET + "X-IRIS-Poll: 1", sent by app.js's
             # periodic refreshers) validates the session WITHOUT refreshing its
@@ -3527,8 +3543,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 raise ValueError("unknown management type")
             platform = gui_onboard.resolve_platform(device)
             router_management_type = management_type in ("router-routed", "router-nat")
-            if device.get("model") and re.match(
-                    r"^C8[0-9]{3}", device["model"], re.IGNORECASE) \
+            if device.get("model") and gui_onboard.family(device["model"]) == "C8xxx" \
                     and not router_management_type:
                 raise ValueError("Catalyst 8000 models require management_type "
                                  "router-routed or router-nat")
@@ -3541,8 +3556,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if router_management_type and platform not in ("router", "iox"):
                 raise ValueError("management_type %s requires platform router "
                                  "or iox" % management_type)
-            if platform == "router" and device.get("model") and not re.match(
-                    r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
+            if platform == "router" and device.get("model") and gui_onboard.family(device["model"]) != "C8xxx":
                 raise ValueError("router modes support the Catalyst 8000 family only; "
                                  "%s is not yet supported" % device["model"])
             # xr-host <-> xr-appmgr is mutually required (gui_fleet.validate_record
@@ -5442,6 +5456,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             env_enabled = telemetry.observability_enabled()
             override = (dest["endpoint"] is not None
                         or dest["enabled"] is not None)
+            audit_cfg, audit_secret = audit_export.read_configuration(
+                audit_export.settings_path(state_dir),
+                creds.audit_export_secrets if creds is not None else None)
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),
@@ -5458,11 +5475,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                              "idle_ttl_minutes": app.idle_ttl_minutes()},
                 # settings file verbatim (it holds no secret) + password_set —
                 # the SCP password itself never leaves the encrypted store
-                "audit_export": dict(
-                    audit_export.read_settings(
-                        audit_export.settings_path(state_dir)),
-                    password_set=(creds.audit_export_secrets() is not None
-                                  if creds is not None else False)),
+                "audit_export": dict(audit_cfg, password_set=audit_secret is not None),
                 # console cert metadata only — key material is never echoed
                 "gui_cert": gui_tls.active_info(),
                 # installed root CAs: name/subject/expiry/fingerprint/source
@@ -6058,7 +6071,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="rejected: %s" % exc)
                 self._json(400, {"error": str(exc)})
                 return
-            except (TimeoutError, ConnectionError) as exc:
+            except (TimeoutError, ConnectionError):
                 self._json(408, {"error": "upload timed out or connection dropped"})
                 return
             job_id = images.start_publish(image_path)
@@ -6383,9 +6396,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if creds is None:
                     self._json(404, {"error": "not found"}); return
                 state = os.environ.get("IRIS_STATE", "/var/lib/iris")
-                cfg = audit_export.read_settings(
-                    audit_export.settings_path(state))
-                secret = creds.audit_export_secrets()
+                cfg, secret = audit_export.read_configuration(
+                    audit_export.settings_path(state), creds.audit_export_secrets)
                 if audit_export.validate_settings(cfg) is not None \
                         or secret is None:
                     self._json(409, {"error": "audit export not configured"})
@@ -6434,22 +6446,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
                 try:
-                    # the settings lock covers the whole read-modify-write:
-                    # an export finishing mid-save (_record_result) must not
-                    # clobber this edit, nor this edit its result
-                    with audit_export.SETTINGS_LOCK:
-                        prev = audit_export.read_settings(spath)
-                        # the destination changed, not the run history: keep it
-                        candidate["last_run_ts"] = prev["last_run_ts"]
-                        candidate["last_result"] = prev["last_result"]
-                        audit_export.write_settings(spath, candidate)
-                    if password:    # absent/empty keeps the stored password
-                        creds.set_audit_export_secret(password)
-                except Exception as exc:
+                    prev = audit_export.save_configuration(
+                        spath, candidate, password, creds.set_audit_export_secret)
+                except audit_export.ConfigurationPasswordRequired as exc:
+                    self._json(400, {"error": str(exc)}); return
+                except audit_export.ConfigurationSaveError as exc:
                     self._audit("audit_export_config", "settings", action="set",
                                target="audit-export", actor=actor, result="fail",
-                               detail="persist failed: %s" % exc.__class__.__name__)
-                    self._json(500, {"error": "settings save failed"}); return
+                               detail="persist failed; export %s" %
+                                      ("disabled" if exc.disabled else "state must be checked"))
+                    message = ("settings save failed; audit export is disabled. "
+                               "Reload settings, re-enter the destination and password, "
+                               "then save again" if exc.disabled else
+                               "settings save failed; reload settings before retrying")
+                    # The generic 5xx adapter deliberately redacts error text;
+                    # this fixed, non-secret recovery detail is safe to retain.
+                    self._json(500, {"error": "settings save failed", "detail": message}); return
                 # destination coordinates are non-secret; the password only
                 # ever audits as a flag
                 self._audit("audit_export_config", "settings", action="set",
@@ -7275,11 +7287,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
                 # under the settings lock so an export finishing mid-delete
                 # (_record_result) cannot resurrect the file we just removed
-                with audit_export.SETTINGS_LOCK:
-                    prev = audit_export.read_settings(spath)
-                    existed = os.path.exists(spath)
-                    audit_export.clear_settings(spath)
-                deleted = creds.clear_audit_export_secret() or existed
+                disabled = False
+                try:
+                    with audit_export.SETTINGS_LOCK:
+                        prev = audit_export.read_settings(spath)
+                        existed = os.path.exists(spath)
+                        audit_export.clear_settings(spath)
+                        disabled = True
+                        deleted = creds.clear_audit_export_secret() or existed
+                except Exception:
+                    message = ("audit export is disabled, but stored password cleanup "
+                               "failed. Reload settings and retry clearing the configuration"
+                               if disabled else
+                               "settings clear failed; reload settings before retrying")
+                    self._audit("audit_export_config", "settings", action="clear",
+                               target="audit-export", actor=actor, result="fail",
+                               detail=message)
+                    self._json(500, {"error": "settings clear failed", "detail": message})
+                    return
                 self._audit("audit_export_config", "settings", action="clear",
                            target="audit-export", actor=actor,
                            detail=(("cleared (was %s@%s:%s)"

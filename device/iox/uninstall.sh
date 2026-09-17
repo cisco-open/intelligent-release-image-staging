@@ -23,11 +23,11 @@
 #     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
 # idempotently; the rest are generic + a delivered artifact):
-#   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable
-#   (onboarding no longer pushes anything over SCP -- the device fetches its
-#   package over HTTPS -- but the agent's runtime guest-share hand-off used
-#   the device's SCP server, and whether IRIS or the operator enabled it is
-#   not recorded; see issue #228), the staged OS image on the selected IOS
+#   iox, file prompt quiet, the AppGigabitEthernet trunk, and the staged OS image.
+#   The controller restores an IRIS-enabled SCP server before recorded save,
+#   after confirming all apps are absent. Pre-existing/legacy/recordless SCP
+#   settings are preserved; dry-run output cannot establish ownership.
+#   The staged OS image stays on the selected IOS
 #   disk. Successful cleanup is
 #   persisted to startup-config so a reload cannot restore IRIS configuration.
 # In a real run, recorded versus force-agent-only authority comes exclusively

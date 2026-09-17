@@ -897,6 +897,19 @@ class DeploymentRecordStore:
             raise ValueError("record missing %s" % ", ".join(missing))
         if new_record and "iox_verification" in record:
             raise ValueError("generic records cannot supply iox_verification authority")
+        if new_record and "scp_server" in record:
+            raise ValueError("generic records cannot supply scp_server authority")
+        if "scp_server" in record:
+            scp = record["scp_server"]
+            _closed_object(scp, {"board_identity", "prior_enabled", "phase"},
+                           "scp_server")
+            _matching_string(scp["board_identity"], _BOARD_ID, "SCP board")
+            if (type(scp["prior_enabled"]) is not bool or
+                    scp["phase"] not in ("preserved", "enable_intent", "enabled", "restored") or
+                    (scp["prior_enabled"] != (scp["phase"] == "preserved")) or
+                    scp["board_identity"] !=
+                    (record.get("iox_verification") or {}).get("board_identity")):
+                raise ValueError("invalid scp_server authority")
         if new_record and ("recovery" in record or "predecessor_record_id" in record):
             raise ValueError("generic records cannot supply recovery lineage")
         if "schedule_provenance" in record:
@@ -1415,6 +1428,56 @@ class DeploymentRecordStore:
     def get(self, record_id, strict=False):
         record = self._read(strict=strict)["records"].get(record_id)
         return copy.deepcopy(record) if record else None
+
+    def iox_scp_state(self, record_id, controller_id, board_identity,
+                      prior_enabled=None, phase=None, deadline=None,
+                      monotonic_fn=None):
+        """Persist controller-owned SCP intent before device mutation.
+
+        A prior deployment's outstanding claim cannot be silently superseded.
+        Passing no state performs this admission check even for shared mounts.
+        """
+        with self._store_lock(deadline, monotonic_fn):
+            data = self._read(strict=True)
+            record = data["records"].get(record_id)
+            journal = (record or {}).get("iox_verification") or {}
+            if (record is not None and not journal and
+                    "scp_server" not in record and prior_enabled is None and phase is None):
+                return None  # Legacy deployments carry no cleanup authority.
+            if (record is None or record.get("state") in _TERMINAL or
+                    journal.get("controller_id") != controller_id or
+                    journal.get("board_identity") != board_identity):
+                raise ValueError("SCP ownership binding mismatch")
+            for other in data["records"].values():
+                claim = other.get("scp_server") or {}
+                if (other["record_id"] != record_id and
+                        claim.get("board_identity") == board_identity and
+                        claim.get("phase") in ("enable_intent", "enabled")):
+                    raise ValueError("prior SCP ownership requires recorded cleanup")
+            current = record.get("scp_server")
+            if prior_enabled is None and phase is None:
+                return copy.deepcopy(current)
+            candidate = copy.deepcopy(record)
+            if current is None:
+                if type(prior_enabled) is not bool or phase is not None:
+                    raise ValueError("invalid initial SCP state")
+                candidate["scp_server"] = {
+                    "board_identity": board_identity,
+                    "prior_enabled": prior_enabled,
+                    "phase": "preserved" if prior_enabled else "enable_intent"}
+            else:
+                if (prior_enabled is not None or
+                        (current["phase"], phase) not in
+                        (("enable_intent", "enabled"), ("enabled", "restored"),
+                         ("enable_intent", "restored"))):
+                    raise ValueError("invalid SCP ownership transition")
+                candidate["scp_server"]["phase"] = phase
+            self._validate(candidate, new_record=False)
+            _check_record_growth(candidate, _record_payload_size(record))
+            data["records"][record_id] = candidate
+            self._check_candidate(data, ordinary=True)
+            _atomic_write_json(self.path, data)
+            return copy.deepcopy(candidate["scp_server"])
 
     def update_planned(self, record_id, *, plan_hash, resolved, preflight,
                        resources):

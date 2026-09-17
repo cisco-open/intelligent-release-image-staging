@@ -174,6 +174,8 @@ setup() {
 _router_install_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   mkdir -p "$STUBDIR/lab" "$STUBDIR/device" "$STUBDIR/bin"
+  mkdir -p "$STUBDIR/server"
+  cp "$BATS_TEST_DIRNAME/../../server/time_preflight.py" "$STUBDIR/server/"
   FAKE_STATE_DIR="$BATS_TEST_TMPDIR/state"
   mkdir -p "$FAKE_STATE_DIR"
   FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/device-commands.log"
@@ -222,6 +224,9 @@ apphost_reply() {
 }
 
 case "$cmds" in
+  *"show ntp status"*)
+    echo 'Clock is synchronized, stratum 5, reference is 192.0.2.123'
+    ;;
   *"__IRIS_STAGE_WRITABLE__"*)
     printf '%s\n' "$cmds"
     [ "${FAKE_STAGE_WRITABLE:-yes}" != yes ] \

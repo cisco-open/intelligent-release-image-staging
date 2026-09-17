@@ -135,7 +135,7 @@ def test_splunk_rollout_preserves_inputs_and_panels_while_filtering_receivers():
     assert inputs == [("time", "tr"), ("text", "dev")]
     titles = {node.text for node in root.findall(".//title")}
     preserved = {
-        "Active seeders", "Active leechers", "Average leecher → seeder",
+        "Active seeders", "Active leechers", "Average image download time",
         "Telemetry last seen", "Seeds and leechers over time",
         "Measured swarm transfer rate", "Received data by source",
         "Time to seed by device", "Transfer verification issues",

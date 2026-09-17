@@ -10,6 +10,7 @@ import hashlib
 import importlib
 import json
 import os
+import stat
 import time
 
 import pytest
@@ -575,6 +576,7 @@ def test_lkg_store_never_leaves_plaintext_or_private_temporary_artifacts(
     names = sorted(path.name for path in tmp_path.iterdir())
     assert names == ["iris-instructions.lkg"]
     raw = (tmp_path / names[0]).read_bytes()
+    assert stat.S_IMODE((tmp_path / names[0]).stat().st_mode) == 0o600
     server_ciphertext = _server_instructions().parse_envelope(
         candidate["envelope"])[4]
     assert server_ciphertext not in raw

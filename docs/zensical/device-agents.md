@@ -24,6 +24,12 @@ The management-type choice governs what the installer and uninstaller may config
 and remove; see
 [Management Type and VLAN Ownership](management-type.md).
 
+Before onboarding any switch or router, IRIS requires `show ntp status` to
+report synchronization to an external time source. The check is read-only:
+configure approved NTP outside IRIS and wait for synchronization. No time-server
+address is stored in an IRIS device template. See
+[time troubleshooting](troubleshooting.md#time-synchronization).
+
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,
 networking, trustpoint, and cleanup state across a reload. Failed or partial
@@ -128,21 +134,24 @@ supervisor loop, running the agent once every `IRIS_TICK_SECONDS` (default 60s).
 Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
 
 **Upgrade on IOx is undeploy, then onboard** with the rebuilt package. Use the
-Console, API, or the [IOx control CLI](reference.md#iox-control-cli)'s
-`submit-uninstall` and `submit-install` commands. The install and uninstall
+Console or submit `POST /api/v1/devices/<id>/undeploy`, wait for its job to
+finish successfully, then submit `POST /api/v1/devices/<id>/onboard`. Read
+`GET /api/v1/onboard/jobs/<job_id>` for each result. The install and uninstall
 shell recipes require the controller's private channel; neither is a
 standalone operator command. A running app requires undeploy first. An incomplete
 IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried with Onboard; see
 [First install of a new package version](iox.md#first-install-of-a-new-package-version).
 
-### IOS-XR: what the installer pushes
+### IOS-XR: HTTPS package delivery
 
 `device/xr-install.sh` deploys the agent to an IOS-XR router — a Cisco 8000
 series or an NCS — running
-IOS-XR as an **appmgr Docker application**. It pushes the pre-built
-`iris-xr.rpm`, the current public catalog certificate (`iris-catalog.pem`),
-and the per-device instruction envelope (`iris-instructions.bootstrap`) to
-`harddisk:` in separate `scp -O` transfers,
+IOS-XR as an **appmgr Docker application**. The XR host downloads the pre-built
+`iris-xr.rpm` and per-device instruction envelope (`iris-instructions.bootstrap`)
+over authenticated HTTPS. Host-key-verified SSH supplies the public catalog
+certificate and curl authentication through echo-disabled standard input.
+The helper uses `curl --cacert` without insecure mode, checks both downloads
+against SHA-256 values from server-side snapshots, places them on `harddisk:`,
 registers the agent RPM (`appmgr package install rpm`), and starts its appmgr
 application in config mode with host networking and the `/misc/disk1:/hostmount` bind mount.
 `/misc/disk1` **is** `harddisk:`, so the container
@@ -161,6 +170,22 @@ runtime certificate, empty `iris-work/`, and remove torrent sidecars from
 `harddisk:` root. The empty work directory can remain after successful
 cleanup; image files remain in place.
 
+This requires XR-host bash, curl with HTTPS support, SHA-256 tools, and a route
+to the artifact server (normally TCP 8000). `IRIS_ARTIFACT_URL` can override
+the HTTPS origin; otherwise it uses the catalog hostname and
+`IRIS_ARTIFACTS_PORT` (default 8000). No device SCP server or device-global PKI
+change is needed, and there is no silent SCP fallback. Private per-device
+server snapshots and router temporary files are removed on normal completion
+or failure; the artifact server also expires abandoned snapshots. A severed
+session can leave a private `.iris-https.*` temporary directory on `harddisk:`;
+inspect it before removing it after confirming no onboarding job is active.
+
+The fetch uses the XR host's existing network context. A route available only
+through another VRF or source address does not automatically become usable;
+IRIS does not change routing or select a management VRF implicitly. Establish
+an approved reachable path before onboarding. This also matters for the
+running agent's catalog and heartbeat access.
+
 All three onboarding paths deliver the current public certificate at runtime.
 A server-certificate rotation therefore requires re-onboarding devices so that
 file is replaced, but it does not require rebuilding the Guest Shell bundle,
@@ -173,7 +198,8 @@ install or activate any network OS image that IRIS distributes.
 ### Confirming it worked
 
 An inventory row and a deployment job can exist before the agent connects.
-The final `onboard complete: <device-ip>` line means the installer completed.
+The final `Onboard completed.` result means the agent installer completed
+(`onboard complete: <device-ip>` in direct installer output and older logs).
 A fresh heartbeat confirms the agent can reach the catalog, even when no
 images are assigned. Check each assigned image in Devices for its staging
 result; onboard completion alone does not mean an image is staged.

@@ -56,6 +56,14 @@ if [ "${1:-}" = "--no-install" ]; then
   shift
 fi
 
+# Parse the whole invocation before resolving or installing any deliverable.
+# In particular, never silently ignore a trailing --no-install and replace
+# the server's amd64 binary with an ARM client (#319).
+if [ "$#" -gt 1 ]; then
+  echo "usage: $0 [--no-install] [amd64|arm64] (put --no-install first)" >&2
+  exit 2
+fi
+
 case "${1:-}" in
   amd64|x86_64)  ARCH=x86_64 ;;
   arm64|aarch64) ARCH=aarch64 ;;

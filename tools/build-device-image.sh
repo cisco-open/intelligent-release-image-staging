@@ -15,9 +15,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 CONTAINER_DIR="$REPO/device/container"
 VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
+PLATFORMS="${IRIS_DEVICE_PLATFORMS:-linux/amd64,linux/arm64}"
+case "$PLATFORMS" in
+  linux/amd64,linux/arm64) ARCHIVE_SUFFIX="" ;;
+  linux/amd64) ARCHIVE_SUFFIX="-amd64" ;;
+  *) echo "!! unsupported IRIS_DEVICE_PLATFORMS: $PLATFORMS" >&2; exit 2 ;;
+esac
 
 CONTEXT_DIR=""
-OCI_ARCHIVE="${IRIS_DEVICE_IMAGE_OCI:-$REPO/artifacts/iris-device-$VERSION.oci.tar}"
+OCI_ARCHIVE="${IRIS_DEVICE_IMAGE_OCI:-$REPO/artifacts/iris-device-$VERSION$ARCHIVE_SUFFIX.oci.tar}"
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -91,6 +97,7 @@ verify_aria2_checksum() {
 # ambiguous former ARIA2C_BIN knob.
 for tuple in "amd64:x86_64:iris-agent.tgz" "arm64:aarch64:iris-agent-arm.tgz"; do
   arch="${tuple%%:*}"; rest="${tuple#*:}"; cpuarch="${rest%%:*}"; bundle="${rest#*:}"
+  case ",$PLATFORMS," in *",linux/$arch,"*) ;; *) continue ;; esac
   override_var="ARIA2C_BIN_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')"
   override="${!override_var:-}"
   dest="$CONTEXT_DIR/agent_bin/aria2c-$arch"
@@ -141,7 +148,7 @@ oci_identity() {
   # at the actual multi-platform image index. Record/verify the latter: that
   # digest is the portable object a registry signer addresses. Also accept a
   # direct untagged index, which is valid OCI output from other builders.
-  python3 - "$1" <<'PY'
+  python3 - "$1" "$PLATFORMS" <<'PY'
 import hashlib
 import json
 import sys
@@ -172,7 +179,7 @@ with tarfile.open(sys.argv[1]) as archive:
         d.get("platform", {}).get("os", ""),
         d.get("platform", {}).get("architecture", ""))
         for d in index.get("manifests", []))
-    if platforms != ["linux/amd64", "linux/arm64"]:
+    if platforms != sorted(sys.argv[2].split(",")):
         raise SystemExit("unexpected OCI platforms: %r" % platforms)
     for descriptor in index["manifests"]:
         algorithm, hexdigest = descriptor["digest"].split(":", 1)
@@ -194,7 +201,7 @@ if [ -r "$OCI_ARCHIVE" ] && [ -r "$MANIFEST" ] \
   actual_platforms="${identity#* }"
   if [ "$actual_archive" = "$(manifest_value archive_sha256)" ] \
      && [ "$actual_index" = "$(manifest_value index_digest)" ] \
-     && [ "$actual_platforms" = linux/amd64,linux/arm64 ] \
+     && [ "$actual_platforms" = "$PLATFORMS" ] \
      && [ "$(manifest_value platforms)" = "$actual_platforms" ]; then
     archive_valid=1
   fi
@@ -219,9 +226,11 @@ else
   trap 'rm -f "$tmp_archive" "$tmp_manifest"; rmdir "$tmp_dir" 2>/dev/null || true' EXIT
   pull_flag=--pull
   [ -z "${IRIS_NO_PULL:-}" ] || pull_flag=--pull=false
-  echo ">> building canonical linux/amd64,linux/arm64 OCI artifact"
+  echo ">> building canonical $PLATFORMS OCI artifact"
+  # Default remains --platform linux/amd64,linux/arm64; an explicitly scoped
+  # amd64 lab build uses a separate archive and never refreshes ARM packages.
   docker buildx build "$pull_flag" \
-    --platform linux/amd64,linux/arm64 --provenance=false --sbom=false \
+    --platform "$PLATFORMS" --provenance=false --sbom=false \
     -t "iris-device:$VERSION" --output "type=oci,dest=$tmp_archive" "$CONTEXT_DIR"
   archive_sha="$(sha256sum "$tmp_archive" | awk '{print $1}')"
   identity="$(oci_identity "$tmp_archive")"

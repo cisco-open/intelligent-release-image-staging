@@ -71,7 +71,15 @@ class GuiApp:
         store = self._load()
         if not gui_auth.verify_admin(store, username, password):
             return None
-        return self.sessions.create(username, self._now())
+        # Password verification is expensive; keep it outside the shared
+        # credential lock. Before minting a session, reject an admin snapshot
+        # replaced by password change or out-of-process break-glass reset.
+        # The flock is shared with every credential writer, so reset cannot
+        # slip between this recheck and session creation either.
+        with secrets_store.store_lock(self.secrets_path):
+            if gui_auth.get_admin(self._load()) != gui_auth.get_admin(store):
+                return None
+            return self.sessions.create(username, self._now())
 
     def _sessions_not_before(self):
         """The break-glass floor from the store (gui_auth.sessions_not_before),

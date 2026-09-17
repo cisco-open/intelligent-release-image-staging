@@ -119,7 +119,7 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$")
 _INTERFACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9./_-]{0,63}$")
 _ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _REGISTRATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-_C8K_RE = re.compile(r"^C8[0-9]{3}", re.IGNORECASE)
+_C8K_RE = re.compile(gui_onboard._C8K_MODEL, re.IGNORECASE)
 _ROUTER_TYPES = frozenset(("router-routed", "router-nat"))
 
 
@@ -581,7 +581,8 @@ class FleetStore:
         # here out of the plain-ValueError input-validation catches every
         # write route already has (see FleetStateError's docstring).
         self._devices = keyed_state.KeyedState(
-            self.path, error=FleetStateError, legacy_extract=_fleet_legacy_rows)
+            self.path, error=FleetStateError, legacy_extract=_fleet_legacy_rows,
+            cache_snapshots=True)
         self._now = now_fn
 
     def _read_revision(self):

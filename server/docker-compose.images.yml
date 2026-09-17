@@ -1,0 +1,11 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Optional runtime image selection for an existing single-host deployment.
+# Set both variables explicitly; this file intentionally has no defaults.
+services:
+  iris:
+    image: "${IRIS_SERVER_IMAGE:?Set IRIS_SERVER_IMAGE to the approved server image}"
+  console:
+    image: "${IRIS_CONSOLE_IMAGE:?Set IRIS_CONSOLE_IMAGE to the approved Console image}"

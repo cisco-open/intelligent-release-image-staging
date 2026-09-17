@@ -49,7 +49,7 @@ platform.innerHTML = '<option value="" selected></option>' + Object.keys(AGENT_I
 async function chooseManagement(value) { mgmt.value = value; await mgmt.dispatch('change'); }
 async function typeModel(value, options) {
   fetchImpl = async () => ({ok: true, json: async () => ({options})});
-  model.value = value; await model.dispatch('input');
+  model.value = value; await model.dispatch('change');
 }
 """
 
@@ -118,7 +118,7 @@ def test_model_lookup_failures_preserve_management_fields_and_selected_install()
         async () => ({ok: true, json: async () => { throw Error('bad JSON'); }})
       ]) {
         fetchImpl = lookup;
-        await model.dispatch('input');
+        await model.dispatch('change');
         assert.equal(mgmt.value, 'xr-host');
         assert.deepEqual(visible(), []);
         assert.equal(platform.value, 'xr-appmgr');
@@ -148,7 +148,7 @@ def test_late_json_or_failed_lookup_cannot_replace_a_newer_choice():
         const oldJSON = new Promise((resolve, reject) => { resolveOld=resolve; rejectOld=reject; });
         fetchImpl = async () => ({ok: true, json: () => oldJSON});
         model.value = '8000';
-        const oldRequest = model.dispatch('input');
+        const oldRequest = model.dispatch('change');
         await Promise.resolve();
         model.value = ''; await chooseManagement('routed');
         await typeModel('C9300', ['guestshell', 'iox']);
@@ -161,3 +161,20 @@ def test_late_json_or_failed_lookup_cannot_replace_a_newer_choice():
         assert.deepEqual(platform.options.filter(Boolean), ['guestshell', 'iox']);
       }
     """)
+
+
+@pytest.mark.parametrize("management", ["router-routed", "router-nat"])
+def test_catalyst_router_offers_both_installers_without_changing_network(management):
+    run_controller("""
+      await chooseManagement(%s);
+      await typeModel('C8xxx', ['router', 'iox']);
+      const fields = visible();
+      assert.deepEqual(platform.options.filter(Boolean), ['router', 'iox']);
+      for (const choice of ['router', 'iox']) {
+        platform.value = choice;
+        await model.dispatch('change');
+        assert.equal(platform.value, choice);
+        assert.equal(mgmt.value, %s);
+        assert.deepEqual(visible(), fields);
+      }
+    """ % (json.dumps(management), json.dumps(management)))

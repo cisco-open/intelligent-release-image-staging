@@ -143,6 +143,13 @@ Vendored web console assets
 The operator web console (server/webroot/) self-hosts the following third-party
 assets, each governed solely by its own license:
 
+  * React, React DOM and Scheduler — MIT License.
+               Copyright (c) Meta Platforms, Inc. and affiliates.
+               Bundled by server/console-ui/ into console.js. The build
+               embeds each package's complete copyright and permission notice
+               in that JavaScript, so notices travel with the runtime assets.
+               Exact versions are recorded in its package-lock.json.
+
   * Inter — SIL Open Font License 1.1.
                Copyright 2020 The Inter Project Authors
                (https://github.com/rsms/inter).
@@ -156,21 +163,26 @@ assets, each governed solely by its own license:
                Copyright 2015 The Roboto Mono Project Authors
                (the embedded notice; the project is published by Google LLC).
                Self-hosted as WOFF2 under server/webroot/fonts/ for
-               machine-data text (identifiers, hashes, addresses, logs). The
+               the standalone swarm map. The
                Apache-2.0 requirement is satisfied by this repository's own
-               LICENSE file.
+               LICENSE file, included with NOTICE at /opt/iris/ in the
+               distributed Console image.
 
   * Phosphor Icons — MIT License.
                Copyright (c) 2023 Phosphor Icons.
                Bold-weight glyph path data vendored as inline SVG symbols in
-               server/webroot/index.html for status indicators.
+               server/webroot/index.html for status indicators and navigation.
+               The complete MIT copyright and permission notice is retained
+               beside the inline symbols in that HTML, including its served
+               copy in the Console image.
 
 The Sharp Sans typeface is licensed to Cisco Systems, Inc. for use in Cisco
 products and is NOT part of this source distribution; deployments stage it
-separately, and the console falls back to Inter when it is absent.
+separately. The current Console uses Inter regardless of that optional mount.
 
-The tools listed above are invoked as separate programs and are not
-linked into or derived from this project's source code. The documentation tools
+The external tools listed above are invoked as separate programs. The React
+runtime libraries are bundled into the Console with their own MIT notices.
+The documentation tools
 and assets listed above are used only for documentation build or rendering. The
 project's own code is licensed under the Apache License, Version 2.0, while each
 tool above remains governed solely by its respective license. The mention of

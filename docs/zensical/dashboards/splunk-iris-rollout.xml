@@ -48,10 +48,11 @@
       </single>
     </panel>
     <panel>
-      <title>Average leecher → seeder</title>
+      <title>Average image download time</title>
+      <description>Average elapsed download time per completed device transfer, from aria2 submission to its last-piece completion hook (one-second resolution). Includes download waiting/pauses; excludes subsequent checksum and copying. Requires updated agents and measured endpoints; already-present images and unmeasured transfers are excluded. Reports received in the selected time window are deduplicated by device and transfer.</description>
       <single>
         <search>
-          <query>index=iris_logs "iris.peer.role"=* | eval Peer=replace('iris.principal',"^device:","") | search Peer=$dev|s$ | stats earliest(eval(if('iris.peer.role'="leecher",_time,null()))) as Started earliest(eval(if('iris.peer.role'="seeder",_time,null()))) as Seeded by Peer "iris.torrent.info_hash" | where isnotnull(Started) AND isnotnull(Seeded) AND Seeded&gt;=Started | eval Minutes=round((Seeded-Started)/60,1) | stats avg(Minutes) as "Average minutes" | eval "Average minutes"=round('Average minutes',1)</query>
+          <query>index=iris_logs "otel.log.name"="iris.device.transfer.report" "iris.download.duration_seconds"=* | search "device.id"=$dev|s$ | stats latest("iris.download.duration_seconds") as Seconds by "device.id" "iris.transfer.id" | where isnotnull(Seconds) AND Seconds&gt;=0 | stats avg(Seconds) as Seconds | eval "Average minutes"=round(Seconds/60,1) | fields "Average minutes"</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>
@@ -94,7 +95,7 @@
   <row>
     <panel>
       <title>Measured swarm transfer rate</title>
-      <description>One-minute averages for the whole fleet; the device filter does not apply to this panel. Received and Sent device to device are reported by the devices themselves and cannot see a transfer shorter than one 60-second agent tick. Distribution Server sent is measured by the distribution server's own aria2. Received counts bytes from every source, so the gap above Distribution Server sent is the peer-to-peer share.</description>
+      <description>One-minute averages for the whole fleet; the device filter does not apply. Device receive/send rates sum fresh reporting devices; updated agents also sample completed seeders. Missing reports and transfers between agent ticks are not measured. Distribution Server sent is sampled independently. Do not subtract these lines to infer peer traffic: timing and coverage differ. Use the captured peer-byte panels for measured device-to-device totals.</description>
       <chart>
         <search>
           <query>| mstats avg(_value) AS v WHERE index=iris_metrics metric_name="iris.transfer.throughput" BY "network.io.direction","iris.torrent.info_hash" span=1m | eval Series=if('network.io.direction'=="transmit","Sent device to device","Received by devices") | append [ | mstats avg(_value) AS v WHERE index=iris_metrics metric_name="iris.seeder.torrent.upload_rate" BY "iris.torrent.info_hash" span=1m | eval Series="Distribution Server sent" ] | eval MBps=v/1048576 | timechart span=1m sum(MBps) by Series</query>
@@ -102,7 +103,8 @@
           <latest>$tr.latest$</latest>
         </search>
         <option name="charting.chart">line</option>
-        <option name="charting.axisTitleY.text">MB/s (1-minute average)</option>
+        <option name="charting.axisTitleY.text">MiB/s (1-minute sampled average)</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
         <option name="charting.legend.placement">bottom</option>
       </chart>
     </panel>

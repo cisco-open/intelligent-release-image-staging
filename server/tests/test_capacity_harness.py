@@ -119,11 +119,9 @@ FAST_SIZES = (50, 500)
 FAST_SAMPLE = 12
 FAST_PAGE_LIMIT = 8
 
-# The progression the project's own scale claims are stated at (see
-# CHANGELOG.md "Unreleased" and the commit this issue follows up on):
-# a hundredfold fleet, 100 -> 1,000 -> 10,000 devices. 10,000 is also
-# peer_endpoints.SUPPORTED_DEVICES -- the top of the supported range, not an
-# arbitrary large number.
+# A hundredfold synthetic fleet, 100 -> 1,000 -> 10,000 devices. 10,000
+# matches peer_endpoints.SUPPORTED_DEVICES, the configured sizing limit;
+# this sequential harness does not qualify production concurrent capacity.
 # Below the SMALLEST size on purpose: a page limit that is not smaller than
 # the fleet being measured is not actually paging at that size (it returns
 # every row, same as the unpaged call), which would make the "flat" claim
