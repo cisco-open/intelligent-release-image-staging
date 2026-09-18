@@ -82,14 +82,18 @@ def origin_status():
         return unavailable
 
 
-def describe(records, onboard):
+def describe(records, onboard, fleet=None):
+    # Deployment history outlives inventory membership. An orphaned record
+    # must not strand the operator behind a device they cannot undeploy.
+    members = set() if fleet is None else {d['device_id'] for d in fleet.list_devices()}
     active = [] if records is None else [r for r in records.list(strict=True)
-             if r['state'] not in ('removed', 'superseded', 'abandoned')]
+             if r['device_id'] in members and
+             r['state'] not in ('removed', 'superseded', 'abandoned')]
     jobs = [] if onboard is None else onboard.list_jobs()
     active_jobs = sum(j['state'] in ('queued', 'running') for j in jobs)
     origin = origin_status()
     return {'mode': mode(), 'origin': origin,
             'active_devices': len({r['device_id'] for r in active}),
             'active_jobs': active_jobs,
-            'can_change': records is not None and onboard is not None and
+            'can_change': fleet is not None and records is not None and onboard is not None and
                           not active and not active_jobs and origin['state'] != 'unavailable'}

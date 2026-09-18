@@ -4949,7 +4949,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
                 try:
-                    self._json(200, peer_tls_settings.describe(record_store, onboard))
+                    self._json(200, peer_tls_settings.describe(record_store, onboard, fleet))
                 except Exception:
                     self._json(503, {"error": "Peer TLS settings unavailable"})
                 return
@@ -6607,7 +6607,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": "mode and expected_mode must be disabled or required"}); return
                 try:
                     with peer_tls_settings.LOCK:
-                        status = peer_tls_settings.describe(record_store, onboard)
+                        status = peer_tls_settings.describe(record_store, onboard, fleet)
                         if status["mode"] != data["expected_mode"]:
                             self._json(409, {"error": "Peer TLS mode changed; reload before retrying"}); return
                         if status["mode"] != data["mode"]:
@@ -6616,7 +6616,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             if data["mode"] == "required":
                                 peer_tls_issuer.Issuer().prepare()
                             peer_tls_settings.save(data["mode"])
-                        status = peer_tls_settings.describe(record_store, onboard)
+                        status = peer_tls_settings.describe(record_store, onboard, fleet)
                 except Exception:
                     self._json(503, {"error": "Peer TLS mode could not be confirmed; reload before retrying"}); return
                 self._audit("peer-tls-mode", "settings", action="set", target="peer-tls",

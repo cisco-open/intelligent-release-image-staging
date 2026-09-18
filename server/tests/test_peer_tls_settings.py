@@ -57,11 +57,12 @@ def test_peer_tls_api_auth_guard_conflict_and_persistence(paths, monkeypatch):
     active = []
     jobs = []
     records = SimpleNamespace(list=lambda strict=False: active)
+    fleet = SimpleNamespace(list_devices=lambda: [{"device_id": "edge-1"}])
     onboard = SimpleNamespace(list_jobs=lambda: jobs)
     app = gui_app.GuiApp(str(paths / 'secrets.json'))
     app.set_admin('admin', 'pw')
     server = management_api.make_server('127.0.0.1', 0, app, onboard=onboard,
-                                        record_store=records, certfile=None)
+                                        record_store=records, fleet=fleet, certfile=None)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     host, port = server.server_address
     prepares = []
@@ -78,7 +79,10 @@ def test_peer_tls_api_auth_guard_conflict_and_persistence(paths, monkeypatch):
         active.append({'device_id': 'edge-1', 'state': 'verified'})
         assert _req(host, port, 'POST', '/api/settings/peer-tls', payload, headers=headers)[0] == 409
         assert settings.mode() == 'disabled' and not prepares
-        active.clear()
+        active[:] = [{'device_id': 'deleted-device', 'state': 'unknown'}]
+        code, _, body = _req(host, port, 'GET', '/api/settings/peer-tls', headers=headers)
+        assert code == 200 and json.loads(body)['active_devices'] == 0
+        assert json.loads(body)['can_change'] is True
         jobs.append({'state': 'queued'})
         assert _req(host, port, 'POST', '/api/settings/peer-tls', payload, headers=headers)[0] == 409
         jobs.clear()
@@ -94,3 +98,20 @@ def test_peer_tls_api_auth_guard_conflict_and_persistence(paths, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_missing_inventory_cannot_enable_mode(paths):
+    settings.atomic_json(settings.status_path(), {
+        'active_mode': 'disabled', 'state': 'running', 'updated_at': time.time()})
+    records = SimpleNamespace(list=lambda strict=False: [])
+    onboard = SimpleNamespace(list_jobs=lambda: [])
+    assert settings.describe(records, onboard)['can_change'] is False
+
+
+def test_inventory_read_failure_does_not_treat_fleet_as_empty(paths):
+    def broken():
+        raise OSError('inventory unavailable')
+    with pytest.raises(OSError):
+        settings.describe(SimpleNamespace(list=lambda strict=False: []),
+                          SimpleNamespace(list_jobs=lambda: []),
+                          SimpleNamespace(list_devices=broken))
