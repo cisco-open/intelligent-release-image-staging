@@ -5228,3 +5228,34 @@ def test_app_block_propagates_explicit_peer_tls_mode_with_default_off(
         tmp_path, "configure_app", _share_render_target(share=False, router=False))
     assert '  run-opts 15 "-e IRIS_PEER_TLS_MODE=%s"' % (mode or "disabled") in app
     assert '  run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"' in app
+
+
+@pytest.mark.parametrize('retirement_delay, expected_code', [(12.0, 0), (7201.0, 5)])
+def test_force_retirement_does_not_spend_supervisor_release_budget(
+        tmp_path, retirement_delay, expected_code):
+    """Store contention may exceed the reap budget, but never the session bound."""
+    clock = _Clock()
+
+    class DelayedRetirementStore(_StatefulStore):
+        def retire_device(self, device_id, reason):
+            result = super().retire_device(device_id, reason)
+            clock.offset += retirement_delay
+            return result
+
+    store = DelayedRetirementStore(tmp_path, records=[_record(record_id='old-r1')])
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, _TransportFactory(), clock=clock,
+        recipe_argv_by_action={'uninstall': ['/bin/bash', recipe]})
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    try:
+        result = controller.run_uninstall(
+            _request(action='uninstall', teardown_mode='force_agent_only', record_id=None),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result['iox_session']['state'] == 'reaped'
+    assert store.records['old-r1']['state'] == 'abandoned'
+    assert result['result_code'] == expected_code
+    if expected_code == 0:
+        assert result['error_category'] is None

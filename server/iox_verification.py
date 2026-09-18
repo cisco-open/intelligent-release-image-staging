@@ -4245,8 +4245,14 @@ class IoxController(object):
                         "journal_durability",
                         "forced teardown record retirement failed", 5)
             if supervisor_reaped:
+                # Durable fence/record writes can wait behind other jobs after
+                # reap_all succeeds. Give the final release its own bounded
+                # wait, still capped by the original absolute session deadline.
+                release_deadline = min(
+                    self._monotonic() + _SUPERVISOR_REAP_SECONDS,
+                    attempt.session_deadline)
                 try:
-                    reaped = attempt.supervisor.release(deadline) and reaped
+                    reaped = attempt.supervisor.release(release_deadline) and reaped
                 except Exception:
                     reaped = False
             else:
