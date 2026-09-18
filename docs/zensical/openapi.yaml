@@ -65810,7 +65810,7 @@
       "post": {
         "operationId": "catalog_post_v1_devices_device_id_peer_tls",
         "summary": "Enroll or renew peer TLS certificate",
-        "description": "Enroll or renew peer TLS certificate. The device bearer is resource-bound. Image collections, items and torrents expose only that device's current assignment.",
+        "description": "Enroll or renew a 24-hour peer TLS certificate using the current same-device catalog Bearer over verified HTTPS with the catalog trust provisioned during preflight. Submit a P-256 CSR; the private key stays on the device. Renew six hours before expiry. Peer TLS defaults to disabled and is configured at deployment for all torrents per process; this endpoint does not change the mode. Returns 409 when disabled, 429 when rate-limited, or 503 when the issuer is unavailable.",
         "tags": [
           "catalog"
         ],

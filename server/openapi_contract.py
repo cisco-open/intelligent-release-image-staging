@@ -3089,6 +3089,15 @@ def _resource_path_exception(route):
 
 def _description(route):
     notes = [route.summary + "."]
+    if route.service == "catalog" and route.path == "/v1/devices/{device_id}/peer-tls":
+        return (
+            "Enroll or renew a 24-hour peer TLS certificate using the current same-device catalog Bearer "
+            "over verified HTTPS with the catalog trust provisioned during preflight. Submit a P-256 CSR; "
+            "the private key stays on the device. Renew six hours before expiry. "
+            "Peer TLS defaults to disabled and is configured at deployment for all torrents per process; "
+            "this endpoint does not change the mode. Returns 409 when disabled, 429 when rate-limited, "
+            "or 503 when the issuer is unavailable."
+        )
     if _instruction_resource(route):
         notes.extend([
             "Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence.",
