@@ -23,6 +23,7 @@ try {
   const defaultCA = 'https://www.cisco.com/security/pki/trs/ios.p7b';
   const settingsState = {gui_cert: {source: 'built-in', subject: 'CN=iris.example.test', not_after: 'Sep 18 12:00:00 2036 GMT', fingerprint_sha256: 'ab'.repeat(32)}, ca_trust: {url: defaultCA, auto: false}, trust: [],
     telemetry_destination: {source: 'environment', effective_endpoint: '', effective_enabled: false}};
+  let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
   await page.addInitScript(() => {
     window.addEventListener('iris:policy-state', event => { window.testPolicyState = event.detail; });
@@ -39,6 +40,7 @@ try {
     assert.equal(url.origin, 'http://iris.test', 'No external requests allowed');
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/peer-tls' && route.request().method() === 'GET') return route.fulfill({json: peerTlsState});
       if (url.pathname === '/api/v1/logout') {
         assert.equal(route.request().method(), 'POST');
         assert.equal(route.request().headers()['x-csrf-token'], 'test-only');
@@ -53,6 +55,11 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/peer-tls') {
+          assert.equal(body.expected_mode, peerTlsState.mode);
+          peerTlsState = {...peerTlsState, mode: body.mode, origin: {active_mode: body.mode, state: 'running'}};
+          return route.fulfill({json: {...peerTlsState, applied: true}});
+        }
         if (url.pathname === '/api/v1/settings/ca-trust') settingsState.ca_trust = {url: body.url || defaultCA, auto: body.auto};
         if (url.pathname === '/api/v1/settings/telemetry-destination') settingsState.telemetry_destination = method === 'DELETE'
           ? {source: 'environment', effective_endpoint: '', effective_enabled: false}
@@ -180,6 +187,26 @@ try {
   await page.locator('#cert-status').getByText('CN=iris.example.test', {exact: true}).waitFor();
   assert.equal(await page.locator('#cert-status .tls-fingerprint dd').textContent(), 'ab'.repeat(32));
   assert.equal(await page.locator('#cert-pem').isVisible(), false);
+  assert.equal(await page.locator('#peer-tls-toggle').isChecked(), false);
+  await page.locator('#peer-tls-toggle').check();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#peer-tls-save').click();
+  await page.locator('#peer-tls-status').getByText('Origin seeder: TLS required · running', {exact: true}).waitFor();
+  assert.deepEqual(settingsWrites.at(-1).body, {mode: 'required', expected_mode: 'disabled'});
+  await page.locator('#peer-tls-toggle').uncheck();
+  page.once('dialog', dialog => dialog.dismiss());
+  const beforeCancelTls = settingsWrites.length;
+  await page.locator('#peer-tls-save').click();
+  assert.equal(settingsWrites.length, beforeCancelTls);
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#peer-tls-save').click();
+  await page.locator('#peer-tls-status').getByText('Origin seeder: TLS off · running', {exact: true}).waitFor();
+  peerTlsState = {...peerTlsState, active_devices: 1, can_change: false};
+  await settingsTab('General'); await settingsTab('TLS & trust');
+  await page.waitForFunction(() => document.getElementById('peer-tls-toggle').disabled);
+  assert.match(await page.locator('#peer-tls-status').textContent(), /1 device/);
+  peerTlsState = {...peerTlsState, active_devices: 0, can_change: true};
+  await settingsTab('General'); await settingsTab('TLS & trust');
   await page.locator('#cert-form summary').click();
   assert.equal(await page.locator('#cert-pem').isVisible(), true);
   await page.waitForFunction(() => document.getElementById('ca-source').value === 'cisco');

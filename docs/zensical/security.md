@@ -403,9 +403,12 @@ the torrent.
 ### Peer payload transport boundary
 
 Tracker/catalog HTTPS and instruction encryption protect separate channels.
-Peer payload encryption is an explicit, coordinated swarm setting:
-`IRIS_PEER_TLS_MODE=required` on the server and installers. The default remains
-`disabled` for compatibility. This is a process-wide setting, not a per-torrent
+Peer payload encryption is an explicit, coordinated swarm setting. In
+**Settings → TLS & trust**, use **Peer transfer TLS** after undeploying existing
+agents; then onboard them again. The origin restarts automatically and onboarding
+inherits the mode. The saved setting overrides the server's `IRIS_PEER_TLS_MODE`
+deployment default, which remains `disabled`. CLI installers still take that
+variable explicitly. This is a process-wide setting, not a per-torrent
 option: all torrents in that aria2 process use the same transport. To disable,
 set the server and device mode to `disabled` and restart their IRIS peer
 processes. Existing devices must receive the updated binary,

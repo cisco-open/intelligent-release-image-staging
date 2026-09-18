@@ -12,6 +12,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Add a default-off peer transfer TLS toggle with persistent mode, automatic origin
+  restart, and matching device onboarding; require undeployment before switching.
+- Prevent completed IOx undeploys from reporting a cleanup failure when concurrent
+  jobs delay record retirement past the earlier process-reaping timeout.
 - Simplify the TLS certificate page, show actionable feed-download errors, and
   use configured trusted CAs for image-verification downloads.
 - Correct the public IE onboarding summary to HTTPS package download and

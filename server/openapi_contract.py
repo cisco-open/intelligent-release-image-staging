@@ -1750,6 +1750,8 @@ _JSON_REQUESTS = {
         {"current": "current-password", "new": "new-password",
          "confirm": "new-password"}, ("current", "new", "confirm"), True),
     "/settings/sessions/revoke-others": ({}, (), False),
+    "/settings/peer-tls": ({"mode": "required", "expected_mode": "disabled"},
+                           ("mode", "expected_mode"), True),
     "/settings/image-verification": ({"mode": "daily", "hour_utc": 3},
                                      ("mode",), True),
     "/settings/audit-export": (
@@ -1813,6 +1815,10 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix == "/settings/peer-tls":
+        schema["additionalProperties"] = False
+        for field in ("mode", "expected_mode"):
+            schema["properties"][field]["enum"] = ["disabled", "required"]
     if suffix in ("/devices/{device_id}/onboard", "/devices/{device_id}/undeploy"):
         schema["properties"]["log"].update({
             "default": False,
@@ -2133,6 +2139,7 @@ def _json_success_example(route):
             "state": "running", "detail": "", "certs": None},
         "/settings/telemetry-destination": {
             "ok": True, "endpoint": None, "enabled": None},
+        "/settings/peer-tls": {"mode": "disabled", "origin": {"active_mode": "disabled", "state": "running"}, "active_devices": 0, "active_jobs": 0, "can_change": True},
         "/settings/gui-cert": {
             "gui_cert": {
                 "source": "custom", "subject": "CN=iris.example",
@@ -2209,6 +2216,8 @@ def _json_success_example(route):
                     "issuer": "CN=IRIS CA",
                     "not_after": "Sep 4 00:00:00 2027 GMT",
                     "fingerprint_sha256": "00" * 32}}
+    if suffix == "/settings/peer-tls" and route.method == "POST":
+        return dict(exact[suffix], applied=True)
     try:
         return exact[suffix]
     except KeyError as exc:
@@ -2221,6 +2230,14 @@ def _success(route):
         return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix == "/settings/peer-tls":
+        example = _json_success_example(route)
+        schema = _schema_for_example(example, "PeerTlsSettings")
+        schema["properties"]["mode"]["enum"] = ["disabled", "required"]
+        schema["properties"]["origin"]["properties"]["active_mode"] = {
+            "type": ["string", "null"], "enum": ["disabled", "required", None]}
+        return "200", {"description": "Configured mode and separately observed origin state",
+                       "content": {"application/json": _media(schema, example)}}
     if _instruction_resource(route):
         artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/1"
         return "200", {
@@ -2988,7 +3005,7 @@ def _error_statuses(route):
                   "/devices/{device_id}/onboard",
                   "/devices/{device_id}/undeploy",
                   "/onboard/jobs/{job_id}/abort",
-                  "/settings/audit-export/run"):
+                  "/settings/audit-export/run", "/settings/peer-tls"):
         statuses.add(409)
     if suffix == "/devices/{device_id}/request-report":
         statuses.update((422, 429))
@@ -3089,12 +3106,19 @@ def _resource_path_exception(route):
 
 def _description(route):
     notes = [route.summary + "."]
+    if route.path.endswith("/settings/peer-tls"):
+        return ("Read or change process-wide BitTorrent peer TLS. Defaults to disabled. "
+                "Changes persist across restarts and restart the origin seeder automatically. "
+                "New device onboarding inherits the mode. Existing agents must be undeployed "
+                "and device jobs finished before a change (409 otherwise); re-onboard afterward. "
+                "POST requires mode and expected_mode (disabled or required); stale expected_mode "
+                "returns 409. Origin status is observed separately; saved mode is not proof of fleet encryption.")
     if route.service == "catalog" and route.path == "/v1/devices/{device_id}/peer-tls":
         return (
             "Enroll or renew a 24-hour peer TLS certificate using the current same-device catalog Bearer "
             "over verified HTTPS with the catalog trust provisioned during preflight. Submit a P-256 CSR; "
             "the private key stays on the device. Renew six hours before expiry. "
-            "Peer TLS defaults to disabled and is configured at deployment for all torrents per process; "
+            "Peer TLS defaults to disabled and is configured in Console settings or at deployment for all torrents per process; "
             "this endpoint does not change the mode. Returns 409 when disabled, 429 when rate-limited, "
             "or 503 when the issuer is unavailable."
         )

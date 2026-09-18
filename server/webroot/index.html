@@ -1060,6 +1060,17 @@
         <div id="settings-pane-tls" hidden>
           <div class="setup-cards tls-layout">
           <div class="card tls-identity">
+          <h3>Peer transfer TLS</h3>
+          <p class="muted">Encrypt BitTorrent traffic between the origin seeder and devices. Applies to all torrents; off by default.</p>
+          <form class="inline-form" id="peer-tls-form">
+            <label class="form-check"><input type="checkbox" role="switch" id="peer-tls-toggle" disabled> Require TLS for torrent traffic</label>
+            <button class="btn" type="submit" id="peer-tls-save" disabled>Apply</button>
+            <span class="err" id="peer-tls-msg" role="alert"></span>
+          </form>
+          <p class="muted" id="peer-tls-status" role="status" aria-live="polite">Reading transport status…</p>
+          <p class="muted">Undeploy existing agents before switching, then onboard them again. The origin seeder restarts automatically; certificates are provisioned automatically.</p>
+          </div>
+          <div class="card tls-identity">
           <h3>Console certificate</h3>
           <p class="muted">The HTTPS identity presented to your browser.</p>
           <div id="cert-status" class="tls-certificate" role="status" aria-live="polite"></div>
@@ -1132,7 +1143,7 @@
           </form>
           </div>
           </div>
-          <p class="muted tls-scope-note">Device-facing certificates are managed during onboarding. Peer transfer TLS is configured at deployment, disabled by default, and applies to all torrents per process.</p>
+          <p class="muted tls-scope-note">Device-facing HTTPS certificates are managed during onboarding. The Console certificate protects browser HTTPS.</p>
         </div>
         <div id="settings-pane-telemetry" hidden>
           <!-- Card goes around the mount point, never around the template

@@ -362,7 +362,7 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
   IRIS_IMAGES_DIR="$IRIS_IMAGES_DIR" \
   SEEDER_LOG=- \
   ARIA2=/opt/iris/bin/aria2c \
-  python3 wait_for_tracker.py bash seed-launch.sh & S=$!
+  python3 wait_for_tracker.py python3 peer_tls_seed.py seed-launch.sh & S=$!
 # Artifact server (HTTPS): explicit API consumers authenticate with resource-
 # bound device Basic credentials before path translation/existence. Unchanged
 # Guest Shell onboarding still pulls the explicit static files and time-bounded

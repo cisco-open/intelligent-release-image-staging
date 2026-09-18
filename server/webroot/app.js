@@ -5432,8 +5432,61 @@
     // --- Image verification (KGV / Cisco Bulk Hash reconciler, Task 5) ---
     // Its own dedicated GET, unlike the panes above -- not part of the big
     // /api/v1/settings blob (see the endpoint contract in Task 4's report).
+    await refreshPeerTls();
     await refreshImageVerificationSettings();
   }
+  var peerTlsMode = null;
+  var peerTlsCanChange = false;
+  var peerTlsPoll = null;
+  async function refreshPeerTls() {
+    var toggle = document.getElementById('peer-tls-toggle');
+    var save = document.getElementById('peer-tls-save');
+    var status = document.getElementById('peer-tls-status');
+    clearTimeout(peerTlsPoll);
+    try {
+      var r = await fetch('/api/v1/settings/peer-tls');
+      if (!r.ok) throw new Error('unavailable');
+      var data = await r.json();
+      if (!data || !['disabled', 'required'].includes(data.mode) || !data.origin || typeof data.can_change !== 'boolean') throw new Error('invalid');
+      peerTlsMode = data.mode;
+      peerTlsCanChange = data.can_change;
+      toggle.checked = data.mode === 'required';
+      toggle.disabled = !peerTlsCanChange;
+      save.disabled = true;
+      var label = data.origin.active_mode === 'required' ? 'TLS required' : data.origin.active_mode === 'disabled' ? 'TLS off' : 'not active';
+      status.textContent = 'Origin seeder: ' + label + ' · ' + data.origin.state +
+        (data.active_devices ? ' · ' + data.active_devices + ' device(s) must be undeployed before switching.' : '') +
+        (data.active_jobs ? ' · Wait for ' + data.active_jobs + ' device job(s) to finish.' : '');
+      if (data.origin.active_mode !== data.mode || data.origin.state !== 'running') {
+        peerTlsPoll = setTimeout(function () {
+          if (!document.getElementById('settings-pane-tls').hidden) refreshPeerTls();
+        }, 2000);
+      }
+    } catch (e) {
+      toggle.disabled = true; save.disabled = true; peerTlsMode = null;
+      status.textContent = 'Peer transport status unavailable. Reload before changing the mode.';
+    }
+  }
+  document.getElementById('peer-tls-toggle').addEventListener('change', function () {
+    document.getElementById('peer-tls-save').disabled = !peerTlsCanChange ||
+      (this.checked ? 'required' : 'disabled') === peerTlsMode;
+  });
+  document.getElementById('peer-tls-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (!peerTlsCanChange || peerTlsMode === null) return;
+    var next = document.getElementById('peer-tls-toggle').checked ? 'required' : 'disabled';
+    if (next === peerTlsMode) return;
+    if (!confirm(next === 'required' ? 'Require TLS for all torrent traffic? The origin seeder will restart. Onboard devices afterward so they receive the same mode.' : 'Turn off peer TLS? Torrent traffic will no longer require encryption. The origin seeder will restart.')) return;
+    var msg = document.getElementById('peer-tls-msg');
+    var save = document.getElementById('peer-tls-save');
+    msg.textContent = ''; save.disabled = true;
+    var r = await settingsWrite('/api/v1/settings/peer-tls', {mode: next, expected_mode: peerTlsMode}, msg);
+    if (r) {
+      var result = await settingsResult(r, msg, function (body) { return body.applied === true && body.mode === next; });
+      if (result) msg.textContent = 'Mode saved. Checking the origin seeder…';
+    }
+    await refreshPeerTls();
+  });
   // ---- Settings: Image verification (KGV / Cisco Bulk Hash reconciler) ----
   // Schedule select + hour, Refresh now, offline .tar upload. Its own
   // dedicated GET/POST at /api/v1/settings/image-verification and

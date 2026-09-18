@@ -99,6 +99,8 @@ _CONSOLE_RESOURCES = (
     ("GET", "/telemetry/health", "Read telemetry health"),
     ("POST", "/telemetry/stream", "Proxy telemetry stream"),
     ("GET", "/settings", "Read settings"),
+    ("GET", "/settings/peer-tls", "Read peer transfer TLS mode"),
+    ("POST", "/settings/peer-tls", "Set peer transfer TLS mode"),
     ("POST", "/settings/password", "Change administrator password"),
     ("POST", "/settings/sessions/revoke-others", "Revoke other sessions"),
     ("GET", "/settings/setup-status", "Read setup status"),

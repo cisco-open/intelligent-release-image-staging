@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 import secretfs
+import peer_tls_settings
 
 DAY = 86400
 
@@ -29,10 +30,10 @@ class InvalidCSR(PeerTLSError):
 
 
 def mode():
-    value = os.environ.get('IRIS_PEER_TLS_MODE', 'disabled')
-    if value not in ('disabled', 'required'):
-        raise PeerTLSError('invalid peer TLS mode')
-    return value
+    try:
+        return peer_tls_settings.mode()
+    except (OSError, ValueError):
+        raise PeerTLSError('invalid peer TLS settings') from None
 
 
 def _openssl(*args, data=None):

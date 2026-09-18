@@ -249,3 +249,44 @@ def test_origin_supervisor_replaces_child_on_certificate_rotation(enrollment, tm
         for pid in pids:
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
+
+
+def test_origin_supervisor_applies_mode_and_stops_on_invalid_settings(enrollment, tmp_path):
+    import os
+    import peer_tls_settings as settings
+    settings.save('disabled')
+    script = tmp_path / 'mode-seed.sh'
+    starts = tmp_path / 'mode-starts'
+    script.write_text('printf "%s %s\\n" "$IRIS_PEER_TLS_MODE" "$$" >> "$IRIS_TEST_STARTS"\nexec sleep 120\n')
+    root = Path(__file__).resolve().parents[1]
+    process = subprocess.Popen(['python3', str(root/'peer_tls_seed.py'), str(script)],
+                               env=dict(os.environ, IRIS_TEST_STARTS=str(starts)),
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def wait_for(state, mode):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            assert process.poll() is None
+            if settings.origin_status() == {'state': state, 'active_mode': mode}:
+                return
+            time.sleep(.1)
+        pytest.fail('origin did not reach expected mode/state')
+    try:
+        wait_for('running', 'disabled')
+        first = int(starts.read_text().splitlines()[0].split()[1])
+        settings.settings_path().write_text('{broken')
+        wait_for('error', None)
+        with pytest.raises(ProcessLookupError):
+            os.kill(first, 0)
+        settings.save('required')
+        wait_for('running', 'required')
+        assert [x.split()[0] for x in starts.read_text().splitlines()] == ['disabled', 'required']
+        settings.save('disabled')
+        wait_for('running', 'disabled')
+        rows = starts.read_text().splitlines()
+        assert [x.split()[0] for x in rows] == ['disabled', 'required', 'disabled']
+        for row in rows[:-1]:
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(row.split()[1]), 0)
+    finally:
+        process.terminate()
+        assert process.wait(timeout=20) == 0

@@ -655,7 +655,7 @@ mount, or the Guest Shell artifact flow. See
 
 ### TLS & trust
 
-[Peer transfer TLS](security.md#peer-payload-transport-boundary) is configured at deployment, defaults to `disabled`, and has no Console toggle.
+**Peer transfer TLS** requires encryption for all torrents and defaults to off. Undeploy existing agents, switch the toggle, then onboard them again. The origin seeder restarts automatically; its observed status is shown separately from the saved setting.
 
 - **Certificate** — drop (or browse to) a certificate and private key, or
   expand **Paste certificate and key instead**. Files are classified by their PEM content rather than
