@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover - Python 2 is not supported in IRIS
     from urlparse import urlsplit
 
 import deployment_records
+import peer_tls_issuer
 
 
 _MAX_INT = (1 << 63) - 1
@@ -4948,7 +4949,8 @@ class IoxController(object):
                 '  run-opts 9 "-e IRIS_TELEMETRY=%s"' % target["telemetry"],
                 '  run-opts 10 "-e IRIS_TELEMETRY_STREAM=%s"' %
                     target["telemetry_stream"],
-                '  run-opts 11 "-e IRIS_LOG=%s"' % target["log"]]
+                '  run-opts 11 "-e IRIS_LOG=%s"' % target["log"],
+                '  run-opts 15 "-e IRIS_PEER_TLS_MODE=%s"' % peer_tls_issuer.mode()]
             if share_host:
                 lines.extend([
                     '  run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"',

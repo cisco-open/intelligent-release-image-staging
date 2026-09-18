@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 REQUIRED = ("catalog_url", "catalog_token", "device_id")
 DEVICE_PLATFORMS = ("iox", "xr-appmgr")
 DEFAULTS = {
+    "peer_tls_mode": "disabled",
     "stage_dir": "/flash/guest-share/iris",
     "target_fs": "",       # optional writable IOS prefix, e.g. sdflash:
     "rpc_port": "6800",
@@ -164,6 +165,8 @@ def validate_config(cfg):
     platform selector. A selector, when present, is strict and controls the
     whole container backend.
     """
+    if cfg.get("peer_tls_mode", "disabled") not in ("disabled", "required"):
+        raise ValueError("invalid peer TLS mode")
     platform = validate_device_platform(cfg.get("device_platform"))
     # target_fs had this validation before the container selector existed;
     # preserve that hard invariant for Guest Shell. Everything else below is

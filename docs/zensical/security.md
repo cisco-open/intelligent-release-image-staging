@@ -402,14 +402,50 @@ the torrent.
 
 ### Peer payload transport boundary
 
-Tracker/catalog HTTPS and instruction encryption do **not** encrypt BitTorrent
-peer image traffic. The currently distributed agent does not require mutually
-authenticated TLS on peer sockets; legacy MSE/ARC4 is not a substitute for it.
-A private hybrid-TLS transport candidate is being validated separately. Until
-it is integrated and deployed across every seed and device, do not describe
-IRIS peer payloads as TLS-protected. Existing public certificate distribution
-can carry a dedicated swarm CA, but unique node keys, certificate enrollment
-and renewal require additional integration.
+Tracker/catalog HTTPS and instruction encryption protect separate channels.
+Peer payload encryption is an explicit, coordinated swarm setting:
+`IRIS_PEER_TLS_MODE=required` on the server and installers. The default remains
+`disabled` for compatibility. This is a process-wide setting, not a per-torrent
+option: all torrents in that aria2 process use the same transport. To disable,
+set the server and device mode to `disabled` and restart their IRIS peer
+processes. Existing devices must receive the updated binary,
+agent, current bootstrap bundle allowlist, and `peer_tls_mode = required` configuration before claiming a protected
+swarm. Required peers never fall back to plaintext or MSE, and cannot communicate
+with legacy peers. This does not change image staging or authorization.
+
+Required mode uses TLS 1.3, X25519MLKEM768 hybrid key exchange, AES-256-GCM or
+ChaCha20-Poly1305, ALPN `aria2-bt/1`, and mutual swarm certificate verification.
+Certificates use P-256 signatures: confidentiality has hybrid post-quantum key
+exchange; certificate authentication is classical. TLS authenticates membership
+in this private swarm, not the expected tracker identity or a per-image grant.
+Session resumption, tickets and early data are disabled.
+
+**The certificate already provisioned during preflight is reused:** it verifies
+the catalog HTTPS connection for enrollment. The current device catalog token
+authorizes `POST /v1/devices/{device_id}/peer-tls`. Each device generates and keeps
+its own private key, sends a CSR, and receives a 24-hour certificate. Renewal
+begins six hours before expiry; a valid identity survives a temporary catalog
+outage. A missing, expired or mismatched identity stops peer startup. Launchers
+recheck on their normal tick and restart aria2 when the certificate changes;
+the origin checks every 30 seconds. Active TLS sessions do not independently
+revalidate certificate expiry between supervisor checks.
+
+The dedicated issuing CA's private key exists only in server tmpfs, with its
+recoverable copy age-encrypted at `IRIS_CONFIG/peer-tls/ca.pem.age`. It is never
+copied to the Console or devices. Device identity files live under
+`stage_dir/peer-tls` with owner-only permissions. OpenSSL CLI is required on
+Guest Shell and included in the shared amd64/arm64 IOx/XR image. The transport
+binary itself carries OpenSSL 3.5.8 statically.
+
+Revoking a catalog token prevents renewal; already-issued peer certificates
+remain usable until expiry (up to 24 hours). This is not immediate peer
+revocation. CA replacement requires a coordinated trust reset and re-enrollment;
+clients refuse an unexpected issuing-CA change. Back up the encrypted CA with
+the existing server config and retain its age recovery identity. Keep clocks
+synchronized for TLS validity checks.
+
+Enable this only as a coordinated all-seed/all-device migration. A successful
+build or an emulated ARM test is not evidence that a live fleet is encrypted.
 
 ### Peer policy failure posture
 

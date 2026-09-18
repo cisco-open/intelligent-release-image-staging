@@ -4,38 +4,17 @@
 
 # Reproducible static-musl build of aria2-next.
 #
-# Corresponding source for the redistributed aria2c binaries (GPLv2 section 3).
-# Driven by build.sh beside it; see the README in this directory.
-#
 # Base image and every dependency are pinned exactly. No `latest` anywhere.
 # A rebuild that cannot resolve a pinned package version FAILS rather than
 # silently drifting to a newer one.
 #
 # syntax=docker/dockerfile:1
 
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS build
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS toolchain
 
-# Toolchain and dependency pins verified against alpine:3.24.1 on 2026-09-03,
-# by resolving every `pkg=version` below against the v3.24 APKINDEX for both
-# x86_64 and aarch64 (server/tests/test_aria2c_build_pins.py does exactly that,
-# under IRIS_TEST_HOST_INTEGRATION=1).
+# Toolchain and dependency pins verified against alpine:3.24.1 on 2026-08-20.
 # c-ares 1.34.8 is the latest upstream release and ships libcares.a in -dev
 # (there is no c-ares-static package).
-#
-# A pin here has a shelf life. An Alpine release branch indexes only the newest
-# -rN of each package, so a security bump WITHDRAWS the version we pinned and
-# `apk add` then refuses the whole set:
-#     ERROR: unable to select packages:
-#       openssl-dev-3.5.8-r0: breaks: world[openssl-dev=3.5.7-r0]
-# That hard failure is the design working -- it is why nothing floats. The
-# response is to bump the withdrawn pin here on purpose (openssl-dev and
-# openssl-libs-static always move together, they are the same source package),
-# never to drop the `=version`. openssl 3.5.7-r0 was withdrawn from v3.24 in
-# favour of 3.5.8-r0 and was bumped here on 2026-09-03; a binary rebuilt on the
-# newer OpenSSL will not match tools/aria2c.sha256, which pins the artifact
-# IRIS ships rather than the recipe (see README.md in this directory).
-# GCC -flto=auto needs GNU make for parallel LTRANS, even with Ninja.
-# Without it GCC silently runs the link-time optimization jobs serially.
 RUN apk add --no-cache \
       gcc=15.2.0-r5 \
       g++=15.2.0-r5 \
@@ -59,6 +38,11 @@ RUN { \
       apk list --installed 2>/dev/null | sort; \
     } > /dependency-manifest.txt
 
+# Reusable local test image; no aria2 source is fetched or copied for this target.
+FROM toolchain AS peer-tls-test
+RUN apk add --no-cache openssl=3.5.8-r0
+
+FROM toolchain AS build
 WORKDIR /src
 COPY aria2-next/ /src/
 

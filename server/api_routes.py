@@ -157,6 +157,7 @@ ROUTES = tuple(
     Route("catalog", "POST", "/v1/devices/{device_id}/heartbeat", "deviceBearer", "Record heartbeat"),
     Route("catalog", "POST", "/v1/devices/{device_id}/telemetry", "deviceBearer", "Record telemetry"),
     Route("catalog", "POST", "/v1/devices/{device_id}/token-refresh", "deviceBearer", "Rotate device token"),
+    Route("catalog", "POST", "/v1/devices/{device_id}/peer-tls", "deviceBearer", "Enroll or renew peer TLS certificate"),
     Route("tracker", "GET", "/announce", "announceBearerOrLegacyQuery", "Announce peer"),
     Route("tracker", "GET", "/scrape", "announceBearerOrLegacyQuery", "Scrape torrent"),
     Route("telemetry", "GET", "/metrics", "observabilityBearer", "Read Prometheus metrics"),

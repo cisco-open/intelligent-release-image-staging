@@ -23,7 +23,7 @@ setup() {
   # bounded container-log driver and the IRIS_LOG env now on the line.
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=<redacted> --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off"'* ]]
+  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=<redacted> --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off --env IRIS_PEER_TLS_MODE=disabled"'* ]]
   [[ "$output" != *'deadbeefcafe'* ]]
 }
 

@@ -207,10 +207,12 @@ IOS-visible image destination. The agent checks the staged file's sha256
 against the catalog's known-good value before hand-off — the catalog's
 images can separately be checked for authenticity against Cisco's signed
 Bulk Hash feed, and a mismatch quarantines the image. The app then hands the
-file to IOS — a disk-speed write through the bind-mounted share where
-available, an scp push on IE-3400 or as the fallback — and IOS performs the
-final placement as a plain copy, which the agent attests by polling for the
-file and confirming it matches the catalog's declared byte size exactly.
+file to IOS through the configured bind-mounted share, or through SCP-to-self
+on deployments without a share, such as IE-3400. A configured share that fails
+has no SCP fallback. IOS performs final placement as a plain copy, which the
+agent attests by polling for the file and checking the catalog's declared byte
+size. This image hand-off is separate from onboarding: the device downloads
+the IRIS agent package from the artifact server over verified HTTPS.
 
 On IOS-XR, the appmgr container shares the router's own network stack and bind-
 mounts `/misc/disk1` as `/hostmount`; that mount is `harddisk:`. The agent

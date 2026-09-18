@@ -65806,6 +65806,344 @@
         }
       }
     },
+    "/v1/devices/{device_id}/peer-tls": {
+      "post": {
+        "operationId": "catalog_post_v1_devices_device_id_peer_tls",
+        "summary": "Enroll or renew peer TLS certificate",
+        "description": "Enroll or renew peer TLS certificate. The device bearer is resource-bound. Image collections, items and torrents expose only that device's current assignment.",
+        "tags": [
+          "catalog"
+        ],
+        "x-iris-service": "catalog",
+        "x-iris-security": "deviceBearer",
+        "servers": [
+          {
+            "url": "https://iris.example:8443",
+            "description": "Device catalog"
+          }
+        ],
+        "security": [
+          {
+            "deviceBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Enroll or renew peer TLS certificate response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "CatalogV1DevicesDeviceIdPeerTlsResponse",
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string"
+                    },
+                    "certificate": {
+                      "type": "string"
+                    },
+                    "ca": {
+                      "type": "string"
+                    },
+                    "renew_before_seconds": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "certificate",
+                    "ca",
+                    "renew_before_seconds"
+                  ],
+                  "additionalProperties": true
+                },
+                "example": {
+                  "mode": "required",
+                  "certificate": "-----BEGIN CERTIFICATE-----\n...",
+                  "ca": "-----BEGIN CERTIFICATE-----\n...",
+                  "renew_before_seconds": 21600
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Invalid request body or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "invalid-request-body",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "invalid-request-body": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request-body",
+                      "title": "Invalid request body",
+                      "status": 400,
+                      "code": "invalid-request-body"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Catalog authentication required",
+            "x-iris-problem-codes": [
+              "catalog-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#catalog-authentication-required",
+                  "title": "Catalog authentication required",
+                  "status": 401,
+                  "code": "catalog-authentication-required"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "x-iris-problem-codes": [
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                  "title": "Forbidden",
+                  "status": 403,
+                  "code": "forbidden"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "x-iris-problem-codes": [
+              "resource-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                  "title": "Resource not found",
+                  "status": 404,
+                  "code": "resource-not-found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource conflict",
+            "x-iris-problem-codes": [
+              "resource-conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-conflict",
+                  "title": "Resource conflict",
+                  "status": 409,
+                  "code": "resource-conflict"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "x-iris-problem-codes": [
+              "internal-error"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#internal-error",
+                  "title": "Internal server error",
+                  "status": 500,
+                  "code": "internal-error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Credential store unavailable",
+            "x-iris-problem-codes": [
+              "credential-store-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable",
+                  "title": "Credential store unavailable",
+                  "status": 503,
+                  "code": "credential-store-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "CatalogV1DevicesDeviceIdPeerTlsRequest",
+                "type": "object",
+                "properties": {
+                  "csr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "csr"
+                ],
+                "additionalProperties": true
+              },
+              "example": {
+                "csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."
+              }
+            }
+          }
+        }
+      }
+    },
     "/announce": {
       "get": {
         "operationId": "tracker_get_announce",

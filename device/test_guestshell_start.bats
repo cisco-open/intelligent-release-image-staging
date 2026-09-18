@@ -921,3 +921,36 @@ STUB
   [ "$status" -eq 0 ]
   [ -e "$tmp/stage/aria2c.log" ]
 }
+
+@test "required peer TLS refuses launch when enrollment is unavailable" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  _stage_catalog_ca "$tmp/stage"
+  echo rpcsecret > "$tmp/stage/rpc-secret"
+  printf '#!/bin/sh\ntouch "%s/launched"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env IRIS_PEER_TLS_MODE=required STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
+      ARIA2_SRC="$tmp/aria2c-stub" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$tmp/launched" ]
+  [[ "$output" == *"aria2c remains stopped"* ]]
+  rm -rf "$tmp"
+}
+
+@test "required peer TLS is enforced on argv as well as in private config" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage/agent" "$tmp/home"
+  _stage_catalog_ca "$tmp/stage"
+  echo rpcsecret > "$tmp/stage/rpc-secret"
+  printf 'print("bt-peer-tls=required")\n' > "$tmp/stage/agent/peer_tls.py"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/launched"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env IRIS_PEER_TLS_MODE=required STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
+      ARIA2_SRC="$tmp/aria2c-stub" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--bt-peer-tls=required' "$tmp/launched"
+  grep -qx 'bt-peer-tls=required' "$tmp/home/aria2.conf"
+  rm -rf "$tmp"
+}

@@ -16,7 +16,7 @@ verified against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
 
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
-2. **The seven patches in this directory**, applied in numeric order.
+2. **The nine patches in this directory**, applied in numeric order.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
 
@@ -110,3 +110,14 @@ The patch files are modifications to GPLv2 code and are provided under GPLv2.
 They carry no inline SPDX header because a header would alter the patch content
 and stop it applying; see the licensing notes in
 [`DEVELOPMENT.md`](../../DEVELOPMENT.md).
+
+## Private peer transport additions (2026-09-18)
+
+- `0008-required-hybrid-peer-tls.patch`: opt-in TLS 1.3 with mutual swarm
+  authentication and X25519MLKEM768. Disabled by default; required mode
+  rejects unsupported backends and plaintext fallback.
+- `0009-test-seeder-goodbye-grace.patch`: align three upstream tests with the
+  five-second grace already provided by patch 0007.
+
+Both x86_64 and aarch64 builds use all nine patches. The ARM transport tests
+run under QEMU; native device validation is a separate rollout check.

@@ -22,7 +22,7 @@ LABEL org.opencontainers.image.title="IRIS device staging agent" \
 # remain identical for both wrappers.
 # curl drives the loopback RPC health probe and completion hook. BusyBox in
 # Alpine supplies ps, top, free and kill for field diagnosis; keep all four.
-RUN apk add --no-cache openssh-client openssh-keygen sshpass ca-certificates curl
+RUN apk add --no-cache openssh-client openssh-keygen sshpass ca-certificates curl openssl
 
 # Both architecture binaries are checksum-verified into the canonical build
 # context. BuildKit selects exactly one for each platform manifest in the OCI

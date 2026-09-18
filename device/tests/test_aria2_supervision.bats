@@ -75,7 +75,7 @@ _code() { sed 's/[[:space:]]*#.*$//' "$1"; }
 
 @test "the supervisor loop keys on aria2_alive AND rpc_healthy" {
   for ep in $ENTRYPOINTS; do
-    cond="$(awk '/^  if \[ "\$want" != "\$cur" \]/{found=1} found{print; if(/; then/) exit}' "$ep")"
+    cond="$(awk '/^[[:space:]]*if \[ "\$want" != "\$cur" \]/{found=1} found{print; if(/; then/) exit}' "$ep")"
     [ -n "$cond" ] || { echo "loop condition not found in $ep"; return 1; }
     [[ "$cond" == *'! aria2_alive'* ]] || return 1
     [[ "$cond" == *'! rpc_healthy'* ]] || return 1

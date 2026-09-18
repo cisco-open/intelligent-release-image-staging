@@ -174,6 +174,18 @@ if ! printf 'rpc-secret=%s\n' "$RPC_SECRET" > "$_aria2_conf_tmp" 2>/dev/null \
   echo "cannot install private aria2 RPC config" >&2
   exit 1
 fi
+# Enrollment uses the already provisioned catalog CA and device bearer.
+# A changed certificate changes the config bytes, forcing daemon replacement.
+_peer_tls_failed=0
+_peer_conf="${IRIS_AGENT_CONF:-$STAGE_DIR/iris-agent.conf}"
+_peer_mode="${IRIS_PEER_TLS_MODE:-$(sed -n 's/^[[:space:]]*peer_tls_mode[[:space:]]*=[[:space:]]*//p' "$_peer_conf" 2>/dev/null | sed 's/[[:space:]]*$//' | tail -1 || true)}"
+case "${_peer_mode:-disabled}" in
+  disabled) ;;
+  required)
+    python3 "$STAGE_DIR/agent/peer_tls.py" --conf "$_peer_conf" >> "$_aria2_conf_tmp" \
+      || _peer_tls_failed=1 ;;
+  *) _peer_tls_failed=1 ;;
+esac
 # Compare bytes before publishing so a rotated secret forces replacement of a
 # daemon that still has the previous value in memory. Mode-only repair does not
 # change the content generation. Reject non-regular existing destinations.
@@ -399,7 +411,8 @@ aria2_tracker_tls_ready() {
 # already up? (skip the probe in tests)
 if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
   if rpc_up; then
-    if [ "$CA_SNAPSHOT_CHANGED" = "0" ] \
+    if [ "$_peer_tls_failed" = "0" ] \
+       && [ "$CA_SNAPSHOT_CHANGED" = "0" ] \
        && [ "$RPC_CONFIG_CHANGED" = "0" ] \
        && aria2_tracker_tls_ready; then
       echo "aria2c RPC already up on :$RPC_PORT with current tracker TLS verification"
@@ -467,6 +480,11 @@ fi
 # copy the binary to an exec-capable fs and run it
 cp -f "$ARIA2_SRC" "$ARIA2" \
   || { echo "cannot install aria2c from $ARIA2_SRC to $ARIA2" >&2; exit 1; }
+if [ "$_peer_tls_failed" != "0" ]; then
+  echo "peer identity unavailable; aria2c remains stopped" >&2
+  exit 1
+fi
+
 chmod +x "$ARIA2" \
   || { echo "cannot make $ARIA2 executable" >&2; exit 1; }
 
@@ -483,6 +501,11 @@ chmod +x "$ARIA2" \
 # COMPLETED file --bt-seed-unverified=true above marks every piece done and
 # aria2 skips validation entirely -- so a device seeding its staged images
 # never re-hashes them at launch.
+# Put the requirement on argv too: old aria2 ignores unknown config keys,
+# but rejects an unknown command-line option before opening any socket.
+if [ "${_peer_mode:-disabled}" = required ]; then
+  set -- "$@" --bt-peer-tls=required
+fi
 exec "$ARIA2" \
   --daemon=true \
   --enable-rpc=true \

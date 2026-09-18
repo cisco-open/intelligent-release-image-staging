@@ -443,7 +443,7 @@ MAX_EXPANDED = MAX_TOTAL + 2 * 1024 * 1024
 AGENT_FILES = (
     "agent_config.py", "catalog_client.py", "cli_ssh.py",
     "flash_target.py", "flashcheck.py", "instr.py", "iris_agent.py",
-    "peer-transfer-hook.sh", "telemetry_report.py", "verify_image.py",
+    "peer-transfer-hook.sh", "peer_tls.py", "telemetry_report.py", "verify_image.py",
     "xr_deps.py",
 )
 ROOT_FILES = (

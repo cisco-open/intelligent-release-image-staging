@@ -19,7 +19,7 @@ source:
 | Item | Where |
 | --- | --- |
 | Upstream fork and exact commit | named in `../aria2c-patches/README.md` |
-| The seven patches | `../aria2c-patches/*.patch` |
+| The nine patches | `../aria2c-patches/*.patch` |
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
 
@@ -201,3 +201,12 @@ stays listed on the seeder for the same window, the hook's `.peers.json`
 sidecar carries that peer rather than `[]`, and the six-patch binary fails
 the same check (peer list already empty at the first sample after
 completion, sidecar `[]`).
+
+## Opt-in peer TLS (2026-09-18)
+
+The local producer is the sibling `aria2-next-static` checkout. The driver archives
+the local pinned checkout before applying patches; it never fetches or resets
+that checkout. Patches 0008/0009 add required hybrid TLS and align upstream
+seeder tests with the already-shipped grace period. TLS defaults to disabled.
+See [peer transport](../../docs/zensical/security.md#peer-payload-transport-boundary)
+for enrollment, deployment and security limits.

@@ -1778,6 +1778,7 @@ _JSON_REQUESTS = {
     "/v1/devices/{device_id}/telemetry": (
         {"schema": "v2", "image_id": "image-01", "state": "complete",
          "timestamp": 1788470400}, ("schema", "image_id"), True),
+    "/v1/devices/{device_id}/peer-tls": ({"csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."}, ("csr",), True),
     "/v1/devices/{device_id}/token-refresh": ({}, (), False),
 }
 
@@ -2161,6 +2162,9 @@ def _json_success_example(route):
         "/v1/devices/{device_id}/heartbeat": {
             "ok": True, "stream_every": 4, "stream_pause": False},
         "/v1/devices/{device_id}/telemetry": {"ok": True},
+        "/v1/devices/{device_id}/peer-tls": {
+            "mode": "required", "certificate": "-----BEGIN CERTIFICATE-----\n...",
+            "ca": "-----BEGIN CERTIFICATE-----\n...", "renew_before_seconds": 21600},
         "/v1/devices/{device_id}/token-refresh": {
             "catalog_token": "replacement-catalog-token",
             "expires_at": 1788556800},
@@ -2921,6 +2925,8 @@ def _error_statuses(route):
         if route.method == "GET":
             return (400, 401, 404, 500, 503)
         statuses = [400, 401, 404, 411, 413, 500, 503]
+        if suffix.endswith("/peer-tls"):
+            statuses.extend((403, 409, 429))
         if suffix.endswith("/token-refresh"):
             statuses.append(409)
         return tuple(sorted(statuses))

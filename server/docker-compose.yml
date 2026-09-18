@@ -214,6 +214,7 @@ services:
       # recipient so a lost primary key doesn't make the store unrecoverable.
       # Adding a recipient later: `iris-bootstrap --rekey` re-encrypts the
       # existing state to this list (never --force, which mints new secrets).
+      IRIS_PEER_TLS_MODE: "${IRIS_PEER_TLS_MODE:-disabled}"
       IRIS_AGE_RECIPIENTS: "${IRIS_AGE_RECIPIENTS:?Set IRIS_AGE_RECIPIENTS to primary,break-glass age public keys}"
       # Declare every persistent/runtime path in the container environment so
       # one-shot commands launched with `docker compose exec` see the same paths

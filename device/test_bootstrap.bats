@@ -42,6 +42,7 @@ agent/flashcheck.py
 agent/instr.py
 agent/iris_agent.py
 agent/peer-transfer-hook.sh
+agent/peer_tls.py
 agent/telemetry_report.py
 agent/verify_image.py
 agent/xr_deps.py

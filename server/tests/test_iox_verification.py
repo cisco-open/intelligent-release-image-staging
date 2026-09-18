@@ -5215,3 +5215,16 @@ def test_command_failure_detail_names_a_timeout_instead_of_an_earlier_verdict():
     plain = {"timed_out": False, "returncode": 4,
              "stdout": b"app-hosting appid iris\r\n% node--1:dbm:IOxMan:Resource Profile-names is not specified\r\n"}
     assert "Resource Profile-names" in module._command_failure_detail("configure_app", plain)
+
+
+@pytest.mark.parametrize("mode", [None, "required"])
+def test_app_block_propagates_explicit_peer_tls_mode_with_default_off(
+        tmp_path, monkeypatch, mode):
+    if mode is None:
+        monkeypatch.delenv("IRIS_PEER_TLS_MODE", raising=False)
+    else:
+        monkeypatch.setenv("IRIS_PEER_TLS_MODE", mode)
+    app = _render_with_target(
+        tmp_path, "configure_app", _share_render_target(share=False, router=False))
+    assert '  run-opts 15 "-e IRIS_PEER_TLS_MODE=%s"' % (mode or "disabled") in app
+    assert '  run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"' in app

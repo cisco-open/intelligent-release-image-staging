@@ -268,6 +268,13 @@ class CatalogClient:
             raise CatalogError("telemetry %s -> HTTP %d" % (device_id, status))
         return json.loads(body)
 
+    def enroll_peer_tls(self, device_id, csr):
+        status, body = self._req(
+            "POST", "/v1/devices/%s/peer-tls" % device_id, body={"csr": csr})
+        if status != 200:
+            raise CatalogError("peer certificate enrollment failed (HTTP %d)" % status)
+        return json.loads(body)
+
     def refresh_token(self, device_id):
         # POST the device's current Bearer to mint a fresh catalog token; the
         # response is the device's full current secret bag (new catalog_token +
