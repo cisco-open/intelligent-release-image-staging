@@ -400,6 +400,17 @@ announce URL with a nonempty `announce_token` or `key` query parameter. It
 parses the query and rejects missing or ambiguous credentials before creating
 the torrent.
 
+### Peer payload transport boundary
+
+Tracker/catalog HTTPS and instruction encryption do **not** encrypt BitTorrent
+peer image traffic. The currently distributed agent does not require mutually
+authenticated TLS on peer sockets; legacy MSE/ARC4 is not a substitute for it.
+A private hybrid-TLS transport candidate is being validated separately. Until
+it is integrated and deployed across every seed and device, do not describe
+IRIS peer payloads as TLS-protected. Existing public certificate distribution
+can carry a dedicated swarm CA, but unique node keys, certificate enrollment
+and renewal require additional integration.
+
 ### Peer policy failure posture
 
 Peer ACLs and per-device assignments live in `peer-policy.json` under

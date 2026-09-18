@@ -12,6 +12,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Clarify that tracker/catalog HTTPS does not encrypt peer image traffic, and
+  distinguish the private TLS candidate from the currently distributed agent.
 - Reject incomplete Bulk Hash downloads before replacing a cached file when
   the body disagrees with its declared size. Build XR RPMs in a private directory
   to prevent log collisions and missing specification files.
