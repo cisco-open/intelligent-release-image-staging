@@ -21,7 +21,7 @@ try {
   let logoutResult = 'http-error';
   const settingsWrites = [];
   const defaultCA = 'https://www.cisco.com/security/pki/trs/ios.p7b';
-  const settingsState = {ca_trust: {url: defaultCA, auto: false}, trust: [],
+  const settingsState = {gui_cert: {source: 'built-in', subject: 'CN=iris.example.test', not_after: 'Sep 18 12:00:00 2036 GMT', fingerprint_sha256: 'ab'.repeat(32)}, ca_trust: {url: defaultCA, auto: false}, trust: [],
     telemetry_destination: {source: 'environment', effective_endpoint: '', effective_enabled: false}};
   let settingsFailure = '';
   await page.addInitScript(() => {
@@ -177,6 +177,11 @@ try {
   await page.locator('#revoke-msg').getByText('Signed out 2 other session(s).', {exact: true}).waitFor();
   assert.deepEqual(settingsWrites.at(-1).body, {});
   await settingsTab('TLS & trust');
+  await page.locator('#cert-status').getByText('CN=iris.example.test', {exact: true}).waitFor();
+  assert.equal(await page.locator('#cert-status .tls-fingerprint dd').textContent(), 'ab'.repeat(32));
+  assert.equal(await page.locator('#cert-pem').isVisible(), false);
+  await page.locator('#cert-form summary').click();
+  assert.equal(await page.locator('#cert-pem').isVisible(), true);
   await page.waitForFunction(() => document.getElementById('ca-source').value === 'cisco');
   assert.equal(await page.locator('#ca-url').isVisible(), false, 'Built-in Cisco URL is not a custom source');
   await page.locator('#ca-auto').check();
@@ -216,6 +221,7 @@ try {
   await page.locator('#cert-revert').click();
   await page.locator('#cert-msg').getByText('Reverted to the deployment default certificate.', {exact: true}).waitFor();
   assert.equal(settingsWrites.at(-1).method, 'DELETE');
+  await page.locator('#trust-form summary').click();
   await page.locator('#trust-pem').fill(certPEM);
   await page.locator('#trust-form button[type="submit"]').click();
   await page.locator('#trust-rows .trust-del').waitFor();

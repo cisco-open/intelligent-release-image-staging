@@ -658,7 +658,7 @@ mount, or the Guest Shell artifact flow. See
 [Peer transfer TLS](security.md#peer-payload-transport-boundary) is configured at deployment, defaults to `disabled`, and has no Console toggle.
 
 - **Certificate** — drop (or browse to) a certificate and private key, or
-  paste PEM directly. Files are classified by their PEM content rather than
+  expand **Paste certificate and key instead**. Files are classified by their PEM content rather than
   extension, so a single combined cert+key file works. Dropping an encrypted
   private key reveals a passphrase field; the key is decrypted at import
   (`openssl pkey`, passphrase piped over stdin, never on the command line)

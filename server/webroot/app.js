@@ -5315,12 +5315,19 @@
     var gc = s.gui_cert || {};
     var certStatus = document.getElementById('cert-status');
     if (gc.source === 'custom' || gc.source === 'built-in') {
-      certStatus.innerHTML = (gc.source === 'custom'
-          ? '<span class="badge badge-running">custom</span> '
-          : '<span class="badge badge-queued">deployment default</span> ') +
-        esc(gc.subject || 'unknown') +
-        ' — expires ' + esc(gc.not_after || 'unknown') +
-        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>';
+      var expiry = Date.parse(gc.not_after || '');
+      var expired = Number.isFinite(expiry) && expiry <= Date.now();
+      var expiring = Number.isFinite(expiry) && !expired && expiry - Date.now() < 30 * 86400000;
+      var expiryBadge = !Number.isFinite(expiry) ? '' : '<span class="badge ' +
+        (expired ? 'badge-fail' : expiring ? 'badge-queued' : 'badge-ok') + '">' +
+        (expired ? 'Expired' : expiring ? 'Expires soon' : 'In date') + '</span>';
+      certStatus.innerHTML = '<div class="tls-certificate-heading"><strong>Active browser identity</strong>' +
+        '<span class="badge badge-running">' + (gc.source === 'custom' ? 'Custom' : 'Deployment default') +
+        '</span>' + expiryBadge + '</div><dl class="tls-certificate-facts">' +
+        '<div><dt>Issued to</dt><dd>' + esc(gc.subject || 'Unavailable') + '</dd></div>' +
+        '<div><dt>Expires</dt><dd>' + esc(gc.not_after || 'Unavailable') + '</dd></div>' +
+        '<div class="tls-fingerprint"><dt>SHA-256 fingerprint</dt><dd>' +
+        esc(gc.fingerprint_sha256 || 'Unavailable') + '</dd></div></dl>';
     } else {
       certStatus.textContent =
         'Certificate details are unavailable.';
@@ -5330,6 +5337,8 @@
     document.getElementById('cert-revert').hidden = false;
     // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
     var trust = s.trust || [];
+    document.getElementById('trust-tbl').hidden = !trust.length;
+    document.getElementById('trust-empty').hidden = !!trust.length;
     var caSrcNow = (s.ca_trust || {}).url;
     var bundleLabel = !caSrcNow || caSrcNow === CA_CISCO_URL ? 'Cisco Trusted Root Store'
       : (caSrcNow === CA_MOZILLA_URL ? 'Mozilla CA bundle (curl.se)' : 'Custom URL');
@@ -5708,6 +5717,7 @@
   function syncPassphraseRow() {
     var t = document.getElementById('cert-key').value;
     document.getElementById('cert-passphrase-row').hidden = !keyLooksEncrypted(t);
+    if (keyLooksEncrypted(t)) document.querySelector('#cert-form details').open = true;
   }
   document.getElementById('cert-key').addEventListener('input', syncPassphraseRow);
   var PEM_CERTIFICATE_RE = /-----BEGIN CERTIFICATE-----/;
@@ -5788,6 +5798,7 @@
       var pw = document.getElementById('cert-passphrase').value;
       if (!pw) {
         document.getElementById('cert-passphrase-row').hidden = false;
+        document.querySelector('#cert-form details').open = true;
         msg.textContent = 'This private key is passphrase-protected — enter its passphrase.';
         return;
       }

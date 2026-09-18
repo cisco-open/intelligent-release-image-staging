@@ -289,6 +289,28 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    turns a run of Settings/Setup h3 sections into bounded .card sections. */
 .setup-cards { display:flex; flex-direction:column; gap:16px; margin:12px 0 0; }
 .setup-cards .card h3:first-child { margin-top:0; }
+/* TLS settings: the active browser identity leads; trust sources follow. */
+.tls-layout { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; }
+.tls-layout .card { min-width:0; }
+.tls-identity { grid-column:1 / -1; }
+.tls-certificate { margin:20px 0 24px; padding:18px 20px; background:var(--surface-subtle); border-left:3px solid var(--action); border-radius:0 var(--radius-control) var(--radius-control) 0; }
+.tls-certificate-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.tls-certificate-heading strong { margin-right:auto; color:var(--text-heading); }
+.tls-certificate-facts { display:grid; grid-template-columns:1fr 1fr; gap:16px 24px; margin:18px 0 0; }
+.tls-certificate-facts dt { color:var(--text-secondary); font-size:12px; margin-bottom:4px; }
+.tls-certificate-facts dd { margin:0; overflow-wrap:anywhere; }
+.tls-fingerprint { grid-column:1 / -1; font-variant-numeric:tabular-nums; }
+.tls-fingerprint dd { font-size:12px; letter-spacing:.03em; }
+.tls-pem { width:100%; }
+.tls-pem summary { cursor:pointer; color:var(--action); padding:8px 0; font-weight:500; }
+.tls-pem summary:focus-visible { outline:2px solid var(--action); outline-offset:3px; }
+.tls-pem-fields { display:flex; flex-wrap:wrap; gap:12px; }
+.tls-pem .field { flex:1 1 280px; }
+.tls-layout .form-actions { flex-wrap:wrap; }
+.tls-layout .dropzone { margin:12px 0; }
+.tls-scope-note { max-width:90ch; margin-top:20px; font-size:12px; }
+@media (max-width:1100px) { .tls-layout { grid-template-columns:minmax(0,1fr); } }
+@media (max-width:600px) { .tls-certificate-facts { grid-template-columns:minmax(0,1fr); } .tls-certificate { padding:14px; } }
 /* Icon sprite (Phosphor bold symbols, index.html): defines but never paints
    -- CSP forbids a literal style= attribute, so it's hidden by class
    instead of the usual inline 0x0/absolute trick. */

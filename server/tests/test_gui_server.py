@@ -1036,8 +1036,8 @@ def test_settings_tls_trust_and_destination_sections_wired():
         html = f.read()
     # section headings, in the Settings view
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    assert "<h3>Certificate</h3>" in settings
-    assert "<h3>Trusted CAs</h3>" in settings
+    assert "<h3>Console certificate</h3>" in settings
+    assert "<h3>Trusted certificate authorities</h3>" in settings
     assert "<h3>Telemetry destination</h3>" in settings
     # element inventory (the global orphan guard checks the JS side)
     for el in ('id="cert-status"', 'id="cert-form"', 'id="cert-pem"',
@@ -1070,8 +1070,8 @@ def test_settings_tls_trust_and_destination_sections_wired():
             "<th>Source</th><th>Certs</th>") in settings
     # the operator is told the key is write-only and that the bundle URL
     # gates both download paths
-    assert "never shown again" in settings
-    assert "https:// URL" in settings
+    assert "never returned by the server" in settings
+    assert "over HTTPS" in settings
     # CSP: still no inline styles or handlers anywhere in the page
     assert " style=" not in html and "onclick=" not in html
 

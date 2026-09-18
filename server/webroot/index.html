@@ -1058,27 +1058,29 @@
           </div>
         </div>
         <div id="settings-pane-tls" hidden>
-          <p class="muted">Peer transfer TLS is configured separately at deployment and is disabled by default.
-            It applies to all torrents in each peer process; there is no Console toggle.</p>
-          <div class="setup-cards">
-          <div class="card">
-          <h3>Certificate</h3>
-          <p class="muted">Serves the console only — the device-facing catalog and
-            artifact certificates are untouched, so enrolled devices keep working.
-            Uploaded private keys are stored age-encrypted and never shown again.</p>
-          <p class="muted" id="cert-status" role="status" aria-live="polite"></p>
+          <div class="setup-cards tls-layout">
+          <div class="card tls-identity">
+          <h3>Console certificate</h3>
+          <p class="muted">The HTTPS identity presented to your browser.</p>
+          <div id="cert-status" class="tls-certificate" role="status" aria-live="polite"></div>
+          <h4>Replace certificate</h4>
+          <p class="muted">Upload a PEM certificate and private key. Private keys are encrypted at rest and never returned by the server.</p>
           <div class="dropzone" id="cert-dropzone" tabindex="0" role="button"
               aria-label="Drop a certificate and/or private key PEM file, or press Enter to browse for files">
             <input type="file" id="cert-dropzone-input" multiple hidden>
             <p>Drop the certificate and private key here<span class="hint">PEM files — or click / press Enter to browse</span></p>
           </div>
           <form class="inline-form" id="cert-form">
+            <details class="tls-pem"><summary>Paste certificate and key instead</summary>
+            <div class="tls-pem-fields">
             <label class="field field-wide" for="cert-pem"><span class="field-label">Certificate PEM (leaf or full chain)</span><textarea id="cert-pem" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
             <label class="field field-wide" for="cert-key"><span class="field-label">Private key PEM</span><textarea id="cert-key" rows="4" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
             <label class="field" for="cert-passphrase" id="cert-passphrase-row" hidden><span class="field-label">Key passphrase</span>
               <input type="password" id="cert-passphrase" autocomplete="off"
                      placeholder="passphrase for the encrypted key">
             </label>
+            </div>
+            </details>
             <div class="form-actions">
               <button class="btn" type="submit">Replace certificate</button>
               <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use deployment default certificate</button>
@@ -1087,22 +1089,24 @@
           </form>
           </div>
           <div class="card">
-          <h3>Trusted CAs</h3>
-          <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
-            bundle download) in addition to the system store.</p>
+          <h3>Trusted certificate authorities</h3>
+          <p class="muted">Additional trust for outbound HTTPS, including image verification and telemetry. System roots remain trusted.</p>
           <div class="table-scroll">
           <table class="tbl" id="trust-tbl">
             <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
             <tbody id="trust-rows"></tbody>
           </table>
           </div>
+          <p class="muted" id="trust-empty" hidden>No additional CAs installed. Outbound HTTPS uses the system trust store.</p>
           <div class="dropzone" id="trust-dropzone" tabindex="0" role="button"
               aria-label="Drop CA certificate PEM files, or press Enter to browse for files">
             <input type="file" id="trust-dropzone-input" multiple hidden>
             <p>Drop CA certificates here<span class="hint">one or many PEM files — or click / press Enter to browse</span></p>
           </div>
           <form class="inline-form" id="trust-form">
+            <details class="tls-pem"><summary>Paste CA certificates instead</summary>
             <label class="field field-wide" for="trust-pem"><span class="field-label">CA certificate PEM</span><textarea id="trust-pem" rows="4" spellcheck="false" placeholder="One or more -----BEGIN CERTIFICATE----- blocks"></textarea></label>
+            </details>
             <div class="form-actions">
               <button class="btn" type="submit">Add CA</button>
             </div>
@@ -1111,10 +1115,7 @@
           </div>
           <div class="card">
           <h3>Public CA bundle</h3>
-          <p class="muted">Optional public CA bundle: Download now fetches the
-            https:// URL below (Cisco's Trusted Root Store by default); enable the
-            daily auto-refresh to keep it current. A failed download never replaces
-            the previous bundle.</p>
+          <p class="muted">Download a public root bundle over HTTPS and optionally refresh it daily. If a download fails, the previous bundle stays in use.</p>
           <form class="inline-form" id="ca-form">
             <label class="field" for="ca-source"><span class="field-label">CA bundle source</span><select id="ca-source">
               <option value="cisco">Cisco Trusted Root Store</option>
@@ -1131,6 +1132,7 @@
           </form>
           </div>
           </div>
+          <p class="muted tls-scope-note">Device-facing certificates are managed during onboarding. Peer transfer TLS is configured at deployment, disabled by default, and applies to all torrents per process.</p>
         </div>
         <div id="settings-pane-telemetry" hidden>
           <!-- Card goes around the mount point, never around the template

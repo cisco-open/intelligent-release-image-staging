@@ -12,6 +12,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Simplify the TLS certificate page, show actionable feed-download errors, and
+  use configured trusted CAs for image-verification downloads.
 - Correct the public IE onboarding summary to HTTPS package download and
   distinguish it from SCP-to-self image placement on deployments without a share.
 - Add opt-in hybrid TLS 1.3 peer transport with mutual swarm certificates,
