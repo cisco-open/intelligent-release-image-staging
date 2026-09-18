@@ -39,6 +39,14 @@ def _valid(cert, ca, seconds=0):
         return False
 
 
+def _subject_matches(subject, identity):
+    # OpenSSL 1.0.2 (Guest Shell) inserts a space after "subject="; newer
+    # versions do not. Keep the complete RFC2253 name comparison exact.
+    label, separator, name = subject.strip().partition(b'=')
+    return (label == b'subject' and separator == b'=' and
+            name.lstrip(b' ') == ('CN=' + identity).encode('ascii'))
+
+
 def _identity_valid(cert, ca, key, device_id, seconds=0):
     if cert is None or not _valid(cert, ca, seconds):
         return False
@@ -49,7 +57,7 @@ def _identity_valid(cert, ca, key, device_id, seconds=0):
         identity = hashlib.sha256(device_id.encode('utf-8')).hexdigest()
         subject = _openssl('x509', '-in', cert, '-subject', '-noout', '-nameopt', 'RFC2253')
         return (public == _openssl('x509', '-in', cert, '-pubkey', '-noout')
-                and subject.strip() == ('subject=CN=' + identity).encode('ascii'))
+                and _subject_matches(subject, identity))
     except PeerTLSError:
         return False
 
@@ -140,7 +148,7 @@ def ensure(cfg, client):
                         raise PeerTLSError('peer certificate does not match local key')
                     identity = hashlib.sha256(cfg['device_id'].encode('utf-8')).hexdigest()
                     subject = _openssl('x509', '-in', pending / 'node.crt', '-subject', '-noout', '-nameopt', 'RFC2253')
-                    if subject.strip() != ('subject=CN=' + identity).encode('ascii'):
+                    if not _subject_matches(subject, identity):
                         raise PeerTLSError('peer certificate identity does not match')
                     if ca is not None and ca.exists():
                         old = ssl.PEM_cert_to_DER_cert(ca.read_text())

@@ -290,3 +290,23 @@ def test_origin_supervisor_applies_mode_and_stops_on_invalid_settings(enrollment
     finally:
         process.terminate()
         assert process.wait(timeout=20) == 0
+
+
+@pytest.mark.parametrize('prefix', [b'subject=', b'subject= '])
+def test_enrollment_accepts_openssl_subject_spacing(enrollment, monkeypatch, prefix):
+    cfg, client, issuer = enrollment
+    original = peer._openssl
+    def legacy(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if '-subject' in args:
+            result = prefix + result.partition(b'=')[2].lstrip(b' ')
+        return result
+    monkeypatch.setattr(peer, '_openssl', legacy)
+    assert 'bt-peer-tls=required' in peer.ensure(cfg, client)
+    assert 'bt-peer-tls=required' in peer.ensure(cfg, client)
+
+
+@pytest.mark.parametrize('subject', [b'subject= CN=other', b'subject= CN=abc,O=extra',
+                                    b'subject= CN=abc+OU=extra', b'CN=abc'])
+def test_subject_spacing_does_not_weaken_exact_identity(subject):
+    assert not peer._subject_matches(subject, 'abc')

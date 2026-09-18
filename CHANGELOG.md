@@ -15,6 +15,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Add a default-off peer transfer TLS toggle with persistent mode, automatic origin
   restart, and matching device onboarding; require undeployment before switching.
   Historical records for devices absent from inventory do not block this control.
+  Accept older Guest Shell OpenSSL subject formatting during peer enrollment.
 - Prevent completed IOx undeploys from reporting a cleanup failure when concurrent
   jobs delay record retirement past the earlier process-reaping timeout.
 - Simplify the TLS certificate page, show actionable feed-download errors, and
