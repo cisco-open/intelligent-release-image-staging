@@ -4,92 +4,36 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Problem type registry
+# API error codes (problem types)
 
-IRIS JSON API errors use [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457.html).
-The `type` URI ends with one of the fragments below, and the same stable value
-appears in the `code` extension. Clients should branch on `type` or `code`, not
-on the human-readable `title` or `detail`. A response can omit `detail`; when it
-is present, it is deliberately redacted.
+IRIS API errors follow [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457.html). Match on the `type` or `code` field, not on `title` or `detail`, which can change.
 
-The BitTorrent tracker is the one protocol-format exception: its errors remain
-BEP-compatible bencoded failure dictionaries. Anonymous `/healthz` and
-`/readyz` probes disclose only an `ok` boolean.
+!!! warning
+    The BitTorrent tracker is the exception: its errors stay bencoded BEP failure dictionaries, not Problem Details.
 
-Scheduled receipt reason values such as `conflict` and `identity_unavailable`
-are durable rollout outcomes, not HTTP Problem Details types. See
-[Scheduled outcomes](operations.md#scheduled-outcomes).
+Codes appear in alphabetical order below, grouped here by the part of IRIS that returns them.
 
-## asymmetric_peers
-
-Raw policy or `iris-role import` input contains an asymmetric relationship
-between two restricted roles. Correct the whole graph and validate/import
-again. The public role PUT owns lifecycle normalization and updates reciprocal
-edges atomically, so this code is not part of that route's live refusal set.
-
-## bad_role
-
-A device role mutation did not supply a valid role string or explicit `null`
-clear. Use a known non-reserved role name, or `null` to clear membership, and
-preview again.
-
-## bad_role_mapping
-
-400: role membership input must be a nonempty device-to-role mapping.
-
-## bad_device_id
-
-400: a role membership mapping contains an empty device ID.
-
-## bad_quarantine
-
-400: the quarantine value must be a JSON boolean.
-
-## unknown_device
-
-422: the legacy quarantine operation names a device absent from inventory.
-
-## bad_acl
-
-400: the ACL migration name is missing, invalid, or reserved.
+| Group | Codes |
+| --- | --- |
+| HTTP | [`authentication-required`](#authentication-required) · [`content-length-required`](#content-length-required) · [`credential-store-unavailable`](#credential-store-unavailable) · [`csrf-validation-failed`](#csrf-validation-failed) · [`forbidden`](#forbidden) · [`internal-error`](#internal-error) · [`invalid-content-length`](#invalid-content-length) · [`invalid-request`](#invalid-request) · [`invalid-request-body`](#invalid-request-body) · [`method-not-allowed`](#method-not-allowed) · [`payload-too-large`](#payload-too-large) · [`precondition-failed`](#precondition-failed) · [`rate-limit-exceeded`](#rate-limit-exceeded) · [`request-body-not-supported`](#request-body-not-supported) · [`request-timeout`](#request-timeout) · [`resource-conflict`](#resource-conflict) · [`resource-not-found`](#resource-not-found) · [`route-not-found`](#route-not-found) · [`service-unavailable`](#service-unavailable) · [`unprocessable-content`](#unprocessable-content) · [`unsupported-media-type`](#unsupported-media-type) · [`upstream-operation-failed`](#upstream-operation-failed) |
+| Console and management | [`console-certificate-unavailable`](#console-certificate-unavailable) · [`console-session-required`](#console-session-required) · [`invalid-authorization-request`](#invalid-authorization-request) · [`management-api-unavailable`](#management-api-unavailable) · [`management-authentication-required`](#management-authentication-required) · [`reconciliation_required`](#reconciliation_required) |
+| Artifact server | [`artifact-authentication-required`](#artifact-authentication-required) · [`artifact-forbidden`](#artifact-forbidden) · [`artifact-not-found`](#artifact-not-found) · [`artifact-request-failed`](#artifact-request-failed) · [`artifact-resource-forbidden`](#artifact-resource-forbidden) · [`range-not-satisfiable`](#range-not-satisfiable) |
+| Catalog and device instructions | [`catalog-authentication-required`](#catalog-authentication-required) · [`instruction-device-forbidden`](#instruction-device-forbidden) · [`instruction-keylist-missing`](#instruction-keylist-missing) · [`instruction-keylist-unavailable`](#instruction-keylist-unavailable) · [`instruction-rate-limit-exceeded`](#instruction-rate-limit-exceeded) · [`instruction-state-unavailable`](#instruction-state-unavailable) · [`instruction-stamp-missing`](#instruction-stamp-missing) · [`invalid-tracker-auth-selector`](#invalid-tracker-auth-selector) · [`stale_pointer`](#stale_pointer) |
+| Roles and sharing policy | [`acl_not_found`](#acl_not_found) · [`asymmetric_peers`](#asymmetric_peers) · [`bad_acl`](#bad_acl) · [`bad_device_id`](#bad_device_id) · [`bad_quarantine`](#bad_quarantine) · [`bad_role`](#bad_role) · [`bad_role_mapping`](#bad_role_mapping) · [`confirmation_required`](#confirmation_required) · [`device_not_found`](#device_not_found) · [`fleet_write_failed`](#fleet_write_failed) · [`incomparable_role_change`](#incomparable_role_change) · [`invalid_policy`](#invalid_policy) · [`invalid_policy_request`](#invalid_policy_request) · [`invalid_roles_csv`](#invalid_roles_csv) · [`mixed_role_direction`](#mixed_role_direction) · [`operation_backlog_full`](#operation_backlog_full) · [`policy_error`](#policy_error) · [`policy_fail_closed`](#policy_fail_closed) · [`policy_unavailable`](#policy_unavailable) · [`precondition_failed`](#precondition_failed) · [`precondition_required`](#precondition_required) · [`principal_unresolvable`](#principal_unresolvable) · [`revision_conflict`](#revision_conflict) · [`role_in_use`](#role_in_use) · [`role_isolated`](#role_isolated) · [`role_management_error`](#role_management_error) · [`role_not_found`](#role_not_found) · [`role_reserved_name`](#role_reserved_name) · [`role_shadowed_by_assignment`](#role_shadowed_by_assignment) · [`unknown_device`](#unknown_device) |
+| Schedules | [`invalid_schedule`](#invalid_schedule) · [`schedule_conflict`](#schedule_conflict) · [`schedule_not_found`](#schedule_not_found) · [`schedule_state_unavailable`](#schedule_state_unavailable) · [`schedule_target_heartbeat_unavailable`](#schedule_target_heartbeat_unavailable) · [`schedule_target_policy_unavailable`](#schedule_target_policy_unavailable) · [`schedule_target_status_unavailable`](#schedule_target_status_unavailable) · [`schedule_target_unavailable`](#schedule_target_unavailable) |
+| Observability | [`observability-authentication-required`](#observability-authentication-required) · [`telemetry-status-unavailable`](#telemetry-status-unavailable) |
 
 ## acl_not_found
 
 404: the ACL named for migration does not exist in current policy.
 
-## policy_error
-
-503: role, QoS, or schedule coordination cannot use degraded policy safely.
-The legacy quarantine preflight retains its 422 compatibility response for
-the same degraded-policy condition. Repair the authoritative policy before
-retrying; a usable last-known-good copy does not authorize new mutations.
-
-## policy_fail_closed
-
-503: no trustworthy peer policy is available, so the mutation is refused.
-Recover the authoritative policy and verify its health before retrying.
-
-## role_management_error
-
-422: the role coordinator rejected the operation without a more specific
-code. Inspect the response's partial-result fields before refreshing/retrying.
-
-## schedule_target_unavailable
-
-503: the schedule target authority is unavailable. Restore inventory/policy
-availability and retry the preview; do not substitute an empty target set.
-
-## authentication-required
-
-The operation requires a credential that was absent or invalid.
-
 ## artifact-authentication-required
 
-The artifact operation requires valid HTTP Basic device credentials.
+The artifact server operation needs valid HTTP Basic device credentials.
 
 ## artifact-forbidden
 
-Access to the requested staging artifact is forbidden.
+Access to the requested staging artifact is not allowed.
 
 ## artifact-not-found
 
@@ -101,164 +45,117 @@ The artifact server could not complete an otherwise valid request.
 
 ## artifact-resource-forbidden
 
-The device credential is not bound to the requested artifact resource.
+The device credential does not grant access to the requested artifact.
+
+## asymmetric_peers
+
+A role is a named group of devices that share with each other. This code means raw policy input, or an `iris-role import` file, gives two restricted roles an asymmetric relationship: one permits the other but not back. Fix the whole role graph and validate or import it again.
+
+## authentication-required
+
+The request needs a credential, and none was given, or the one given is invalid.
+
+## bad_acl
+
+400: the ACL name given for migration is missing, invalid, or reserved.
+
+## bad_device_id
+
+400: a role membership mapping contains an empty device ID.
+
+## bad_quarantine
+
+Quarantine, applied to a device, tells it to stop sharing with every peer. 400: the quarantine value in the request must be a JSON boolean (`true` or `false`).
+
+## bad_role
+
+A device role change did not give a valid role name or an explicit `null` to clear the role. Use a known, non-reserved role name, or `null` to clear membership, then preview the change again.
+
+## bad_role_mapping
+
+400: the role membership input must be a nonempty mapping from device to role.
 
 ## catalog-authentication-required
 
-The catalog operation requires a valid device bearer credential.
-
-Every refusal also writes one line to the server log (`docker logs iris`):
-`iris-catalog: refused bearer method=… route=… device=… src=… reason=…`.
-`device` is the id from the request path when it is id-shaped (`-` on image
-and torrent routes), and `reason` is one of `missing_bearer`,
-`unknown_token`, `expired`, `revoked`, `wrong_principal` (another device's
-live token) or `previous_token` (the device still presents its pre-rotation
-token, so it missed a token-refresh delivery). `token_id` is the truncated
-hash the audit log uses for the same credential; the line never carries the
-token. Repeats of one refusal collapse to a line per minute (`repeats=N`),
-and at most 100 lines a minute are written in total (`dropped=N`).
-
-## console-certificate-unavailable
-
-No usable browser-facing Console certificate is available.
-
-## console-session-required
-
-The browser operation requires a valid Console session cookie.
+The catalog operation needs a valid device bearer credential. See [Troubleshoot: symptoms and first steps](user-guide/troubleshooting.md) for how to read the refusal line the server logs for this error.
 
 ## confirmation_required
 
-The role or QoS candidate changes at least one blast-radius count or QoS value.
-Preview that exact candidate with `dry_run=1`, then send its `confirm_token`
-with the same current ETag.
+The candidate role or QoS change affects a large number of devices, or changes a QoS value. Preview that exact candidate with `dry_run=1`, then send its `confirm_token` with the same current ETag.
+
+## console-certificate-unavailable
+
+No usable Console certificate is available for the browser to check.
+
+## console-session-required
+
+The browser request needs a valid Console session cookie.
 
 ## content-length-required
 
-The request must provide a valid `Content-Length` and cannot use chunked
-transfer encoding for this operation.
+The request must include a valid `Content-Length` header. This operation does not accept chunked transfer encoding.
 
 ## credential-store-unavailable
 
-The credential store could not be read or validated, so access failed closed.
+The credential store could not be read or checked, so the request is refused rather than allowed by default.
 
 ## csrf-validation-failed
 
-The state-changing browser request lacks the session's valid CSRF value.
+The browser request changes state but does not carry the session's valid CSRF token.
 
 ## device_not_found
 
-The device-role or effective-QoS route names no current Fleet device. Refresh
-the inventory and use its exact device ID.
-
-## forbidden
-
-The authenticated principal is not allowed to perform the operation.
-
-## instruction-keylist-unavailable
-
-503: the root-signed keylist cannot be read or validated. Repair server custody
-or state and retry on a later tick; the bounded retry hint is 10 seconds.
-Usable cached keylist/LKG evidence is retained.
-
-## instruction-keylist-missing
-
-404: no published instruction keylist exists. Complete the root-signed keylist
-procedure; the agent retains usable prior evidence and retries on a later tick.
-
-## instruction-state-unavailable
-
-503: policy stamp, role artifact, key or custody state cannot be safely read or
-validated. Inspect producer/custody status; repair the source rather than
-fabricating an empty stamp. The bounded retry hint is 10 seconds.
-
-## instruction-stamp-missing
-
-404: the device has no instruction stamp or its immutable role artifact is
-missing. Check admission/producer state and use `iris-instr-key restamp
-<device_id>` after fixing the source. Current `instr_stamp_missing` inventory
-counts are separate from cumulative route failures.
-
-## stale_pointer
-
-409: the stamped key no longer resolves to a current or still-valid prior
-instruction key. Finish/restamp the committed rotation and retry later; the
-bounded retry hint is 10 seconds. The agent reports `instr_pending` while
-retaining usable LKG/defaults.
-
-## instruction-device-forbidden
-
-403: a valid current catalog token belongs to a different device than the path.
-Invalid/revoked, non-current or unsupported credentials instead return 401
-`catalog-authentication-required`. For instruction 401/403 the agent attempts
-one-shot refresh and reports `instr_forbidden`; durable revocation is
-server-observed and cannot be healed by key rotation.
-
-## instruction-rate-limit-exceeded
-
-429: the shared per-device instruction/keylist request bucket is exhausted.
-It permits a burst of 2 and refills one request every 10 seconds. Honor the
-bounded `Retry-After` hint on a later tick; never add an in-tick sleep/retry loop.
-
-These fetch failures affect the instruction step only; heartbeat/staging
-continue with verified fallback/defaults when policy apply succeeds. An aria2
-RPC apply failure still sends heartbeat but skips staging for that tick. Shared `catalog-authentication-required`
-and `credential-store-unavailable` failures still apply. Bad MAC, audience,
-rollback, signer and size failures are local agent states, listed with actions
-in the [failure table](device-agents.md#instruction-failures-and-recovery).
-Missing/invalid evidence stays unknown: **violation = 0 does not mean compliant**.
-For custody renewal, refusal and degraded-root alarms, use the
-[root runbook](operations.md#instruction-root-ceremony-and-recovery).
+The device-role or effective-QoS route names a device that is not in current inventory. Refresh the inventory and use its exact device ID.
 
 ## fleet_write_failed
 
-A coordinated membership change could not finish its Fleet write. Policy may
-already have committed on a relaxation. Inspect `partial`, `applied`, `failed`,
-revision, and `role_drift`; refresh both stores before reviewing a retry.
+A coordinated role-membership change could not finish writing to inventory. Policy may have already committed a relaxation. Check the `partial`, `applied`, `failed`, revision, and `role_drift` fields, and refresh both stores before you decide whether to retry.
 
-## internal-error
+## forbidden
 
-The server encountered an internal failure. Details never expose exception or
-filesystem text.
+A principal is who a request comes from: a device, the server's seeder, or a legacy device. This code means the authenticated principal is not allowed to do this operation.
 
 ## incomparable_role_change
 
-The server cannot classify the requested membership move safely as one
-tightening or relaxation. This applies to a move between two roles whose
-permitted sets do not nest; split such a change into separately previewed
-steps. A device that policy does not currently place in any role can always
-enter a restricted role (classified as a tightening) and can always be cleared
-back to no role (a relaxation). A first assignment into an unrestricted role,
-and a device whose declared and enforced roles differ (`role_drift`), are
-classified like any other move. A first assignment cannot share one bulk or
-CSV import with a relaxation; apply relaxations separately.
+The server cannot safely tell whether the requested role change is a tightening or a relaxation of access. Split the change into separate, individually previewed steps. See [Control which devices share with each other](user-guide/roles.md) for how role changes are classified.
+
+## instruction-device-forbidden
+
+403: a valid, current catalog token belongs to a different device than the one in the request path. An invalid, revoked, out-of-date, or unsupported credential instead returns 401 [`catalog-authentication-required`](#catalog-authentication-required). On a 401 or 403 for an instruction, the device agent tries one refresh and reports `instr_forbidden`. If the server has revoked the device, rotating its key does not fix this.
+
+## instruction-keylist-missing
+
+404: no published instruction key list exists yet. Complete the root-signed key list setup; the device agent keeps its last usable evidence and retries at the next check.
+
+## instruction-keylist-unavailable
+
+An instruction is the signed message the server sends a device saying which images to stage and how. 503: the root-signed key list needed to trust an instruction cannot be read or checked. Fix the problem with who holds the private keys, or with server state, and retry at the next check; the retry hint is 10 seconds. The device keeps using its last usable cached key list until then.
+
+## instruction-rate-limit-exceeded
+
+429: the shared per-device bucket for instruction and key-list requests is empty. It allows a burst of 2 requests and refills one every 10 seconds. Wait for the `Retry-After` hint before the next check; do not add your own retry loop.
+
+For how the device agent behaves after an instruction failure, see [Data formats and states](reference/state-and-data.md). To replace or recover the signing keys, see [Replace or recover signing keys](admin-guide/instruction-keys.md#instruction-root-ceremony-and-recovery).
+
+## instruction-stamp-missing
+
+404: the device has no instruction stamp, or its fixed role file is missing. Check the state of whatever produces the stamp, fix the source, then run `iris-instr-key restamp <device_id>`.
+
+## instruction-state-unavailable
+
+503: the policy stamp, role file, key, or the record of who holds the private keys cannot be safely read or checked. Look at the status of whichever part produced it and repair the source; do not send an empty stamp instead. The retry hint is 10 seconds.
+
+## internal-error
+
+The server hit an internal failure. The response never includes exception text or file paths.
 
 ## invalid-authorization-request
 
-The Console tier's header-only authorization preflight was malformed.
+The Console container's header-only authorization check found the request malformed.
 
 ## invalid-content-length
 
-The supplied `Content-Length` is not a valid non-negative integer.
-
-## invalid_policy
-
-A role definition, role graph, network, or QoS value violates the closed policy
-schema. Correct the named field and validate the complete candidate again.
-
-## invalid_roles_csv
-
-A roles CSV sent to `POST /api/v1/peer-policy/roles/import-csv` does not follow
-the `iris-role` grammar: a missing `role` header, an unknown column, a row
-without a role, a duplicate role, a non-integer QoS cell, or a malformed
-network. The problem's `detail` names the row or field. Nothing was written;
-fix the file and preview again. Policy refusals inside a well-formed file
-(unknown peer, reserved name, isolated role) keep their own codes.
-
-## invalid_policy_request
-
-A role/QoS route received an unknown query key, unknown body field, malformed
-JSON shape, or a value of the wrong request type. Send only the documented
-route fields.
+The `Content-Length` header is not a valid non-negative integer.
 
 ## invalid-request
 
@@ -266,64 +163,67 @@ The request syntax or parameters are invalid.
 
 ## invalid-request-body
 
-The request body cannot be decoded as the schema required by the operation.
+The request body does not match the schema the operation requires.
 
 ## invalid-tracker-auth-selector
 
-The catalog torrent request selected an unsupported tracker authentication
-mode.
+The catalog torrent request asked for a tracker authentication mode IRIS does not support.
+
+## invalid_policy
+
+A role definition, role graph, network value, or QoS value breaks the fixed policy schema. Fix the named field and validate the whole candidate again.
+
+## invalid_policy_request
+
+A role or QoS route received an unknown query parameter, an unknown body field, a malformed JSON shape, or a value of the wrong type. Send only the fields the route documents.
+
+## invalid_roles_csv
+
+A roles CSV file sent to `POST /api/v1/peer-policy/roles/import-csv` does not follow the required format. The file might have a missing `role` header, an unknown column, a row with no role, a duplicate role, a non-integer QoS cell, or a malformed network value. The `detail` field names the row or field. Nothing is written; fix the file and preview again. A well-formed file can still fail for a policy reason, such as an unknown peer, a reserved name, or an isolated role; those keep their own codes.
 
 ## invalid_schedule
 
-A schedule definition, patch, or CSV row failed validation. The schema is
-closed: unknown fields, an unknown verb, a payload that does not match the
-verb, an out-of-range window, or an unknown IANA time zone are all refused
-before anything durable is written. Nothing was changed.
+A schedule definition, patch, or CSV row failed validation. The schema is fixed and rejects these before anything is written: an unknown field, an unknown verb, a payload that does not match the verb, an out-of-range window, or an unrecognized time zone. Nothing changed.
 
 ## management-api-unavailable
 
-The Console tier cannot establish its authenticated, CA-verified management
-API hop.
+The Console container cannot open its authenticated, CA-verified connection to the management API.
 
 ## management-authentication-required
 
-The internal operation requires the current or bounded-overlap management
-bearer credential.
+The internal operation needs the current management bearer credential, or one still inside its short overlap window after a rotation.
 
 ## method-not-allowed
 
-The resource exists but does not support the requested HTTP method. Consult
-the response's `Allow` header.
+The resource exists but does not support this HTTP method. Check the response's `Allow` header for the methods it does support.
 
 ## mixed_role_direction
 
-One bulk role request combines devices whose changes tighten policy with
-devices whose changes relax it. Split them into directionally consistent bulk
-requests so the two-store write order remains safe.
+One bulk role request mixes devices whose change tightens access with devices whose change relaxes it. Split it into two requests, one for each direction, so the writes stay safe.
 
 ## observability-authentication-required
 
-The observability operation requires its independently scoped bearer
-credential.
+The observability operation needs its own, separately scoped bearer credential.
 
 ## operation_backlog_full
 
-The tracker has not acknowledged 256 peer-policy operations. A backlog observed
-during normal preflight refuses before durable mutation; a Fleet-first writer
-racing after that check can still report a partial outcome. Inspect partial and
-drift fields, then repair tracker reconciliation before retrying.
+Peer policy, also called sharing policy, is the rules that say which devices may share pieces with which. The tracker has not confirmed 256 peer-policy operations yet. When the normal preflight check sees this backlog, it refuses the request before writing anything. A write already in flight can still finish with a partial outcome. Check the partial and drift fields, then let the tracker catch up before you retry.
 
 ## payload-too-large
 
-The declared or received request body exceeds that operation's documented
-limit.
+The request body, declared or received, is larger than this operation's documented limit.
+
+## policy_error
+
+503: role, QoS, or schedule coordination cannot safely use policy that is out of date. The legacy quarantine check keeps its own 422 response for the same condition. Repair the current policy before you retry; an old cached copy does not authorize new changes.
+
+## policy_fail_closed
+
+503: no trustworthy peer policy is available, so the change is refused. Restore the current policy and check that it is healthy before you retry.
 
 ## policy_unavailable
 
-The role/QoS interface cannot use authoritative policy or a required policy
-store. This can be a pre-write degraded/fail-closed refusal, or it can wrap a
-Fleet-first `policy_write_failed` after Fleet changed. Inspect partial outcome,
-revision, and drift fields, then refresh both stores before retrying.
+The role or QoS interface cannot use the current policy, or a policy store it needs is unavailable. This can be a refusal before any write happens, or it can follow a successful inventory write whose policy write then failed. Check the partial outcome, revision, and drift fields, then refresh both stores before you retry.
 
 ## precondition-failed
 
@@ -331,19 +231,15 @@ An HTTP precondition such as `If-Match` did not match current state.
 
 ## precondition_failed
 
-The role/QoS route's header-time CAS check did not receive exactly the current
-strong peer-policy ETag. Weak, wildcard, duplicate, missing-current, and stale
-values fail. Reread and preview again.
+The role or QoS route's compare-and-swap check did not receive exactly the current, strong peer-policy ETag in `If-Match`. A weak, wildcard, duplicate, missing-current, or stale value fails. Read the current policy again and preview your change again.
 
 ## precondition_required
 
-The role or QoS mutation omitted the current strong peer-policy `If-Match`.
+The role or QoS change left out the required `If-Match` header carrying the current, strong peer-policy ETag.
 
 ## principal_unresolvable
 
-Pair explanation could not resolve one requested typed principal to exactly one
-fresh, unambiguous endpoint address. Wait for a fresh announce or repair shared
-attribution; the route never guesses from the inventory address.
+The pair-explanation lookup could not resolve one requested principal to exactly one fresh, unambiguous address. Wait for a fresh announce, or fix shared attribution; this route never guesses an address from inventory.
 
 ## range-not-satisfiable
 
@@ -351,24 +247,13 @@ The requested byte range cannot be served.
 
 ## rate-limit-exceeded
 
-The caller exceeded an operation's rate limit. Retry only after the duration
-in `Retry-After`.
+The caller exceeded an operation's rate limit. Retry only after the duration in `Retry-After`.
 
 ## reconciliation_required
 
-Not an HTTP problem type but the `error_category` an IOx onboard, undeploy, or
-forced undeploy job ends with (result code 3) when the device's IOx
-verification journal is in phase `indeterminate`: an earlier attempt was cut
-off after IRIS began disabling device-global app signature verification and
-before it could restore it, so the controller refuses to guess. The job log's
-`IOx controller: predecessor recovery failed: ...` line names the record id,
-transaction id and revision. No retry clears it, Force included: restore
-verification on the device and run `reconcile-enabled` with that binding, as
-described in
-[Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run).
-The same category with `conflicting board verification obligations` is a
-different condition — two unresolved journals claim one board — and is not
-resolved by that procedure.
+This is not an HTTP problem type. It is the `error_category` an IOx onboard, undeploy, or forced undeploy job ends with when an earlier attempt was cut off partway through changing device-global app signature verification. IRIS cannot safely guess the device's state, and no retry clears it, including a forced one.
+
+A verification journal stuck in phase `indeterminate`, and two unresolved journals claiming the same device, are different conditions with different fixes. See [Recover from an interrupted job or damaged state](admin-guide/recovery.md) for both.
 
 ## request-body-not-supported
 
@@ -376,12 +261,11 @@ This operation does not accept a request body.
 
 ## request-timeout
 
-The client did not complete the request within the server's bounded deadline.
+The client did not finish sending the request within the server's deadline.
 
 ## resource-conflict
 
-The request conflicts with current resource state or reuses an idempotency key
-for a different operation.
+The request conflicts with the resource's current state, or reuses an idempotency key for a different operation.
 
 ## resource-not-found
 
@@ -389,89 +273,79 @@ The authenticated resource does not exist.
 
 ## revision_conflict
 
-Another policy writer committed after the request passed its initial ETag check
-but before the under-lock revision check. Use the returned revision/ETag to
-reread and preview; do not replay the old candidate token.
+Another policy writer committed a change after this request passed its first ETag check but before the final, locked revision check. Use the revision and ETag the response returns to reread and preview again; do not resend the old candidate token.
 
 ## role_in_use
 
-The requested role still has members or is referenced by another role. The
-response gives the member count and referring role names; remove those uses
-before deleting it.
+The requested role still has members, or another role refers to it. The response gives the member count and the referring role names; remove those uses before you delete it.
 
 ## role_isolated
 
-A role's peer list omitted the role itself. Every role must permit its own
-members, even when it permits no other role.
+A role's peer list left out the role itself. Every role must permit its own members, even when it permits no other role.
+
+## role_management_error
+
+422: the role coordinator rejected the request without a more specific code. Check the response's partial-result fields before you refresh and retry.
 
 ## role_not_found
 
-The requested definition, QoS target, or membership role does not exist.
-Refresh the role list, create the definition first if intended, and preview
-again.
+The requested definition, QoS target, or membership role does not exist. Refresh the role list, create the role first if you meant to, and preview again.
 
 ## role_reserved_name
 
-The requested role name is reserved by the policy model: `default`,
-`quarantine`, `origin`, `seeder`, or `legacy`.
+The requested role name is reserved by the policy model: `default`, `quarantine`, `origin`, `seeder`, or `legacy`.
 
 ## role_shadowed_by_assignment
 
-The device has an explicit stored-ACL assignment that would shadow its role.
-Use the audited ACL-to-role migration workflow instead of creating inert
-membership accidentally.
+The device has an explicit stored-ACL assignment that would override its role silently. Use the audited ACL-to-role migration instead of creating a role membership that would have no effect.
 
 ## route-not-found
 
-No registered API route matches the request. Authentication is checked before
-this distinction is disclosed.
+No registered API route matches the request. The server checks authentication before it discloses this.
 
 ## schedule_conflict
 
-The schedule could not be changed as asked because its authority moved: the id
-already exists, the definition changed under the request, or an occurrence and
-its evidence no longer agree with the definition being written. Reread the
-schedule and reapply the same intent.
+The schedule could not be changed as asked because it moved under you. The id already exists, the definition changed while the request was in flight, or an occurrence and its evidence no longer match the definition you are writing. Read the schedule again and reapply the same change.
 
 ## schedule_not_found
 
-No schedule with that id exists. Occurrence and outcome history stays readable
-after a definition is deleted, so a history read can still succeed where this
-does not.
+No schedule with that id exists. Occurrence and outcome history stay readable after a definition is deleted, so a history read can still succeed where this does not.
 
 ## schedule_state_unavailable
 
-The durable schedule store could not be read or a write could not be confirmed.
-A failed write may already be visible; this response does not guarantee
-rollback. Repair the storage problem, then reread the definition, ETag and
-occurrence evidence before retrying. Unreadable authority does not authorize
-new scheduled work.
+The durable schedule store could not be read, or a write could not be confirmed. A failed write may already be visible elsewhere; this response does not promise a rollback. Fix the storage problem, then reread the definition, ETag, and occurrence evidence before you retry. An unreadable store never authorizes new scheduled work.
 
 ## schedule_target_heartbeat_unavailable
 
-The target uses a filter that only the heartbeat authority can resolve (`q`,
-`telemetry`, or `status`) and that authority could not be read. The target is
-refused rather than resolved against a partial fleet.
+The schedule's target filter (`q`, `telemetry`, or `status`) can only be resolved from device heartbeat data, and that data could not be read. IRIS refuses the target rather than resolve it against a partial inventory.
 
 ## schedule_target_policy_unavailable
 
-Peer policy is unavailable or degraded, so a role-aware target cannot be
-resolved. Roles are enforced from that policy; resolving without it would
-silently ignore role membership.
+Peer policy is unavailable or out of date, so a role-aware schedule target cannot be resolved. Roles are enforced from that policy, so resolving the target without it would silently ignore role membership.
 
 ## schedule_target_status_unavailable
 
-A `status` filter needs the management job authority, which is not available in
-this context. Use a filter that does not depend on live job state.
+A `status` filter needs live management-job data that is not available here. Use a filter that does not depend on live job state.
+
+## schedule_target_unavailable
+
+503: the service that resolves a schedule's target devices is unavailable. Restore inventory and policy access, then retry the preview. Do not substitute an empty target set.
 
 ## service-unavailable
 
-A required service or state store is temporarily unavailable. Retry only after
-the duration in `Retry-After`.
+A required service or state store is temporarily unavailable. Retry only after the duration in `Retry-After`.
+
+## stale_pointer
+
+409: the key named in the stamp is no longer current or still valid. Finish or redo the committed key rotation and retry later; the retry hint is 10 seconds. The device agent reports `instr_pending` while it keeps using its last usable policy.
 
 ## telemetry-status-unavailable
 
-The authenticated telemetry status projection could not be produced.
+The authenticated telemetry status view could not be produced.
+
+## unknown_device
+
+422: the legacy quarantine request names a device that is not in inventory.
 
 ## unprocessable-content
 

@@ -220,13 +220,13 @@ that does not exist yet.
 | `build-and-publish-the-arm64-iox-package` | `install/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
 | `embedded-agent-packages` | `install/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
 | `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
-| `instruction-root-ceremony-and-recovery` | `user-guide/instruction-keys.md` "Replace the two root keys"; the pointer section on `user-guide/recovery.md` | `tools/start-compose-server.sh`, `kubernetes/README.md:426`, older script copies, CHANGELOG. |
-| `f3-offline-bootstrap-envelope-redelivery` | `user-guide/instruction-keys.md` "Deliver the first instruction file by hand" | Four in-docs pages, CHANGELOG. |
+| `instruction-root-ceremony-and-recovery` | `admin-guide/instruction-keys.md` "Replace the two root keys"; the pointer section on `admin-guide/recovery.md` | `tools/start-compose-server.sh`, `kubernetes/README.md:426`, older script copies, CHANGELOG. |
+| `f3-offline-bootstrap-envelope-redelivery` | `admin-guide/instruction-keys.md` "Deliver the first instruction file by hand" | Four in-docs pages, CHANGELOG. |
 | `device-administrator-trust-boundary` | `architecture/security-model.md` "What a device administrator can still change" | The literal link `test_docs_map.py` pins on `architecture/device-agent.md`. |
 | `device-global-package-verification` | `install/iox.md` "Signature verification is a device-wide setting" | `device/iox/README.md:148-149`, six in-docs pages. |
 | `unassigned-image-park` | `user-guide/assignments.md` "What happens to an image you unassign" | `fleet/assignments.csv.example:15`, six in-docs pages. |
-| `recover-a-volume-whose-private-modes-were-changed` | `user-guide/recovery.md` "Repair a volume whose file permissions were changed" | `kubernetes/README.md:352`. |
-| `rollback-after-the-shard-migration` | `user-guide/recovery.md` "Roll back the per-device state split" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
+| `recover-a-volume-whose-private-modes-were-changed` | `admin-guide/recovery.md` "Repair a volume whose file permissions were changed" | `kubernetes/README.md:352`. |
+| `rollback-after-the-shard-migration` | `admin-guide/recovery.md` "Roll back the per-device state split" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
 | `crash-safe-same-name-replacement` | `architecture/device-agent.md` "How the agent replaces an image without deleting it first" | `device/iox/README.md:193`, two in-docs pages. |
 
 Two test helpers already understand the attribute. `_section()` in

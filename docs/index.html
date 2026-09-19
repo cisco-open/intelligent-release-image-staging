@@ -128,7 +128,7 @@ SPDX-License-Identifier: Apache-2.0
         <article>
           <span>03</span>
           <h3>Safer change control</h3>
-          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control. On an existing management VLAN (inband), IRIS also never creates, changes, or removes that VLAN, its SVI, gateway, routes, or VRF. <a href="docs/management-type/">Management type and VLAN ownership</a>.</p>
+          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control. On an existing management VLAN (inband), IRIS also never creates, changes, or removes that VLAN, its SVI, gateway, routes, or VRF. <a href="docs/install/management-types/">Management type and VLAN ownership</a>.</p>
         </article>
       </section>
 
@@ -184,13 +184,13 @@ SPDX-License-Identifier: Apache-2.0
             IOx and IOS-XR appmgr use one device-agent container build for arm64 and amd64. Each platform has its own package and storage handling. Guest Shell runs the same agent code from a bundle.
           </p>
           <p>
-            Device families include Catalyst, Industrial Ethernet, Cisco 8000, and NCS. Available deployment paths depend on device capabilities and software; see <a href="docs/device-agents/">device requirements</a>.
+            Device families include Catalyst, Industrial Ethernet, Cisco 8000, and NCS. Available deployment paths depend on device capabilities and software; see <a href="docs/install/supported-devices/">device requirements</a>.
           </p>
           <p>
-            The server and web Console run in separate containers on one Docker host, <a href="docs/docker-hosts/">separate Docker hosts</a>, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
+            The server and web Console run in separate containers on one Docker host, <a href="docs/install/separate-docker-hosts/">separate Docker hosts</a>, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
           </p>
           <p>
-            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. See <a href="docs/network-ports/">network ports and flows</a> for firewall requirements.
+            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. An operator can turn on TLS with mutual certificates for peer transfers between devices; that setting is off by default. See <a href="docs/architecture/network-ports/">network ports and flows</a> for firewall requirements.
           </p>
         </div>
       </section>
@@ -199,17 +199,16 @@ SPDX-License-Identifier: Apache-2.0
       <section class="docs-band">
         <div>
           <p class="eyebrow">Documentation</p>
-          <h2>Setup guides and reference.</h2>
+          <h2>Guides and reference.</h2>
         </div>
         <div class="doc-links">
-          <a href="docs/getting-started/">Getting started</a>
-          <a href="docs/architecture/">Architecture</a>
-          <a href="docs/containers/">Containers</a>
-          <a href="docs/network-ports/">Network ports</a>
-          <a href="docs/security/">Security</a>
-          <a href="docs/operations/">Operations</a>
-          <a href="docs/troubleshooting/">Troubleshooting</a>
-          <a href="docs/swagger/">Published API reference</a>
+          <a href="docs/install/">Installation Guide</a>
+          <a href="docs/admin-guide/">Administration Guide</a>
+          <a href="docs/user-guide/">User Guide</a>
+          <a href="docs/architecture/">Architecture Guide</a>
+          <a href="docs/reference/">Reference</a>
+          <a href="docs/user-guide/troubleshooting/">Troubleshooting</a>
+          <a href="docs/swagger/">Browse the API</a>
         </div>
       </section>
     </main>

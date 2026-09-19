@@ -15,43 +15,99 @@ extra_javascript = ["javascripts/mermaid.mjs"]
 copyright = "Copyright &copy; 2026 Cisco Systems, Inc."
 nav = [
   { "Overview" = "index.md" },
-  { "Get started" = [
-    { "Getting Started" = "getting-started.md" },
-    { "AI-Guided PoC" = "aiagent.md" },
+  { "Architecture Guide" = [
+    { "How IRIS works" = "architecture/index.md" },
+    { "How an image reaches a device" = "architecture/data-path.md" },
+    { "Security model" = "architecture/security-model.md" },
+    { "Network ports and flows" = "architecture/network-ports.md" },
+    { "Limits" = "architecture/limitations.md" },
   ] },
-  { "How it works" = [
-    { "Architecture" = "architecture.md" },
-    { "Security Model" = "security.md" },
-    { "Network Ports and Flows" = "network-ports.md" },
+  { "Installation Guide" = [
+    { "Install IRIS" = "install/index.md" },
+    { "Before you start" = [
+      { "Check the host" = "install/check-the-host.md" },
+      { "Supported devices" = "install/supported-devices.md" },
+      { "Open the ports" = "install/open-ports.md" },
+    ] },
+    { "Get the tools and keys" = [
+      { "Download the build tools" = "install/build-tools.md" },
+      { "Build the images" = "install/build-images.md" },
+      { "Create the signing keys" = "install/signing-roots.md" },
+    ] },
+    { "Deploy the server" = [
+      { "One Docker host" = "install/one-docker-host.md" },
+      { "Separate Docker hosts" = "install/separate-docker-hosts.md" },
+      { "Kubernetes" = "install/kubernetes.md" },
+    ] },
+    { "Finish the server setup" = [
+      { "Sign in for the first time" = "install/first-sign-in.md" },
+      { "Turn on instruction signing" = "install/activate-signing.md" },
+      { "Certificates and tokens" = "install/certificates-and-tokens.md" },
+      { "Device packages" = "install/device-packages.md" },
+      { "Verify the installation" = "install/verify.md" },
+    ] },
+    { "Prepare devices" = [
+      { "Device requirements" = "install/device-requirements.md" },
+      { "Management types" = "install/management-types.md" },
+      { "Guest Shell devices" = "install/guest-shell.md" },
+      { "IOx devices" = "install/iox.md" },
+      { "IOS-XR routers" = "install/ios-xr.md" },
+    ] },
   ] },
-  { "Deploy the server" = [
-    { "Server" = "server.md" },
-    { "Container Deployments" = "containers.md" },
-    { "Docker on Separate Hosts" = "docker-hosts.md" },
-    { "Kubernetes" = "kubernetes.md" },
+  { "Administration Guide" = [
+    { "Keep IRIS running" = "admin-guide/index.md" },
+    { "Upgrade to a new release" = "admin-guide/upgrade.md" },
+    { "Back up and restore" = "admin-guide/backups.md" },
+    { "Routine maintenance" = "admin-guide/maintenance.md" },
+    { "Rotate credentials and certificates" = "admin-guide/rotations.md" },
+    { "Replace or recover signing keys" = "admin-guide/instruction-keys.md" },
+    { "Recover from damage" = "admin-guide/recovery.md" },
   ] },
-  { "Onboard devices" = [
-    { "Device Agents" = "device-agents.md" },
-    { "Management Type and VLAN Ownership" = "management-type.md" },
-    { "IOx App" = "iox.md" },
+  { "User Guide" = [
+    { "Run IRIS day to day" = "user-guide/index.md" },
+    { "Find your way around the Console" = "user-guide/console.md" },
+    { "Stage your first image" = "user-guide/first-image.md" },
+    { "Everyday tasks" = [
+      { "Publish and verify images" = "user-guide/images.md" },
+      { "Add and onboard devices" = "user-guide/onboarding.md" },
+      { "Work with many devices" = "user-guide/devices.md" },
+      { "Undeploy and retire devices" = "user-guide/undeploy.md" },
+      { "Assign images and check status" = "user-guide/assignments.md" },
+      { "Schedule maintenance windows" = "user-guide/scheduling.md" },
+      { "Control peer sharing" = "user-guide/roles.md" },
+      { "Automate with the API" = "user-guide/automation.md" },
+    ] },
+    { "Monitoring" = [
+      { "Monitor transfers and reports" = "user-guide/monitoring.md" },
+      { "Export telemetry" = "user-guide/telemetry-export.md" },
+      { "Import the dashboards" = "user-guide/dashboards.md" },
+      { "Send telemetry to Splunk" = "user-guide/splunk.md" },
+      { "Search IRIS data in Splunk" = "user-guide/splunk-searches.md" },
+    ] },
+    { "Troubleshoot" = "user-guide/troubleshooting.md" },
   ] },
-  { "Operate" = [
-    { "Web Console" = "console.md" },
-    { "Network Workflows" = "fleet-workflows.md" },
-    { "Operations" = "operations.md" },
-    { "Troubleshooting" = "troubleshooting.md" },
-    { "Observability" = "observability.md" },
-    { "Telemetry Export" = "telemetry-export.md" },
-    { "Splunk Setup" = "splunk.md" },
-    { "Dashboard Templates" = "dashboards/README.md" },
-  ] },
-  { "Reference and development" = [
-    { "Reference" = "reference.md" },
-    { "Browsable API reference" = "swagger/index.html" },
-    { "API coverage and load testing" = "api-testing.md" },
-    { "Problem type registry" = "problems.md" },
-    { "Validation" = "validation.md" },
-    { "Development" = "development.md" },
+  { "Reference" = [
+    { "Look up a setting, route or term" = "reference/index.md" },
+    { "Configuration" = [
+      { "Server configuration" = "reference/server-configuration.md" },
+      { "Device agent configuration" = "reference/device-configuration.md" },
+    ] },
+    { "APIs" = [
+      { "Console API" = "reference/console-api.md" },
+      { "Roles and sharing-policy API" = "reference/peer-policy-api.md" },
+      { "APIs the device agent uses" = "reference/device-apis.md" },
+      { "API error codes" = "problems.md" },
+      { "Browse the API" = "swagger/index.html" },
+    ] },
+    { "Data and telemetry" = [
+      { "Data formats and states" = "reference/state-and-data.md" },
+      { "Telemetry signals" = "reference/telemetry-signals.md" },
+    ] },
+    { "Lookup" = [
+      { "Helper commands" = "reference/tools.md" },
+      { "Glossary" = "reference/glossary.md" },
+      { "Cisco and third-party references" = "reference/external-references.md" },
+    ] },
   ] },
 ]
 
@@ -63,7 +119,8 @@ variant = "modern"
 # highlighted search hits. "navigation.tabs" arrives with the four guides so a
 # half-migrated preview never shows a tab bar with nothing behind it.
 features = [
-  "navigation.sections",
+  "navigation.tabs",
+  "navigation.tabs.sticky",
   "navigation.indexes",
   "navigation.path",
   "navigation.footer",
@@ -94,7 +151,6 @@ features = [
 [project.markdown_extensions.footnotes]
 
 [project.markdown_extensions.toc]
-permalink = true
 
 [project.markdown_extensions.pymdownx.details]
 
