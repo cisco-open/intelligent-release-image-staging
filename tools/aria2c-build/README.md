@@ -19,7 +19,7 @@ source:
 | Item | Where |
 | --- | --- |
 | Upstream fork and exact commit | named in `../aria2c-patches/README.md` |
-| The nine patches | `../aria2c-patches/*.patch` |
+| The ordered patches | `../aria2c-patches/*.patch` |
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
 

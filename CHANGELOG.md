@@ -133,6 +133,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- Add the aria2 source fix and forced-collision regression for one-peer swarms
+  stalling during simultaneous discovery (#331); pending the next binary handoff.
 - Reject a login if administrator credentials change during password verification.
 - Keep audit-export destinations and passwords consistent during saves.
   Interrupted updates disable exports until a complete retry; an unconfigured

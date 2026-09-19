@@ -16,7 +16,9 @@ verified against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
 
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
-2. **The nine patches in this directory**, applied in numeric order.
+2. **The patches in this directory**, applied in numeric order.
+   Patch `0010` is the issue #331 fix for the next binary handoff; the current
+   checksum-pinned artifacts contain patches `0001`–`0009`.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
 
@@ -48,6 +50,12 @@ Which patches matter to IRIS:
 | `0005-hard-bt-max-peers.patch` | Enforces the peer cap for slow/stalled downloaders and bounds outbound batches, including pending dials | **Yes** — makes the configured per-torrent cap effective (issue #168) |
 | `0006-preserve-coalesced-bt-handshake.patch` | Preserves messages received alongside the BitTorrent handshake and processes them immediately | **Yes** — prevents valid incoming peers being dropped when TCP combines messages (issue #174) |
 | `0007-seeder-goodbye-grace.patch` | Keeps a seeder↔seeder connection for 5 s after both sides are complete before the "Good Bye Seeder" drop, on both ends of the connection, instead of dropping it in the same event-loop iteration | **Yes** — `device/agent/peer-transfer-hook.sh` reads per-peer bytes over RPC after the last piece lands; upstream had already erased every seeder that fed the download, so a device fed only by the origin reported zero attributed bytes (issue #68) |
+
+Patch `0010-resolve-crossed-peer-handshakes.patch` resolves simultaneous
+outgoing handshakes at a full peer cap: the lower peer ID keeps its outgoing
+connection, and the other side releases a pending outgoing slot before admitting
+it. Established connections are retained; TLS requirements and the cap are
+unchanged. Regression: `tools/aria2c-build/test-peer-collision.py` (also `--tls`).
 
 ## Build
 
