@@ -39,6 +39,23 @@ uses calendar versioning (`YYYY.0M.0D`, with an optional same-day `.MICRO`
 suffix), not semantic versioning; maintainers decide when accumulated changes
 are cut into a dated release.
 
+## Developer documentation
+
+Contributor material lives under [`docs/dev/`](docs/dev/README.md). Start with
+[docs/dev/documentation.md](docs/dev/documentation.md) before you edit the
+manual: it holds the writing standard, the heading ids that have to survive a
+rename, how to retire a page without breaking a link, the pinned tool
+versions, and what the documentation tests check.
+
+Two directories, two audiences. `docs/zensical/` is the user manual: Zensical
+builds it and CI publishes it as the documentation site. `docs/dev/` is
+contributor material, sits outside the site's `docs_dir`, and is never built
+or published.
+
+For a development checkout and the build loop, see
+[DEVELOPMENT.md](DEVELOPMENT.md); for the test suites, see
+[TESTING.md](TESTING.md).
+
 ## Other Ways to Contribute
 
 We welcome anyone that wants to contribute to `intelligent-release-image-staging` to triage and

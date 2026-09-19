@@ -50,6 +50,8 @@ SHIP=(
   # The README links into the Zensical source tree. Ship the source, static
   # public site, and exact build inputs so those links work in the unpacked
   # release and recipients can build the same manual published by CI.
+  # `docs` is the whole tracked tree, so docs/dev/ (contributor material that
+  # the site never publishes) ships with it.
   docs zensical.toml requirements-docs.txt
   # TESTING.md tells the recipient to install these before running the suites,
   # and server/ ships the tests, so the declaration has to travel with them.

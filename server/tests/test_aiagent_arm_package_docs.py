@@ -14,9 +14,13 @@ ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs" / "zensical"
 GUIDE = (DOCS / "aiagent.md").read_text()
 ANCHOR = "#build-and-publish-the-arm64-iox-package"
-RECIPE = GUIDE.split("## Build and publish the ARM64 IOx package\n", 1)[1].split(
-    "\n## ", 1
-)[0]
+# The recipe keeps its own H2 while the manual is reorganized: the heading
+# becomes "Build the packages { #build-and-publish-the-arm64-iox-package }",
+# keeping the id above. Accept either wording, with or without the trailing
+# attribute, so this file passes before and after that move.
+RECIPE = re.split(
+    r"^## (?:Build and publish the ARM64 IOx package|Build the packages\b).*\n",
+    GUIDE, maxsplit=1, flags=re.MULTILINE)[1].split("\n## ", 1)[0]
 
 
 def test_arm_download_keeps_server_binary_and_uses_supported_flag_order():

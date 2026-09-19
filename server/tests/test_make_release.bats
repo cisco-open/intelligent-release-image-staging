@@ -42,6 +42,7 @@
 
   for path in \
     iris/docs/zensical/index.md \
+    iris/docs/dev/README.md \
     iris/zensical.toml \
     iris/requirements-docs.txt \
     iris/requirements-dev.txt \
@@ -100,7 +101,7 @@ _make_release_fixture() {
   git -C "$FIX" init -q
   git -C "$FIX" config user.email t@example.com
   git -C "$FIX" config user.name t
-  mkdir -p "$FIX/docs/zensical" "$FIX/server/certs" "$FIX/server/webroot/fonts" \
+  mkdir -p "$FIX/docs/zensical" "$FIX/docs/dev" "$FIX/server/certs" "$FIX/server/webroot/fonts" \
            "$FIX/device/xr/out" "$FIX/device/container" \
            "$FIX/tools/aria2c-patches" "$FIX/tools/aria2c-build" "$FIX/tools/licenses" "$FIX/lab" \
            "$FIX/kubernetes" "$FIX/fleet"
@@ -110,6 +111,8 @@ _make_release_fixture() {
   echo "0.0.0-test" > "$FIX/VERSION"
   cp "$repo/.gitignore" "$repo/.dockerignore" "$FIX/"
   echo "# index" > "$FIX/docs/zensical/index.md"
+  # docs/ ships whole, so the contributor folder travels with the manual.
+  echo "# dev" > "$FIX/docs/dev/README.md"
   echo "# server" > "$FIX/server/tracker.py"
   echo "PUBLIC CERT" > "$FIX/server/certs/cisco_bulkhash_verify.pem"
   echo "# device" > "$FIX/device/bootstrap.sh"

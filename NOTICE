@@ -151,7 +151,7 @@ third-party tools or runtime assets. They are not linked into the IRIS runtime:
                Self-hosted documentation assets are distributed unchanged
                under docs/zensical/swagger/. That directory preserves the
                upstream LICENSE, NOTICE, and swagger-ui-bundle.js.LICENSE.txt
-               dependency notices. SOURCE.md records the pinned release,
+               dependency notices. SOURCE.txt records the pinned release,
                checksums, and reproducible update command.
 
 ------------------------------------------------------------------------------

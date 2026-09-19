@@ -337,6 +337,12 @@ ALLOWLIST.extend([
       "receipt revision, job id, and selected dashboard time bounds as applicable."),
      "Task 23 troubleshooting guidance uses durable schedule receipts and "
      "their identity-binding evidence"),
+    ("docs/dev/documentation.md",
+     ("(the API calls it a receipt)",
+      '"receipt" outside an API route or field name'),
+     "the writing standard for contributors: the approved wording for "
+     "\"scheduled outcome\" names the API's own schedule-receipt spelling, "
+     "and the rule that every such line needs its own narrow entry here"),
 ])
 
 
@@ -357,7 +363,7 @@ TERM_FILE_ALLOWLIST = [
      "Task 23 scheduled assignment/onboarding receipt and recovery tests"),
     ("docs/zensical/swagger/swagger-ui-bundle.js", ("attachment",),
      "vendored swagger-ui-dist 5.32.15 bundle contains upstream download and "
-     "URI-scheme vocabulary; SOURCE.md records its immutable provenance. "
+     "URI-scheme vocabulary; SOURCE.txt records its immutable provenance. "
      "This term-only exemption leaves receipt and every IRIS-authored Swagger "
      "asset, including iris-openapi32.js, under the guard"),
 ]

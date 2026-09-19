@@ -52,16 +52,62 @@ nav = [
     { "Problem type registry" = "problems.md" },
     { "Validation" = "validation.md" },
     { "Development" = "development.md" },
-    { "Swagger UI Provenance" = "swagger/SOURCE.md" },
   ] },
 ]
 
 [project.theme]
 variant = "modern"
+# Sidebar sections, a landing page per section, the breadcrumb path, the
+# previous/next footer, back-to-top, anchor tracking, a table of contents that
+# follows the reader, copy buttons on code blocks, linked content tabs and
+# highlighted search hits. "navigation.tabs" arrives with the four guides so a
+# half-migrated preview never shows a tab bar with nothing behind it.
+features = [
+  "navigation.sections",
+  "navigation.indexes",
+  "navigation.path",
+  "navigation.footer",
+  "navigation.top",
+  "navigation.tracking",
+  "toc.follow",
+  "content.code.copy",
+  "content.tabs.link",
+  "search.highlight",
+]
+
+# This table REPLACES Zensical's defaults, so every extension the manual uses
+# has to be named here, including the ones that were active before.
 
 [project.markdown_extensions.admonition]
 
 [project.markdown_extensions.tables]
+
+# Heading id aliases: `## New text { #old-id }` keeps a link that something
+# outside the manual already points at.
+[project.markdown_extensions.attr_list]
+
+[project.markdown_extensions.md_in_html]
+
+# Definition lists for the glossary.
+[project.markdown_extensions.def_list]
+
+[project.markdown_extensions.footnotes]
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.details]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+combine_header_slug = true
+
+[project.markdown_extensions.pymdownx.highlight]
+
+[project.markdown_extensions.pymdownx.inlinehilite]
+
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true
 
 [project.markdown_extensions.pymdownx.superfences]
 custom_fences = [

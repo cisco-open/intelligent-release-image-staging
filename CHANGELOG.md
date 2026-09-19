@@ -32,6 +32,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   while retaining per-request content validation and independent shard writes.
 - Set the documentation site URL, build the site in strict mode in CI, and
   guard against page-name collisions between a page and a folder index.
+- Prepare the documentation site for its reorganization: theme features and
+  Markdown extensions, redirect-stub and writing-rule tests, a developer-docs
+  folder outside the site, and the Swagger provenance record kept as plain
+  text.
 
 ## [2026.09.19]
 

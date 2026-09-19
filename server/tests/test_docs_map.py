@@ -11,9 +11,10 @@ contracts in the detailed guides.
 """
 import os
 import ast
+import posixpath
 import re
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DOCS = os.path.join(REPO, "docs", "zensical")
@@ -71,9 +72,46 @@ def test_nav_page_existence_check_catches_missing_file_and_directory_target(tmp_
     assert missing == ["missing.md", "guide"]
 
 
+_FRONT_MATTER = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n?", re.DOTALL)
+
+
+def _front_matter(text):
+    """Flat `key: value` pairs from a leading `---` block, or None."""
+    match = _FRONT_MATTER.match(text)
+    if not match:
+        return None
+    fields = {}
+    for line in match.group(1).splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def _is_redirect_stub(path):
+    """True for a file that is only front matter naming Zensical's redirect
+    template. A stub is an old URL kept alive, not a page: it has no prose, no
+    nav entry, and none of the page gates below apply to it."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    fields = _front_matter(text)
+    return bool(fields) and fields.get("template") == "redirect.html"
+
+
 def _docs_pages(root):
+    """Every real page under docs_dir, at any depth. Redirect stubs are left
+    out; the recursive walk stays so a page in a subfolder cannot hide."""
     root = Path(root)
-    return {path.relative_to(root).as_posix() for path in root.rglob("*.md")}
+    return {path.relative_to(root).as_posix() for path in root.rglob("*.md")
+            if not _is_redirect_stub(path)}
+
+
+def _redirect_stubs(root):
+    root = Path(root)
+    return {path.relative_to(root).as_posix() for path in root.rglob("*.md")
+            if _is_redirect_stub(path)}
 
 
 def test_docs_page_discovery_includes_nested_pages(tmp_path):
@@ -82,7 +120,11 @@ def test_docs_page_discovery_includes_nested_pages(tmp_path):
     nested.mkdir(parents=True)
     (nested / "setup.md").touch()
     (nested / "asset.json").touch()
+    (tmp_path / "old-name.md").write_text(
+        "---\ntemplate: redirect.html\n"
+        "location: ../guide/advanced/setup/\n---\n")
     assert _docs_pages(tmp_path) == {"index.md", "guide/advanced/setup.md"}
+    assert _redirect_stubs(tmp_path) == {"old-name.md"}
 
 
 def test_every_docs_page_is_in_the_nav():
@@ -90,6 +132,83 @@ def test_every_docs_page_is_in_the_nav():
     orphans = _docs_pages(DOCS) - nav
     assert not orphans, \
         "docs pages missing from the zensical.toml nav: %s" % sorted(orphans)
+
+
+def _redirect_stub_problems(root):
+    """Check every redirect stub under `root`: the target it names must be a
+    page that exists, the stub itself must stay out of the nav, and it must
+    carry nothing but the front matter.
+
+    `location` is emitted verbatim into the rendered redirect, so a relative
+    target is read from the STUB's output directory (`old/index.html`), not
+    from the file's folder. A `#hash` in `location` would be dropped for
+    readers who arrive with one of their own, so it is refused here."""
+    root = Path(root)
+    nav = set(_nav_pages())
+    pages = {path.relative_to(root).as_posix() for path in root.rglob("*.md")}
+    problems = []
+    for stub in sorted(_redirect_stubs(root)):
+        text = (root / stub).read_text(encoding="utf-8")
+        location = (_front_matter(text) or {}).get("location", "")
+        body = _FRONT_MATTER.sub("", text, count=1).strip()
+        if body:
+            problems.append("%s: a stub carries no text, found %r"
+                            % (stub, body[:60]))
+        if stub in nav:
+            problems.append("%s: a redirect stub must not be in the nav" % stub)
+        if not location:
+            problems.append("%s: no redirect location" % stub)
+            continue
+        if "#" in location:
+            problems.append("%s: location %r must not carry a hash"
+                            % (stub, location))
+            continue
+        if location.startswith("https://"):
+            continue
+        # A page builds to <name>/index.html, so its output directory is
+        # <name>/ -- except for a folder index (index.md, README.md), which
+        # builds to the folder itself.
+        if PurePosixPath(stub).name in ("index.md", "README.md"):
+            out_dir = posixpath.dirname(stub) + "/"
+        else:
+            out_dir = stub[:-len(".md")] + "/"
+        target = posixpath.normpath(posixpath.join(out_dir, location))
+        if target.startswith(".."):
+            problems.append("%s: location %r leaves the site" % (stub, location))
+            continue
+        candidates = [target + ".md", target + "/index.md",
+                      target + "/README.md"]
+        if not any(candidate in pages for candidate in candidates):
+            problems.append("%s: location %r resolves to none of %s"
+                            % (stub, location, candidates))
+    return problems
+
+
+def test_redirect_stubs_resolve_to_existing_pages():
+    """A stub whose target was renamed again sends the reader to a 404 that no
+    build warning reports: Zensical copies `location` through untouched."""
+    problems = _redirect_stub_problems(DOCS)
+    assert not problems, "broken redirect stubs:\n%s" % "\n".join(problems)
+
+
+def test_redirect_stub_check_catches_every_way_a_stub_goes_wrong(tmp_path):
+    (tmp_path / "install").mkdir()
+    (tmp_path / "install" / "index.md").touch()
+    (tmp_path / "kept.md").write_text(
+        "---\ntemplate: redirect.html\nlocation: ../install/\n---\n")
+    (tmp_path / "gone.md").write_text(
+        "---\ntemplate: redirect.html\nlocation: ../missing/\n---\n")
+    (tmp_path / "hashed.md").write_text(
+        "---\ntemplate: redirect.html\nlocation: ../install/#start\n---\n")
+    (tmp_path / "wordy.md").write_text(
+        "---\ntemplate: redirect.html\nlocation: ../install/\n---\n\nMoved.\n")
+    # A folder index builds to the folder itself, one level up from a page.
+    (tmp_path / "boards").mkdir()
+    (tmp_path / "boards" / "README.md").write_text(
+        "---\ntemplate: redirect.html\nlocation: ../install/\n---\n")
+    problems = _redirect_stub_problems(tmp_path)
+    assert [problem.split(":", 1)[0] for problem in problems] == [
+        "gone.md", "hashed.md", "wordy.md"]
 
 
 def _docs_page_folder_collisions(root):
@@ -208,20 +327,133 @@ def test_entry_points_stay_short_and_task_oriented():
     assert len(readme.splitlines()) <= 60
 
 
-def test_index_groups_pages_under_their_own_section():
-    """Each page must be linked BELOW its section heading in index.md, so the
-    page can't drift into the wrong group."""
-    with open(os.path.join(DOCS, "index.md")) as fh:
-        index = fh.read()
-    order = [(index.index(t), t) for t in _nav_sections() if t in index]
-    order.sort()
-    for pos, title in order:
-        later = [p for p, _t in order if p > pos]
-        end = min(later) if later else len(index)
-        block = index[pos:end]
-        for page in _nav_sections()[title]:
-            assert ("(%s)" % page) in block, \
-                "index.md links %s outside its '%s' section" % (page, title)
+def test_section_landing_pages_link_every_page():
+    """A guide's landing page is the reader's map of that guide: every other
+    page in the section has to be linked from it, so a page cannot join a
+    guide without appearing in it.
+
+    Only sections whose first nav entry is a landing page (`index.md`) are
+    checked, which is every guide once its folder exists and no section
+    before that."""
+    missing = []
+    for title, pages in _nav_sections().items():
+        if not pages or PurePosixPath(pages[0]).name != "index.md":
+            continue
+        landing = pages[0]
+        folder = posixpath.dirname(landing)
+        index = _page(landing)
+        for page in pages[1:]:
+            relative = posixpath.relpath(page, folder) if folder else page
+            if ("(%s)" % relative) not in index and ("(%s)" % page) not in index:
+                missing.append("%s does not link %s (section %r)"
+                               % (landing, page, title))
+    assert not missing, "\n".join(missing)
+
+
+# Every page that existed before the manual was reorganized. Each one keeps
+# its old length, its old vocabulary and its lab detail until it is rewritten
+# or replaced by a redirect stub, and leaves this set at that moment. A page
+# created from now on is held to the writing standard from the day it lands.
+LEGACY_PAGES = frozenset({
+    "aiagent.md", "api-testing.md", "architecture.md", "console.md",
+    "containers.md", "dashboards/README.md", "development.md",
+    "device-agents.md", "docker-hosts.md", "fleet-workflows.md",
+    "getting-started.md", "index.md", "iox.md", "kubernetes.md",
+    "management-type.md", "network-ports.md", "observability.md",
+    "operations.md", "problems.md", "reference.md", "security.md",
+    "server.md", "splunk.md", "telemetry-export.md", "troubleshooting.md",
+    "validation.md",
+})
+
+
+# The writing standard lives in docs/dev/documentation.md; these are the parts
+# of it a machine can read. Matching is CASE SENSITIVE and on word boundaries,
+# which keeps "alphabetical" and the alias id
+# "f3-offline-bootstrap-envelope-redelivery" legal.
+_WRITING_RULES = (
+    (re.compile(r"\bPhase [01]\b"),
+     "a project phase label; say what the software does instead"),
+    (re.compile(r"\bF3\b"),
+     "an internal workstream label; name the behavior instead"),
+    (re.compile(r"\balpha\b"),
+     "a maturity claim; the CHANGELOG owns release history"),
+    (re.compile(r"Issue #"),
+     "a tracker issue number; it belongs in the CHANGELOG or docs/dev"),
+    (re.compile(r"\bagentinfo\b"),
+     "an agent working folder; it is not part of the deliverable"),
+    (re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+                r"|192\.168\.\d{1,3}\.\d{1,3}"
+                r"|100\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"),
+     "a private or lab address; use 192.0.2.0/24, 198.51.100.0/24 or "
+     "203.0.113.0/24"),
+    (re.compile("\u2014"),
+     "an em-dash; use a comma, a colon or a new sentence"),
+    (re.compile(r"\b(?:robust|seamless|leverage|comprehensive|delve"
+                r"|streamline)\b"),
+     "a filler word; say what actually happens"),
+)
+
+
+def _without_code_blocks(text):
+    """Drop fenced blocks. Commands, digests and file listings are not prose,
+    and holding them to the prose rules would ban a hex digest containing an
+    address-shaped run of digits."""
+    kept = []
+    fence = None
+    for line in text.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence is None:
+            if marker:
+                fence = marker.group(1)[0]
+                continue
+            kept.append(line)
+        elif marker and marker.group(1)[0] == fence:
+            fence = None
+    return "\n".join(kept)
+
+
+def test_docs_pages_follow_the_writing_rules():
+    """The machine-readable half of the writing standard: no project labels,
+    tracker numbers or lab addresses on a page an operator reads, no filler
+    words, no em-dashes, and a page short enough to finish."""
+    problems = []
+    for page in sorted(_docs_pages(DOCS)):
+        if page in LEGACY_PAGES:
+            continue
+        text = Path(DOCS, page).read_text(encoding="utf-8")
+        lines = text.splitlines()
+        if len(lines) > 400:
+            problems.append("%s: %d lines; split the page by moment of use"
+                            % (page, len(lines)))
+        if PurePosixPath(page).name == "index.md" and len(lines) >= 80:
+            problems.append("%s: %d lines; a landing page stays under 80"
+                            % (page, len(lines)))
+        prose = _without_code_blocks(text)
+        for pattern, reason in _WRITING_RULES:
+            for found in pattern.finditer(prose):
+                problems.append("%s: %r is %s"
+                                % (page, found.group(0), reason))
+    assert not problems, \
+        "docs pages break the writing standard:\n%s" % "\n".join(problems)
+
+
+def test_writing_rule_check_reads_prose_and_skips_code(tmp_path):
+    (tmp_path / "clean.md").write_text(
+        "# Stage an image\n\nCopy the image, then check its hash.\n\n"
+        "```bash\nssh admin@10.1.2.3 \"show flash:\"\n```\n")
+    (tmp_path / "loud.md").write_text(
+        "# Phase 1 rollout\n\nA robust seamless run on 10.1.2.3 \u2014 see "
+        "Issue #42.\n")
+    found = []
+    for page in sorted(_docs_pages(tmp_path)):
+        prose = _without_code_blocks(
+            (tmp_path / page).read_text(encoding="utf-8"))
+        for pattern, _reason in _WRITING_RULES:
+            found.extend("%s:%s" % (page, hit.group(0))
+                         for hit in pattern.finditer(prose))
+    assert found == ["loud.md:Phase 1", "loud.md:Issue #", "loud.md:10.1.2.3",
+                     "loud.md:\u2014", "loud.md:robust", "loud.md:seamless"]
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +482,18 @@ def _changelog_release(version, lower=False):
     return text.lower() if lower else text
 
 
+# Old file name -> its new path under docs/zensical, filled in as the manual
+# is reorganized. A test that was written against the old file keeps naming
+# it and still reads the right page; the dict doubles as the record of where
+# each page went. Pages that split into several new ones are not listed here:
+# their tests name the new path at the call site.
+PAGE_MAP = {
+    # "troubleshooting.md": "user-guide/troubleshooting.md",
+}
+
+
 def _page(name):
-    with open(os.path.join(DOCS, name)) as fh:
+    with open(os.path.join(DOCS, PAGE_MAP.get(name, name))) as fh:
         return fh.read()
 
 
@@ -1029,8 +1271,11 @@ def _assert_ordered(text, terms, message, distance=500):
 
 def _section(text, heading):
     """Return an ATX section including nested headings, ending at a peer."""
+    # `{ #old-id }` is an attr_list attribute: a heading whose text changed
+    # keeps the id something outside the manual already links to.
     match = re.search(
-        r"^(#{1,6})[ \t]+%s[ \t]*#*[ \t]*$" % re.escape(heading),
+        r"^(#{1,6})[ \t]+%s[ \t]*(?:\{[^}]*\})?[ \t]*#*[ \t]*$"
+        % re.escape(heading),
         text, re.IGNORECASE | re.MULTILINE)
     assert match, "missing section: %s" % heading
     level = len(match.group(1))
