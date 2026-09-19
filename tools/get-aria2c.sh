@@ -10,6 +10,14 @@
 #   tools/get-aria2c.sh amd64              # x86_64  (Catalyst / server)
 #   tools/get-aria2c.sh arm64              # aarch64 (IE-3400, Cortex-A53)
 #   tools/get-aria2c.sh --no-install arm64 # deliverables/ only, keep bin/
+#   tools/get-aria2c.sh --for-platforms linux/amd64,linux/arm64
+#                                          # every client that list needs, in
+#                                          # one run: amd64 into bin/, every
+#                                          # other architecture into
+#                                          # deliverables/. The list takes the
+#                                          # same form as IRIS_DEVICE_PLATFORMS
+#                                          # and defaults to it (else
+#                                          # linux/amd64) when left off.
 #
 # IRIS does not build aria2c. The binary is produced elsewhere, by the
 # aria2-next-static project, and delivered here as an artifact. That project
@@ -44,6 +52,55 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="$REPO_ROOT/bin"
 SUMS="$REPO_ROOT/tools/aria2c.sha256"
+
+# --for-platforms installs every client one deployment needs in a single run,
+# from the same comma-separated list tools/build-device-image.sh reads out of
+# IRIS_DEVICE_PLATFORMS. The amd64 client goes into bin/aria2c (what
+# server/Dockerfile COPYs); every other architecture is collected into
+# deliverables/ with bin/ left alone, because the device builders read there.
+# Each client is installed by re-entering this same script one architecture at
+# a time, so every one of them is verified against tools/aria2c.sha256 and
+# fails closed exactly as a single-architecture run does -- there is no second
+# implementation of the checks to keep in step. Per-client output is one line;
+# a failing client's full diagnostic is passed through and stops the run.
+if [ "${1:-}" = "--for-platforms" ]; then
+  shift
+  PLATFORMS="${1:-${IRIS_DEVICE_PLATFORMS:-linux/amd64}}"
+  [ "$#" -eq 0 ] || shift
+  if [ "$#" -gt 0 ]; then
+    echo "usage: $0 --for-platforms linux/amd64,linux/arm64" >&2
+    exit 2
+  fi
+  for platform in ${PLATFORMS//,/ }; do
+    case "$platform" in
+      linux/amd64|amd64|linux/x86_64|x86_64)   arch=amd64; cpu=x86_64 ;;
+      linux/arm64|arm64|linux/aarch64|aarch64) arch=arm64; cpu=aarch64 ;;
+      *) echo "unsupported platform in --for-platforms: $platform" >&2; exit 2 ;;
+    esac
+    if [ "$arch" = amd64 ]; then
+      run_args=("$arch"); dest="bin/aria2c"; verb="Installed"
+    else
+      run_args=(--no-install "$arch"); dest="deliverables/aria2c-$cpu"; verb="Collected"
+    fi
+    rc=0
+    out="$(bash "$0" "${run_args[@]}" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf '%s\n' "$out" >&2
+      echo "!! no verified aria2c client for $platform; nothing further was installed" >&2
+      exit "$rc"
+    fi
+    # A client verified somewhere this repository's builders never read (a
+    # producer checkout, an ARIA2C_DELIVERABLE elsewhere) is not collected.
+    # Say so here rather than let the device build fail closed later.
+    if [ ! -f "$REPO_ROOT/$dest" ]; then
+      printf '%s\n' "$out" >&2
+      echo "!! the $cpu client verified, but $dest was not written; hand it in there" >&2
+      exit 1
+    fi
+    echo "$verb: $dest — $cpu, sha256 matched tools/aria2c.sha256"
+  done
+  exit 0
+fi
 
 # --no-install collects and verifies the deliverable without touching
 # bin/aria2c. bin/ holds ONE client, the x86_64 one the server image copies

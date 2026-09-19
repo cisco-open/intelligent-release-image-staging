@@ -21,6 +21,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   schedule error codes, including the legacy quarantine status distinction.
   Clarify first-start configuration, recipient rotation, CSV workflows and
   dashboard evidence; repair stale operator links.
+- The one-host start script fetches and verifies the tested aria2c clients
+  itself; `get-aria2c.sh` gains `--for-platforms` so one command installs every
+  architecture in `IRIS_DEVICE_PLATFORMS`.
 
 ### Fixed
 - Normalize the Kubernetes server's private state directories after kubelet

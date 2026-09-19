@@ -22,6 +22,22 @@ setup() {
   printf '#!/usr/bin/env bash\necho "Leap status : Normal"\necho "Stratum : 5"\necho "Reference ID : C000027B"\n' > "$STUB/chronyc"
   chmod +x "$STUB/timedatectl" "$STUB/chronyc"
   cp "$BATS_TEST_DIRNAME/../setup_status.py" "$REPO/server/"
+  # The pinned aria2c clients are fetched by the bring-up itself, not by the
+  # operator. Stub the fetcher: it records how it was called and only installs
+  # when FAKE_FETCH_OK is set, so the fail-closed paths below still see a
+  # clone with no clients at all.
+  export ARIA2C_LOG="$BATS_TEST_TMPDIR/get-aria2c.log"
+  cat > "$REPO/tools/get-aria2c.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s|' "$@" >> "$ARIA2C_LOG"; printf '\n' >> "$ARIA2C_LOG"
+[ -n "${FAKE_FETCH_OK:-}" ] || exit 0
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$repo/bin" "$repo/deliverables"
+: > "$repo/bin/aria2c"
+: > "$repo/deliverables/aria2c-x86_64"
+: > "$repo/deliverables/aria2c-aarch64"
+STUB
+  chmod +x "$REPO/tools/get-aria2c.sh"
   chmod +x "$REPO/tools/start-compose-server.sh"
   : > "$REPO/server/docker-compose.yml"
   # the handed-in seeder client server/Dockerfile COPYs; present by default so
@@ -115,6 +131,46 @@ run_bringup() {
   rm -f "$REPO/bin/aria2c"
   run_bringup
   [ "$status" -eq 1 ]
+  [[ "$output" == *"bin/aria2c"* ]]
+  [[ "$output" == *"tools/get-aria2c.sh"* ]]
+  [ ! -s "$DOCKER_LOG" ] || { echo "docker ran anyway:"; cat "$DOCKER_LOG"; return 1; }
+}
+
+@test "a missing client is fetched and verified instead of handed to the operator" {
+  # The clients are prebuilt and tested per architecture; an install that stops
+  # to print a command the operator must paste is a step with no decision in
+  # it. tools/get-aria2c.sh verifies against tools/aria2c.sha256 and fails
+  # closed, so the bring-up can run it itself.
+  rm -f "$REPO/bin/aria2c"
+  FAKE_FETCH_OK=1 run_bringup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^--for-platforms|linux/amd64,linux/arm64|$' "$ARIA2C_LOG" || {
+    echo "the bring-up did not fetch the clients:"; cat "$ARIA2C_LOG" 2>/dev/null; return 1; }
+  [ -f "$REPO/bin/aria2c" ]
+}
+
+@test "IRIS_DEVICE_PLATFORMS selects which clients the bring-up installs" {
+  rm -f "$REPO/deliverables/aria2c-aarch64"
+  IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64 FAKE_FETCH_OK=1 run_bringup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^--for-platforms|linux/amd64,linux/arm64|$' "$ARIA2C_LOG" || {
+    echo "$(cat "$ARIA2C_LOG" 2>/dev/null)"; return 1; }
+  [ -f "$REPO/deliverables/aria2c-aarch64" ]
+}
+
+@test "nothing is fetched when every client is already in place" {
+  run_bringup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -f "$ARIA2C_LOG" ] || { echo "fetched anyway:"; cat "$ARIA2C_LOG"; return 1; }
+}
+
+@test "ARIA2C_NO_DOWNLOAD=1 forbids the fetch and the missing input stands" {
+  # A host that must not reach the release keeps the hand-in workflow: no
+  # fetch is attempted, and the missing-input report names the remedy.
+  rm -f "$REPO/bin/aria2c"
+  ARIA2C_NO_DOWNLOAD=1 FAKE_FETCH_OK=1 run_bringup
+  [ "$status" -eq 1 ]
+  [ ! -f "$ARIA2C_LOG" ] || { echo "fetched anyway:"; cat "$ARIA2C_LOG"; return 1; }
   [[ "$output" == *"bin/aria2c"* ]]
   [[ "$output" == *"tools/get-aria2c.sh"* ]]
   [ ! -s "$DOCKER_LOG" ] || { echo "docker ran anyway:"; cat "$DOCKER_LOG"; return 1; }
