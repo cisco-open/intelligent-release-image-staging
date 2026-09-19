@@ -6,6 +6,7 @@ from pathlib import Path
 import posixpath
 import re
 from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
 
 import pytest
 import yaml
@@ -45,7 +46,8 @@ def test_comparison_is_compact_static_and_has_distinct_piece_states():
     assert "animation" not in comparison_css
     assert "@keyframes flow" not in css and "@keyframes pulse" not in css
     assert "min-height: 420px" not in comparison_css
-    assert "max-width: 340px" in comparison_css
+    assert "max-width: 1080px" in comparison_css
+    assert "max-width: 440px" in comparison_css
     assert "gap: 10px" in comparison_css
     assert ".flow-svg .node .piece {" in comparison_css
     assert ".flow-svg .node .piece.empty {" in comparison_css
@@ -54,6 +56,43 @@ def test_comparison_is_compact_static_and_has_distinct_piece_states():
     assert "Turn on mutual TLS" in markup
     assert "HTTPS for every control path" not in markup
     assert "HTTPS for the Console and service APIs" in markup
+
+
+def test_swarm_distinguishes_coordination_from_piece_delivery():
+    markup = (ROOT / "docs/index.html").read_text()
+    source = re.search(
+        r'<svg class="flow-svg swarm-diagram".*?</svg>', markup, re.S).group()
+    svg = ET.fromstring(source)
+    assert "IRIS server" not in source
+    services = svg.find("g[@class='service-group']")
+    assert services is not None
+    assert " ".join(services.itertext()) == "Distribution container"
+    assert "One IRIS distribution container holds the tracker and origin seeder" in source
+    assert "A separate Console provides the management UI" in markup
+    assert svg.find("g[@class='node tracker']/text").text == "Tracker"
+    assert " ".join(svg.find("g[@class='node server']").itertext()) == "Origin seeder"
+    peers = svg.findall("g[@class='node']")
+    assert {peer.find("text").text for peer in peers} == {
+        "Peer " + letter for letter in "ABCDEF"}
+    assert svg.findall("path[@class='edge control']")
+    assert svg.findall("path[@class='edge seed']")
+    assert len(svg.findall("path[@class='edge peer']")) > len(peers) - 1
+    css = (ROOT / "docs/styles.css").read_text()
+    for role in ("seed", "peer"):
+        style = re.search(r"\.flow-svg \.edge\." + role + r" \{([^}]+)\}", css).group(1)
+        assert "stroke-dasharray" not in style
+    assert "stroke-dasharray" in re.search(
+        r"\.flow-svg \.edge\.control \{([^}]+)\}", css).group(1)
+
+
+def test_distribution_service_does_not_depend_on_console_container():
+    compose = yaml.safe_load((ROOT / "server/docker-compose.yml").read_text())
+    assert "console" not in compose["services"]["iris"].get("depends_on", {})
+    assert "iris" in compose["services"]["console"]["depends_on"]
+    entrypoint = (ROOT / "server/docker-entrypoint.sh").read_text()
+    assert "python3 tracker.py" in entrypoint
+    assert "seed-launch.sh" in entrypoint
+    assert "python3 management_api.py" in entrypoint
 
 
 def test_developer_index_links_every_contributor_page():

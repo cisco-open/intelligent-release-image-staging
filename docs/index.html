@@ -79,7 +79,7 @@ SPDX-License-Identifier: Apache-2.0
           <p class="eyebrow">How it works</p>
           <h2>The simple idea: devices help each other download.</h2>
           <p>
-            With a normal file server, every device asks the server for the whole image. With IRIS, the server introduces the image and devices exchange the pieces they already have. The more devices participate, the more download capacity the fleet can contribute.
+            A file server sends the whole image to every device. With IRIS, the tracker finds eligible peers, the origin seeder supplies pieces, and devices share what they already have.
           </p>
         </div>
         <div class="distribution-visual" aria-label="Traditional download compared with IRIS swarm delivery">
@@ -98,20 +98,33 @@ SPDX-License-Identifier: Apache-2.0
           </div>
           <div class="compare-card highlight">
             <h3>IRIS private swarm</h3>
-            <svg class="flow-svg" viewBox="0 0 360 220" role="img" aria-label="The IRIS server supplies image pieces and devices share them with each other; peer TLS is optional">
-              <path class="edge seed" d="M120 110 C 150 110 160 40 176 40"></path>
-              <path class="edge seed" d="M120 110 L 250 110"></path>
-              <path class="edge seed" d="M120 110 C 150 110 160 180 176 180"></path>
-              <path class="edge peer" d="M272 40 L 300 90"></path>
-              <path class="edge peer" d="M300 130 L 272 180"></path>
-              <path class="edge peer" d="M224 60 L 224 160"></path>
-              <g class="node server"><rect x="16" y="86" width="104" height="48" rx="10"></rect><text x="68" y="110">IRIS server</text></g>
-              <g class="node"><rect x="176" y="20" width="96" height="40" rx="10"></rect><text x="224" y="35">Device A</text><rect class="piece" x="188" y="46" width="16" height="5" rx="2"></rect><rect class="piece" x="208" y="46" width="16" height="5" rx="2"></rect><rect class="piece" x="228" y="46" width="16" height="5" rx="2"></rect><rect class="piece empty" x="248" y="46" width="12" height="5" rx="2"></rect></g>
-              <g class="node"><rect x="252" y="90" width="96" height="40" rx="10"></rect><text x="300" y="105">Device B</text><rect class="piece" x="264" y="116" width="16" height="5" rx="2"></rect><rect class="piece" x="284" y="116" width="16" height="5" rx="2"></rect><rect class="piece empty" x="304" y="116" width="16" height="5" rx="2"></rect><rect class="piece empty" x="324" y="116" width="12" height="5" rx="2"></rect></g>
-              <g class="node"><rect x="176" y="160" width="96" height="40" rx="10"></rect><text x="224" y="175">Device C</text><rect class="piece" x="188" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="208" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="228" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="248" y="186" width="12" height="5" rx="2"></rect></g>
-              <g class="badge"><rect x="244" y="52" width="40" height="18" rx="9"></rect><text x="264" y="61">TLS</text></g>
-            </svg>
-            <p>The server and eligible peers supply missing pieces. Devices resume interrupted downloads and verify each image before staging. Turn on mutual TLS to encrypt peer transfers.</p>
+            <div class="flow-figure">
+              <svg class="flow-svg swarm-diagram" viewBox="0 0 400 280" role="img" aria-label="One IRIS distribution container holds the tracker and origin seeder. The tracker coordinates eligible peers; the origin seeder and six interconnected devices supply image pieces. The rows are a layout, not a fixed forwarding hierarchy.">
+                <g class="service-group" aria-label="IRIS distribution container"><rect x="4" y="30" width="136" height="220" rx="12"></rect><text x="72" y="52">Distribution</text><text x="72" y="72">container</text></g>
+                <g class="peer-group"><rect x="156" y="6" width="240" height="258" rx="12"></rect><text x="276" y="24">Eligible peers</text></g>
+                <path class="edge control" d="M128 111 H144 V32 H156"></path>
+                <path class="edge seed" d="M128 183 C150 183 146 68 174 68"></path>
+                <path class="edge seed" d="M128 183 C150 183 150 148 174 148"></path>
+                <path class="edge seed" d="M128 183 C150 183 150 228 174 228"></path>
+                <path class="edge peer" d="M266 68 H290"></path>
+                <path class="edge peer" d="M266 148 H290"></path>
+                <path class="edge peer" d="M266 228 H290"></path>
+                <path class="edge peer" d="M220 92 V124"></path>
+                <path class="edge peer" d="M336 92 V124"></path>
+                <path class="edge peer" d="M220 172 V204"></path>
+                <path class="edge peer" d="M336 172 V204"></path>
+                <g class="node tracker"><rect x="16" y="90" width="112" height="42" rx="8"></rect><text x="72" y="111">Tracker</text></g>
+                <g class="node server"><rect x="16" y="154" width="112" height="58" rx="8"></rect><text x="72" y="174">Origin</text><text x="72" y="196">seeder</text></g>
+                <g class="node"><rect x="174" y="44" width="92" height="48" rx="8"></rect><text x="220" y="63">Peer A</text><rect class="piece" x="182" y="80" width="16" height="5" rx="2"></rect><rect class="piece" x="202" y="80" width="16" height="5" rx="2"></rect><rect class="piece" x="222" y="80" width="16" height="5" rx="2"></rect><rect class="piece empty" x="242" y="80" width="16" height="5" rx="2"></rect></g>
+                <g class="node"><rect x="290" y="44" width="92" height="48" rx="8"></rect><text x="336" y="63">Peer B</text><rect class="piece" x="298" y="80" width="16" height="5" rx="2"></rect><rect class="piece empty" x="318" y="80" width="16" height="5" rx="2"></rect><rect class="piece" x="338" y="80" width="16" height="5" rx="2"></rect><rect class="piece empty" x="358" y="80" width="16" height="5" rx="2"></rect></g>
+                <g class="node"><rect x="174" y="124" width="92" height="48" rx="8"></rect><text x="220" y="143">Peer C</text><rect class="piece empty" x="182" y="160" width="16" height="5" rx="2"></rect><rect class="piece" x="202" y="160" width="16" height="5" rx="2"></rect><rect class="piece" x="222" y="160" width="16" height="5" rx="2"></rect><rect class="piece empty" x="242" y="160" width="16" height="5" rx="2"></rect></g>
+                <g class="node"><rect x="290" y="124" width="92" height="48" rx="8"></rect><text x="336" y="143">Peer D</text><rect class="piece" x="298" y="160" width="16" height="5" rx="2"></rect><rect class="piece empty" x="318" y="160" width="16" height="5" rx="2"></rect><rect class="piece empty" x="338" y="160" width="16" height="5" rx="2"></rect><rect class="piece" x="358" y="160" width="16" height="5" rx="2"></rect></g>
+                <g class="node"><rect x="174" y="204" width="92" height="48" rx="8"></rect><text x="220" y="223">Peer E</text><rect class="piece" x="182" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="202" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="222" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="242" y="240" width="16" height="5" rx="2"></rect></g>
+                <g class="node"><rect x="290" y="204" width="92" height="48" rx="8"></rect><text x="336" y="223">Peer F</text><rect class="piece empty" x="298" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="318" y="240" width="16" height="5" rx="2"></rect><rect class="piece" x="338" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="358" y="240" width="16" height="5" rx="2"></rect></g>
+              </svg>
+              <div class="flow-legend" aria-hidden="true"><span class="control-key">Peer coordination</span><span class="data-key">Image pieces</span></div>
+            </div>
+            <p>Tracker and origin seeder run in one distribution container. A separate Console provides the management UI. Devices exchange image pieces with the seeder and eligible peers. Turn on mutual TLS to encrypt peer transfers.</p>
           </div>
         </div>
       </section>

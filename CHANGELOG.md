@@ -12,6 +12,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 - Tighten the website's transfer comparison into smaller, static diagrams.
+  Distinguish tracker coordination from origin seeding and six-peer sharing
+  inside a wider, tiered swarm illustration.
   Correct installation trust setup, deployment prerequisites, credential
   custody, certificate rotation, API retry limits and staging checks against
   the implementation; add executable documentation regression tests.

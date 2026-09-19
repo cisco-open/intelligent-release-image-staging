@@ -389,7 +389,7 @@ code {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   width: 100%;
-  max-width: 900px;
+  max-width: 1080px;
   gap: 1px;
   overflow: hidden;
   background: var(--line);
@@ -423,7 +423,7 @@ code {
 .flow-svg {
   display: block;
   width: 100%;
-  max-width: 340px;
+  max-width: 440px;
   justify-self: center;
   height: auto;
   overflow: visible;
@@ -462,18 +462,15 @@ code {
 
 .flow-svg .edge.pull {
   stroke: var(--coral);
-  stroke-dasharray: 5 11;
   filter: drop-shadow(0 0 6px rgba(189, 99, 255, 0.55));
 }
 
 .flow-svg .edge.seed {
-  stroke: rgba(136, 255, 0, 0.45);
-  stroke-dasharray: 3 9;
+  stroke: var(--forest);
 }
 
 .flow-svg .edge.peer {
   stroke: var(--forest);
-  stroke-dasharray: 6 10;
   stroke-width: 2.4;
   filter: drop-shadow(0 0 8px rgba(136, 255, 0, 0.5));
 }
@@ -486,20 +483,71 @@ code {
   fill: rgba(136, 255, 0, 0.18);
 }
 
-.flow-svg .badge rect {
-  fill: #100719;
-  stroke: var(--aqua);
-  stroke-width: 1.2;
+.flow-figure {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 6px;
 }
 
-.flow-svg .badge text {
+.flow-svg .edge.control {
+  stroke: var(--aqua);
+  stroke-dasharray: 4 5;
+}
+
+.flow-svg .tracker rect {
+  stroke: var(--aqua);
+}
+
+.flow-svg .tracker text {
   fill: var(--aqua);
+}
+
+.flow-svg.swarm-diagram .node text {
+  font-size: 18px;
+}
+
+.flow-svg .service-group rect,
+.flow-svg .peer-group rect {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.flow-svg .service-group text,
+.flow-svg .peer-group text {
+  fill: var(--muted);
   font-family: inherit;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.12em;
+  font-size: 16px;
+  font-weight: 600;
   text-anchor: middle;
   dominant-baseline: middle;
+}
+
+.flow-legend {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px 16px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.flow-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-legend span::before {
+  content: "";
+  width: 18px;
+  border-top: 2px solid var(--forest);
+}
+
+.flow-legend .control-key::before {
+  border-color: var(--aqua);
+  border-top-style: dashed;
 }
 
 .benefits-grid {
