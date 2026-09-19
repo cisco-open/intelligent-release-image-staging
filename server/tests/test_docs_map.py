@@ -55,6 +55,22 @@ def test_every_nav_page_exists():
             "zensical.toml nav references missing page: %s" % page
 
 
+def test_nav_page_existence_check_catches_missing_file_and_directory_target(tmp_path):
+    """Prove the os.path.isfile guard test_every_nav_page_exists relies on
+    actually flags both failure shapes Zensical itself stays silent about: a
+    nav target naming a file that does not exist, and a nav target naming a
+    directory (renders as a live sidebar link with no warning)."""
+    (tmp_path / "index.md").touch()
+    (tmp_path / "guide").mkdir()
+    (tmp_path / "guide" / "index.md").touch()
+    nav = [{"Overview": "index.md"}, {"Missing": "missing.md"},
+           {"Guide": "guide"}]
+    pages = _nav_pages(nav)
+    missing = [page for page in pages
+               if not os.path.isfile(os.path.join(tmp_path, page))]
+    assert missing == ["missing.md", "guide"]
+
+
 def _docs_pages(root):
     root = Path(root)
     return {path.relative_to(root).as_posix() for path in root.rglob("*.md")}
@@ -74,6 +90,48 @@ def test_every_docs_page_is_in_the_nav():
     orphans = _docs_pages(DOCS) - nav
     assert not orphans, \
         "docs pages missing from the zensical.toml nav: %s" % sorted(orphans)
+
+
+def _docs_page_folder_collisions(root):
+    """Pairs of (page, folder index) that Zensical builds to the SAME output
+    file, site/<name>/index.html: a <name>.md page alongside a <name>/index.md
+    or <name>/README.md folder index for the same <name>, at any depth. One of
+    the two is silently dropped with "No issues found" -- see IRIS-docs #360."""
+    pages = _docs_pages(root)
+    collisions = []
+    for page in sorted(pages):
+        if not page.endswith(".md"):
+            continue
+        stem = page[:-len(".md")]
+        for index_name in ("index.md", "README.md"):
+            folder_index = "%s/%s" % (stem, index_name)
+            if folder_index in pages:
+                collisions.append((page, folder_index))
+    return collisions
+
+
+def test_no_page_collides_with_a_folder_index():
+    """A top-level <name>.md and a <name>/index.md (or <name>/README.md)
+    render to the same URL with no build warning, so a stub or leftover page
+    silently overwrites -- or is overwritten by -- its own section index."""
+    collisions = _docs_page_folder_collisions(DOCS)
+    assert not collisions, \
+        ("docs pages collide with a folder index and publish to the same "
+         "URL: %s" % collisions)
+
+
+def test_docs_page_folder_collision_guard_fires(tmp_path):
+    (tmp_path / "architecture.md").touch()
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "architecture" / "index.md").touch()
+    (tmp_path / "reference.md").touch()
+    (tmp_path / "reference").mkdir()
+    (tmp_path / "reference" / "README.md").touch()
+    (tmp_path / "ok.md").touch()
+    assert _docs_page_folder_collisions(tmp_path) == [
+        ("architecture.md", "architecture/index.md"),
+        ("reference.md", "reference/README.md"),
+    ]
 
 
 def test_problem_registry_covers_literal_role_coordinator_codes():

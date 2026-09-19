@@ -46,7 +46,7 @@ jobs:
         run: pip install -r requirements-docs.txt
 
       - name: Build Zensical documentation
-        run: zensical build
+        run: zensical build --clean --strict
 
       - name: Combine website and documentation
         run: |

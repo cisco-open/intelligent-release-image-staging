@@ -24,6 +24,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   server publisher so Guest Shell bundles provision successfully at startup.
 - Batch concurrent cached inventory scans to reduce reader lock contention,
   while retaining per-request content validation and independent shard writes.
+- Set the documentation site URL, build the site in strict mode in CI, and
+  guard against page-name collisions between a page and a folder index.
 
 ## [2026.09.19]
 

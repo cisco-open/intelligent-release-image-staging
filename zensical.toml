@@ -6,6 +6,7 @@
 site_name = "IRIS Documentation"
 site_description = "Intelligent Release and Image Staging documentation"
 site_author = "Cisco Systems, Inc."
+site_url = "https://cisco-open.github.io/intelligent-release-image-staging/docs/"
 docs_dir = "docs/zensical"
 site_dir = "site"
 dev_addr = "127.0.0.1:8091"
