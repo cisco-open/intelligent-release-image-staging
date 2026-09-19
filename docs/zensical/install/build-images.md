@@ -13,9 +13,8 @@ a fresh checkout, for the layout you chose.
 
 - Check out the same IRIS source on every host that builds an image.
 - Install Docker Engine and Docker Compose. See [Check the host before you install](check-the-host.md).
-- On separate Docker hosts or Kubernetes, get the `aria2c` client first. See
-  [Download the tools that build device packages](build-tools.md). On one
-  Docker host, the start script fetches it for you.
+- The tested `aria2c` clients are included in the checkout; the build scripts
+  verify them against `tools/aria2c.sha256`.
 - Run every command from the root of the checkout.
 
 ## Build the images
@@ -23,9 +22,8 @@ a fresh checkout, for the layout you chose.
 ### On one Docker host
 
 Skip this. [Install on one Docker host](one-docker-host.md) runs
-`tools/start-compose-server.sh`, which builds both images for you. It fetches
-the tested amd64 `aria2c` client first and checks it against the checksum in
-`tools/aria2c.sha256`.
+`tools/start-compose-server.sh`, which builds both images for you and verifies
+the included amd64 `aria2c` client against `tools/aria2c.sha256`.
 
 ### On separate Docker hosts
 
@@ -37,12 +35,8 @@ iris_server() {
     -f server/docker-compose.server.yml "$@"
 }
 
-tools/get-aria2c.sh --for-platforms linux/amd64,linux/arm64
 iris_server build --pull
 ```
-
-Use `linux/amd64` alone when no device in your fleet is arm64. This checks
-each client against `tools/aria2c.sha256` and refuses a mismatch.
 
 On the Console host, which needs no `aria2c` client:
 
@@ -60,7 +54,6 @@ iris_console build --pull
 Build on a machine that can push to the registry your cluster pulls from:
 
 ```bash
-tools/get-aria2c.sh --for-platforms linux/amd64,linux/arm64
 docker build --pull --platform linux/amd64 \
   -f server/Dockerfile \
   -t registry.example.com/iris/server:candidate .
@@ -70,9 +63,6 @@ docker build --pull --platform linux/amd64 \
 docker push registry.example.com/iris/server:candidate
 docker push registry.example.com/iris/console:candidate
 ```
-
-Use `linux/amd64` alone when no device in your fleet is arm64. This checks
-each client against `tools/aria2c.sha256` and refuses a mismatch.
 
 `--pull` re-resolves the server image's base tag instead of reusing whatever
 the build host already cached, which can be weeks of security updates behind

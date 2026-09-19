@@ -33,7 +33,7 @@ reports](monitoring.md).
 
 The boards say **traced** and **untraced**. Traced bytes are bytes the server
 could pin to a named device. Untraced bytes were sent for certain, to a
-recipient the server cannot name.
+recipient the server did not identify.
 
 ### Let Prometheus scrape the metrics endpoint
 

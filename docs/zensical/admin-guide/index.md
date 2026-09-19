@@ -9,6 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 This guide is for the person who looks after the IRIS server: upgrades,
 backups, credentials, certificates, signing keys, and recovery when something
 breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
+See the [Overview](../index.md) for what IRIS does and does not do.
 
 !!! note
     IRIS stages images. It never installs, activates, reloads, or changes boot

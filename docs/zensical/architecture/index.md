@@ -27,7 +27,7 @@ becomes another source.
 | Telemetry service | Reads device reports stored by the catalog and combines them with tracker and seeder data for swarm views, metrics, and exports. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
-IRIS builds three images. The server image runs the catalog, the tracker, the seeder, the artifact server, the telemetry service and the management API, and holds the state. The management API also runs the instruction stamper and device-custody work as additional threads in that same process, not a new process or container. The server still supervises five processes. The Console image serves the browser application and forwards its API requests to the management API over authenticated HTTPS. The device agent image runs on IOx and IOS-XR appmgr, and Guest Shell gets the same agent as a bundle instead.
+IRIS builds three images. The server image runs the catalog, the tracker, the seeder, the artifact server, the telemetry service and the management API, and holds the state. The Console image serves the browser application and forwards its API requests to the management API over authenticated HTTPS. The device agent image runs on IOx and IOS-XR appmgr; Guest Shell runs the same agent from a bundle.
 
 ## Where the two containers run
 

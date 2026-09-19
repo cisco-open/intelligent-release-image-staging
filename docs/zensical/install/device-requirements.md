@@ -69,5 +69,5 @@ The agent checks in about every 60 seconds; a new assignment reads **Waiting for
 ## Next steps
 
 - [Prepare Catalyst 9000 series and 8000 series devices for Guest Shell](guest-shell.md)
-- [Prepare Industrial Ethernet 3000 series, Catalyst 9000 series and 8000 series devices for the IOx app](iox.md): on Catalyst 9000 series switches, IOx is the alternative to Guest Shell
+- [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 series and 8000 series devices for the IOx app](iox.md): on Catalyst 9000 series switches, IOx is the alternative to Guest Shell
 - [Prepare Cisco 8000 series and NCS routers for IOS-XR appmgr](ios-xr.md)

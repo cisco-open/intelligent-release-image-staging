@@ -11,7 +11,7 @@ device places it on its own storage. IRIS moves the file over a private swarm:
 the server hands out the first pieces, then the devices trade pieces with each
 other.
 
-## The life of one image
+## How the private torrent moves an image
 
 ```mermaid
 sequenceDiagram
@@ -54,7 +54,7 @@ starts.
 | Platform | What the device gets | Devices |
 | --- | --- | --- |
 | Guest Shell | The agent bundle, its digest file, the bootstrap script and an IOS timer | Catalyst 9000 series switches |
-| IOx app | The IOx package that holds the shared container image | Catalyst 9000 series switches with app-hosting storage, Catalyst 8000 series routers, Industrial Ethernet 3000 series switches, IR 1100 and 1800 series routers |
+| IOx app | The IOx package that holds the shared container image | Catalyst 9000 series switches with app-hosting storage, Catalyst 8000 series routers, Industrial Ethernet switches with app hosting |
 | IOS-XR appmgr | The appmgr package that holds the same container image | Cisco 8000 series and NCS routers |
 
 The device also fetches the public catalog certificate and its own envelope,
@@ -110,7 +110,7 @@ those catalog values.
 | Torrent pieces | aria2 on every device | Checks pieces during transfer and validates saved pieces when resuming an incomplete download. |
 | SHA-256 | Shared agent, on the completed staging file | Confirms the file matches the value recorded at publication. |
 | Exact byte size | IOS-XE `dir`, or XR `stat` on the bind mount | Confirms final placement. IOS-XE copies the already-verified file; XR has downloaded directly to its final location. |
-| SHA-512 and size for an existing Guest Shell or IOx root file | Bounded IOS-XE native verification | Allows adoption when the agent cannot read the IOS root itself. IOx checks after the scratch download. |
+| SHA-512 and size for an existing Guest Shell or IOx root file | Bounded IOS-XE native verification | Confirms an existing Guest Shell or IOx root file through the native IOS commands that read it on the agent's behalf. IOx checks after the scratch download. |
 
 The server runs one more check of its own: it compares the catalog SHA-512
 with Bulk Hash, the checksum Cisco publishes for that image. See

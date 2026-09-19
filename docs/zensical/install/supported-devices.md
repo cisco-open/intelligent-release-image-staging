@@ -25,10 +25,11 @@ IRIS reaches a device over Guest Shell, IOx, or IOS-XR appmgr.
 | --- | --- | --- | --- | --- |
 | Catalyst 9000 series switches | Guest Shell | `flash:` | Your default on these switches. | The Guest Shell agent bundle, `iris-agent.tgz`. |
 | Catalyst 9000 series switches | IOx | Chosen by the live writable-media policy, normally `flash:` through the SSD share | The switch has app-hosting storage and you run IOx apps. | The amd64 IOx package, `iris-amd64.tar`. |
-| Industrial Ethernet 3000 series switches | IOx | Chosen by the live writable-media policy, normally `sdflash:` | The one path for this series. | The arm64 IOx package, `iris-arm64.tar`. |
+| Industrial Ethernet switches with app hosting | IOx | Chosen by the live writable-media policy, normally `sdflash:` | The one path for this family. | The arm64 IOx package, `iris-arm64.tar`. |
 | Catalyst 8000 series routers | Guest Shell | `bootflash:` | The agent runs on a VirtualPortGroup that IRIS manages. | The Guest Shell agent bundle, `iris-agent.tgz`. |
 | Catalyst 8000 series routers | IOx | `bootflash:` | You run IOx apps. The app attaches to the same VirtualPortGroup. | The amd64 IOx package, `iris-amd64.tar`. |
-| Cisco 8000 series and NCS routers, IOS-XR | IOS-XR appmgr | `harddisk:` | The one path for IOS-XR. One package serves both series. | The appmgr package, `iris-xr.rpm`. |
+| Cisco 8000 series routers, IOS-XR | IOS-XR appmgr | `harddisk:` | The one path for IOS-XR. Validated on a Cisco 8201. | The appmgr package, `iris-xr.rpm`. |
+| NCS-540 routers, IOS-XR | IOS-XR appmgr | `harddisk:` | The one path for IOS-XR. Package transfer, RPM checksum, registration, and app startup are validated; image staging, telemetry delivery, and undeploy are not yet validated. | The appmgr package, `iris-xr.rpm`. |
 
 On IOx and IOS-XR the agent picks the staging target itself; see
 [Data formats and states](../reference/state-and-data.md). Guest Shell keeps the
@@ -51,7 +52,7 @@ attach the agent to the same VirtualPortGroup.
   [Upgrade to a new release](../admin-guide/upgrade.md).
 - The IOx path turns device-global signature verification off for the length of
   an unsigned install, then turns it back on. Read
-  [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](iox.md#device-global-package-verification)
+  [Prepare Industrial Ethernet, Catalyst 9000 and 8000 devices for the IOx app](iox.md#device-global-package-verification)
   first.
 
 ## Which management types each path supports
@@ -63,10 +64,10 @@ your management VLAN, or through the router.
 | --- | --- | --- | --- |
 | Routed | Static | Guest Shell or IOx | Yes |
 | Inband | Static | Guest Shell | Yes |
-| Inband | Static | IOx on Industrial Ethernet 3000 or Catalyst 9000 series switches | Yes |
+| Inband | Static | IOx on Industrial Ethernet switches with app hosting or Catalyst 9000 series switches | Yes |
 | `router-routed` | Static | Guest Shell or IOx on Catalyst 8000 series routers | Yes |
 | `router-nat` | Static | Guest Shell or IOx on Catalyst 8000 series routers | Yes |
-| `xr-host` | None | IOS-XR appmgr on Cisco 8000 series and NCS routers | Yes |
+| `xr-host` | None | IOS-XR appmgr on Cisco 8000 series routers; on NCS-540 routers, only package transfer, registration, and app startup are validated (staging and undeploy are not) | Yes |
 
 !!! warning
 
@@ -86,5 +87,5 @@ your management VLAN, or through the router.
 - [What a device needs before onboarding](device-requirements.md)
 - [Choose a management type](management-types.md)
 - [Prepare Catalyst 9000 and 8000 devices for Guest Shell](guest-shell.md)
-- [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](iox.md)
-- [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](ios-xr.md)
+- [Prepare Industrial Ethernet, Catalyst 9000 and 8000 devices for the IOx app](iox.md)
+- [Prepare Cisco 8000 routers, and NCS-540 routers (partially validated), for IOS-XR appmgr](ios-xr.md)

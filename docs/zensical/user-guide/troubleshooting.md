@@ -82,11 +82,11 @@ series routers. On switches with app-hosting storage, use the IOx app instead.
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
 | Guest Shell reports `bundle rejected (trust-unreadable)` | The guest user could not read a trust file | IRIS rolls back to the previous bundle. Check guest share ownership and mount permissions, then retry onboarding. |
-| Guest Shell stages files but instructions report `verifier_missing` | The device would check the signature but the tool to do so is not installed | Check that the latest bootstrap and an architecture-matched bundle are deployed and that the bundled verifier passed its runtime probe. See [Upgrade to a new release](../admin-guide/upgrade.md). |
+| Guest Shell stages files but instructions report `verifier_missing` | The agent package is outdated or damaged: its bundled signature verifier did not install or pass its runtime probe | The Guest Shell agent bundle carries its own signature verifier, so every device checks instruction signatures once the current package is deployed. Redeploy the current bootstrap and an architecture-matched bundle. See [Upgrade to a new release](../admin-guide/upgrade.md). |
 
 ### IOx
 
-The IOx app runs on Industrial Ethernet 3000 series switches, Catalyst 8000
+The IOx app runs on Industrial Ethernet switches with app hosting, Catalyst 8000
 series routers, and Catalyst 9000 series switches with app-hosting storage.
 
 | Symptom | Likely cause | What to do |

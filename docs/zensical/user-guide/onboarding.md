@@ -63,13 +63,15 @@ profile. A CSV that lists a `device_id` twice is rejected as a whole.
 1. Open **Inventory → Add Device**.
 2. Choose the **Management type**: Routed, Inband, Router routed, Router NAT,
    or XR host. It controls which network fields the form shows.
-3. Choose the **Model series**: IE Switches, IR Routers, Catalyst Routers,
-   Catalyst Switches, NCS, or Cisco 8000 Series. It narrows the **Agent
-   install** choices. The API and CSV take exact model numbers too.
+3. Choose the **Model series**: IE Switches, Catalyst Routers, Catalyst
+   Switches, NCS, or Cisco 8000 Series. It narrows the **Agent install**
+   choices. The API and CSV take exact model numbers too.
 4. Choose **Agent install**. On Catalyst 9000 series switches the agent runs in
    Guest Shell, or in the IOx app on switches with app-hosting storage.
-   Catalyst 8000 series routers offer Guest Shell or IOx, and Cisco 8000 series
-   and NCS routers use the IOS-XR appmgr installer.
+   Catalyst 8000 series routers offer Guest Shell or IOx. Cisco 8000 series
+   and NCS-540 routers use the IOS-XR appmgr installer; on NCS-540, image
+   staging, telemetry delivery and undeploy are not yet validated. See
+   [Supported devices and platforms](../install/supported-devices.md#which-delivery-path-each-device-family-uses).
 5. For Router routed and Router NAT, fill in the VirtualPortGroup number and
    the app addressing. Router NAT also asks for the outside interface.
 6. Select the device and press **Onboard**. The job starts and streams its
@@ -78,7 +80,7 @@ profile. A CSV that lists a `device_id` twice is rejected as a whole.
 A device with no management type reads:
 
 ```text
-Inventory only — management type not chosen
+Inventory only: management type not chosen
 ```
 
 Edit that row into one of the management types before you onboard it.

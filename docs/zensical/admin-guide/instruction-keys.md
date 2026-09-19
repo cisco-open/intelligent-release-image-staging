@@ -137,8 +137,9 @@ roots need attestations within 180 days for a healthy quorum.
 3. Repeat the export, issue and import steps above with the surviving root for
    the next online certificate and keylist. No device trust change is required.
 4. Record the quorum as degraded until a replacement root and a new signed
-   device release are in place. The 180-day attestation metric can stay
-   healthy, because it cannot see a key lost in the physical world.
+   device release are in place. The 180-day attestation metric only reports
+   signed records, not physical custody, so confirm the loss with your
+   custodians directly rather than relying on that metric alone.
 
 ## If both root keys are lost
 
@@ -214,8 +215,8 @@ fleet operation.
 
 Roll back by restoring the reviewed prior bundle and its evidence as one set.
 On IOx, signature verification is a device-wide setting, not a per-app one. See
-[Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx
-app](../install/iox.md#device-global-package-verification).
+[Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000
+devices for the IOx app](../install/iox.md#device-global-package-verification).
 
 ## Deliver the first instruction file by hand { #f3-offline-bootstrap-envelope-redelivery }
 

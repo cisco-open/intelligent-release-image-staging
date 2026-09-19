@@ -41,8 +41,10 @@ the server at the address in `IRIS_HOST_IP`, and the tracker URL uses it.
 
 The agent runs in Guest Shell on Catalyst 9000 and 8000 series devices; the IOx
 app is the alternative on those with app-hosting storage. Industrial Ethernet
-3000 series switches and IR 1100 and 1800 series routers run the IOx app, and
-Cisco 8000 series and NCS routers run the IOS-XR appmgr container.
+switches with app hosting run the IOx app, and Cisco 8000 series routers run
+the IOS-XR appmgr container. NCS-540 is partially validated: package
+transfer, RPM checksum matching, and registration are confirmed; image
+staging, telemetry delivery, and undeploy validation are pending.
 
 | Port | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- |

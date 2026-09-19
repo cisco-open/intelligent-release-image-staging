@@ -23,9 +23,9 @@ file permissions, leaves IRIS stuck. Each procedure here clears one state.
 
 ## Recovering an IOx attempt cut off mid-run
 
-This covers Industrial Ethernet 3000 series switches, Catalyst 8000 series
-routers, and Catalyst 9000 series switches with app-hosting storage, where the
-IOx app replaces the Guest Shell agent. A cut-off onboard or undeploy leaves
+This covers Industrial Ethernet switches with app hosting, Catalyst 8000
+series routers, and Catalyst 9000 series switches with app-hosting storage,
+where the IOx app replaces the Guest Shell agent. A cut-off onboard or undeploy leaves
 the device's IOx verification journal in phase `indeterminate`. Every later job
 on that device, Force included, then ends in `error` with result code 3 and the
 category `reconciliation_required`. Its job log starts with
@@ -48,7 +48,7 @@ reconcile.
    The second read must report `App signature verification: enabled`.
    Verification is device-wide, so check the other IOx applications on the
    device first. See
-   [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](../install/iox.md#device-global-package-verification).
+   [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 devices for the IOx app](../install/iox.md#device-global-package-verification).
 
 3. **Reconcile the journal** from inside the server container, as the service
    user:
@@ -86,8 +86,10 @@ errors, see [API error codes (problem types)](../problems.md).
 
 ## Recovering an interrupted IOS-XR teardown
 
-This covers Cisco 8000 series and NCS routers. An interrupted undeploy leaves
-the deployment record in `needs-reconcile`, a red badge in the Console. Run
+This covers Cisco 8000 series routers on IOS-XR, validated on a Cisco 8201.
+NCS-540 registration and app startup are validated; undeploy is not yet
+validated on NCS-540. An interrupted undeploy leaves the deployment record in
+`needs-reconcile`, a red badge in the Console. Run
 undeploy again from that state, record-backed or with **Force**: each step
 re-probes the router, including the appmgr application, before acting.
 

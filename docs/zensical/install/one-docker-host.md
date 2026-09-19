@@ -97,8 +97,8 @@ the scrape token as described in
 IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
 
-The helper fetches the tested `aria2c` clients and checks them against the
-checksum in `tools/aria2c.sha256`. It then bootstraps encrypted configuration,
+The tested `aria2c` clients are included in the repository, and the helper
+verifies them against `tools/aria2c.sha256`. It then bootstraps encrypted configuration,
 installs the two public roots, starts both containers, and builds the device
 packages, including the IOS-XR appmgr package unless `IRIS_SKIP_XR` is set.
 
@@ -166,14 +166,10 @@ These commands give you the server and the Console without signing roots or
 device packages:
 
 ```bash
-tools/get-aria2c.sh --for-platforms linux/amd64
 docker compose -f server/docker-compose.yml build --pull
 docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
 docker compose -f server/docker-compose.yml up -d
 ```
-
-The first line fetches the tested amd64 client and checks it against
-`tools/aria2c.sha256`.
 
 ## Running a second stack on the same host
 

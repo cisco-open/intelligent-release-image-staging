@@ -6,13 +6,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Prepare Cisco 8000 and NCS routers for IOS-XR appmgr
 
-Onboard a Cisco 8000 series or NCS router running IOS-XR. The agent runs as
-an appmgr application and stages images on `harddisk:`.
+Onboard a Cisco 8000 series router, or an NCS-540 router, running IOS-XR. The
+agent runs as an appmgr application and stages images on `harddisk:`. On an
+NCS-540, package delivery, checksum verification, registration and app
+startup are validated; heartbeat delivery depends on catalog reachability
+from the app's VRF, and image staging, telemetry, and undeploy are not yet
+validated on this platform. Confirm each before you rely on it.
 
 Skip this page for Catalyst 9000 series switches (Guest Shell, or IOx on
 switches with app-hosting storage) and Catalyst 8000 series routers; see
-[Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](iox.md) and
-[Supported devices and platforms](supported-devices.md).
+[Prepare Industrial Ethernet, Catalyst 9000 and 8000 devices for the IOx app](iox.md)
+and [Supported devices and platforms](supported-devices.md).
 
 ## Before you start
 

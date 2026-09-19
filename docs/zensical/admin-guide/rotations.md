@@ -104,8 +104,8 @@ Every onboarding path delivers the current public certificate beside the package
 | Platform | Where the certificate lands |
 | --- | --- |
 | Guest Shell, where the agent runs on Catalyst 9000 series switches and Catalyst 8000 series routers | With the other short-lived onboarding artifacts. |
-| IOx, the alternative on Catalyst 9000 series switches with app-hosting storage and the path on Industrial Ethernet 3000 series switches and IR 1100 and 1800 series routers | In app-hosting application data, after activation and before the app starts. |
-| IOS-XR appmgr on Cisco 8000 series and NCS routers | In `harddisk:/iris-catalog.pem`, read through the container's `/hostmount` bind mount. |
+| IOx, the alternative on Catalyst 9000 series switches with app-hosting storage and the path on Industrial Ethernet switches with app hosting | In app-hosting application data, after activation and before the app starts. |
+| IOS-XR appmgr on Cisco 8000 series routers, and on NCS-540 (package transfer, RPM checksum, registration, and app startup validated; image staging, telemetry and undeploy validation pending, and no other NCS model established) | In `harddisk:/iris-catalog.pem`, read through the container's `/hostmount` bind mount. |
 
 1. Publish the new certificate.
 2. Re-onboard every device: undeploy, then onboard. See

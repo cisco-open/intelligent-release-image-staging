@@ -89,7 +89,7 @@ Raw agent states: `none`, `applied`, `lkg`, `stale_expired`, `allowlist_expired`
 
 Server display states: `applied`, `lkg`, `stale`, `rejected`, `tracker-only`, `pre-instructions`, `unknown`, `unavailable`, `pending`, `forbidden`, `floor_reset`, `none`, `revoked`.
 
-`lkg` means the device fell back to its last accepted policy (LKG, last known good; see [Glossary](glossary.md)). `verifier_missing` means the device would check the signature but the tool to do so is not installed. A device whose `instr_protocol: 1` marker is absent displays as `pre-instructions`; an `instr_protocol` value that is invalid displays as `unknown`. A durable `revoked` display overrides the agent's own state, and the underlying agent evidence stays visible beneath it. Missing/corrupt evidence reads as null/unknown and must never become healthy zero. The server measures report age itself: an old report is marked stale while the underlying agent state and its evidence stay visible.
+`lkg` means the device fell back to its last accepted policy (LKG, last known good; see [Glossary](glossary.md)). The Guest Shell agent package bundles its own signature verifier, so every device checks instruction signatures. `verifier_missing` means the device's agent package is outdated or damaged; redeploy the package to fix it. A device whose `instr_protocol: 1` marker is absent displays as `pre-instructions`; an `instr_protocol` value that is invalid displays as `unknown`. A durable `revoked` display overrides the agent's own state, and the underlying agent evidence stays visible beneath it. Missing/corrupt evidence reads as null/unknown and must never become healthy zero. The server measures report age itself: an old report is marked stale while the underlying agent state and its evidence stay visible.
 
 | Revision term | Meaning |
 | --- | --- |
@@ -131,7 +131,7 @@ Each device row, and the per-device QoS response, carries one `instruction` obje
 | Unknown key: `key_rejected` (`unknown_key`) | Retain usable LKG/defaults | One unscheduled refresh per unknown key ID, then retry later. |
 | Bad MAC: `key_rejected` (`bad_mac`) | Retain usable LKG/defaults | Record a violation and inspect integrity. There is no refresh. |
 | Bad signer or tampered bytes: `tamper_rejected` | Retain only independently usable LKG/defaults | Repair signer/keylist or envelope provenance. |
-| Missing verifier: `verifier_missing` | Tracker-only peers, verified/default QoS | Supply a supported verifier in the agent package. |
+| Outdated or damaged agent package: `verifier_missing` | Tracker-only peers, verified/default QoS | Redeploy the agent package. |
 | Bad local cache: `lkg_rejected`, `lkg_unreadable` | Defaults, tracker-only peers | Obtain a fresh envelope. |
 | Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer or transport, and retry on a later tick. |
 | aria2 session restart: `reasserted` | Reapply verified/default QoS | Check `qos_drift_count`. |

@@ -43,7 +43,7 @@ Build in the server host's checkout once the stack is healthy:
 # Build and stage both packages during server bring-up (recommended).
 tools/provision-iox-packages.sh
 
-# IE-3x00, IR 1100 and 1800 series: arm64 package served as iris-arm64.tar
+# Industrial Ethernet switches with app hosting: arm64 package served as iris-arm64.tar
 tools/stage-iox-package.sh --arch arm64
 
 # Catalyst 9000 series with app-hosting storage: amd64 package served as iris-amd64.tar
@@ -105,9 +105,7 @@ Use this procedure for every layout. Only the destination changes.
 
 ```bash
 export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
-tools/get-aria2c.sh --for-platforms "$IRIS_DEVICE_PLATFORMS"
 tools/get-ioxclient.sh
-file bin/aria2c deliverables/aria2c-aarch64
 ```
 
 IRIS ships a tested `aria2c` client for each architecture, and the script
@@ -281,8 +279,7 @@ manifest recording that output's SHA-256.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| `file` reports ARM for `bin/aria2c` | An earlier fetch by hand put the ARM client where the server's own binary belongs | Run `tools/get-aria2c.sh --for-platforms "$IRIS_DEVICE_PLATFORMS"` again: one run restores the amd64 client in `bin/` and puts every other architecture in `deliverables/`. |
-| The aarch64 client is missing, or its checksum does not match | The pinned binary was never handed in, or the download is not the pinned build | Run the script again; it checks each client against `tools/aria2c.sha256` and stops on a mismatch. Ask for a verified hand-in when you cannot download. Never replace a pin to accept an untrusted download. |
+| `bin/aria2c` is not the amd64 client, or a client does not match `tools/aria2c.sha256` | A committed client was replaced or deleted by hand | Restore it with `git checkout -- bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64`. The build scripts check every client against the checksum file and stop on a mismatch. |
 | `exec format error`, a missing handler, or a request for a binfmt digest | The amd64 build host has no arm64 emulation | Set emulation up as [Download the tools that build device packages](build-tools.md) describes. Do not pull an unpinned privileged image. |
 | No OCI exporter, or the ARM manifest is missing | The Buildx builder cannot write the archive, or only amd64 was built | Inspect the builder and set `IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64`. Do not reuse an amd64-only archive. |
 | The builder refuses to replace the existing image archive | The archive on disk came from different source | Build into the private build directory and keep the previous archive. |
@@ -293,7 +290,7 @@ manifest recording that output's SHA-256.
 ## Next steps
 
 - [Verify the installation](verify.md)
-- [Prepare IE-3x00 series and 8000 series devices for the IOx app](iox.md)
+- [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 series devices for the IOx app](iox.md)
 - [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](ios-xr.md)
 - [Add and onboard devices](../user-guide/onboarding.md)
 - [Upgrade to a new release](../admin-guide/upgrade.md)

@@ -20,8 +20,9 @@ Skip this page if you run both containers on one machine, described in
    [Check the host before you install](check-the-host.md). Check out the same
    IRIS release on both.
 2. Both container images. See
-   [Build the server and Console images](build-images.md), which fetches the
-   `aria2c` client the server build needs.
+   [Build the server and Console images](build-images.md). The tested
+   `aria2c` clients are included in the repository, and the build scripts
+   verify them.
 3. The two public signing roots on the server host, from
    [Create the two offline signing keys](signing-roots.md), and the firewall
    permits in [Open the required ports](open-ports.md#firewall-rules).

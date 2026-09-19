@@ -56,11 +56,11 @@ On Catalyst 9000 series switches and Catalyst 8000 series routers the agent runs
 
 ### IOx
 
-The IOx app is the agent on Industrial Ethernet 3000 series switches, on IR 1100 and 1800 series routers, and on Catalyst 9000 series switches and Catalyst 8000 series routers with app-hosting storage. The package carries no certificate. The device fetches the package and the current catalog certificate over HTTPS, the controller copies the certificate into the application data directory after activation, and the app starts only once it validates that copy. The enrollment token, the device id and the SSH-to-self credential are passed as run options.
+The IOx app is the agent on Industrial Ethernet switches with app hosting, and on Catalyst 9000 series switches and Catalyst 8000 series routers with app-hosting storage. The package carries no certificate. The device fetches the package and the current catalog certificate over HTTPS, the controller copies the certificate into the application data directory after activation, and the app starts only once it validates that copy. The enrollment token, the device id and the SSH-to-self credential are passed as run options.
 
 ### IOS-XR
 
-On Cisco 8000 series and NCS routers, onboarding creates the appmgr application, registers the package source, and stages the package, the catalog certificate and one working directory under `harddisk:`. Undeploy removes the recorded application, the package and those files.
+On Cisco 8000 series routers, onboarding creates the appmgr application, registers the package source, and stages the package, the catalog certificate and one working directory under `harddisk:`. Undeploy removes the recorded application, the package and those files. On NCS-540, onboarding registers the package and starts the app; image staging, telemetry delivery and undeploy are not yet validated.
 
 ### Router onboarding and teardown
 

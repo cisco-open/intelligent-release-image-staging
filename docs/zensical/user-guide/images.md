@@ -164,8 +164,8 @@ From the image's detail view, **Release** runs the `sha512` comparison again:
   quarantine lifts and the verdict becomes `verified`.
 - It still disagrees: type the image's own filename to confirm an override. The
   override is audited as a distinct action, permits assignment, and leaves the
-  verdict at `mismatch`. A later run with that same mismatch does not
-  re-quarantine the image; a different mismatch does.
+  verdict at `mismatch`. A later run with that same mismatch leaves the release
+  in place; a different mismatch re-quarantines the image.
 
 Either release also puts the image back into the origin seeder, the server's
 own copy of the image and the first source in the swarm, from the directory the

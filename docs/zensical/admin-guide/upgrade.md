@@ -114,9 +114,9 @@ script again, and the device adopts the new bundle on its next check-in.
 
 ### IOx
 
-On Industrial Ethernet 3000 series switches, Catalyst 9000 series switches with
-app-hosting storage (the alternative to Guest Shell), and Catalyst 8000 series
-routers, upgrade is undeploy, then onboard. Use the Console, or these
+On Industrial Ethernet switches with app hosting, Catalyst 9000 series switches
+with app-hosting storage (the alternative to Guest Shell), and Catalyst 8000
+series routers, upgrade is undeploy, then onboard. Use the Console, or these
 [Console API](../reference/console-api.md) routes:
 
 1. `POST /api/v1/devices/<id>/undeploy`, and wait for its job to succeed.
@@ -127,9 +127,12 @@ Re-provision a device when replacing its bootstrap configuration or enrollment m
 
 ### IOS-XR
 
-On Cisco 8000 series and NCS routers, `xr-install.sh` installs the rebuilt
+On Cisco 8000 series routers, `xr-install.sh` installs the rebuilt
 `iris-xr.rpm` and starts the application; `xr-uninstall.sh` removes it. Run
-them from the Console, or with the same two routes.
+them from the Console, or with the same two routes. On NCS-540, package
+transfer, RPM checksum verification, registration, and app startup are
+validated; heartbeat delivery, image staging, and undeploy are not yet
+validated on NCS-540.
 
 ## Upgrade the instruction format
 

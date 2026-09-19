@@ -11,9 +11,9 @@ names, helper commands and the words IRIS uses.
 
 !!! note
     IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables.
+    variables. See the [Overview](../index.md).
 
-    See [the Overview](../index.md) for the full rule.
+See [the Overview](../index.md) for the stage-only rule.
 
 ## Find the route for a task
 

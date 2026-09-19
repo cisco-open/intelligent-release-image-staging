@@ -11,6 +11,26 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Rewrite the documentation site into guides: an Overview, a short
+  Architecture Guide, an Installation Guide, an Administration Guide, a User
+  Guide and a Reference, each in its own folder with a landing page and short
+  sidebar labels. Pages are written for network engineers in plain language:
+  device families by series, no internal labels, one home per fact, and the
+  stage-only rule stated once. Every old page URL redirects to its new home;
+  the anchors listed in `docs/dev/documentation.md` keep their ids; Console
+  and server images built before this change rely on those redirects for
+  their help links until rebuilt. Contributor and validation material moves
+  to `docs/dev/`, linked from `CONTRIBUTING.md` and not published. The site
+  gains `site_url`, builds strictly in CI, and its tests learn redirect
+  stubs, a page map for moved files, page-versus-folder collisions and the
+  plain-language rules.
+- Commit the tested aria2c clients for both architectures (`bin/aria2c`,
+  `deliverables/aria2c-x86_64`, `deliverables/aria2c-aarch64`) so a fresh
+  clone or release archive is complete offline. The scripts verify them
+  against `tools/aria2c.sha256` and fail closed on a mismatch; the one-host
+  start script re-verifies them itself, and `get-aria2c.sh --for-platforms`
+  restores every architecture in one command only when a file was deleted.
+  The release archive ships the clients beside their corresponding source.
 - Reject duplicate directly routed application addresses and overlapping
   dedicated application subnets in inventory, while retaining intentional
   shared in-band networks and private router-NAT address reuse.
@@ -21,21 +41,6 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   schedule error codes, including the legacy quarantine status distinction.
   Clarify first-start configuration, recipient rotation, CSV workflows and
   dashboard evidence; repair stale operator links.
-- Reorganize the manual into an Architecture Guide, an Installation Guide, an
-  Administration Guide, a User Guide, and a Reference, each with its own
-  landing page. Every old `docs/zensical/*.md` page now redirects to its new
-  location; the anchors named in `docs/dev/documentation.md`'s alias table
-  survive at their old fragment, and every other in-page anchor moves with its
-  heading to the new page. Console and server images built before this change
-  link to the old page URLs in their help pages and rely on the redirects to
-  keep working until those images are rebuilt.
-- The one-host start script fetches and verifies the tested aria2c clients
-  itself; `get-aria2c.sh` gains `--for-platforms` so one command installs every
-  architecture in `IRIS_DEVICE_PLATFORMS`.
-- Commit the tested aria2c clients for both architectures so a fresh clone
-  needs no download; the scripts verify them against `tools/aria2c.sha256` and
-  fetch only when a file is missing.
-
 ### Fixed
 - Normalize the Kubernetes server's private state directories after kubelet
   prepares the PVC, preventing local-volume `fsGroup` handling from leaving
@@ -44,13 +49,6 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   server publisher so Guest Shell bundles provision successfully at startup.
 - Batch concurrent cached inventory scans to reduce reader lock contention,
   while retaining per-request content validation and independent shard writes.
-- Set the documentation site URL, build the site in strict mode in CI, and
-  guard against page-name collisions between a page and a folder index.
-- Prepare the documentation site for its reorganization: theme features and
-  Markdown extensions, redirect-stub and writing-rule tests, a developer-docs
-  folder outside the site, and the Swagger provenance record kept as plain
-  text.
-
 ## [2026.09.19]
 
 ### Added

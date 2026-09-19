@@ -74,7 +74,7 @@ Hands a device its onboarding files: the IOx package or IOS-XR rpm, the catalog 
 
 | Route | Auth | What it does |
 | --- | --- | --- |
-| `GET`/`HEAD /v1/devices/<device-id>/artifacts/<path>` | HTTP Basic: device id as username, current catalog token as password | Serves one file from the device's onboarding folder. See [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](../install/iox.md) and [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](../install/ios-xr.md). |
+| `GET`/`HEAD /v1/devices/<device-id>/artifacts/<path>` | HTTP Basic: device id as username, current catalog token as password | Serves one file from the device's onboarding folder. See [Prepare Industrial Ethernet, Catalyst 9000 and 8000 devices for the IOx app](../install/iox.md) and [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](../install/ios-xr.md). |
 
 Guest Shell fetches its bootstrap files, bundle and certificate from
 separate, short-lived paths that need no HTTP Basic credential. Files are

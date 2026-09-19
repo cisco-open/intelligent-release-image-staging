@@ -141,11 +141,11 @@ come from the Prometheus scrape only.
 
 ## Limits
 
+Byte-count sampling and floor-vs-census limits are covered once, in
+[Byte counts are close, not exact](../architecture/limitations.md#byte-counts-are-close-not-exact).
+
 | Limit | What it means |
 | ----- | ------------- |
-| Origin-side sampling is lossy | The origin misses bytes moved by peers that came and went between two samples, and publishes the gap as the untraced counter. |
-| A device transfer record is a floor, not a census | The completion hook sees only peers still connected at that instant, and `iris.transfer_record.capture_complete` goes false when the capture was lossy. The rows that are there stay exact. |
-| Absence of a record is not a zero | A measured zero arrives as `0`. |
 | Export is best effort | The record queue is a fixed size, so it drops records while a destination is unreachable. Export health reports the failures and the drops. |
 
 ## Related

@@ -38,7 +38,7 @@ the stored model. For the role filter and **Set role**, see
 | --- | --- |
 | Onboard | Queues an agent deployment for each selected device. |
 | Undeploy | Removes the agent using its deployment record. |
-| Adopt | Records a reviewed existing deployment; router adoption is not supported. |
+| Adopt | Records a reviewed existing deployment. |
 | Delete | Retires inventory and server-side device state. |
 | Set credential or role | Updates the selected devices. A role change previews first, so read the impact counts before you commit it. |
 | Assign images | Replaces each selected device's image set with the checked images. |

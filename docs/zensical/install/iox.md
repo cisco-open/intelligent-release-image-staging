@@ -4,10 +4,10 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app
+# Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 devices for the IOx app
 
 Use this page for a device that runs the device agent as an IOx application:
-Industrial Ethernet 3000 series switches, Catalyst 8000 series routers, and
+Industrial Ethernet switches with app hosting, Catalyst 8000 series routers, and
 Catalyst 9000 series switches with app-hosting storage. On Catalyst 9000 series
 switches the agent normally runs in [Guest Shell](guest-shell.md), and
 [Supported devices and platforms](supported-devices.md) says which path each
@@ -50,7 +50,7 @@ not blindly enable an operator-changed or unowned state.
     progress.
 
 Cisco documents signature enforcement, SD and bootflash restrictions and the
-global setting in the [IE-3x00 IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html), and the [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html) limits disabling verification to USB and SSD media.
+global setting in the [Industrial Ethernet switches with app hosting IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html), and the [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html) limits disabling verification to USB and SSD media.
 
 ## What onboarding puts on the device
 
@@ -93,13 +93,13 @@ The job stops before it writes anything when one of these checks fails.
 | Check | What the job does |
 | --- | --- |
 | Staging target | Reads `show file systems` and picks a writable disk that is not the crash volume. |
-| SD card, on Industrial Ethernet 3000 series switches with an `sdflash:` target | Reads `show sdflash: filesys` for an IOx partition, and fails with a `PREREQ:` line when the card was never formatted for IOx. |
+| SD card, on Industrial Ethernet switches with app hosting with an `sdflash:` target | Reads `show sdflash: filesys` for an IOx partition, and fails with a `PREREQ:` line when the card was never formatted for IOx. |
 | `ip routing`, on the routed management type | Checks that it is on. See [Choose a management type](management-types.md). |
 | HTTP client credentials | Refuses a device whose running configuration already carries your own `ip http client username` or `ip http client password`. |
 | Device clock | Warns when the clock is old enough to break TLS certificate validation. See [Troubleshoot: symptoms and first steps](../user-guide/troubleshooting.md#time-synchronization). |
 | SCP server claim | Refuses onboarding while an older deployment still holds an unresolved claim. See [Undeploy, retire and clean up devices](../user-guide/undeploy.md). |
 
-On Industrial Ethernet 3000 series switches and Catalyst 8000 series routers,
+On Industrial Ethernet switches with app hosting and Catalyst 8000 series routers,
 onboarding also turns on the device's SCP server with `ip scp server enable`,
 and undeploy restores that setting. That SCP traffic is addressed to the
 device itself, so the platform's default Control Plane Policing caps it at

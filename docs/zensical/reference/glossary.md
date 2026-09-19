@@ -95,7 +95,7 @@ Keep an unassigned image on the device in case it is assigned again. See
 
 ## verifier_missing
 
-The device would check the signature but the tool to do so is not installed.
+The device's agent package carries a bundled signature verifier, so it checks every instruction. `verifier_missing` means the installed package is outdated or damaged; redeploy the agent package to restore checking.
 See [Troubleshoot](../user-guide/troubleshooting.md).
 
 ## Bulk Hash

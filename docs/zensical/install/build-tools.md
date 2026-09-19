@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Get the tools that build the IRIS device packages. Run every command from your
 IRIS checkout, on the host where the Docker daemon builds packages. Skip this
-page on the Console host.
+page on the Console host. The tested aria2c clients are committed to the
+repository, and the build scripts verify them against `tools/aria2c.sha256`.
 
 ## Before you start
 
@@ -16,11 +17,11 @@ Supply what the devices you plan to onboard need.
 
 | What you will onboard | Supply first |
 | --- | --- |
-| Server and Console only, no devices yet | `aria2c` amd64 |
-| Guest Shell on Catalyst 9000 series switches and Catalyst 8000 series routers | `aria2c` amd64, the two roots |
-| IOx app on Catalyst 9000 series switches and Catalyst 8000 series routers | `aria2c` amd64, `ioxclient`, the two roots |
-| IOx app on Industrial Ethernet 3000 series switches and IR 1100 and 1800 series routers | the amd64 set, plus `aria2c` arm64 and ARM64 emulation |
-| IOS-XR appmgr on Cisco 8000 series and NCS routers | `aria2c` amd64, the two roots, Docker and network access |
+| Server and Console only, no devices yet | Nothing further. |
+| Guest Shell on Catalyst 9000 series switches and Catalyst 8000 series routers | the two roots |
+| IOx app on Catalyst 9000 series switches and Catalyst 8000 series routers | `ioxclient`, the two roots |
+| IOx app on Industrial Ethernet switches with app hosting | ARM64 emulation |
+| IOS-XR appmgr on Cisco 8000 series and NCS routers | the two roots, Docker and network access |
 
 On Catalyst 9000 series switches the agent runs in Guest Shell. On switches with
 app-hosting storage, the IOx app is the alternative.
@@ -29,23 +30,7 @@ The two roots are the public signing keys every device package embeds: see
 [Create the two offline signing keys](signing-roots.md). For which models take
 which installer, see [Supported devices](supported-devices.md).
 
-## 1. Get the aria2c client
-
-`aria2c` is the transfer client the server and every device agent run.
-
-```bash
-tools/get-aria2c.sh --for-platforms linux/amd64,linux/arm64
-```
-
-Use `linux/amd64` alone when no device in your fleet is arm64. The command
-checks each client against `tools/aria2c.sha256` and refuses a mismatch. The
-amd64 client lands in `bin/aria2c`, the arm64 client in `deliverables/`.
-
-On a host with no outbound access, set `ARIA2C_NO_DOWNLOAD=1` and place the
-clients under `deliverables/` yourself, named `aria2c-x86_64` and
-`aria2c-aarch64`.
-
-## 2. Get ioxclient
+## 1. Get ioxclient
 
 IOx device types need Cisco's IOx packaging command line tool, on Linux amd64.
 
@@ -56,7 +41,7 @@ tools/get-ioxclient.sh
 The tool installs at `tools/bin/ioxclient`, checked against
 `tools/ioxclient.sha256`. Set `IOXCLIENT` to use your own copy.
 
-## 3. Check ARM64 emulation
+## 2. Check ARM64 emulation
 
 Building the arm64 IOx package on an amd64 host needs QEMU emulation. Check the
 host:
@@ -71,13 +56,13 @@ Ubuntu and Debian, then check again. The builders can also register the handler
 for you, from the `tonistiigi/binfmt` image named by digest in
 `BINFMT_IMAGE_DIGEST`.
 
-## 4. Install skopeo and rpmbuild
+## 3. Install skopeo and rpmbuild
 
 The builders read the device image archive with `skopeo`, and the IOS-XR
 builder assembles its package with `rpmbuild`. Install both with your package
 manager. Debian and Ubuntu ship `rpmbuild` in the `rpm` package.
 
-## 5. Prepare the IOS-XR appmgr builder
+## 4. Prepare the IOS-XR appmgr builder
 
 `tools/build-xr-package.sh` wraps the device image as an appmgr RPM package
 file. Its first run clones Cisco's `ios-xr/xr-appmgr-build` into

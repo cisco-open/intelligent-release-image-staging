@@ -12,6 +12,9 @@ Read this guide once, in order. At the end you have a running server and Console
     IRIS stages images. It never installs, activates, reloads, or changes boot
     variables. See the [Overview](../index.md).
 
+!!! note
+    See the [Overview](../index.md) for what IRIS stages.
+
 ## Choose a layout
 
 | Layout | Where the Console runs | Deployment files |
@@ -46,6 +49,6 @@ Layouts cannot be mixed: the Console must reach port 9443, which only the same h
 | Your devices | What to read at step 15 |
 | --- | --- |
 | Catalyst 9000 series switches and Catalyst 8000 series routers | The agent runs in Guest Shell: [Prepare Catalyst 9000 and 8000 devices for Guest Shell](guest-shell.md). On devices with app-hosting storage, [the IOx app](iox.md) is the alternative. |
-| Industrial Ethernet 3000 series switches, IR 1100 and 1800 series routers | [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](iox.md). Step 11 builds the ARM64 package for them. |
+| Industrial Ethernet switches with app hosting | [Prepare Industrial Ethernet switches with app hosting for the IOx app](iox.md). Step 11 builds the ARM64 package for them. |
 | Cisco 8000 series and NCS routers | [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](ios-xr.md). |
 | No devices yet, the server alone | Nothing. Steps 1 to 3 and 5 to 12 are enough. |

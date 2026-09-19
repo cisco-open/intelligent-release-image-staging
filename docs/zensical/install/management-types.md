@@ -19,7 +19,7 @@ onboard it. It sets the network fields the Console asks for.
 Know whether each device is a switch or a router, and whether it has a
 management VLAN that reaches the IRIS server. On Catalyst 9000 series switches
 the agent runs in Guest Shell, or in the IOx app where the switch has
-app-hosting storage. Industrial Ethernet 3000 series switches use the IOx app.
+app-hosting storage. Industrial Ethernet switches with app hosting use the IOx app.
 
 ## Routed - IRIS-managed app network
 
@@ -64,9 +64,11 @@ open. See [Peer and sharing policy](../architecture/security-model.md).
 
 ## XR host - router's own network stack
 
-On Cisco 8000 series and NCS routers, the agent runs as an IOS-XR appmgr
-container on the router's own network stack. You provide a reachable
-management address on the router.
+On Cisco 8000 series routers, the agent runs as an IOS-XR appmgr container on
+the router's own network stack. On NCS-540, appmgr installs, registers, and
+starts, but image staging, telemetry delivery, and undeploy are not yet
+validated; other NCS models are untested. You provide a reachable management
+address on the router.
 
 ## What undeploy removes
 
@@ -86,7 +88,7 @@ After onboarding, the Console's device table shows the management type. See
 ## Next steps
 
 - [Prepare Catalyst 9000 and 8000 devices for Guest Shell](guest-shell.md)
-- [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](iox.md)
+- [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 devices for the IOx app](iox.md)
 - [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](ios-xr.md)
 - [Add and onboard devices](../user-guide/onboarding.md)
 - [Stage your first image](../user-guide/first-image.md)

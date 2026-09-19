@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## What this is for
 
+You edit roles on the Console's Devices and Roles screens or through the API; the Console has no role-policy JSON editor.
+
 IRIS moves an image over a private swarm: a device takes pieces from other
 devices. A role is a named group of devices that share with each other. Use
 roles to keep a site, a tenant or a test bench apart, and to give a group its
@@ -50,10 +52,11 @@ restricted flag, peer roles, origin access, networks and speed limit overrides.
 4. Select **Preview change**, then **Save role**. Editing any field after a
    preview discards it. **Delete** previews first too.
 
-The Console has no role-policy JSON editor. The global and per-role speed
-limits, and the tracker's `qos_state`, are API-only, through the management API
-route `PUT /api/v1/peer-policy/qos`. Pair explanations are available only
-through `GET /api/v1/peer-policy/explain`.
+The Console sets per-role speed limits in **Edit role definitions → Advanced**
+(above). The global default, per-device overrides, and the tracker's
+`qos_state` go through the management API route `PUT /api/v1/peer-policy/qos`
+only. Pair explanations are available only through
+`GET /api/v1/peer-policy/explain`.
 
 !!! warning
     Do not edit server state files by hand.
@@ -142,8 +145,8 @@ along with the ordinary ACL entry, the role membership and the speed limits.
 
 A quarantine written by an earlier release sits in the ordinary ACL instead,
 and the next policy change moves it to its own container. Such a legacy
-quarantine row has no surviving ordinary ACL, so IRIS cannot recover the
-assignment that earlier behavior already overwrote.
+quarantine row has no surviving ordinary ACL: releasing it leaves the device
+with no role or ACL assignment, and you must set one directly.
 
 ### Containment takes time
 

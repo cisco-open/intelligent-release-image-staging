@@ -109,7 +109,7 @@ Terminal per-device reports, tracker lifecycle events, peer-policy operations, a
 | `iris.transfer.bytes_unattributed_omitted` | Bytes dropped with the peer rows capped by `iris.transfer.peer_records.rows_omitted`. Keep it in its own bucket; never redistribute it among the origin, device, or unknown totals above. |
 | `iris.transfer.peer_records.rows_omitted`, `iris.transfer.bytes_from_all_senders_omitted` | Peer rows dropped at a cap, and the bytes dropped with them. |
 | `iris.transfer.peer_records.capture_complete` | `false` when the peer capture itself was lossy. |
-| `iris.download.started_at`, `iris.download.completed_at`, `iris.download.duration_seconds` | Elapsed download time, from the optional v2 report `download` block. A resume retains the original start when known. Already-present images, missing hooks, and a transfer whose start was not recorded are excluded from the average rather than reported as zero. Historical tracker-only role transitions cannot be converted to this metric. |
+| `iris.download.started_at`, `iris.download.completed_at`, `iris.download.duration_seconds` | Elapsed download time, from the optional v2 report `download` block. A resume retains the original start when known. Already-present images, missing hooks, and a transfer whose start was not recorded are excluded from the average rather than reported as zero. |
 
 !!! warning "The transfer record is a floor, not a census"
     The device only counts peers aria2 still has an open connection to when the last piece lands. `bytes_from_all_senders_total` is a lower bound, not an exact match for `completed_content_bytes`. A transfer with no usable snapshot carries no peer-transfer-record attributes at all.

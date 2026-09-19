@@ -77,7 +77,7 @@ Call `POST /api/v1/telemetry/stream` with `{"every": <1..60>, "pause":
 
 | Metric | What it means |
 | --- | --- |
-| `iris.transfer.throughput` | From the devices, sampled at the cadence above. Zero does not prove no traffic; needs the refreshed shared agent. |
+| `iris.transfer.throughput` | From the devices, sampled at the cadence above. A transfer that finishes inside one 60 s tick reads a truthful zero, taken outside the window; read `iris.seeder.torrent.upload_rate` for a lower-bound signal that is not tick-limited. |
 | `iris.seeder.torrent.upload_rate` | The origin's own aria2 poll: a **lower bound** on swarm throughput; it misses device-to-device traffic. For peer-to-peer throughput, read the measured peer-byte panels instead. |
 | `iris.download.duration_seconds` | Job acceptance to download finish, including pauses; stops before the SHA-256 check and the copy into flash. |
 | `iris.transfer.seeding_started_at` | The last of: file complete, checksum verified, tracker saw the device seeding. |

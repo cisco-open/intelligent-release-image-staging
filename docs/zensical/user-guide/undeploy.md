@@ -23,12 +23,14 @@ Undeploy runs from the deployment record, the record of what IRIS applied.
 
 ### Adopt an agent that has no deployment record
 
-A device running an agent with no record cannot be undeployed.
+A device running an agent with no record cannot run a record-driven undeploy.
+Adopt it first, or use Force undeploy instead.
 
 1. Choose **Adopt** and confirm.
 2. IRIS audits the device, writes a fresh record, and undeploy then runs from it.
 
-Catalyst 8000 series routers cannot be adopted. Use **Force**.
+Catalyst 8000 series routers use Force instead (see
+[Supported devices](../install/supported-devices.md)).
 
 ### Force undeploy
 
@@ -74,7 +76,7 @@ ssh-keygen -R '<device_ip>' -f '<state>/ssh/known_hosts'
 | Route | What it does |
 | --- | --- |
 | `POST /api/v1/devices/<id>/undeploy` | Starts the teardown job from the device's deployment record. Answers 409 with no record; send `{"force": true}` to run it anyway. |
-| `POST /api/v1/devices/<id>/adopt` | Records an existing deployment. Needs `{"acknowledge_adopt": true}`; answers 409 if an active record exists. Routers cannot be adopted. |
+| `POST /api/v1/devices/<id>/adopt` | Records an existing deployment. Needs `{"acknowledge_adopt": true}`; answers 409 if an active record exists, or if the device is a router (see Adopt an agent that has no deployment record above). |
 
 Delete and Forget host key have their own routes. See [Console API](../reference/console-api.md).
 
@@ -108,7 +110,7 @@ With no bind-mounted share, the IOx app uses the device's own SCP server to plac
 | The setting existed before onboarding, or this is an older deployment or a forced undeploy with no record | It is left unchanged. |
 | The enable was interrupted with no confirmation | Confirm SCP is no longer needed, disable it on the device, then run the recorded undeploy again. |
 
-A new onboarding is blocked while an older deployment still holds an SCP claim. See [Prepare IE-3x00, Catalyst 9000 and 8000 devices for the IOx app](../install/iox.md).
+A new onboarding is blocked while an older deployment still holds an SCP claim. See [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 devices for the IOx app](../install/iox.md).
 
 ## Uninstall from the device by hand
 
@@ -118,8 +120,8 @@ When you cannot reach the device through the Console, run its uninstall script.
 | --- | --- |
 | Catalyst 9000 series switches, where the agent runs in Guest Shell | `device/device-uninstall.sh` |
 | Catalyst 8000 series routers | `device/router-uninstall.sh` |
-| The IOx app, on Industrial Ethernet 3000 series switches and on Catalyst 9000 series switches with app-hosting storage | `device/iox/uninstall.sh` |
-| Cisco 8000 series and NCS routers, in the IOS-XR appmgr container | `device/xr-uninstall.sh` |
+| The IOx app, on Industrial Ethernet switches with app hosting and on Catalyst 9000 series switches with app-hosting storage | `device/iox/uninstall.sh` |
+| Cisco 8000 series and NCS routers, in the IOS-XR appmgr container (NCS-540 undeploy is not yet lab-validated; see [Supported devices and platforms](../install/supported-devices.md)) | `device/xr-uninstall.sh` |
 
 Arguments for each script are in [Helper commands](../reference/tools.md). On IOS-XR you can repeat an undeploy: it skips whatever is already gone.
 

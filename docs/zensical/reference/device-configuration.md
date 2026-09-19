@@ -36,7 +36,7 @@ to it too, once per [tick](glossary.md#tick).
 | `IRIS_MAX_PEERS` / `IRIS_MAX_CONCURRENT` | launcher fallback `10` / `100` | IOx, XR | Provisional peer and concurrency limits, 1 to 1000, until the first successful tick sets verified or default policy. |
 | `CAF_APP_PERSISTENT_DIR` | `/data` | IOx only | The CAF persistent root. The agent keeps its work under `<root>/iris`. |
 | `IRIS_TARGET_FS` | unset (auto-detect) | IOx only | An optional preferred IOS filesystem, such as `sdflash:`. Must be writable and not `crashinfo:`. |
-| `IRIS_SHARE_DIR` / `IRIS_SHARE_IOS_PATH` | `/mnt/share` / `usbflash1:iox_host_data_share` | IOx only | The container-side and IOS-side paths of the optional host-data share. A failing share stops placement; there is no SCP fallback. |
+| `IRIS_SHARE_DIR` / `IRIS_SHARE_IOS_PATH` | `/mnt/share` / `usbflash1:iox_host_data_share` | IOx only | The container-side and IOS-side paths of the optional host-data share. A failing share stops placement. |
 | `IRIS_DEVICE_SSH_HOST` | required on first start | IOx only | The IOS address the agent uses to SSH to itself, for read-only discovery and staged-file placement. |
 | `IRIS_DEVICE_SSH_USER` / `IRIS_DEVICE_SSH_PASS` | required on first start | IOx only | The SSH-to-self credential, kept in the owner-only configuration file. |
 | `IRIS_DEVICE_SSH_ENABLE` / `IRIS_DEVICE_SSH_PORT` | the SSH password / `22` | IOx only | An optional enable secret, and the SSH-to-self port (1 to 65535). |
@@ -59,8 +59,6 @@ The agent also reads `key = value` lines from a persistent file,
 - Guest Shell: `/flash/guest-share/iris/iris-agent.conf` by default.
 - IOx: `<CAF_APP_PERSISTENT_DIR>/iris/iris-agent.conf`, `/data/iris/iris-agent.conf` by default.
 - IOS-XR appmgr: `/hostmount/iris-work/iris-agent.conf`, on the `harddisk:` bind mount.
-
-The path is fixed per platform and cannot be overridden.
 
 | Key | Default | Effect |
 | --- | --- | --- |

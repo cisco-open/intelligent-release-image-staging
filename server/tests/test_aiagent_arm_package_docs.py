@@ -25,12 +25,13 @@ RECIPE = re.split(
 
 
 def test_arm_download_runs_the_script_once_and_never_builds_aria2c():
-    """IRIS publishes a tested aria2c client for each architecture, and
-    tools/get-aria2c.sh verifies what it installs against tools/aria2c.sha256.
-    The guide runs that script once. It never asks a reader to build aria2c,
-    and it never shows the two-command fetch whose flag order could overwrite
-    the server's own binary."""
-    assert 'tools/get-aria2c.sh --for-platforms "$IRIS_DEVICE_PLATFORMS"' in RECIPE
+    """IRIS now commits a tested aria2c client for each architecture, so the
+    guide no longer fetches or builds one: it never mentions get-aria2c,
+    never shows --no-install, and never shows the two-command fetch whose
+    flag order could overwrite the server's own binary. It still runs the
+    package builders."""
+    assert "get-aria2c" not in RECIPE
+    assert "get-aria2c" not in GUIDE
     assert "--no-install" not in GUIDE
     assert "cp tools/aria2c-build/out/aarch64/aria2c" not in GUIDE
     assert 'export ARIA2C_BIN_AMD64="$PWD/bin/aria2c"' in RECIPE

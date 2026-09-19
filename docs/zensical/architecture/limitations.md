@@ -42,13 +42,6 @@ reads, or work around the rate limits it applies. A report from a device is
 evidence the device gave you, not proof. See
 [Security model and trust boundaries](security-model.md#device-administrator-trust-boundary).
 
-## Guest Shell may have no signature checker
-
-Guest Shell checks an [instruction](../reference/glossary.md#instruction)'s
-signature with a tool that some builds do not carry. Without that tool the
-device reports [`verifier_missing`](../reference/glossary.md#verifier_missing).
-It then applies no instruction and keeps to the controls the tracker gives it.
-
 ## Rate limits apply per process
 
 The request budget the server applies to Console API calls lives inside one

@@ -37,8 +37,11 @@ the image yourself.
    platform, the series, and the management type, which is how the agent
    reaches the network: on its own address, on your management VLAN, or through
    the router. Add a credential profile, the stored account the server uses to
-   reach the device. Cisco 8000 series and NCS routers use `xr-host` and
-   `xr-appmgr`, with the app address, VLAN, SVI, VPG, and NAT fields empty. See
+   reach the device. Cisco 8000 series routers use `xr-host` and `xr-appmgr`,
+   with the app address, VLAN, SVI, VPG, and NAT fields empty. NCS-540 uses the
+   same fields; IRIS has validated package transfer and registration on it, not
+   staging or undeploy, so use a Cisco 8000 series router for this first
+   walkthrough if you have one. See
    [Supported devices and platforms](../install/supported-devices.md) for which
    path your platform uses, and
    [Choose a management type](../install/management-types.md).
@@ -72,9 +75,11 @@ image you still want assigned. See [Console API](../reference/console-api.md).
 
 ## When the agent reports verifier_missing
 
-`verifier_missing` means the device would check the signature but the tool to do
-so is not installed. The device still stages the image. Check signed-instruction
-status separately from staging status.
+`verifier_missing` means the device's agent package is missing or has a
+damaged copy of the bundled signature verifier. The Guest Shell agent package
+carries its own verifier, so redeploy the package to restore signature
+checking. The device still stages the image while this is unresolved. Check
+signed-instruction status separately from staging status.
 
 ## When the image never reaches the device
 

@@ -38,10 +38,9 @@ Run on the server host. See [Work with many devices at once](../user-guide/devic
 | `tools/stage-iox-package.sh` | Builds one architecture's package. | `--arch amd64\|arm64` (default `amd64`), `--artifacts-dir <dir>` |
 | `tools/check-package-freshness.sh` | Checks the served packages against provenance and the certificate. | `--rebuild` |
 
-Run on the Compose host once the server is healthy. `amd64` targets Catalyst 9000 series switches with app-hosting storage, where IOx is the alternative to the Guest Shell agent. `arm64` targets Industrial Ethernet 3000 series switches and IR 1100 and 1800 series routers.
+Run on the Compose host once the server is healthy. `amd64` targets Catalyst 9000 series switches with app-hosting storage, where IOx is the alternative to the Guest Shell agent. `arm64` targets Industrial Ethernet switches with app hosting.
 
-!!! warning
-    A package carries no certificate. Rotating the certificate needs devices re-onboarded, not a rebuild. See [Rotate credentials and certificates](../admin-guide/rotations.md) and [Build and publish the device packages](../install/device-packages.md).
+See [Rotate credentials and certificates](../admin-guide/rotations.md) and [Build and publish the device packages](../install/device-packages.md).
 
 ## IOx control CLI
 
