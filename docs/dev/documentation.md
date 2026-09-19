@@ -333,6 +333,27 @@ manual under `/docs/`. Both `site/` and `deploy/` are build output: they are
 git-ignored, and editing them by hand changes nothing. `docs/dev/` is outside
 `docs_dir`, so it reaches neither.
 
+The Console's Help menu links two bundled guides that are not part of the
+manual: `server/webroot/help-device.html` and `server/webroot/help-server.html`.
+Update the matching one whenever you change a troubleshooting or workflow
+step on the corresponding manual page. Both ship inside the Console image, so
+an update needs a Console image rebuild before a running deployment serves
+it.
+
+## Regenerate the OpenAPI contract
+
+The contract comes from `server/api_routes.py` and `server/openapi_contract.py`.
+After changing a route, regenerate the document and validate it:
+
+```bash
+python3 server/openapi_contract.py > docs/zensical/openapi.yaml
+python3 -m pytest server/tests/test_openapi_contract.py server/tests/test_openapi_validation.py -q
+```
+
+Those two suites check the document itself, its request and response schemas,
+and the runtime route inventory. The validator's schemas ship with the test
+dependency, so validation needs no network access.
+
 ## How the docs tests work
 
 Three suites guard the documentation. Run them with the rest of the server

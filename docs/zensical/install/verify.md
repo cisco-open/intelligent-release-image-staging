@@ -26,9 +26,9 @@ Check that your server works before the first device reaches it.
 
 ## Check the deployment for your layout
 
-Read the column for the layout you deployed and confirm every row. An
-instruction is the signed message the server sends a device saying which images
-to stage and how.
+Read the column for the layout you deployed and confirm every row. The
+"Devices and signing" row checks the state
+[Turn on instruction signing](activate-signing.md) sets up.
 
 | Check | Docker on one host | Docker on separate hosts | Kubernetes |
 | --- | --- | --- | --- |

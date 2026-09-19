@@ -11,9 +11,17 @@ What IRIS does not promise.
 ## The server runs on amd64
 
 The server image is built for amd64 (x86_64) hosts. The agent binary in the
-Guest Shell bundle is x86_64 as well. On Catalyst 9000 series switches the
-agent runs in Guest Shell, and the IOx app is the alternative on switches with
-app-hosting storage.
+Guest Shell bundle is x86_64 as well. See
+[Supported devices and platforms](../install/supported-devices.md) for which
+platform each device family uses.
+
+## A platform-family row is a delivery path, not a compatibility promise
+
+A device-family row in the delivery-path table names a path, not confirmation
+that every model and software release in that family is supported. Check
+[Device requirements](../install/device-requirements.md) before you onboard.
+Peer-assisted transfer speed depends on connectivity, peer policy, and which
+pieces are locally available. It is not a fixed performance guarantee.
 
 ## One server writes state
 
@@ -36,11 +44,10 @@ evidence the device gave you, not proof. See
 
 ## Guest Shell may have no signature checker
 
-An instruction is the signed message the server sends a device saying which
-images to stage and how. Guest Shell checks its signature with a tool that some
-builds do not carry. Without that tool the device reports `verifier_missing`:
-the device would check the signature but the tool to do so is not installed. It
-then applies no instruction and keeps to the controls the tracker gives it.
+Guest Shell checks an [instruction](../reference/glossary.md#instruction)'s
+signature with a tool that some builds do not carry. Without that tool the
+device reports [`verifier_missing`](../reference/glossary.md#verifier_missing).
+It then applies no instruction and keeps to the controls the tracker gives it.
 
 ## Rate limits apply per process
 
@@ -51,11 +58,7 @@ are listed in [Server configuration](../reference/server-configuration.md).
 
 ## The origin cannot shape one role
 
-A role is a named group of devices that share with each other. The origin
-seeder is the server's own copy of the image, the first source in the swarm. It
-can shape all of its traffic or the traffic for one image. Inside one shared
-swarm, per-role origin shaping is not expressible. The fields you can set are
-listed in [Roles and sharing-policy API](../reference/peer-policy-api.md).
+The origin seeder is the server's own copy of the image, the first source in the swarm. It can shape all of its traffic or the traffic for one [role](../reference/glossary.md#role). Inside one shared swarm, per-role origin shaping is not expressible. The fields you can set are listed in [Roles and sharing-policy API](../reference/peer-policy-api.md).
 
 ## An older agent reports less
 

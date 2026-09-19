@@ -24,8 +24,8 @@ directions. Every port below is TCP, so a firewall rule may allow any source por
 
 A device announces to the tracker to learn which peers hold an image, and asks
 the catalog for instructions: the signed messages the server sends a device
-saying which images to stage and how. The origin seeder is the server's own
-copy of the image, the first source in the swarm.
+saying which images to stage and how. Bytes then move from the
+[origin seeder](../reference/glossary.md#origin-seeder) and its peers.
 
 ## Addresses
 

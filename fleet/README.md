@@ -4,11 +4,11 @@ This directory holds the CSV templates for device inventory and image
 assignments, and the per-device installers the legacy generator writes.
 
 The operator manual is
-[Fleet workflows](../docs/zensical/fleet-workflows.md); the CSV v2 schema is
-documented in [Management type and VLAN
-ownership](../docs/zensical/management-type.md#inventory). This file is
-the directory-level orientation only — when the two disagree, the manual is
-right.
+[Add and onboard devices](../docs/zensical/user-guide/onboarding.md); the CSV v2
+schema is documented in [Inventory CSV
+columns](../docs/zensical/reference/state-and-data.md#inventory-csv-columns).
+This file is the directory-level orientation only — when the two disagree, the
+manual is right.
 
 ## Files
 
@@ -36,7 +36,7 @@ older pre-role CSV is re-imported. Clear membership explicitly with
 writes anything, and `iris-schedule export` writes the same schema back. A
 schedule is stage-only: its `kind` is `assign` or `onboard`, and neither
 installs, activates, or reloads. Weekday numbering is Monday=0. See
-[Scheduling](../docs/zensical/fleet-workflows.md#scheduling).
+[Scheduling](../docs/zensical/user-guide/scheduling.md#scheduling).
 
 `iris-role export` writes the same scalar-only schema as `roles.csv.example` and
 omits `qos_state`; restore it with `iris-role import FILE`. `iris-role define`
@@ -64,7 +64,7 @@ resolves a plan, and runs preflight before any enrollment token is minted —
 2. `cp devices.csv.example devices.csv`, fill in your devices, and import it on
    the console's Devices screen — or create the rows there directly.
 3. Onboard from the console. See
-   [Fleet workflows](../docs/zensical/fleet-workflows.md).
+   [Add and onboard devices](../docs/zensical/user-guide/onboarding.md).
 
 Assignments are the one CSV path that is still first-class from the command
 line: `cp assignments.csv.example assignments.csv`, then

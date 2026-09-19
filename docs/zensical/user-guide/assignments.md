@@ -8,9 +8,14 @@ SPDX-License-Identifier: Apache-2.0
 
 ## What this is for
 
-An assignment is the list of images you want one device to stage. To assign to
-many devices at once, select them on the Devices table and use **Assign
-images**; see [Work with many devices at once](devices.md).
+!!! note
+    IRIS stages images. It never installs, activates, reloads, or changes boot
+    variables. See [the Overview](../index.md).
+
+An assignment is the list of images you want one device to
+[stage](../reference/glossary.md). To assign to many devices at once, select
+them on the Devices table and use **Assign images**; see
+[Work with many devices at once](devices.md).
 
 ## In the Console
 
@@ -53,7 +58,8 @@ images to stage and how. Devices shows an instruction chip with a label,
 source evidence and report age. The server measures two of those itself:
 whether a key was revoked, and how old the last report is. The rest is the
 agent's own claim. A revoked key wins the display, with the agent's last
-reported state beneath it.
+reported state beneath it. The labels are server-created strings, and the
+Console shows each one exactly as the server sends it.
 
 A second panel shows the health of the keys that sign instructions: whether
 signing is on, certificate days remaining, keylist age, and root ceremony
@@ -76,6 +82,10 @@ server can prove about an instruction is in
 For multiple images, read `staged_image_ids` and `errored_image_ids`;
 `stage_state` covers the whole set. Peer progress and per-image measurements
 are in [Monitor transfers and device reports](monitoring.md).
+
+Current assignments and the latest heartbeat can differ until the next agent
+poll: the Console shows an assigned image as **Waiting for staging** until the
+device reports it. A current error takes precedence over an older staged flag.
 
 ### What a finished assignment looks like
 

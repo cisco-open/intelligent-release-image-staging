@@ -35,20 +35,27 @@ job owns the whole transaction, and this table says what it does in each case.
 
 | Wrapper / initial observation | Owned behavior |
 | --- | --- |
-| Signed marker present | No verification-state change. |
+| Signed marker present | No verification-state change. Native signature enforcement is a platform setting; marker presence alone is not cryptographic validation. |
 | Unsigned / `enabled` | Durably record the initial state and restoration obligation; disable only for installation; restore and read-back before activation/start. |
 | Unsigned / `disabled` | Leave disabled; no unowned enable operation. |
 | Unsigned / `unknown` | Refuse mutation and installation. Obtain readable platform evidence first. |
 
+Interruption/resume and uninstall recovery use durable obligations. They do
+not blindly enable an operator-changed or unowned state.
+
 !!! warning
 
     Check the onboarding job and deployment record before you retry an
-    interrupted onboarding or run an uninstall.
+    interrupted onboarding or run an uninstall. Unresolved restoration blocks
+    progress.
 
 Cisco documents signature enforcement, SD and bootflash restrictions and the
 global setting in the [IE-3x00 IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html), and the [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html) limits disabling verification to USB and SSD media.
 
 ## What onboarding puts on the device
+
+`device/iox/install.sh` and `device/iox/uninstall.sh` require the
+controller's private channel; they are not meant to run standalone.
 
 1. The installer opens an SSH session to IOS and installs the catalog trustpoint over it.
 2. The device fetches the package (`iris-arm64.tar` or `iris-amd64.tar`) and
@@ -94,7 +101,10 @@ The job stops before it writes anything when one of these checks fails.
 
 On Industrial Ethernet 3000 series switches and Catalyst 8000 series routers,
 onboarding also turns on the device's SCP server with `ip scp server enable`,
-and undeploy restores that setting.
+and undeploy restores that setting. That SCP traffic is addressed to the
+device itself, so the platform's default Control Plane Policing caps it at
+roughly 1.4 MB/s; IRIS never modifies CoPP. This can make placement on these
+platforms much slower than a share-based placement on a Catalyst 9300.
 
 ## Which IOS address the app uses
 
@@ -121,9 +131,12 @@ Open the onboarding job in the Console. A finished job leaves the app in the
 IOx verification is device-global. See
 [Signature verification is a device-wide setting](#device-global-package-verification).
 Read the verification state again before you onboard another application.
+Interruption, resume and uninstall recovery never blindly enables an
+operator-changed or unowned state, so inspect the job and deployment evidence
+when restoration is incomplete.
 
-An onboard that fails at activation leaves the app-hosting configuration in
-place. Press **Onboard** again rather than forcing a teardown; see [Add and onboard devices](../user-guide/onboarding.md#first-install-of-a-new-package-version).
+See [Add and onboard devices](../user-guide/onboarding.md#first-install-of-a-new-package-version)
+for what to do after a failed onboard.
 
 ## Next steps
 

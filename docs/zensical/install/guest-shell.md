@@ -28,6 +28,9 @@ IRIS generates `device/device-install.sh` for a Catalyst 9000 series switch and
 `device/router-install.sh` for a Catalyst 8000 series router. The installer
 lands the catalog trustpoint, enables IOx and Guest Shell, fetches the bootstrap
 script and the agent bundle, and adds a timer in Embedded Event Manager (EEM).
+On a router, `router-install.sh` first destroys any pre-existing Guest Shell
+before it applies configuration, so a re-onboard cannot leave the guest
+running on stale networking from an earlier install.
 
 ## What the installer lands on the device
 

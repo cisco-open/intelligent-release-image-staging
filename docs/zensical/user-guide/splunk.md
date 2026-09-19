@@ -33,7 +33,8 @@ scrapes IRIS port `9101` for the peer and origin-byte families the views read.
 
 On Splunk Cloud Platform, create the indexes and token the way your stack
 supports, then use its **HEC ingest endpoint**, including `/services/collector`,
-in both exporters below.
+in both exporters below. Managed stacks normally use port 443; trial stacks
+can use 8088.
 
 Each token has one job: HEC writes to Splunk, the collector bearer token lets IRIS submit OTLP, and the observability token reads `/metrics`.
 
@@ -55,7 +56,9 @@ On the collector host, make a working directory outside the IRIS checkout for
     Keep `.env`, private keys, and tokens out of version control.
 
 Get the collector and HEC certificates from your certificate authority, and
-copy `artifacts/iris-catalog.pem` from IRIS over an authenticated channel.
+copy `artifacts/iris-catalog.pem` from IRIS over an authenticated channel. When
+the HEC endpoint is already trusted by the collector's system roots, omit its
+`tls.ca_file` and the matching mount instead of supplying a separate CA file.
 
 1. Create the collector bearer token on the collector host.
 
@@ -116,7 +119,10 @@ and [filter processor](https://github.com/open-telemetry/opentelemetry-collector
 
 2. Open the paths between the hosts: the IRIS server to collector port `4318`,
    the collector to IRIS port `9101`, and the collector to your HEC port.
-3. Save `otel-collector.yaml`, replacing the example hostnames.
+3. Save `otel-collector.yaml`, replacing the example hostnames. If you scrape
+   `iris.example.com:9101` by an address that does not match the name on
+   `iris-catalog.pem`, add `tls_config.server_name` to `prometheus/iris9101`
+   and set it to the name the certificate is valid for.
 
     ```yaml
     extensions:
@@ -217,6 +223,10 @@ and [filter processor](https://github.com/open-telemetry/opentelemetry-collector
     A filter condition names the records to **drop**. These two keep the IRIS
     logs and both metric naming styles, dotted and underscored. On a shared
     collector, merge these components into its configuration.
+
+    The `sending_queue` above is held in memory: it does not survive the
+    collector container being replaced. Use the collector's persistent queue
+    support if you need that additional protection.
 
 4. Validate the configuration and start the collector.
 

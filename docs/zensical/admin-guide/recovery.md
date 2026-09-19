@@ -177,6 +177,11 @@ Replacing the two offline keys that sign every instruction key, and recovering
 a lost one, are on
 [Replace or recover signing keys](instruction-keys.md#instruction-root-ceremony-and-recovery).
 
+A server restart also marks any deployment record for a job that was still
+running as `unknown`, not `active` or failed. Do not retry the device
+operation blindly: read the record first and reconcile from it, the same way
+as for a cut-off IOx attempt above.
+
 ## With the API
 
 `GET /api/v1/devices/<id>/deployment` returns the deployment record, with

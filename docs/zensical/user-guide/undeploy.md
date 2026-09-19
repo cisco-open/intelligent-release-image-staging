@@ -17,7 +17,7 @@ Undeploy runs from the deployment record, the record of what IRIS applied.
 
 ### Undeploy one device
 
-1. Open the Devices table and check the device's row.
+1. Open **Inventory** and check the device's row.
 2. Choose **Undeploy** in the toolbar. The teardown job starts.
 3. Follow the job to the end and read its result.
 
@@ -36,12 +36,22 @@ Use **Force** when the record is missing or does not match the device.
 
 Force removes everything that carries the IRIS name: the IRIS EEM applets, the IRISQ logging discriminator with its bindings, `crypto pki trustpoint IRIS`, `ip http client secure-trustpoint IRIS`, the app-hosting stanza, and the staged IRIS files. It leaves your VLAN, SVI, VirtualPortGroup and NAT rules. The audit trail records `undeploy_forced`.
 
+A record-driven undeploy verifies the device's processor-board identity
+against the deployment record before it removes anything. Force has no record
+to check that identity against, which is why its removal is scoped to
+IRIS-named artifacts only, never your network configuration.
+
 !!! warning "Force does not repair an IOx verification failure"
     Recover and reconcile the journal first: see [Recover from an interrupted job or damaged state](../admin-guide/recovery.md).
 
 ### Retire a device from the inventory
 
 Delete revokes the device's credentials first. If that write fails, the delete stops and nothing else changes. The rest of the cleanup is best effort, and a partial cleanup is reported.
+
+The device's address rows are deliberately **retained** until they age out, so
+a revoked device stays denied whatever the sharing policy says, and the order
+of cleanup cannot re-permit it by accident. Onboarding the same device again
+clears those old rows before the fresh credential works.
 
 !!! warning "Deleting inventory is not an undeploy"
     Undeploy first if you want the agent removed. Delete does not contact the device; it revokes credentials and retires the device's assignments, reports, records and jobs. Adding the same device id again does not bring that state back.
@@ -73,7 +83,7 @@ Delete and Forget host key have their own routes. See [Console API](../reference
 | What you see | What it means |
 | --- | --- |
 | `undeploy complete: <device-ip>` | The teardown job finished. On IOS-XR, an empty `iris-work/` directory is expected. |
-| HTTP 207 | Part of the cleanup failed — a partial cleanup, not a success. |
+| HTTP 207 | Part of the cleanup failed: a partial cleanup, not a success. |
 | `needs-reconcile` | The deployment record is missing, drifted, or uncertain, so cleanup stopped. |
 | `undeploy_forced` in the audit trail | The teardown ran with **Force**, planned from inventory. |
 

@@ -3179,7 +3179,7 @@ def test_indeterminate_predecessor_refusal_names_the_reconcile_binding(
     assert "is indeterminate" in detail
     assert "enable app signature verification on the device" in detail
     assert "iox_verification.py reconcile-enabled" in detail
-    assert ("docs/operations/#recovering-an-iox-attempt-cut-off-mid-run"
+    assert ("docs/admin-guide/recovery/#recovering-an-iox-attempt-cut-off-mid-run"
             in detail)
     _assert_console_safe_detail(detail)
     assert not [call for call in factory.calls if call[0] == "command" and

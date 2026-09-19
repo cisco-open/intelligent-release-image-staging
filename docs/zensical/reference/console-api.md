@@ -19,8 +19,8 @@ The Console serves this API on its own HTTPS listener, normally port 8080, at `<
 | Body size | 64 KiB JSON; 2 MiB bulk credential assignment; 8 MiB CSV import; 4 GiB streamed image upload; 256 MiB offline Bulk Hash feed (the checksum Cisco publishes for an image). |
 | Errors | RFC 9457 Problem Details with a `type` and `code`; match against [API error codes (problem types)](../problems.md). `detail` is redacted. The tracker returns bencoded BEP failures instead. |
 | Versions | `/api/v1` (Console), `/internal/v1` (server), `/v1` (device-facing services). A major version stays published for two releases, warned first with `Deprecation`, `Sunset`, `Link` headers. |
-| Retries | Send `Idempotency-Key` to retry safely; the server replays the same response for 24 hours. A restart clears this — check the catalog or deployment record first. |
-| Schedule writes | Use `ETag` and `If-Match` instead — see Schedules, below. |
+| Retries | Send `Idempotency-Key` to retry safely; the server replays the same response for 24 hours. A restart clears this, so check the catalog or deployment record first. |
+| Schedule writes | Use `ETag` and `If-Match` instead; see Schedules, below. |
 | Polling | The Console marks its own background `GET` requests `X-IRIS-Poll: 1`; the server does not count these as session activity. |
 
 ## Session and settings
@@ -113,7 +113,7 @@ See [Work with many devices at once](../user-guide/devices.md) for the procedure
 | `POST /api/v1/onboard/jobs/<id>/abort` | Stops the job. |
 | `POST /api/v1/onboard/cancel-queued` | Drops jobs still queued. |
 
-A job's state is `queued`, `running`, `done`, `error`, or `cancelled`. `done` means the installer or undeployer finished — check the device's own heartbeat status for the image download and check. The `end` stream event carries `done`, `error`, `cancelled`, `idle` (timed out), or `unknown` (job no longer available); read the job's own state before treating a closed stream as a failure.
+A job's state is `queued`, `running`, `done`, `error`, or `cancelled`. `done` means the installer or undeployer finished; check the device's own heartbeat status for the image download and check. The `end` stream event carries `done`, `error`, `cancelled`, `idle` (timed out), or `unknown` (job no longer available); read the job's own state before treating a closed stream as a failure.
 
 For a router, preflight runs once, before the job mints its enrollment token, so submitting many routers returns one job id per device right away. See [Security model and trust boundaries](../architecture/security-model.md) for what preflight checks, and [Helper commands](tools.md) for recovery operations with no route of their own.
 
@@ -141,7 +141,7 @@ Every schedule write sends the schedule's strong `ETag` in `If-Match`, or the se
 | `DELETE /api/v1/schedules/{id}` | 204. Requires `If-Match`. Occurrences and outcomes are kept. |
 | `POST /api/v1/schedules/{id}/reaffirm` | Empty body. Rewrites `created_by` to you, for a schedule whose creator no longer exists. Requires `If-Match`. |
 | `GET /api/v1/schedules/{id}/occurrences` | `{occurrences: [...], total, offset, truncated}`, oldest first, `limit` at most 100. |
-| `GET /api/v1/schedules/{id}/receipts` | `{receipts: [...], total, offset, truncated}` — the durable per-device outcome for every occurrence, `limit` ≤ 1000. `fleet_registration_id` identifies the bound registration when present. |
+| `GET /api/v1/schedules/{id}/receipts` | `{receipts: [...], total, offset, truncated}`, the durable per-device outcome for every occurrence, `limit` ≤ 1000. `fleet_registration_id` identifies the bound registration when present. |
 
 A receipt reason of `conflict` can mean the current same-name fleet row has a different registration than the occurrence binding. `identity_unavailable` means fresh work could not prove a durable target identity. Follow [Schedule maintenance windows](../user-guide/scheduling.md#scheduled-outcomes).
 
@@ -169,11 +169,11 @@ See [Monitor transfers and device reports](../user-guide/monitoring.md) for the 
 
 Set a shared request budget with `IRIS_API_RATE_TOTAL`, and optionally narrower `IRIS_API_RATE_READ` and `IRIS_API_RATE_WRITE` budgets, plus the `IRIS_API_BURST_*` settings; see [Server configuration](server-configuration.md) for the full variable table. Login, setup, and the Console's own internal calls are outside this budget.
 
-A rejected request returns 429 with `Retry-After`; wait at least that long, with jitter, before retrying. A 207 means part of a bulk request succeeded — it is not the same as a 429. See [Automate with the API](../user-guide/automation.md) for both cases worked through. The budget is per server process; see [Limitations](../architecture/limitations.md).
+A rejected request returns 429 with `Retry-After`; wait at least that long, with jitter, before retrying. A 207 means part of a bulk request succeeded, which is not the same as a 429. See [Automate with the API](../user-guide/automation.md) for both cases worked through. The budget is per server process; see [Limitations](../architecture/limitations.md).
 
 ## Browse the API reference
 
-Open **Help → Local API reference (Swagger)** in the Console to browse the same routes, generated from the running server's contract. The documentation site publishes the same read-only view. There is no **Try it out** button or authorization field — send real requests through the Console or your own client. A header switch shows Console routes alone or every service, including the device-facing catalog and tracker APIs.
+Open **Help → Local API reference (Swagger)** in the Console to browse the same routes, generated from the running server's contract. The documentation site publishes the same read-only view. There is no **Try it out** button or authorization field; send real requests through the Console or your own client. A header switch shows Console routes alone or every service, including the device-facing catalog and tracker APIs.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |

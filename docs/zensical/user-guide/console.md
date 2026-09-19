@@ -80,6 +80,10 @@ two open the setup flow at `#setup`. Every card carries a status chip:
 | `stale` | Something is configured, but the evidence behind it no longer matches. |
 | `absent`, `unknown` | The server could not determine the state. A failed status fetch shows every chip as `unknown`. |
 
+The image verification card can also show a sixth reading, worded distinctly
+as `Configured — no successful run yet`: a schedule exists but has not
+produced a successful run, which is not the same as never configured at all.
+
 In the setup flow, a step panel lists every step with its state. Open the steps
 in any order and skip any of them; `#setup` resumes at the first one still
 outstanding. Creating the first administrator comes first: see
@@ -110,8 +114,10 @@ those devices again, as
 **Certificate** installs the certificate this Console serves to browsers. Drop
 or browse to a certificate and a private key, or expand **Paste certificate and
 key instead**. A combined file works, and an encrypted key brings up a
-passphrase field. **Use deployment default certificate** returns to the
-deployment's identity.
+passphrase field. The Console decrypts it at import with `openssl pkey`,
+piping the passphrase over stdin and never placing it on the command line, and
+stores the key age-encrypted at rest either way. **Use deployment default
+certificate** returns to the deployment's identity.
 
 **Trusted CAs** is the server's outbound trust store. Drop CA certificate files
 to install them one by one, or pick a bundle source: the Cisco Trusted Root

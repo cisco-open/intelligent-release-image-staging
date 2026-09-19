@@ -9,7 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 ## What this is for
 
 IRIS publishes two telemetry surfaces: a Prometheus endpoint your collector
-scrapes, and an OpenTelemetry Protocol (OTLP) endpoint IRIS pushes to.
+scrapes, and an OpenTelemetry Protocol (OTLP) endpoint IRIS pushes to. This
+page covers metrics and observability, not proof of what staged. For that, see
+[Export the audit trail off the server](../admin-guide/maintenance.md#export-the-audit-trail-off-the-server).
 
 ## The two export paths
 
@@ -120,6 +122,11 @@ IRIS records the traced total twice: the origin's sampled estimate and the
 device's exact count.
 [Telemetry signals](../reference/telemetry-signals.md) names both records and
 warns against summing them.
+
+A peer-assist ratio is `bytes_from_devices_total ÷ completed_content_bytes`.
+Use `bytes_from_all_senders_total` as that denominator instead and every
+rollout reports as roughly 100% peer-delivered, because that total already
+includes the origin.
 
 ## Choosing a collector
 

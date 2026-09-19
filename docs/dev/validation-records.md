@@ -118,6 +118,10 @@ address. The app reaching a running state does not, by itself, prove it can
 reach the catalog or send a heartbeat. See
 [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](../zensical/install/ios-xr.md).
 
+Beyond the RPM transfer, registration, and app-startup check above, image
+staging, telemetry delivery, and undeploy on the NCS-540 remain unvalidated.
+This record establishes nothing about any other NCS model.
+
 ## The separate-hosts outage drill
 
 On a deployment split across a server host and a Console host, the health

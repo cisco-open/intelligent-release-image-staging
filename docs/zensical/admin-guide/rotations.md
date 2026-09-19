@@ -20,7 +20,10 @@ Run one rotation at a time.
 ## Rotate the management credential
 
 The Console reaches server state over the management API on internal HTTPS port
-9443. Both sides read the credential from mounted files.
+9443. Both sides read the credential from mounted files, and each rereads its
+file on every request, so rotating the token needs no container restart on
+Docker (Kubernetes still needs a rollout restart to pick up the new Secret
+projection). Do not start another rotation until the current one is complete.
 
 !!! warning "Keep the credential in files"
     Never put it in `server/.env`, a Compose `environment:` entry, a URL, or a
@@ -28,7 +31,9 @@ The Console reaches server state over the management API on internal HTTPS port
 
 ### On one Docker host
 
-1. Rotate it. The old value moves to `previous.json`, the new one to `current.json`:
+1. Rotate it. The old value moves to `previous.json`, the new one to `current.json`.
+   The two files must hold distinct values; the server rejects an alias
+   before either rotation or retirement:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
@@ -58,15 +63,39 @@ docker compose -f server/docker-compose.yml exec iris \
 
 ### On Kubernetes
 
-1. Put the new token in `current` and the old one in `previous`, then recreate
-   the `iris-tier-auth` Secret from both files.
-2. Restart both Deployments. Each pod's mounted `current` file holds the new
-   token.
-3. Open **Devices** in the Console. The page loads.
-4. Empty `previous`, apply the Secret again, restart both Deployments.
+1. Generate the new token and put the old one in `previous`:
 
-Use `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`
-for each update. Secret names: [Install on Kubernetes](../install/kubernetes.md).
+```bash
+cp iris-tier-auth/current iris-tier-auth/previous
+openssl rand -hex 32 > iris-tier-auth/current
+kubectl -n iris create secret generic iris-tier-auth \
+  --from-file=current=iris-tier-auth/current \
+  --from-file=previous=iris-tier-auth/previous \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+2. Restart both Deployments and wait for them to become ready. Each pod's
+   mounted `current` file holds the new token:
+
+```bash
+kubectl -n iris rollout restart deployment/iris-seed-server deployment/iris-console
+kubectl -n iris rollout status deployment/iris-seed-server
+kubectl -n iris rollout status deployment/iris-console
+```
+
+3. Open **Devices** in the Console. The page loads.
+4. Empty `previous`, apply the Secret again, and restart both Deployments:
+
+```bash
+: > iris-tier-auth/previous
+kubectl -n iris create secret generic iris-tier-auth \
+  --from-file=current=iris-tier-auth/current \
+  --from-file=previous=iris-tier-auth/previous \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n iris rollout restart deployment/iris-seed-server deployment/iris-console
+```
+
+Secret and Deployment names: [Install on Kubernetes](../install/kubernetes.md).
 
 ## Rotate the certificate that devices trust
 

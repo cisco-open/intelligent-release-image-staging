@@ -10,6 +10,10 @@ The management type is how the agent reaches the network: on its own address,
 on your management VLAN, or through the router. Pick one per device before you
 onboard it. It sets the network fields the Console asks for.
 
+!!! note
+    IRIS stages images. It never installs, activates, reloads, or changes boot
+    variables. See the [Overview](../index.md).
+
 ## Before you start
 
 Know whether each device is a switch or a router, and whether it has a
@@ -71,7 +75,7 @@ management address on the router.
 | Routed | The VLAN, the SVI, and the trunk entry |
 | Inband | The agent and IRIS's Embedded Event Manager (EEM) applets and configuration; the trunk entry stays, because other apps may share the trunk |
 | Router routed | The VPG and its subnet configuration |
-| Router NAT | The NAT access list, its rules, and the translations for this device |
+| Router NAT | The NAT access list, its rules, and the translations for this device. An outside NAT marking on that interface that predates IRIS is left in place. |
 | XR host | The appmgr application, its package, and IRIS's staged files |
 
 ## Verify

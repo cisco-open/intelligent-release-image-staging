@@ -26,7 +26,7 @@ returns 401.
 | --- | --- | --- |
 | `GET /v1/images` | Assignment-bound | Lists the caller's assigned images. An unassigned device gets an empty list. See [Publish and verify images](../user-guide/images.md). |
 | `GET /v1/images/<id>` | Assignment-bound | One assigned image's details. An unassigned or unknown id returns 404. |
-| `GET /v1/torrents/<id>` (also `<id>.torrent`) | Assignment-bound | A torrent file for an assigned image. IOx and IOS-XR appmgr send their tracker credential separately; Guest Shell gets a personalized URL. An unassigned or unknown id returns 404. |
+| `GET /v1/torrents/<id>` (also `<id>.torrent`) | Assignment-bound | A torrent file for an assigned image. An IOx or IOS-XR appmgr request opts in with `X-IRIS-Tracker-Auth: bearer` and gets a token-free tracker URL, supplying its announce bearer separately; a request without that header gets Guest Shell's personalized, token-bearing URL instead. Both forms carry `Vary: Authorization, X-IRIS-Tracker-Auth`. An unassigned or unknown id returns 404. |
 | `GET /v1/devices/<id>/policy` | Identity-bound | The device's peer-sharing policy. See [Data formats and states](state-and-data.md). |
 | `GET /v1/devices/<id>/instructions` | Identity-bound | The device's instruction, sealed in an envelope, capped at 256 KiB. An unchanged instruction returns 304. See [Security model and trust boundaries](../architecture/security-model.md). |
 | `GET /v1/devices/<id>/instruction-keylist` | Identity-bound | The signed key list for checking that instruction, up to 128 KiB, with the same 304 behavior. |
@@ -80,6 +80,11 @@ Guest Shell fetches its bootstrap files, bundle and certificate from
 separate, short-lived paths that need no HTTP Basic credential. Files are
 removed about an hour after they are written. See [Prepare Catalyst 9000 and
 8000 devices for Guest Shell](../install/guest-shell.md).
+
+A file under `staging/` must be mode `0600` or tighter before `GET`/`HEAD`
+serves it. The server tightens the mode in place when it owns the file, and
+refuses with `403 Staging file permissions are unsafe` when it does not own
+the file and the mode is loose.
 
 !!! warning
     A path that tries to escape the device's own onboarding folder is refused.

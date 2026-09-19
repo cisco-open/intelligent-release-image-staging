@@ -50,6 +50,10 @@ Console host only.
 Services, not host firewall rules, decide what is reachable. Keep the management
 port on an internal Service.
 
+!!! note "IRIS uses no UDP"
+    Every listener above is TCP. The private swarm disables DHT, peer
+    exchange, and local peer discovery, so IRIS needs no UDP firewall rule.
+
 ## Telemetry on port 9101
 
 Open 9101 only when Prometheus or operator tooling scrapes the server.

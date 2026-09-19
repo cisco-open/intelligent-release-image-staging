@@ -22,6 +22,16 @@ Both roots are scanned recursively. A publish happens in place: the seeder
 reads the image where it sits, and the `.torrent` goes under the state
 directory. See [Data formats and states](../reference/state-and-data.md).
 
+!!! warning "Reseeding on restart trusts the recorded directory"
+
+    On restart, the server reseeds each image from its catalog entry's
+    recorded `source_dir`. If that field is missing or its directory is
+    unavailable, the server searches both image roots for a file with the
+    entry's filename instead. The seeder runs with `bt-seed-unverified`, so a
+    wrong directory would serve the wrong bytes under a piece hash that still
+    matches. Keep `source_dir` accurate, and do not leave two files with the
+    same name under different roots.
+
 !!! warning
 
     The host tree behind `IRIS_IMAGE_ROOT` must be readable and traversable
@@ -169,7 +179,9 @@ A file reaches the **Import from disk** panel only when it ends in `.bin`,
 `.iso`, `.tar`, or `.rpm`, its filename uses only the characters
 `A-Za-z0-9._-`, it is not a dotfile, a sidecar `.torrent` or an upload
 temporary, and its resolved path is still inside the root it was found under.
-Other files are hidden. Three more reasons are listed grayed out and named.
+Discovery resolves each candidate to its real path and keeps it only when that
+real path still lands inside the root it was found under, so a symlink cannot
+pull a file from outside the set. Other files are hidden. Three more reasons are listed grayed out and named.
 
 | Reason | What it means | What to do |
 | --- | --- | --- |

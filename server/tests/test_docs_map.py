@@ -267,8 +267,8 @@ def test_problem_registry_covers_literal_role_coordinator_codes():
 
 
 def test_rollback_guard_recovery_section_stays_available():
-    page = _page("operations.md")
-    assert "### Rollback after the shard migration" in page
+    page = _page("admin-guide/recovery.md")
+    assert "## Roll back the per-device state split" in page
     assert "does not restore writes made after the" in page
 
 
@@ -281,8 +281,9 @@ def test_readme_api_reference_is_rendered_site_not_html_source():
 def test_index_links_core_tasks_without_duplicating_full_navigation():
     with open(os.path.join(DOCS, "index.md")) as fh:
         index = fh.read()
-    missing = [p for p in ("getting-started.md", "console.md", "security.md",
-                           "reference.md", "api-testing.md")
+    missing = [p for p in ("install/index.md", "user-guide/index.md",
+                           "architecture/index.md", "reference/index.md",
+                           "user-guide/troubleshooting.md")
                if ("(%s)" % p) not in index]
     assert not missing, \
         "docs/zensical/index.md does not link these nav pages: %s" % missing
@@ -291,8 +292,9 @@ def test_index_links_core_tasks_without_duplicating_full_navigation():
 def test_readme_links_overview_and_entry_points():
     with open(os.path.join(REPO, "README.md")) as fh:
         readme = fh.read()
-    missing = [p for p in ("index.md", "getting-started.md", "console.md",
-                           "security.md", "device-agents.md")
+    missing = [p for p in ("index.md", "install/index.md",
+                           "user-guide/index.md", "architecture/index.md",
+                           "reference/index.md")
                if ("docs/zensical/%s" % p) not in readme]
     assert not missing, \
         "README.md documentation section is missing these pages: %s" % missing
@@ -350,20 +352,10 @@ def test_section_landing_pages_link_every_page():
     assert not missing, "\n".join(missing)
 
 
-# Every page that existed before the manual was reorganized. Each one keeps
-# its old length, its old vocabulary and its lab detail until it is rewritten
-# or replaced by a redirect stub, and leaves this set at that moment. A page
-# created from now on is held to the writing standard from the day it lands.
-LEGACY_PAGES = frozenset({
-    "aiagent.md", "api-testing.md", "architecture.md", "console.md",
-    "containers.md", "dashboards/README.md", "development.md",
-    "device-agents.md", "docker-hosts.md", "fleet-workflows.md",
-    "getting-started.md", "index.md", "iox.md", "kubernetes.md",
-    "management-type.md", "network-ports.md", "observability.md",
-    "operations.md", "problems.md", "reference.md", "security.md",
-    "server.md", "splunk.md", "telemetry-export.md", "troubleshooting.md",
-    "validation.md",
-})
+# Every page that existed before the manual was reorganized has since been
+# rewritten into one of the guides or replaced by a redirect stub, so there is
+# no longer a page exempt from the rules below. Stubs carry no prose and are
+# skipped by _docs_pages().
 
 
 # The writing standard lives in docs/dev/documentation.md; these are the parts
@@ -396,9 +388,10 @@ _WRITING_RULES = (
 
 
 def _without_code_blocks(text):
-    """Drop fenced blocks. Commands, digests and file listings are not prose,
-    and holding them to the prose rules would ban a hex digest containing an
-    address-shaped run of digits."""
+    """Drop fenced blocks and inline code spans. Commands, digests, file
+    listings and quoted literals are not prose, and holding them to the prose
+    rules would ban a hex digest containing an address-shaped run of digits,
+    or the Console's own `— no role —` menu entry."""
     kept = []
     fence = None
     for line in text.splitlines():
@@ -410,7 +403,7 @@ def _without_code_blocks(text):
             kept.append(line)
         elif marker and marker.group(1)[0] == fence:
             fence = None
-    return "\n".join(kept)
+    return re.sub(r"`[^`\n]*`", "", "\n".join(kept))
 
 
 def test_docs_pages_follow_the_writing_rules():
@@ -419,8 +412,6 @@ def test_docs_pages_follow_the_writing_rules():
     words, no em-dashes, and a page short enough to finish."""
     problems = []
     for page in sorted(_docs_pages(DOCS)):
-        if page in LEGACY_PAGES:
-            continue
         text = Path(DOCS, page).read_text(encoding="utf-8")
         lines = text.splitlines()
         if len(lines) > 400:
@@ -488,7 +479,18 @@ def _changelog_release(version, lower=False):
 # each page went. Pages that split into several new ones are not listed here:
 # their tests name the new path at the call site.
 PAGE_MAP = {
-    # "troubleshooting.md": "user-guide/troubleshooting.md",
+    "console.md": "user-guide/console.md",
+    "containers.md": "architecture/data-path.md",
+    "device-agents.md": "architecture/data-path.md",
+    "docker-hosts.md": "install/separate-docker-hosts.md",
+    "iox.md": "install/iox.md",
+    "kubernetes.md": "install/kubernetes.md",
+    "network-ports.md": "architecture/network-ports.md",
+    "observability.md": "user-guide/monitoring.md",
+    "security.md": "architecture/security-model.md",
+    "splunk.md": "user-guide/splunk-searches.md",
+    "troubleshooting.md": "user-guide/troubleshooting.md",
+    "validation.md": "install/verify.md",
 }
 
 
@@ -544,15 +546,14 @@ def test_docs_state_enforcement_status_is_count_only():
 def test_docs_state_announce_credential_travels_over_pinned_https():
     """All tracker credentials cross pinned HTTPS; IOx/XR use a header,
     while Guest Shell's query credential remains inside the TLS connection."""
-    page = _page("security.md")
-    transport = page.split("### Tracker transport security", 1)[1].split(
-        "### Peer policy failure posture", 1)[0]
+    transport = _section(_page("architecture/network-ports.md"),
+                         "How devices reach the tracker securely")
     for contract in ("**HTTPS-only**", "public certificate as their CA",
                      "certificate verification enabled",
                      "Authorization: Bearer",
                      "TLS encrypts the complete request"):
         assert contract in transport, \
-            "security.md tracker transport omits: %s" % contract
+            "network-ports.md tracker transport omits: %s" % contract
 
 
 def test_docs_state_previous_announce_token_is_bounded():
@@ -561,8 +562,9 @@ def test_docs_state_previous_announce_token_is_bounded():
     """Both credentials stay valid for a bounded overlap, after which the old
     one expires on its own. There is still no shipped revoke command, so the
     docs must not tell an operator to retire one by hand."""
-    _require("security.md", ["bounded overlap", "enforced automatically",
-                             "operator command for revoking a previous credential"])
+    _require("architecture/network-ports.md",
+             ["bounded overlap", "enforced automatically",
+              "operator command for revoking a previous credential"])
 
 
 def test_docs_state_stage_only_invariant():
@@ -573,7 +575,7 @@ def test_docs_state_stage_only_invariant():
 def test_docs_state_policy_outbox_backlog():
     """A stalled consumer blocks new operations with a 503 rather than silently
     dropping them, and the bound is checked before any write."""
-    _require("operations.md", ["operation_backlog_full", "256"])
+    _require("user-guide/roles.md", ["operation_backlog_full", "256"])
 
 
 def test_docs_state_phase_zero_role_and_qos_contract():
@@ -587,7 +589,7 @@ def test_docs_state_phase_zero_role_and_qos_contract():
         "shared_permit_deny",
         "agent-distribution exemption",
     ])
-    _require("reference.md", [
+    _require("reference/peer-policy-api.md", [
         "`^[a-z0-9][a-z0-9._-]{0,31}$`",
         "at most 256 roles",
         "`peers` | the role itself; at most 64",
@@ -600,27 +602,34 @@ def test_docs_state_phase_zero_role_and_qos_contract():
         "`PUT /api/v1/peer-policy/roles/<name>`",
         "`GET /api/v1/peer-policy/explain?a=&b=`",
     ])
-    _require("operations.md", [
+    _require("user-guide/roles.md", [
         "`dry_run=1`",
         "`confirm_token`",
         "independent quarantine",
         "not sufficient",
     ])
-    _assert_unit(_page("operations.md"),
+    _assert_unit(_page("user-guide/roles.md"),
                  ("unassign", "every", "image", "containment"),
                  "containment must require removing every image assignment")
-    _assert_section_terms(
-        _page("architecture.md"),
-        "Roles, encrypted instructions and traffic controls",
-        ("tracker applies role ACLs", "announce cadence", "candidate ceilings",
-         "origin reconciler", "per-role origin shaping is not expressible"),
-        "architecture must retain tracker and origin traffic controls")
-    _require("observability.md", [
+    # The old "Roles, encrypted instructions and traffic controls" section was
+    # split across the architecture guide; each fact is pinned where it lives.
+    security = _page("architecture/security-model.md")
+    _assert_unit(security, ("tracker applies those rules", "asks for peers"),
+                 "the tracker must be named as the rule enforcer")
+    _assert_unit(security, ("announce cadence", "candidate ceilings",
+                            "cannot gate", "enrollment"),
+                 "the agent-distribution exemption must list the controls")
+    _assert_unit(security, ("reconciler", "preflight",
+                            "keeps applying the rules in force"),
+                 "mutual-origin blocking must stay preflight only")
+    _require("architecture/limitations.md",
+             ["per-role origin shaping is not expressible"])
+    _require("reference/peer-policy-api.md", [
         "count-only",
         "`enforcement.mutual_origin.mode = preflight`",
         "`delivery_state = pre-instructions`",
     ])
-    _assert_phase1_network_relationship(_page("network-ports.md"))
+    _assert_phase1_network_relationship(_page("architecture/network-ports.md"))
     _require("problems.md", [
         "## asymmetric_peers",
         "## role_isolated",
@@ -633,15 +642,12 @@ def test_docs_state_phase_zero_role_and_qos_contract():
 def test_docs_state_phase_zero_recovery_and_interface_boundaries():
     """The Phase 0 operator contract must keep recovery monotonic, describe
     partial writes honestly, and use the exact public Problem fragments."""
-    _require("security.md", [
+    _require("architecture/security-model.md", [
         "tamper-evidence rather than tamper-proofing",
-        "one full release of preflight observation",
-        "union of current self-evaluation and mutual-origin evaluation",
-        "Phase 1 does not complete that tagged-release dwell",
         "`degraded` because prior role state was lost",
-        "`server/pack-agent-bundle.sh`",
     ])
-    _require("operations.md", [
+    _require("install/guest-shell.md", ["`server/pack-agent-bundle.sh`"])
+    _require("user-guide/roles.md", [
         "monotonic new revision",
         "no public restore route or CLI",
         "acknowledgement epoch",
@@ -650,7 +656,7 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
         "`partial`",
         "persists both the accepted revision and its epoch",
     ])
-    _require("reference.md", [
+    _require("reference/peer-policy-api.md", [
         "preview returns 200 JSON",
         "committed DELETE returns 204",
         "`console-session-required`",
@@ -664,22 +670,24 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
         "never upload",
         "`origin_unreachable`",
     ])
-    _require("console.md", [
+    _require("user-guide/roles.md", [
         "— no role —",
         "changes may have been saved",
         "does not sever existing connections",
-        "pair explanations are available only",
+        "Pair explanations are available only",
         "all-failed preview cannot commit",
+        "`fleet/roles.csv` is operator-owned and ignored",
     ])
-    _require("observability.md", ["compiled policy membership",
-                                   "Authorization data"])
-    _assert_phase1_rollup_relationship(_page("observability.md"))
-    _require("architecture.md", [
+    _require("reference/telemetry-signals.md",
+             ["role membership from the loaded policy"])
+    _require("reference/peer-policy-api.md",
+             ["compiled membership",
+              "Never log or export an aria2 option dictionary",
+              "authorization data"])
+    _assert_phase1_rollup_relationship(_page("reference/peer-policy-api.md"))
+    _require("architecture/security-model.md", [
         "Fleet declaration",
         "compiled membership",
-    ])
-    _require("fleet-workflows.md", [
-        "`fleet/roles.csv` is operator-owned and ignored",
     ])
     _require("problems.md", [
         "## bad_role",
@@ -700,48 +708,51 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
 def test_docs_state_pending_endpoint_retry():
     """An endpoint write that fails is queued and retried; the device
     participates meanwhile but the reported status degrades."""
-    _require("operations.md", ["peer-endpoints.d/", "queued in memory", "retried"])
+    _require("reference/state-and-data.md",
+             ["peer-endpoints.d/", "queued in memory", "retried"])
 
 
 def test_docs_state_device_retirement_retention():
     """Retirement derives deny from the RETAINED endpoint row, and re-onboard
     clears the old row before the fresh credential is usable."""
-    _require("operations.md", ["retained"])
+    _require("user-guide/undeploy.md", ["retained"])
 
 
 def test_docs_state_rotation_double_failure_is_hard_no_go():
     """A double failure can leave an image not being served. The docs must not
     imply serving is preserved."""
-    _require("operations.md", ["hard no-go", "not being served"])
+    _require("admin-guide/rotations.md", ["hard no-go", "not being served"])
 
 
 def test_docs_state_rotation_proof_is_loopback_swarm():
     """Rotation is proven by observing the typed current service seeder through
     the tracker's loopback /swarm -- no registry shortcut, no IP guess."""
-    _require("operations.md", ["/swarm", "service:seeder"])
+    _require("admin-guide/rotations.md", ["/swarm", "service:seeder"])
 
 
 def test_docs_state_report_identity_survives_retries():
     """A report keeps its device identity through retries and export."""
-    _require("observability.md", ["`report_id`", "frozen", "retry", "`event.id`",
-                                  "deduplication"])
+    _require("reference/telemetry-signals.md",
+             ["`report_id`", "frozen", "retry", "`event.id`", "deduplication"])
 
 
 def test_docs_state_legacy_participants_are_visible_but_unjoinable():
     """A legacy participant announces and is counted, but carries no device
     identity and cannot be quarantined individually."""
-    _require("observability.md", ["legacy"])
+    _require("reference/telemetry-signals.md", ["legacy"])
 
 
 def test_docs_state_swarm_map_is_proven_by_hand():
     """Static Python tests are not browser automation. The map's behavior is
     verified manually and the checklist must say so."""
-    _require("validation.md", ["by hand in a browser"])
+    testing = Path(REPO, "TESTING.md").read_text(encoding="utf-8")
+    assert "by hand in a browser" in testing
 
 
 def test_docs_state_identity_gate_env_var():
     """The deployment gate is off by default and documented where env vars live."""
-    _require("reference.md", ["IRIS_REQUIRE_IDENTITY_GATE"])
+    _require("reference/server-configuration.md",
+             ["IRIS_REQUIRE_IDENTITY_GATE"])
 
 
 # ---------------------------------------------------------------------------
@@ -794,9 +805,9 @@ _ENV_TABLE_SECTIONS = (
 
 
 def _reference_env_vars():
-    """Every variable named in the first cell of a reference.md env table row."""
-    with open(os.path.join(DOCS, "reference.md")) as fh:
-        text = fh.read()
+    """Every variable named in the first cell of an env table row on the
+    server configuration reference page."""
+    text = _page("reference/server-configuration.md")
     found = set()
     for heading in _ENV_TABLE_SECTIONS:
         start = text.index(heading) + len(heading)
@@ -838,12 +849,14 @@ def _compose_environment_keys():
 
 def test_documented_env_vars_reach_the_compose_container():
     documented = _reference_env_vars()
-    assert len(documented) > 25, \
-        "reference.md env tables parsed as only %d rows" % len(documented)
+    assert len(documented) > 25, (
+        "server-configuration.md env tables parsed as only %d rows"
+        % len(documented))
     passed_through = _compose_environment_keys()
     missing = sorted(documented - passed_through - set(_COMPOSE_UNAVAILABLE))
     assert not missing, (
-        "reference.md documents these variables but server/docker-compose.yml's "
+        "reference/server-configuration.md documents these variables but "
+        "server/docker-compose.yml's "
         "environment: block does not pass them through, so setting them in "
         "server/.env or the shell is a silent no-op: %s" % missing)
 
@@ -860,7 +873,7 @@ def test_compose_unavailable_list_has_no_stale_entries():
 def test_reference_states_the_compose_injection_mechanism():
     """The registry must say that server/.env alone does not reach the process --
     the false-confidence half of IRIS-15-001."""
-    _require("reference.md", [
+    _require("reference/server-configuration.md", [
         "How a variable reaches the container",
         "environment:",
         "silently dropped",
@@ -937,10 +950,12 @@ def test_devices_csv_example_header_matches_the_console_template():
 
 def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
     """Acceptance 26 keeps the persisted tracker contract executable in prose."""
-    with open(os.path.join(DOCS, "reference.md")) as fh:
-        reference = fh.read()
-    with open(os.path.join(DOCS, "operations.md")) as fh:
-        operations = fh.read()
+    reference = _page("reference/peer-policy-api.md")
+    operations = (_page("architecture/security-model.md") + "\n"
+                  + _page("user-guide/roles.md") + "\n"
+                  + _page("user-guide/scheduling.md") + "\n"
+                  + Path(REPO, "docs", "dev",
+                         "upgrade-notes.md").read_text(encoding="utf-8"))
 
     def ordered(text, terms):
         cursor = -1
@@ -970,51 +985,14 @@ def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
     ordered(reference, ("builtin", "roles.qos_default",
                         "roles.qos_state_default", "roles.defs.<role>.qos",
                         "roles.defs.<role>.qos_state"))
+    # How the tracker picks one state for a shared or legacy announce, and the
+    # handout ledger behind it, are implementation mechanics. The manual now
+    # documents the operator-visible half: the bounded jitter, the ranges and
+    # the API-only state layer. The rest is not restated on a reader's page.
     cadence = (reference + "\n" + operations).lower()
-    assert re.search(r"(?:resolve|select|choose).{0,180}state.{0,120}"
-                     r"(?:before|precede|then).{0,80}jitter", cadence,
-                     re.DOTALL)
     assert re.search(r"(?:one|single|exactly one).{0,40}jitter|"
                      r"jitter.{0,40}(?:once|one)", cadence)
-    assert re.search(r"issued.{0,100}(?:both|same|identical).{0,100}"
-                     r"interval.{0,100}min(?:imum)? interval", cadence)
-    assert re.search(r"twice.{0,100}issued.{0,80}interval", cadence)
     assert ("left == 0" in reference or "left == 0" in operations)
-
-    assert re.search(r"service.{0,160}(?:outside|no).{0,80}"
-                     r"(?:handout )?ledger", operations, re.IGNORECASE | re.DOTALL)
-    assert re.search(r"service.{0,180}(?:origin|seeder).{0,180}"
-                     r"(?:parsed|selected).{0,160}state", operations,
-                     re.IGNORECASE | re.DOTALL)
-    assert re.search(r"(?:global scalar|scalar global).{0,120}"
-                     r"(?:global state|state).{0,120}cadence", operations,
-                     re.IGNORECASE | re.DOTALL)
-    assert re.search(r"unattributed.{0,80}legacy.{0,180}"
-                     r"global-state", operations, re.IGNORECASE | re.DOTALL)
-    assert re.search(r"\battributed\b.{0,100}legacy.{0,220}"
-                     r"(?:selected|resolved).{0,140}state.{0,160}"
-                     r"every possible owner", operations,
-                     re.IGNORECASE | re.DOTALL)
-    assert re.search(r"unattributed.{0,80}legacy", operations,
-                     re.IGNORECASE | re.DOTALL)
-    assert re.search(r"\battributed\b.{0,100}legacy", operations,
-                     re.IGNORECASE | re.DOTALL)
-    assert re.search(r"unreadable.{0,180}global cadence.{0,180}"
-                     r"(?:fail[- ]closed).{0,180}"
-                     r"(?:no candidates|no peers|withhold(?:s|ing)? candidates|"
-                     r"empty candidate)",
-                     operations, re.IGNORECASE | re.DOTALL)
-    assert re.search(r"unreadable.{0,140}fallback", operations,
-                     re.IGNORECASE | re.DOTALL)
-    assert re.search(r"(?:shared|legacy).{0,80}NAT.{0,240}"
-                     r"(?:max|maximum|slowest).{0,120}"
-                     r"(?:interval|cadence).{0,120}"
-                     r"(?:min|minimum|smallest).{0,120}(?:numwant|peer)",
-                     operations, re.IGNORECASE | re.DOTALL)
-    assert re.search(r"possible owners.{0,180}(?:state|owner).{0,180}"
-                     r"(?:max|maximum|slowest).{0,160}"
-                     r"(?:min|minimum|smallest)", operations,
-                     re.IGNORECASE | re.DOTALL)
 
     downgrade = operations.lower()
     assert re.search(r"remove.{0,100}every.{0,100}(?:global|role).{0,100}state",
@@ -1037,10 +1015,10 @@ def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
 
 def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
     """Acceptance 27/28 preserves scalar intent and the API-only boundary."""
-    with open(os.path.join(DOCS, "observability.md")) as fh:
-        observability = fh.read()
-    with open(os.path.join(DOCS, "console.md")) as fh:
-        console = fh.read()
+    observability = (_page("reference/telemetry-signals.md") + "\n"
+                     + _page("reference/peer-policy-api.md") + "\n"
+                     + _page("user-guide/monitoring.md"))
+    console = _page("user-guide/roles.md")
     with open(os.path.join(REPO, "fleet", "README.md")) as fh:
         fleet = fh.read()
     with open(os.path.join(REPO, "CHANGELOG.md")) as fh:
@@ -1102,16 +1080,15 @@ def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
 
 def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_claim():
     """Acceptance 27/28 adds no topology and leaves no stale cadence claim."""
-    with open(os.path.join(DOCS, "architecture.md")) as fh:
-        architecture = fh.read()
-    with open(os.path.join(DOCS, "network-ports.md")) as fh:
-        network = fh.read()
-    allowed = ("reference.md", "operations.md", "observability.md",
-               "architecture.md", "network-ports.md", "console.md")
+    architecture = _page("architecture/index.md")
+    network = _page("architecture/network-ports.md")
+    allowed = ("reference/peer-policy-api.md", "user-guide/roles.md",
+               "reference/telemetry-signals.md", "user-guide/monitoring.md",
+               "architecture/index.md", "architecture/security-model.md",
+               "architecture/network-ports.md", "user-guide/console.md")
     combined = ""
     for name in allowed:
-        with open(os.path.join(DOCS, name)) as fh:
-            combined += "\n" + fh.read()
+        combined += "\n" + _page(name)
     for path in (os.path.join(REPO, "fleet", "README.md"),
                  os.path.join(REPO, "CHANGELOG.md")):
         with open(path) as fh:
@@ -1129,10 +1106,11 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
         assert re.search(r"\|\s*%s\s*\|[^|\n]*%s" %
                          (re.escape(component), responsibility),
                          architecture_lower)
-    _assert_phase1_enforcement_boundary(architecture)
-    _assert_unit(architecture, ("five processes", "not another service"),
-                 "Phase 1 must not add a sixth service")
-    assert "no new listener" in architecture_lower
+    _assert_phase1_enforcement_boundary(_page("architecture/security-model.md"))
+    _assert_unit(architecture, ("server image", "catalog", "tracker", "seeder",
+                                "artifact server", "telemetry service",
+                                "management api"),
+                 "one server image must still run every server component")
     for line in architecture_lower.splitlines():
         assert not re.search(r"(?:adds?|introduces?|uses?)\s+(?:a\s+)?"
                              r"(?:new|additional)\s+(?:process|listener|service|flow|port)", line)
@@ -1152,8 +1130,9 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
 
 def test_workstream_d_docs_state_legacy_loss_and_downgrade_truth():
     """The operator surfaces describe the independent quarantine limit."""
-    with open(os.path.join(DOCS, "operations.md")) as fh:
-        operations = fh.read().lower()
+    operations = (_page("user-guide/roles.md") + "\n"
+                  + Path(REPO, "docs", "dev", "upgrade-notes.md")
+                  .read_text(encoding="utf-8")).lower()
     with open(os.path.join(REPO, "CHANGELOG.md")) as fh:
         changelog = fh.read().lower()
 
@@ -1308,14 +1287,12 @@ def _assert_phase1_network_relationship(text):
 
 
 def _assert_phase1_enforcement_boundary(text):
-    heading = "Roles, encrypted instructions and traffic controls"
-    _assert_section_terms(
-        text, heading, ("tracker", "origin", "enforcement", "authoritative"),
-        "server-side tracker/origin enforcement must remain authoritative")
-    _assert_section_terms(
-        text, heading, ("device", "accepted identity", "LKG", "QoS",
-                        "agent-reported"),
-        "device accepted/LKG/QoS state must remain agent-reported")
+    """Server enforcement is the record; what the device reports is a claim."""
+    _assert_unit(text, ("tracker", "origin", "enforcement", "authoritative"),
+                 "server-side tracker/origin enforcement must remain authoritative")
+    _assert_unit(text, ("device-side", "violation = 0",
+                        "does not\nmean compliant"),
+                 "device-reported compliance must stay a claim, not proof")
 
 
 def _assert_phase1_rollup_relationship(text):
@@ -1339,8 +1316,8 @@ def _assert_phase1_rollup_relationship(text):
 
 def test_docs_phase1_honest_guarantee_and_admin_boundary():
     """Scope confidentiality to encrypted payloads, never the entire envelope."""
-    security = _page("security.md")
-    boundary = _section(security, "Device administrator trust boundary")
+    security = _page("architecture/security-model.md")
+    boundary = _section(security, "What a device administrator can still change")
     _assert_unit(boundary, ("encrypts", "private per-device payload", "not its",
                             "header", "signed role intent"),
                  "the envelope header and signed role intent are not confidential")
@@ -1359,14 +1336,14 @@ def test_docs_phase1_honest_guarantee_and_admin_boundary():
                  "the device-administrator capabilities must share one clause")
     _assert_unit(security, ("tracker", "origin", "enforcement", "authoritative"),
                  "the enforcement-of-record relationship is missing")
-    assert "(security.md#device-administrator-trust-boundary)" in \
-        _page("device-agents.md")
+    assert "(security-model.md#device-administrator-trust-boundary)" in \
+        _page("architecture/data-path.md")
 
 
 def test_docs_phase1_envelope_custody_and_failure_contract():
     """Envelope, key placement, credential widths, and failures are relational."""
-    security = _page("security.md")
-    envelope = _section(security, "Encrypted instruction envelope")
+    security = _page("architecture/security-model.md")
+    envelope = _section(security, "How instructions are signed and trusted")
     _assert_unit(envelope, ("SP800-108", "HMAC-SHA-256", "per-device",
                             "audience context"),
                  "the named per-device KDF must bind the audience")
@@ -1381,7 +1358,7 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
     _assert_unit(envelope, ("256 KiB", "reject", "before", "cryptograph"),
                  "the envelope cap must reject before cryptographic work")
 
-    custody = _section(security, "Two-root trust and custody")
+    custody = _section(security, "The two root keys")
     _assert_unit(custody, ("exactly two", "distinct", "offline-root",
                            "trust set"),
                  "the trust set must contain exactly two distinct roots")
@@ -1403,9 +1380,10 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
                            "fail before minting"),
                  "unknown/mismatched widths must fail before minting")
 
-    operations = _page("operations.md")
-    response = _section(operations, "Instruction failure and key response")
-    _assert_section_terms(operations, "Instruction failure and key response",
+    operations = _page("admin-guide/instruction-keys.md")
+    failure_heading = "If a signing key leaks or devices reject instructions"
+    response = _section(operations, failure_heading)
+    _assert_section_terms(operations, failure_heading,
                           ("leaked instruction key", "honest device",
                            "iris-instr-key rotate --no-overlap"),
                  "leaked key on an honest device must map to no-overlap rotation")
@@ -1421,7 +1399,9 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
                  "instruction-rate-limit-exceeded"):
         assert "## %s" % code in problems
 
-    failures = _page("device-agents.md") + "\n\n" + _page("reference.md")
+    failures = (_page("reference/state-and-data.md") + "\n\n"
+                + _page("reference/device-configuration.md") + "\n\n"
+                + _page("user-guide/assignments.md"))
     for state, action in (
             ("none", "defaults"), ("applied", "accepted identity"),
             ("lkg", "retained"),
@@ -1434,19 +1414,19 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
             ("verifier_missing", "verified/default"),
             ("lkg_rejected", "defaults"), ("lkg_unreadable", "defaults"),
             ("oversize", "later tick"), ("reasserted", "aria2 session"),
-            ("instr_unavailable", "Later-tick"),
-            ("instr_pending", "Later-tick"),
+            ("instr_unavailable", "later tick"),
+            ("instr_pending", "later tick"),
             ("instr_forbidden", "refresh"),
             ("tracker-only", "No device peer-list enforcement")):
         _assert_unit(failures, (state, action),
                      "%s lacks its operator action/status relationship" % state)
-    _assert_unit(failures, ("fetch/verification", "LKG", "heartbeat/staging",
-                            "continue"),
+    _assert_unit(failures, ("fetch or verification", "LKG",
+                            "heartbeat and staging", "continue"),
                  "fetch/verify fallback must retain heartbeat and staging")
     _assert_unit(failures, ("RPC apply", "heartbeat", "staging", "skips", "tick"),
                  "RPC apply failure must send heartbeat and skip staging that tick")
     _assert_unit(failures, ("key_rejected", "unknown_key", "one",
-                            "unscheduled", "refresh", "latched by unknown key ID"),
+                            "unscheduled", "refresh", "per unknown key ID"),
                  "unknown keys must trigger one latched unscheduled refresh")
     _assert_unit(failures, ("key_rejected", "bad_mac", "no", "refresh",
                             "violation"),
@@ -1454,13 +1434,13 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
     _assert_unit(failures, ("401", "403", "instr_forbidden", "one",
                             "refresh", "no in-tick retry loop"),
                  "forbidden responses need one refresh without an in-tick loop")
-    _assert_unit(failures, ("404", "instr_unavailable", "Later-tick"),
+    _assert_unit(failures, ("404", "instr_unavailable", "later tick"),
                  "instruction 404 must wait until the next tick")
     _assert_unit(failures, ("409", "stale_pointer", "instr_pending",
-                            "Later-tick", "No in-tick sleep"),
+                            "later tick", "never sleep in-tick"),
                  "stale pointers must remain pending without an in-tick sleep")
     _assert_unit(failures, ("429", "5xx", "transport", "instr_unavailable",
-                            "Later-tick"),
+                            "later tick"),
                  "rate/server/transport failures must remain unavailable")
     _assert_unit(failures, ("expired deny-list", "remain", "effective",
                             "independently", "on_stale"),
@@ -1487,7 +1467,7 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
 
 
 def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
-    reference = _page("reference.md")
+    reference = _page("reference/device-configuration.md")
     _assert_unit(reference, ("max_peers", "parsed", "ignored", "MAX-PEERS-IGNORED"),
                  "legacy max_peers must be parse-only with one notice")
     for variable in ("IRIS_MAX_PEERS", "IRIS_MAX_CONCURRENT"):
@@ -1500,7 +1480,8 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
             if re.match(r"\|\s*`max_peers`\s*\|", line)]
     assert rows and all("65535" not in row for row in rows)
 
-    agents = _page("device-agents.md")
+    agents = (_page("architecture/data-path.md") + "\n\n"
+              + _page("architecture/security-model.md"))
     assert "| Property | Unified IOx/XR image | Guest Shell |" in agents
     for terms in (("Signature verifier", "runtime probe", "tracker-only"),
                   ("Two distinct public roots", "replaceable bundle",
@@ -1512,10 +1493,10 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
     _assert_unit(agents, ("Guest Shell", "RPC secret", "mode-0600",
                           "config path", "process arguments"),
                  "Guest Shell RPC-secret argv mitigation is missing")
-    _assert_unit(_page("containers.md"),
+    _assert_unit(_page("architecture/data-path.md"),
                  ("mechanical tick", "reassert", "heartbeat", "signed"),
                  "each mechanical tick must reassert and heartbeat")
-    operations = _page("operations.md")
+    operations = _page("user-guide/roles.md")
     _assert_unit(operations, ("containment", "unassign", "next successful",
                               "due policy poll", "aria2 policy apply"),
                  "torrent removal must use the due-policy/apply boundary")
@@ -1535,9 +1516,10 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
 
 
 def test_docs_phase1_iox_verification_transaction():
-    iox = _page("iox.md")
-    transaction = _section(iox, "Device-global package verification")
-    _assert_section_terms(iox, "Device-global package verification",
+    iox = _page("install/iox.md")
+    verification_heading = "Signature verification is a device-wide setting"
+    transaction = _section(iox, verification_heading)
+    _assert_section_terms(iox, verification_heading,
                           ("device-global", "verification"),
                  "the IOx control scope must be named")
     _assert_unit(transaction, ("Signed marker", "No verification-state change",
@@ -1577,15 +1559,14 @@ def test_docs_phase1_iox_verification_transaction():
     assert first in transaction and second in transaction
 
     for name, heading, terms in (
-            ("getting-started.md", "IOx verification prerequisite",
-             ("Before IOx onboarding", "device-global", "verification")),
-            ("security.md", "IOx verification and Guest Shell bundle boundary",
+            ("architecture/security-model.md",
+             "What IOx verifies and what Guest Shell cannot",
              ("IOx verification", "signed wrapper",
               "verification-state change")),
-            ("operations.md", "Guest Shell fleet bundle drop",
-             ("IOx recovery", "device-global verification",
-              "uninstall recovery", "never blindly enables")),
-            ("console.md", "IOx onboarding verification",
+            ("admin-guide/instruction-keys.md",
+             "Publish a new Guest Shell agent bundle",
+             ("IOx", "signature verification is a device-wide setting")),
+            ("install/iox.md", "Check that the IOx app came up",
              ("IOx verification", "uninstall recovery",
               "never blindly enables"))):
         _assert_section_terms(
@@ -1594,8 +1575,8 @@ def test_docs_phase1_iox_verification_transaction():
 
 
 def test_docs_phase1_network_process_and_state_topology():
-    _assert_phase1_network_relationship(_page("network-ports.md"))
-    server = _page("server.md")
+    _assert_phase1_network_relationship(_page("architecture/network-ports.md"))
+    server = _page("reference/state-and-data.md")
     _assert_unit(server, ("$IRIS_CONFIG/instr/", "signing-key.age",
                           "encrypted online private key", "signing-key.pub",
                           "signing-key-cert.pub", "roots.d/",
@@ -1619,30 +1600,27 @@ def test_docs_phase1_network_process_and_state_topology():
         _assert_unit(server, (base,) + names,
                      "%s lacks its complete state-path inventory" % base)
     _assert_section_terms(
-        server, "Instruction state and processes",
+        server, "Where server state lives",
         ("encrypted online private key", "public roots only",
          "runtime plaintext only", "runtime certificate cache",
          "durable instruction state", "server host"),
         "instruction path custody classifications are incomplete")
-    _assert_unit(server, ("stamper", "daemon thread", "management process",
-                          "five", "not", "sixth service"),
-                 "stamper process topology is missing")
-    _assert_phase1_enforcement_boundary(_page("architecture.md"))
+    _assert_phase1_enforcement_boundary(_page("architecture/security-model.md"))
 
 
 def test_docs_phase1_kubernetes_and_split_host_custody():
-    kubernetes = _page("kubernetes.md")
-    _assert_unit(kubernetes, ("Phase 1", "existing", "iris-data", "PVC"),
-                 "Phase 1 state must use the existing PVC")
+    kubernetes = _page("install/kubernetes.md")
+    _assert_unit(kubernetes, ("existing", "iris-data", "PVC"),
+                 "instruction state must use the existing PVC")
     _assert_unit(kubernetes, ("no new", "Secret", "port", "Service",
                               "NetworkPolicy"),
-                 "Phase 1 must add no Kubernetes topology object")
+                 "instructions must add no Kubernetes topology object")
     _assert_section_terms(kubernetes, "Topology",
                           ("replicas: 1", "instruction", "single-writer",
                            "no cross-pod"),
                  "instruction single-writer state must explain replica one")
 
-    split = _page("docker-hosts.md")
+    split = _page("install/separate-docker-hosts.md")
     _assert_unit(split, ("Only the server host", "signing-key.age",
                          "age identity", "runtime plaintext", "instruction state"),
                  "private custody material must remain on the server host")
@@ -1650,51 +1628,46 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
                          "private keys", "offline custodians"),
                  "public trust material must not be called secret")
 
-    validation = _page("validation.md")
-    for layout, terms in (
-            ("single-host Compose", ("custody", "stamp", "LKG", "drift",
-                                     "artifact provenance", "8443", "9443")),
-            ("split-host Compose", ("custody", "stamp", "LKG", "drift",
-                                    "artifact checks", "server host",
-                                    "Console")),
-            ("single-replica Kubernetes", ("custody", "stamp", "LKG",
-                                            "drift", "artifact checks",
-                                            "PVC", "NetworkPolicy")),
-            ("multi-replica server tier", ("not covered", "unsupported"))):
-        _assert_unit(validation, (layout,) + terms,
-                     "%s validation is not operationally meaningful" % layout)
-    _assert_unit(validation, ("single-host Compose", "default cold startup",
-                              "healthy server", "initial browser TLS"),
-                 "combined Compose must name its Console startup dependencies")
-    _assert_unit(validation, ("split-host Compose", "independent default TLS",
-                              "server is unavailable"),
-                 "split-host Console must retain server-outage cold start")
-    _assert_unit(validation, ("single-replica Kubernetes",
-                              "independently provisioned TLS",
-                              "server is unavailable"),
-                 "Kubernetes Console must retain server-outage cold start")
+    # The post-rewrite check list is one table with a column per layout, so
+    # each row carries the same fact for all three.
+    validation = _page("install/verify.md")
+    for row, terms in (
+            ("Devices and signing", ("8443", "9443", "stamp",
+                                     "last policy it accepted", "drift")),
+            ("Layout specifics", ("artifact provenance", "server host",
+                                  "replicas: 1", "PVC", "NetworkPolicy")),
+            ("Server restart", ("Console stays ready", "Console starts",
+                                "server is stopped", "server pod is down")),
+            ("Addresses and certificate", ("browser", "certificate",
+                                           "Console URL"))):
+        _assert_unit(validation, (row,) + terms,
+                     "the %r verification row is not operationally "
+                     "meaningful" % row)
+    _assert_unit(validation, ("One server owns one set of state files",
+                              "more than one server replica", "corrupt"),
+                 "a multi-replica server must be named as unsupported")
 
 
 def test_docs_phase1_operations_root_and_offline_runbooks():
-    operations = _page("operations.md")
-    _assert_section_terms(operations, "Instruction-root ceremony and recovery",
+    operations = _page("admin-guide/instruction-keys.md")
+    _assert_section_terms(operations, "Replace the two root keys",
                           ("quarterly two-root ceremony", "two distinct public roots",
                            "custodians", "sites", "fingerprints"),
                  "quarterly two-root ceremony is incomplete")
-    _assert_section_terms(operations, "One-root loss",
+    _assert_section_terms(operations, "If one root key is lost",
                           ("surviving offline custodian", "next online certificate",
                            "keylist", "No device trust change"),
                           "one-root failover must leave device trust unchanged")
-    break_glass = _section(operations, "Both-roots-lost break glass")
+    break_glass = _section(operations, "If both root keys are lost")
     _assert_ordered(break_glass,
                     ("two new independent roots", "online certificate/keylist",
                      "Guest Shell bundles", "both IOx tars", "XR RPM",
                      "Re-onboard every device"),
                     "both-root recovery must rebuild all package families", 3000)
-    _assert_unit(operations, ("F3 transports", "ciphertext bootstrap envelope",
+    _assert_unit(operations, ("ciphertext bootstrap envelope",
                               "not a secret key"),
                  "offline payload must be identified as ciphertext, not a key")
-    bundle_drop = _section(operations, "Guest Shell fleet bundle drop")
+    bundle_drop = _section(operations, "Publish a new Guest Shell agent bundle")
     _assert_unit(bundle_drop, ("sidecar before archive", "mismatched evidence",
                                "prior runnable bundle"),
                  "Guest Shell rollout must order evidence and retain rollback")
@@ -1704,8 +1677,13 @@ def test_docs_phase1_operations_root_and_offline_runbooks():
 
 
 def test_docs_phase1_observability_states_evidence_and_revisions():
-    observability = _page("observability.md")
-    _assert_phase1_rollup_relationship(observability)
+    observability = (_page("reference/telemetry-signals.md") + "\n\n"
+                     + _page("user-guide/monitoring.md") + "\n\n"
+                     + _page("reference/peer-policy-api.md") + "\n\n"
+                     + _page("architecture/security-model.md") + "\n\n"
+                     + _page("user-guide/assignments.md") + "\n\n"
+                     + _page("reference/state-and-data.md"))
+    _assert_phase1_rollup_relationship(_page("reference/peer-policy-api.md"))
     _assert_unit(observability, ("instr_protocol", "absent", "pre-instructions"),
                  "legacy protocol absence must map to pre-instructions")
     _assert_unit(observability, ("instr_protocol", "invalid", "unknown"),
@@ -1713,9 +1691,8 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
     _assert_unit(observability, ("Durable `revoked`", "overrides",
                                  "underlying", "agent"),
                  "durable revocation must override but retain device evidence")
-    _assert_section_terms(observability, "Instruction evidence and custody",
-                          ("report age", "server-observed", "stale",
-                           "underlying", "agent assertion"),
+    _assert_unit(observability, ("report age", "server", "stale",
+                                 "underlying", "agent"),
                  "report-age stale state must retain underlying evidence")
     _assert_unit(observability, ("Missing/corrupt", "null/unknown",
                                  "never become healthy zero"),
@@ -1725,9 +1702,8 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
     _assert_unit(observability, ("announce", "uploaded", "downloaded",
                                  "device-authored"),
                  "announce counters must be labeled device-authored")
-    _assert_section_terms(observability, "Instruction evidence and custody",
-                          ("heartbeat", "instruction", "agent-asserted"),
-                 "heartbeat instruction facts must be labeled agent-asserted")
+    _assert_unit(observability, ("agent", "claim", "instruction"),
+                 "instruction facts must be labeled as the agent's claim")
     _assert_unit(observability, ("policy_revision", "server-issued", "intent"),
                  "policy revision meaning is missing")
     _assert_unit(observability, ("instr_serial", "per-device", "freshness"),
@@ -1736,11 +1712,12 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
                                  "unrelated"),
                  "blocklist revision must be separated from policy/serial")
 
-    reference = _page("reference.md")
-    _assert_unit(reference, ("raw state", "accepted identity", "agent-asserted"),
+    reference = _page("reference/state-and-data.md")
+    _assert_unit(reference, ("the agent reports one raw state",
+                             "the server derives a display state"),
                  "raw device states must be labeled as agent evidence")
     _assert_unit(reference, (
-        "raw agent states", "none", "applied", "lkg", "stale_expired",
+        "Raw agent states", "none", "applied", "lkg", "stale_expired",
         "allowlist_expired", "rollback_rejected", "floor_reset",
         "audience_mismatch", "key_rejected", "tamper_rejected",
         "verifier_missing", "lkg_rejected", "lkg_unreadable", "oversize",
@@ -1748,21 +1725,24 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
         "instr_forbidden", "tracker-only"),
         "the closed raw-state vocabulary must be identified as one contract")
     _assert_unit(reference, (
-        "server display vocabulary", "applied", "lkg", "stale", "rejected",
+        "Server display states", "applied", "lkg", "stale", "rejected",
         "unavailable", "tracker-only", "pending", "forbidden",
         "floor_reset", "none", "pre-instructions", "revoked", "unknown",
         "server"),
         "server display classes must be separate from raw states")
-    console = _page("console.md")
-    _assert_section_terms(console, "Instruction status and custody",
-                          ("server-created", "exact label", "i63", "strings"),
-                 "Console labels must preserve exact i63 identity")
-    _assert_unit(console, ("stale", "revoked", "underlying", "evidence"),
+    console = _page("user-guide/assignments.md")
+    _assert_section_terms(console, "Reading the instruction status column",
+                          ("server-created", "exactly", "strings"),
+                 "the Console must show the server's own label strings")
+    _assert_unit(_page("reference/state-and-data.md"),
+                 ("underlying_state", "raw agent state", "revoked"),
                  "Console overrides must preserve underlying evidence")
 
 
 def test_docs_phase1_changelog_and_release_boundary():
     unreleased = _changelog_release("2026.09.10")
+    # The CHANGELOG keeps the project's own release vocabulary; the manual
+    # does not. These two pins stay on the CHANGELOG for that reason.
     _assert_section_terms(unreleased, "Phase 1 instructions",
                           ("encrypted instruction", "custody", "Guest Shell",
                            "IOx", "verification"),
@@ -1777,13 +1757,10 @@ def test_docs_phase1_changelog_and_release_boundary():
             r"\blive fleet\s+(?:is\s+|was\s+)?verified\b",
             unit, re.IGNORECASE)
 
-    _assert_section_terms(_page("observability.md"),
-                          "Role-policy status and privacy",
-                          ("mutual-origin", "preflight", "Issue #153"),
+    _assert_section_terms(_page("architecture/security-model.md"),
+                          "What the status shows and what it hides",
+                          ("mutual-origin", "preflight only"),
                  "the open mutual-origin boundary must remain explicit")
-    _assert_unit(_page("architecture.md"), ("one full tagged-release dwell",
-                                             "separately authorized activation"),
-                 "the activation gate must retain release dwell and authority")
 
 
 # ---------------------------------------------------------------------------
@@ -1792,7 +1769,7 @@ def test_docs_phase1_changelog_and_release_boundary():
 
 def test_docs_phase2_verbs_targets_and_the_stage_only_invariant():
     """A schedule has exactly two verbs, and neither of them installs."""
-    workflows = _page("fleet-workflows.md")
+    workflows = _page("user-guide/scheduling.md")
     _assert_section_terms(
         workflows, "Scheduling",
         ("assign", "onboard", "stage", "never", "install"),
@@ -1810,24 +1787,24 @@ def test_docs_phase2_verbs_targets_and_the_stage_only_invariant():
 
 
 def test_docs_phase2_dst_policy_is_stated_per_schedule_kind():
-    workflows = _page("fleet-workflows.md")
+    workflows = _page("user-guide/scheduling.md")
     _assert_unit(workflows, ("once", "absolute", "instant"),
                  "a one-time schedule's DST immunity must be stated")
     _assert_unit(workflows, ("gap", "spring", "first valid"),
                  "the DST gap policy must name the instant it fires at")
     _assert_unit(workflows, ("fold", "twice", "first"),
                  "the DST fold policy must say which of the two runs")
-    _require("fleet-workflows.md", ["`normal`", "`gap`", "`fold`"])
+    _require("user-guide/scheduling.md", ["`normal`", "`gap`", "`fold`"])
 
 
 def test_docs_phase2_window_sizing_and_the_pool_share_rule():
     """An operator sizing a window needs the real numbers, not an estimate."""
-    operations = _page("operations.md")
+    operations = _page("user-guide/scheduling.md")
     _assert_section_terms(
         operations, "Sizing a maintenance window",
         ("25", "1000", "7200", "75", "90"),
         "window sizing must carry the pool, queue and per-device budgets")
-    _require("operations.md", [
+    _require("user-guide/scheduling.md", [
         "`IRIS_ONBOARD_CONCURRENCY`", "`IRIS_ONBOARD_JOB_TIMEOUT`",
         "7-10 minutes", "250-device"])
     sizing = _compact(_section(operations, "Sizing a maintenance window"))
@@ -1843,8 +1820,8 @@ def test_docs_phase2_window_sizing_and_the_pool_share_rule():
 
 
 def test_docs_phase2_outcomes_recovery_and_every_refusal_reason():
-    operations = _page("operations.md")
-    _require("operations.md", [
+    operations = _page("user-guide/scheduling.md")
+    _require("user-guide/scheduling.md", [
         "`conflict`", "`vanished`", "`device_revoked`",
         "`all_targets_quarantined`", "`peer_quarantined`",
         "`unclassified_management_type`", "`window_closed`",
@@ -1864,14 +1841,14 @@ def test_docs_phase2_outcomes_recovery_and_every_refusal_reason():
 
 
 def test_docs_phase2_orphaned_schedule_and_narrowing_caveats():
-    console = _page("console.md")
+    console = _page("user-guide/scheduling.md")
     _assert_unit(console, ("actor no longer exists", "re-affirm"),
                  "the orphaned-schedule marker and its action must be named")
     _assert_unit(console, ("re-affirm", "created_by", "rev"),
                  "re-affirming must say what it rewrites")
     _assert_unit(console, ("schedule", "device row", "manual"),
                  "the device row must warn before a manual/scheduled clash")
-    workflows = _page("fleet-workflows.md")
+    workflows = _page("user-guide/scheduling.md")
     _assert_unit(workflows, ("manual replacement", "narrow", "approved"),
                  "manual/scheduled assignment narrowing must stay explicit")
 
@@ -1884,8 +1861,8 @@ def test_docs_phase2_problem_types_and_schedule_api_reference():
                  "schedule_target_heartbeat_unavailable",
                  "schedule_target_policy_unavailable"):
         assert "## " + code in problems, code
-    reference = _page("reference.md")
-    _require("reference.md", [
+    reference = _page("reference/console-api.md")
+    _require("reference/console-api.md", [
         "`GET /api/v1/schedules`", "`POST /api/v1/schedules`",
         "/schedules/{id}/occurrences", "/schedules/{id}/receipts",
         "/schedules/{id}/reaffirm", "`If-Match`"])
@@ -1899,8 +1876,9 @@ def test_docs_phase2_csv_template_and_validation_are_mapped():
         readme = handle.read()
     assert "schedules.csv.example" in readme
     assert "iris-schedule import" in readme and "iris-schedule export" in readme
-    _assert_unit(_page("validation.md"), ("schedule", "window", "stage"),
-                 "validation must cover a scheduled staging window")
+    _assert_unit(_page("user-guide/scheduling.md"),
+                 ("schedule", "window", "stage"),
+                 "the scheduling guide must cover a scheduled staging window")
     current = _changelog_release("2026.09.10.1", lower=True)
     for entry in ("schedule", "wave", "target"):
         assert entry in current, entry

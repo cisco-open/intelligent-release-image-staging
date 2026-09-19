@@ -19,10 +19,9 @@ Skip this page if you run both containers on one machine, described in
    2.24.4 or newer, that meet
    [Check the host before you install](check-the-host.md). Check out the same
    IRIS release on both.
-2. Both container images, from
-   [Build the server and Console images](build-images.md), and the pinned
-   `aria2c` binary the server build needs, from
-   [Download the tools that build device packages](build-tools.md).
+2. Both container images. See
+   [Build the server and Console images](build-images.md), which fetches the
+   `aria2c` client the server build needs.
 3. The two public signing roots on the server host, from
    [Create the two offline signing keys](signing-roots.md), and the firewall
    permits in [Open the required ports](open-ports.md#firewall-rules).
@@ -45,8 +44,10 @@ Pick all three before you provision either host.
 | Server private management address | The Console's `IRIS_MANAGEMENT_API_URL`, normally `https://iris-mgmt.example.com:9443`. Its hostname must resolve from the Console container. |
 | Console browser address | Operators, for example `https://console.example.com:8080`. Set the same full URL as `IRIS_CONSOLE_URL` on the server. |
 
-Bind port 9443 to the management address and let only the Console host through
-the firewall. Restrict the Console browser port to trusted operator sources.
+The management address can share the device-facing interface if that
+interface is on a trusted management network. Bind port 9443 to the
+management address and let only the Console host through the firewall.
+Restrict the Console browser port to trusted operator sources.
 
 ## What lives on which host
 

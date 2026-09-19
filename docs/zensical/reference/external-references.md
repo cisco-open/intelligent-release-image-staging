@@ -12,7 +12,7 @@ Cisco documentation and third-party tools that the guides link to.
 
 | Document | Used by |
 | --- | --- |
-| [IOx package descriptor](https://developer.cisco.com/docs/iox/package-descriptor/) | [Prepare devices for the IOx app](../install/iox.md) — Catalyst 9000 series switches (Guest Shell, or the IOx app on switches with app-hosting storage), Catalyst 8000 series routers, and Industrial Ethernet 3000 series switches |
+| [IOx package descriptor](https://developer.cisco.com/docs/iox/package-descriptor/) | [Prepare devices for the IOx app](../install/iox.md): Catalyst 9000 series switches (Guest Shell, or the IOx app on switches with app-hosting storage), Catalyst 8000 series routers, and Industrial Ethernet 3000 series switches |
 | [IOS XE app-hosting](https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/prog/configuration/1718/b-1718-programmability-cg/m_1717_prog_application_hosting.html) | [Prepare devices for the IOx app](../install/iox.md) |
 
 ## Third-party tools

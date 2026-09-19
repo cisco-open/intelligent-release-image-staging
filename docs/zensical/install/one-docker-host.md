@@ -19,8 +19,7 @@ to a cluster, covered by [Install on Kubernetes](kubernetes.md).
 
 - [Check the host before you install](check-the-host.md).
 - [Build the server and Console images](build-images.md).
-- [Download the tools that build device packages](build-tools.md), including the
-  amd64 `aria2c` client.
+- [Download the tools that build device packages](build-tools.md).
 - [Create the two offline signing keys](signing-roots.md), then copy their public
   halves to a reviewed directory on this host, such as `$HOME/iris-roots`.
 
@@ -98,9 +97,10 @@ the scrape token as described in
 IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
 
-The helper bootstraps encrypted configuration, installs the two public roots,
-starts both containers, and builds the device packages, including the IOS-XR
-appmgr package unless `IRIS_SKIP_XR` is set.
+The helper fetches the tested `aria2c` clients and checks them against the
+checksum in `tools/aria2c.sha256`. It then bootstraps encrypted configuration,
+installs the two public roots, starts both containers, and builds the device
+packages, including the IOS-XR appmgr package unless `IRIS_SKIP_XR` is set.
 
 2. Check its exit code. A nonzero exit with the stack still running means a
    package build failed. Fix the reported problem, then rebuild as described in
@@ -162,14 +162,18 @@ For an authenticated request through the Console address, see
 
 ## Server-only preview
 
-These three commands give you the server and the Console without signing roots
-or device packages. They still need the amd64 `aria2c` client:
+These commands give you the server and the Console without signing roots or
+device packages:
 
 ```bash
+tools/get-aria2c.sh --for-platforms linux/amd64
 docker compose -f server/docker-compose.yml build --pull
 docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
 docker compose -f server/docker-compose.yml up -d
 ```
+
+The first line fetches the tested amd64 client and checks it against
+`tools/aria2c.sha256`.
 
 ## Running a second stack on the same host
 

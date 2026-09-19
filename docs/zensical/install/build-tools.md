@@ -31,30 +31,19 @@ which installer, see [Supported devices](supported-devices.md).
 
 ## 1. Get the aria2c client
 
-`aria2c` is the transfer client the server and every device agent run. Every
-deployment needs the amd64 client. Run these in the shell that builds the
-packages. For both architectures:
+`aria2c` is the transfer client the server and every device agent run.
 
 ```bash
-export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
-tools/get-aria2c.sh amd64
-tools/get-aria2c.sh --no-install arm64
+tools/get-aria2c.sh --for-platforms linux/amd64,linux/arm64
 ```
 
-The amd64 client lands in `bin/aria2c`, the arm64 client in `deliverables/`.
+Use `linux/amd64` alone when no device in your fleet is arm64. The command
+checks each client against `tools/aria2c.sha256` and refuses a mismatch. The
+amd64 client lands in `bin/aria2c`, the arm64 client in `deliverables/`.
 
-For an amd64-only package set:
-
-```bash
-export IRIS_DEVICE_PLATFORMS=linux/amd64
-tools/get-aria2c.sh amd64
-```
-
-!!! warning
-
-    Keep `--no-install` before `arm64`. In any other order the arm64 binary
-    replaces `bin/aria2c`, and the next server image build fails its
-    architecture check.
+On a host with no outbound access, set `ARIA2C_NO_DOWNLOAD=1` and place the
+clients under `deliverables/` yourself, named `aria2c-x86_64` and
+`aria2c-aarch64`.
 
 ## 2. Get ioxclient
 

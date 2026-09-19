@@ -21,6 +21,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   schedule error codes, including the legacy quarantine status distinction.
   Clarify first-start configuration, recipient rotation, CSV workflows and
   dashboard evidence; repair stale operator links.
+- Reorganize the manual into an Architecture Guide, an Installation Guide, an
+  Administration Guide, a User Guide, and a Reference, each with its own
+  landing page. Every old `docs/zensical/*.md` page now redirects to its new
+  location; the anchors named in `docs/dev/documentation.md`'s alias table
+  survive at their old fragment, and every other in-page anchor moves with its
+  heading to the new page. Console and server images built before this change
+  link to the old page URLs in their help pages and rely on the redirects to
+  keep working until those images are rebuilt.
 - The one-host start script fetches and verifies the tested aria2c clients
   itself; `get-aria2c.sh` gains `--for-platforms` so one command installs every
   architecture in `IRIS_DEVICE_PLATFORMS`.

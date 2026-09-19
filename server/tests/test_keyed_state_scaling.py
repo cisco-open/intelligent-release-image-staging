@@ -443,7 +443,7 @@ def test_rollback_guard_names_the_migrated_file_for_the_operator(tmp_path):
     # lookup.
     assert path + ".migrated" in guard_text
     assert "mv " in guard_text
-    assert "docs/zensical/operations.md" in guard_text
+    assert "docs/zensical/admin-guide/recovery.md" in guard_text
 
 
 def test_migration_is_one_shot_even_across_process_restarts(tmp_path):

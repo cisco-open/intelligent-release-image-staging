@@ -11,7 +11,7 @@ Console](console.md), then [Stage your first image](first-image.md).
 
 !!! note
     IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See [IRIS documentation](../index.md).
+    variables. See [the Overview](../index.md).
 
 ## What you do every day
 

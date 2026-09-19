@@ -64,6 +64,14 @@ The agent writes only to `harddisk:`. Undeploy removes the application, the
 package, and these files. See
 [Undeploy, retire and clean up devices](../user-guide/undeploy.md).
 
+## How the transfer is verified
+
+The router fetches `iris-xr.rpm` and the catalog certificate over authenticated
+HTTPS, with certificate verification enforced and insecure mode never used.
+Before it registers the package, it checks both downloads against SHA-256
+values taken from server-side snapshots, so a corrupted or tampered transfer
+is refused instead of installed.
+
 ## Verify
 
 - The job's last result says onboarding completed.

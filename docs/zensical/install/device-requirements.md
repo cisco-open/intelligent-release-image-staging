@@ -19,18 +19,28 @@ SPDX-License-Identifier: Apache-2.0
 2. If it is not, run `show ntp associations`.
    Result: a selected peer shows non-zero reach.
 
-Configure NTP outside IRIS. The server host has its own clock requirement — see [Check the host before you install](check-the-host.md).
+Configure NTP outside IRIS. The server host has its own clock requirement; see [Check the host before you install](check-the-host.md).
 
 !!! warning
 
     Do not change routing, VRFs or interfaces that other services depend on to make this check pass.
 
 - `time preflight failed`: check the selected VRF, source interface, return route and UDP/123 access.
-- Peer selected, status still `unsynchronized`: the clock is measuring drift (`FREQ`) — let it settle and check again.
+- Peer selected, status still `unsynchronized`: the clock is measuring drift (`FREQ`), so let it settle and check again.
+
+### If a device cannot reach the approved upstream server
+
+An operator-approved host NTP relay is an option here, not an IRIS feature.
+Synchronize that host to the upstream server, allow UDP/123 only from the
+intended clients, and verify both hops. Do not configure a local or orphan
+clock to make an unsynchronized relay appear healthy. Keep relay addresses
+and service configuration outside IRIS templates. See
+[Troubleshoot: symptoms and first steps](../user-guide/troubleshooting.md#time-synchronization)
+for the other clock symptoms.
 
 ## 2. Size the storage root
 
-- Allow **2x the image size + 200 MB** of free space per image in flight — about 4.2 GB for a 2 GB image.
+- Allow **2x the image size + 200 MB** of free space per image in flight, about 4.2 GB for a 2 GB image.
 - Budget for every image you want resident at once.
 - Remove a file whose size and hash do not match the catalog. Guest Shell adopts a matching one.
 
@@ -59,5 +69,5 @@ The agent checks in about every 60 seconds; a new assignment reads **Waiting for
 ## Next steps
 
 - [Prepare Catalyst 9000 series and 8000 series devices for Guest Shell](guest-shell.md)
-- [Prepare Industrial Ethernet 3000 series, Catalyst 9000 series and 8000 series devices for the IOx app](iox.md) — on Catalyst 9000 series switches, IOx is the alternative to Guest Shell
+- [Prepare Industrial Ethernet 3000 series, Catalyst 9000 series and 8000 series devices for the IOx app](iox.md): on Catalyst 9000 series switches, IOx is the alternative to Guest Shell
 - [Prepare Cisco 8000 series and NCS routers for IOS-XR appmgr](ios-xr.md)

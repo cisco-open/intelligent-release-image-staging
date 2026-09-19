@@ -8,7 +8,7 @@
 # The multi-architecture index digest is pinned so both CPU builds share one
 # audited definition. Alpine is the measured smallest qualified Python runtime
 # for this payload (see the package-footprint section of
-# docs/zensical/containers.md).
+# docs/dev/device-packages.md).
 FROM python:3.12-alpine3.24@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b AS python-base
 
 # CPython 3.12.14 embeds Expat 2.8.3. Apply the merged upstream 3.12

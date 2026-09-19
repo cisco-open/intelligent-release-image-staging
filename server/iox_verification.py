@@ -2069,13 +2069,13 @@ def _public_journal(journal):
 
 
 # The operator runbook for a journal the controller cannot resolve on its
-# own (docs/zensical/operations.md, "Recovering an IOx attempt cut off
-# mid-run"). Carried in the refusal's detail because a forced teardown's
+# own (docs/zensical/admin-guide/recovery.md, "Recovering an IOx attempt cut
+# off mid-run"). Carried in the refusal's detail because a forced teardown's
 # result reports the operation's own null binding, not the predecessor's,
 # so the log line is the only place the operator sees which record to
 # reconcile (issue #231).
 _RECONCILE_RUNBOOK = ("https://cisco-open.github.io/intelligent-release-image-staging/"
-                      "docs/operations/#recovering-an-iox-attempt-cut-off-mid-run")
+                      "docs/admin-guide/recovery/#recovering-an-iox-attempt-cut-off-mid-run")
 # gui_onboard refuses a controller detail longer than this.
 _DETAIL_LIMIT = 512
 

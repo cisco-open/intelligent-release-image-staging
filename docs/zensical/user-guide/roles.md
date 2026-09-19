@@ -19,18 +19,20 @@ own speed limits. Sharing needs permission from both roles.
 
 1. In **Inventory**, select the devices.
 2. Open **More actions → Set role…** and choose a role. The explicit
-   *— no role —* option clears membership.
+   `— no role —` option clears membership.
 3. Select **Preview change**. One dry run covers every selected device and
    reports the impact on access and membership, the speed limits, per-device
    failures, and the confirmation threshold.
-4. Select **Set role**. It commits that preview, and an all-failed preview
-   cannot commit. If the policy changed under you, or the server refuses the
-   confirmation, the Console discards the preview: refresh and preview again.
+4. Select **Set role**. It commits that preview, and an
+   all-failed preview cannot commit. If the policy changed under you, or the
+   server refuses the confirmation, the Console discards the preview: refresh
+   and preview again.
 
 !!! warning
-    If the commit request or its reply never arrives, then **changes may have
-    been saved**. Refresh the policy and inventory views, review the reported
-    drift, and preview again rather than sending the same request twice.
+    If the commit request or its reply never arrives, then
+    **changes may have been saved**. Refresh the policy and inventory views,
+    review the reported drift, and preview again rather than sending the same
+    request twice.
 
 ### Edit role definitions
 
@@ -63,8 +65,9 @@ file in the `fleet/roles.csv.example` format, and asks you to confirm a count of
 the roles it holds. Roles missing from the file are removed, and a role a device
 still declares refuses the import. **Export CSV** downloads the definitions.
 
-`fleet/roles.csv.example` is the tracked template. The real `fleet/roles.csv` is
-operator-owned and ignored by Git; back it up with your site inventory. Lists in
+`fleet/roles.csv.example` is the tracked template.
+`fleet/roles.csv` is operator-owned and ignored by Git, so back it up with your
+site inventory. Lists in
 `peers` and `nets` are semicolon-separated, rates are integer bytes per second,
 and `*_s` values are integer seconds.
 
@@ -93,7 +96,7 @@ For routes, request fields and refusal codes, see
 | Where | What it shows |
 | --- | --- |
 | Inventory, **Role** column | the role a device declares, or a dash |
-| **Filters → Role** | *Role: any*, *— no role —*, and every role in the policy, including roles not on the page you are looking at |
+| **Filters → Role** | *Role: any*, `— no role —`, and every role in the policy, including roles not on the page you are looking at |
 | **Policies** | which roles may share images and which may use the distribution server |
 | **Advanced** | role and restricted-role counts, drift, how full the pending-operation queue is (`N/256`), and, under **Peer access and roles**, per-role member counts and the rule that an explicit ACL entry shadows a role |
 
@@ -132,16 +135,23 @@ records your intent, not the tracker's last enforcement state.
 
 Quarantine is held separately from that device's ordinary ACL assignment, and
 applying it preserves the current ordinary ACL entry, which takes effect again
-when you release the quarantine. Revoking a device's credentials clears only
-that ACL entry and keeps the quarantine, role membership and device speed
-limits. Retiring the device clears them all.
+when you release the quarantine. Revoke a device's credentials and only that
+ordinary ACL entry is cleared: the quarantine, the role membership and the
+device speed limits are all retained. Retiring the device clears the quarantine
+along with the ordinary ACL entry, the role membership and the speed limits.
+
+A quarantine written by an earlier release sits in the ordinary ACL instead,
+and the next policy change moves it to its own container. Such a legacy
+quarantine row has no surviving ordinary ACL, so IRIS cannot recover the
+assignment that earlier behavior already overwrote.
 
 ### Containment takes time
 
 !!! warning
-    Tracker or quarantine discovery alone does not sever existing connections or
-    remove peers a device already holds, so independent quarantine alone is not
-    sufficient containment: quarantine is not immediate isolation.
+    Tracker or quarantine discovery alone does not sever existing connections
+    or remove peers a device already holds. An
+    independent quarantine alone is not sufficient containment, and quarantine
+    is not immediate isolation.
 
 To request containment, unassign every image from the affected device. Its agent
 removes torrents only after the next successful due policy poll and a successful
@@ -166,6 +176,27 @@ refused before it writes anything (`operation_backlog_full`). Check that the
 tracker is running and that the queue is draining before you retry. Every
 refusal on these routes has an entry in
 [API error codes (problem types)](../problems.md).
+
+## When a role change half-succeeds
+
+A role change writes two stores: the inventory and the sharing policy. When one
+write lands and the other fails, the response is `partial`. That is not a
+rollback. A later policy restore changes policy content only and
+does not roll back a completed Fleet write. Repair the failed store and send the
+same request again; the request is idempotent.
+
+Rolling policy content back is a reviewed maintenance step, not a button. The
+internal primitive copies reviewed historical content into a
+monotonic new revision, keeps the queue of changes the tracker has not
+acknowledged, and rotates its acknowledgement epoch. There is
+no public restore route or CLI, so never overwrite a healthy policy file with an
+older snapshot by hand.
+
+Each queued change carries a stable event ID, so a failed export replays the
+same change at least once instead of losing it. The tracker
+persists both the accepted revision and its epoch in the enforcement status. Do
+not edit those fields by hand to clear a backlog: an acknowledgement with no
+matching epoch counts as zero, and the queued changes replay anyway.
 
 ## Related
 

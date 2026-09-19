@@ -53,7 +53,7 @@ Allow-list membership always falls back to tracker-only, independent of `on_stal
 
 `nets` accepts a bare IPv4 address or an IPv4 prefix with a decimal length, a netmask, or a hostmask; leading zeroes and IPv6 are refused. `iris-role` CSV import compares networks for you and keeps the first valid spelling.
 
-A role's `qos` object cannot set `defs.<role>.qos.on_stale`: that fallback is a separate field on the role definition, not a QoS key. Stored ACLs, the older explicit per-device peer lists, hold at most 64 names with 256 rules each; a role's rules compile in memory and use none of those slots. One explicit stored-ACL assignment shadows a role rather than combining with it. `iris-role migrate ACL ROLE --dry-run` previews moving a device between them; `iris-role migrate ACL ROLE --apply` commits the move in two policy revisions. A quarantined device cannot be migrated.
+A role's `qos` object cannot set `defs.<role>.qos.on_stale`: that fallback is a separate field on the role definition, not a QoS key. Stored ACLs, the older explicit per-device peer lists, hold at most 64 names with 256 rules each; a role's rules compile in memory and use none of those slots. One explicit stored-ACL assignment shadows a role rather than combining with it. `iris-role migrate ACL ROLE --dry-run` previews moving a device between them; `iris-role migrate ACL ROLE --apply` commits the move in two policy revisions. A quarantined device cannot be migrated. `iris-role` CSV import owns duplicate-network detection: it compares canonical networks while keeping the first valid spelling, and the raw policy validator does not promise duplicate-net rejection.
 
 ## QoS keys
 
@@ -84,11 +84,13 @@ Values are integers. Rate keys are bytes per second, and `0` means unlimited; a 
 
 A `PUT /api/v1/peer-policy/qos` write replaces the whole selected QoS object; `{}` clears that layer. Omitting `qos_state` preserves the stored state object. An explicit `qos_state: {}` removes only the selected state layer and preserves the rest of the scalar QoS unchanged. A full role-definition replacement, a `PUT .../roles/<name>` write, must include `qos_state` to retain it: that write is a complete replacement, not a merge.
 
-Use role membership and access rules to keep a role off a swarm. The Console edits role fields as typed fields; global or role QoS, including the `qos_state` overlay, is set only through `PUT /api/v1/peer-policy/qos`. There is no per-device QoS write route. Pair explanations come only from `GET /api/v1/peer-policy/explain`.
+Zero is unlimited, so no rate key expresses **never upload**. Use role membership and access rules to keep a role off a swarm, and account for connections aria2 already holds. The Console edits role fields as typed fields; global or role QoS, including the `qos_state` overlay, is set only through `PUT /api/v1/peer-policy/qos`. There is no per-device QoS write route. Pair explanations come only from `GET /api/v1/peer-policy/explain`.
+
+Scalar QoS is the instruction intent the server sends to a device. `tracker_qos` explains the selected tracker state and its sources. `tracker_qos` is tracker-only: tracker state never enters instruction QoS or control, telemetry, semantic hashes, role artifacts, stamps, serials, envelopes, heartbeat, or device configuration.
 
 ## Response fields
 
-`GET /api/v1/peer-policy` is count-only: it never returns the raw deny list, peer addresses, aria2 option dictionaries, session IDs, or the device IDs behind the mutual-origin preflight. Role drift (the gap between a device's declared role and its compiled membership) is the one exception: up to ten device IDs return, flagged if the list was truncated.
+`GET /api/v1/peer-policy` is count-only: it never returns the raw deny list, peer addresses, aria2 option dictionaries, session IDs, or the device IDs behind the mutual-origin preflight (two devices that both hold a full copy of the same image). Role drift (the gap between a device's declared role and its compiled membership) is the one exception: up to ten device IDs return, flagged if the list was truncated.
 
 | Field | Meaning |
 | --- | --- |
@@ -96,13 +98,12 @@ Use role membership and access rules to keep a role off a swarm. The Console edi
 | `enforcement.state`, `applied_revision`, `stale` | The tracker's last reconciliation result and how fresh it is. A result older than five minutes is marked stale. |
 | `enforcement.mutual_origin.mode = preflight` | Mutual-origin blocking (two devices that both hold a full copy of the same image) is observation-only. `newly_denied_device_count` is `null` when unavailable, and `0` when a completed check found no newly denied device; neither adds a device to the active deny list. |
 | `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the origin's rate limits reached every active download. These are counts, not per-role throughput. |
-| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | The current issued policy revision, and accepted-device counts grouped by that revision. |
+| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | The current issued policy revision, nullable until the first issue, and accepted-device counts grouped by that policy revision. |
 | `fleet_rollup.states.pre-instructions` | Devices whose last heartbeat did not claim the instruction protocol. |
 | `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | A deprecated legacy sentinel; read the response's `instruction` object for current evidence instead. |
 
 !!! warning
-    Never log or export an aria2 option dictionary. Tracker authorization
-    data can be present among those options.
+    Never log or export an aria2 option dictionary, because tracker authorization data can be present among those options.
 
 ## Refusals
 

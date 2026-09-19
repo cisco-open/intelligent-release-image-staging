@@ -65,6 +65,10 @@ The origin seeder knows exactly how many bytes it sent; which device received th
 
 A peer that connects, takes bytes and disconnects between two samples is counted as untraced, not lost. Metric names use `attributed`; the matching OTLP attribute is `iris.peer.attribution`, covered under `iris.device.peer_transfer_record` below.
 
+Prometheus labels never carry per-peer or per-device identity, because that
+would put unbounded peer identity into label cardinality. That detail is
+available only in the OTLP log records below.
+
 ## OTLP log records
 
 Terminal per-device reports, tracker lifecycle events, peer-policy operations, and measured peer rates and byte totals flow as OTLP logs. Event identity is the top-level `eventName` field. These are the `otel.log.name` values IRIS emits:
@@ -102,9 +106,10 @@ Terminal per-device reports, tracker lifecycle events, peer-policy operations, a
 | `network.peer.address` | A flat string array of the observed peer addresses. |
 | `iris.transfer.bytes_from_all_senders_total` | The device's own total, including the origin. |
 | `iris.transfer.bytes_from_origin_total`, `iris.transfer.bytes_from_devices_total`, `iris.transfer.bytes_from_unknown_total` | The classified parts: from the origin seeder, from other devices, unattributable. |
+| `iris.transfer.bytes_unattributed_omitted` | Bytes dropped with the peer rows capped by `iris.transfer.peer_records.rows_omitted`. Keep it in its own bucket; never redistribute it among the origin, device, or unknown totals above. |
 | `iris.transfer.peer_records.rows_omitted`, `iris.transfer.bytes_from_all_senders_omitted` | Peer rows dropped at a cap, and the bytes dropped with them. |
 | `iris.transfer.peer_records.capture_complete` | `false` when the peer capture itself was lossy. |
-| `iris.download.started_at`, `iris.download.completed_at`, `iris.download.duration_seconds` | Elapsed download time, from the optional v2 report `download` block. |
+| `iris.download.started_at`, `iris.download.completed_at`, `iris.download.duration_seconds` | Elapsed download time, from the optional v2 report `download` block. A resume retains the original start when known. Already-present images, missing hooks, and a transfer whose start was not recorded are excluded from the average rather than reported as zero. Historical tracker-only role transitions cannot be converted to this metric. |
 
 !!! warning "The transfer record is a floor, not a census"
     The device only counts peers aria2 still has an open connection to when the last piece lands. `bytes_from_all_senders_total` is a lower bound, not an exact match for `completed_content_bytes`. A transfer with no usable snapshot carries no peer-transfer-record attributes at all.
@@ -130,6 +135,9 @@ The `iris.device.report` record is a reduced projection: `device.id`, `iris.imag
 | `iris.enforcement.state` | The enforcement outcome. |
 | `iris.enforcement.applied_revision` | The revision actually applied. |
 | `iris.enforcement.desired_ip_count` | How many addresses the desired state names. |
+
+This record is count-only: it never carries role membership lists, raw
+rules, addresses, or origin-QoS option values.
 
 See [Roles and sharing-policy API](peer-policy-api.md) for the fields behind these attributes.
 
@@ -238,7 +246,7 @@ Emitted once per peer per completed transfer, from a device-side completion hook
 | `iris.transfer.session_bytes_from_peer`, `iris.transfer.session_bytes_to_peer` | Bytes received from, and sent to, that peer in this session. |
 | `iris.peer.attribution` | `origin`, `device`, or `unknown`. |
 | `iris.peer.device.id`, `iris.peer.device_id` | The sender: a device id, `origin`, or absent for an unknown sender. |
-| `iris.peer.has_complete_file`, `iris.transfer_record.capture_complete` | Whether that peer already held the whole file, and whether the capture itself was lossy. |
+| `iris.peer.has_complete_file`, `iris.transfer_record.capture_complete` | Whether that peer already held the whole file, and whether the capture itself was lossy. `has_complete_file` does not identify the origin: it is aria2's seeder flag, true for any peer holding the complete file, including every device that finished early in a multi-device wave. It answers complete-vs-partial, not origin identity. |
 
 The server classifies and pins each row's attribution once, at first export; see [Data formats and states](state-and-data.md). A row the server did not resolve stays `unknown` rather than being folded into `device`.
 
@@ -256,6 +264,10 @@ While a transfer is active, a device with streaming enabled embeds one `telemetr
 | `sampling_class` | `good` or `constrained`. |
 | `aria` | `receive_bps`, `send_bps`, `completed_content_bytes`, `total_content_bytes`, `connections`, `status`. |
 | `peer_connections` | Up to 32 rows: `ip`, `port`, `send_bps`, `receive_bps`, `peer_client_name`, `progress`. Extra rows are truncated and flagged, not rejected. |
+
+## Announce counters are the device's own
+
+The announce counters, including bytes uploaded and bytes downloaded, are device-authored: the device reports them and the tracker records what it was told.
 
 ## Event identity
 

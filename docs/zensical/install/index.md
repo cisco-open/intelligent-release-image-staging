@@ -10,7 +10,7 @@ Read this guide once, in order. At the end you have a running server and Console
 
 !!! note
     IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See [IRIS documentation](../index.md).
+    variables. See the [Overview](../index.md).
 
 ## Choose a layout
 

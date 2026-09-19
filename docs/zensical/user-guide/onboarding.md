@@ -51,7 +51,7 @@ the gateway you name already exist.
 
 An imported device cannot be onboarded until you give it a profile.
 
-1. Open **Devices** and select the imported rows.
+1. Open **Inventory** and select the imported rows.
 2. Pick a profile in the *credential for selected* dropdown.
 3. Press **Apply**. The rows become onboardable at once.
 
@@ -60,7 +60,7 @@ profile. A CSV that lists a `device_id` twice is rejected as a whole.
 
 ## In the Console
 
-1. Open **Devices → Add Device**.
+1. Open **Inventory → Add Device**.
 2. Choose the **Management type**: Routed, Inband, Router routed, Router NAT,
    or XR host. It controls which network fields the form shows.
 3. Choose the **Model series**: IE Switches, IR Routers, Catalyst Routers,
@@ -82,6 +82,13 @@ Inventory only — management type not chosen
 ```
 
 Edit that row into one of the management types before you onboard it.
+
+A row imported under the deprecated `vlan`/`guest_ip` CSV headers can sit
+unclassified the same way. IRIS onboards it only once its complete historical
+routed tuple, `device_id`, `device_ip`, VLAN, SVI address and mask, and app
+address, is valid. An incomplete row fails before any onboarding job,
+enrollment credential or device connection is created; edit it into one of the
+current management types first.
 
 For its first contact the agent uses an enrollment token the server mints for
 that one device, then obtains a credential of its own. Wait for an agent
@@ -142,6 +149,11 @@ Each line starts with its elapsed offset from the start of the job:
 Preflight runs when the job runs, so a large batch returns a job per device
 promptly. Router preflight adds read-only collision, identity and NAT checks. A
 failure fails that job only; the other queued jobs keep running.
+
+A router's deployment record additionally binds the management IP and the
+processor-board identity, and owns only collision-free named globals and the
+`guest-share` resources it created. That binding is how IRIS proves what it
+owns on a shared router without touching your existing configuration.
 
 The server limits how many onboard jobs run at the same time. The limit and its
 variable are in [Server configuration](../reference/server-configuration.md).

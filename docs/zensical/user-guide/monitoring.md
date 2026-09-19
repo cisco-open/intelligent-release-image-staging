@@ -49,9 +49,9 @@ credential. Read that counter beside the two refusal counters in
 ## Turn on and tune live transfer samples
 
 Transfer streaming shows which devices pull which image, how fast, and from
-how many peers. It is off by default, set by `telemetry_stream`. On
-Catalyst 9000 series switches the agent runs in Guest Shell; the IOx app is
-the alternative on switches with app-hosting storage.
+how many peers. It is off by default, set by `telemetry_stream`. See
+[Supported devices and platforms](../install/supported-devices.md) for which
+path your platform uses.
 
 | Platform | How you set it |
 | --- | --- |
@@ -83,6 +83,18 @@ Call `POST /api/v1/telemetry/stream` with `{"every": <1..60>, "pause":
 | `iris.transfer.seeding_started_at` | The last of: file complete, checksum verified, tracker saw the device seeding. |
 
 ## Time from plan to seeding
+
+`seeding_started` is only emitted once three conditions all hold:
+
+1. The device reached a terminal report after finding the staged file at the
+   exact catalog size, with no aria2 control file beside it.
+2. That same report carries `content_sha256.state = verified` for this plan's
+   `transfer_id`.
+3. The device's own aria2 announced `left = 0` on the image's torrent,
+   authenticated by that device's personalised announce token.
+
+A tracker-observed seeder alone, apart from the combined `seeding_started_at`,
+does not prove device verification or final placement.
 
 | Compare | Tells you |
 | --- | --- |

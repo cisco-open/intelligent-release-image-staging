@@ -33,14 +33,14 @@ the image yourself.
    import a feed file when the server has no route to the internet. A mismatch
    puts the image in quarantine, an image that failed the Cisco hash check and
    is held back from devices.
-3. **Add the device.** In **Devices**, choose **Add Device**. Pick the
+3. **Add the device.** In **Inventory**, choose **Add Device**. Pick the
    platform, the series, and the management type, which is how the agent
    reaches the network: on its own address, on your management VLAN, or through
    the router. Add a credential profile, the stored account the server uses to
-   reach the device. On Catalyst 9000 series switches the agent runs in Guest
-   Shell; the IOx app is the alternative on switches with app-hosting storage.
-   Cisco 8000 series and NCS routers use `xr-host` and `xr-appmgr`, with the app
-   address, VLAN, SVI, VPG, and NAT fields empty. See
+   reach the device. Cisco 8000 series and NCS routers use `xr-host` and
+   `xr-appmgr`, with the app address, VLAN, SVI, VPG, and NAT fields empty. See
+   [Supported devices and platforms](../install/supported-devices.md) for which
+   path your platform uses, and
    [Choose a management type](../install/management-types.md).
 4. **Onboard the device.** Start onboarding and watch the job to the end. It
    installs the device agent. Read a failed job before you retry it. See

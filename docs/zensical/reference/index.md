@@ -13,7 +13,7 @@ names, helper commands and the words IRIS uses.
     IRIS stages images. It never installs, activates, reloads, or changes boot
     variables.
 
-    See [IRIS documentation](../index.md) for the full rule.
+    See [the Overview](../index.md) for the full rule.
 
 ## Find the route for a task
 
@@ -52,3 +52,4 @@ serve the device agent, not your integrations: see
 | [Glossary](glossary.md) | The words IRIS uses, each with its plain meaning. |
 | [Cisco references and third-party components](external-references.md) | The Cisco documentation the guides cite, and the third-party parts IRIS ships. |
 | [API error codes (problem types)](../problems.md) | Every error code the API returns, what it means, what to do. |
+| [Browse the API](../swagger/index.html) | The same routes as a read-only Swagger UI, generated from the server's contract. |

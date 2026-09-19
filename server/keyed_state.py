@@ -61,8 +61,8 @@ on an unparseable state file (the pre-#51/#52/#53/#56/#58
 trips that same fail-closed path instead of reading an empty store. The
 placeholder carries the recovery instructions in the clear, so ``cat``-ing
 the file the error points at is enough to find them. See
-``docs/zensical/operations.md`` ("Rollback after the shard migration") for
-the full procedure.
+``docs/zensical/admin-guide/recovery.md`` ("Roll back the per-device state
+split") for the full procedure.
 """
 import contextlib
 import copy
@@ -428,8 +428,8 @@ class KeyedState:
             "\n"
             "    mv %s %s\n"
             "\n"
-            "See docs/zensical/operations.md, \"Rollback after the shard\n"
-            "migration\", for the full recovery procedure.\n"
+            "See docs/zensical/admin-guide/recovery.md, \"Roll back the\n"
+            "per-device state split\", for the full recovery procedure.\n"
             % (self.dir, migrated_path, self.legacy_path,
                migrated_path, self.legacy_path)
         )

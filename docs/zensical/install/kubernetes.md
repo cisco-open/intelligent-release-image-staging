@@ -45,7 +45,9 @@ flowchart LR
 
 Run one server pod: the Deployment uses `replicas: 1` with the `Recreate`
 strategy, because the tracker, the catalog, the seeder and the instruction
-stamper are single-writer with no cross-pod coordination.
+stamper are single-writer with no cross-pod coordination. Do not raise
+`replicas` above 1; that configuration is unsupported and not covered by
+validation, and it would split coordination state rather than add capacity.
 
 ## 1. Reserve the addresses and set the exposure
 
@@ -60,6 +62,19 @@ LoadBalancer; the Console publishes 8080 through another. Keep
 `externalTrafficPolicy: Local` on the server Service, so the tracker sees each
 device's real source address, and restrict the source ranges at your firewall.
 See [Open the required ports](open-ports.md).
+
+## Pod security
+
+Both pods run at the restricted pod-security level:
+
+| Setting | Value |
+| --- | --- |
+| Namespace label | `pod-security.kubernetes.io/enforce: restricted` |
+| Pod `securityContext` | `runAsNonRoot: true`, uid, gid and `fsGroup` all `10001` |
+| Container and init-container `securityContext` | `allowPrivilegeEscalation: false`, every Linux capability dropped, `seccompProfile: RuntimeDefault` |
+
+Whether `fsGroup` reaches the persistent volume is the CSI driver's decision;
+verify it against your storage class, as the next step describes.
 
 ## 2. Prepare the persistent volume ownership
 
@@ -157,10 +172,10 @@ input, so editing one and applying again rolls one Deployment.
 
 ## 5. Install the two public signing roots
 
-An instruction is the signed message the server sends a device saying which
-images to stage and how. Before you publish any device bundle, put the two
-public roots your packages were built with as `.pub` files under
-`/data/config/instr/roots.d` on the PVC, readable by uid `10001`.
+Before you publish any device bundle, put the two public roots your packages
+were built with as `.pub` files under `/data/config/instr/roots.d` on the PVC,
+readable by uid `10001`. These are the roots [Turn on instruction
+signing](activate-signing.md) issues certificates from.
 
 !!! warning "Roots come from outside the cluster"
     Never create replacement roots inside the pod, and never copy a private
@@ -244,7 +259,7 @@ Console's `loadBalancerSourceRanges` to operator networks.
 For local storage, prepare the directory as in step 2, then bind it through a
 local PersistentVolume with node affinity, the `Retain` reclaim policy, and a
 storage class that uses `WaitForFirstConsumer`. Match the PVC's storage class
-and request to that volume; a small lab can request `10Gi`. Watch free space,
+and request to that volume; a small deployment can request `10Gi`. Watch free space,
 because a directory-backed volume has no disk quota. K3s can share the host
 with Docker when the LoadBalancer addresses differ from Docker's published
 address; keep the pods on the cluster network with no `hostNetwork` and no

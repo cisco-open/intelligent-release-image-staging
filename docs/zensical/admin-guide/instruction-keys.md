@@ -26,8 +26,7 @@ iris -- sh`.
 
 Open **Policies → Advanced → Instruction delivery and key custody**. The panel
 shows signing status, certificate and keylist age, ceremony status, and
-attested roots. See [Find your way around the Console](../user-guide/console.md) for the
-field list.
+attested roots; the terms it uses are in the next section.
 
 ## What you see
 
@@ -42,6 +41,17 @@ field list.
 unavailable. Degraded quorum means the records no longer cover both roots, so
 check who holds the private keys. A command that returns success is not proof
 that a device accepted anything.
+
+## What happens at startup
+
+The encrypted online signing key, `$IRIS_CONFIG/instr/signing-key.age`, is
+optional. If it is missing, the server removes any leftover runtime signing
+key and certificate copies and starts anyway: signing shows disabled, and
+existing services keep running without producing new signed instructions. If
+the file is present but is not a regular file, is a symlink, or cannot be
+decrypted, the server refuses to start rather than treat it as missing. If a
+server that used to sign instructions will not come up after you touched a
+file under `$IRIS_CONFIG/instr/`, check that file first.
 
 ## Replace the two root keys { #instruction-root-ceremony-and-recovery }
 
@@ -139,8 +149,8 @@ roots need attestations within 180 days for a healthy quorum.
    passphrase protection: `ssh-keygen -t ed25519 -f /offline/root-a`, and the
    matching root-b command at its site. Record their public fingerprints.
 3. Reconcile root configuration, keylist and revocation state, and the sequence
-   under a reviewed maintenance procedure, then provision the new online
-   certificate/keylist. Single commands do not recover a fleet in place.
+   under a reviewed maintenance procedure, then provision the new
+   online certificate/keylist. Single commands do not recover a fleet in place.
 4. Build fresh Guest Shell bundles, the unified container image, both IOx tars
    and the XR RPM with the new public roots and the current pinned aria2c
    binaries, for both architectures. See [Build and publish the device
@@ -210,9 +220,9 @@ app](../install/iox.md#device-global-package-verification).
 ## Deliver the first instruction file by hand { #f3-offline-bootstrap-envelope-redelivery }
 
 An envelope is the encrypted file that carries an instruction. A device that
-cannot reach the server needs its first envelope by hand. F3 transports a
+cannot reach the server needs its first envelope by hand. What you carry is a
 ciphertext bootstrap envelope for one device; it is not a secret key, an OS
-image, or a bypass of signature/audience/replay checks.
+image, or a bypass of signature, audience and replay checks.
 
 1. In the server shell, write the envelope to a private destination:
 

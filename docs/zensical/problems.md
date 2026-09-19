@@ -121,7 +121,7 @@ The server cannot safely tell whether the requested role change is a tightening 
 
 ## instruction-device-forbidden
 
-403: a valid, current catalog token belongs to a different device than the one in the request path. An invalid, revoked, out-of-date, or unsupported credential instead returns 401 [`catalog-authentication-required`](#catalog-authentication-required). On a 401 or 403 for an instruction, the device agent tries one refresh and reports `instr_forbidden`. If the server has revoked the device, rotating its key does not fix this.
+An instruction is the signed message the server sends a device saying which images to stage and how. 403: a valid, current catalog token belongs to a different device than the one in the request path. An invalid, revoked, out-of-date, or unsupported credential instead returns 401 [`catalog-authentication-required`](#catalog-authentication-required). On a 401 or 403 for an instruction, the device agent tries one refresh and reports `instr_forbidden`. If the server has revoked the device, rotating its key does not fix this.
 
 ## instruction-keylist-missing
 
@@ -129,7 +129,7 @@ The server cannot safely tell whether the requested role change is a tightening 
 
 ## instruction-keylist-unavailable
 
-An instruction is the signed message the server sends a device saying which images to stage and how. 503: the root-signed key list needed to trust an instruction cannot be read or checked. Fix the problem with who holds the private keys, or with server state, and retry at the next check; the retry hint is 10 seconds. The device keeps using its last usable cached key list until then.
+503: the root-signed key list needed to trust an instruction cannot be read or checked. Fix the problem with who holds the private keys, or with server state, and retry at the next check; the retry hint is 10 seconds. The device keeps using its last usable cached key list until then.
 
 ## instruction-rate-limit-exceeded
 

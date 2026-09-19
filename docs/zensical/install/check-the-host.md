@@ -18,7 +18,8 @@ has the right size, the tools IRIS needs, a verified clock, and the code.
 ## Size the host
 
 These numbers cover the control plane and telemetry for 200 devices; the
-images come on top. A wave is a group of devices a schedule releases together.
+images come on top, per
+[wave](../user-guide/scheduling.md#deployment-waves).
 
 | Resource | Need |
 | --- | --- |

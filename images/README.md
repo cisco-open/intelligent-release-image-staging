@@ -25,8 +25,8 @@ the container at `/opt/images` (`IRIS_IMAGE_ROOT` on the host, `IMAGES_ROOT`
 inside). It is scanned recursively by the console's *Import from disk* panel,
 and publishing from it seeds in place — nothing is copied and the tree stays
 read-only. See
-[Image path variables](../docs/zensical/reference.md#image-path-variables) and
-[Importing images already on disk](../docs/zensical/console.md#importing-images-already-on-disk).
+[Image path variables](../docs/zensical/reference/server-configuration.md#image-path-variables) and
+[Import a file already on disk](../docs/zensical/user-guide/images.md#import-a-file-already-on-disk).
 
 The host tree must be readable and traversable by uid `10001`; a `700`
 root-owned tree fails to publish and seed.

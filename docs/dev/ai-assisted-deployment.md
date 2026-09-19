@@ -121,6 +121,10 @@ Kubernetes it copies only that public pair to the server's storage once the
 pod is running. See
 [Create the two offline signing keys](../zensical/install/signing-roots.md).
 
+One person holding both private keys works for a proof of concept only. It is
+not production custody and not signing evidence: say so explicitly when you
+report on a deployment set up this way.
+
 ## Start signing instructions
 
 Once the stack is up and before you onboard any device, the assistant sets

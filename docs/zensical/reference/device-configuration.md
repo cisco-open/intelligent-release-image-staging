@@ -17,7 +17,7 @@ These variables configure the unified IOx and IOS-XR appmgr image. Installers
 set the identity fields and the platform selector; everything else falls back
 to its default. Guest Shell runs the same agent from a bundle started by
 `bootstrap.sh` and an EEM applet, so rows marked Guest Shell or router apply
-to it too. A tick is one pass of the agent's check-in loop.
+to it too, once per [tick](glossary.md#tick).
 
 | Variable | Default | Platform | Effect |
 | --- | --- | --- | --- |
@@ -28,7 +28,7 @@ to it too. A tick is one pass of the agent's check-in loop.
 | `CAF_APP_APPDATA_DIR` | required, set by CAF | IOx only | Holds the runtime-delivered `iris-catalog.pem` certificate. XR uses `/hostmount/iris-catalog.pem` instead. |
 | `IRIS_TELEMETRY` | `on` | IOx, XR | Turns device reports on or off. |
 | `IRIS_TELEMETRY_STREAM` | `off` | IOx, XR | Turns on live transfer samples. See [Transfer streaming by platform](#transfer-streaming-by-platform). |
-| `IRIS_TICK_SECONDS` | `60` | IOx, XR | The tick interval, 1 to 86400 seconds. Separate from the signed `catalog_tick_s` cadence; every tick still reasserts policy and sends a heartbeat. |
+| `IRIS_TICK_SECONDS` | `60` | IOx, XR | The mechanical tick interval, 1 to 86400 seconds. Separate from the signed logical `catalog_tick_s` cadence; every tick still reasserts policy and sends a heartbeat. |
 | `IRIS_TICK_JITTER_PCT` / `IRIS_STARTUP_JITTER` | `10` / `1` (on) | IOx, XR | Spread ordinary ticks (as a percent of `IRIS_TICK_SECONDS`) and the first tick (across that window). Set `IRIS_STARTUP_JITTER` to `0` to turn its spread off. |
 | `IRIS_TICK_BACKOFF_MAX` | `600` seconds | IOx, XR, Guest Shell, router | The cap on backoff after a failed tick. |
 | `IRIS_TICK_JITTER_MAX` | `8` seconds | Guest Shell, router | The random pause `bootstrap.sh` takes before each tick, 0 up to one second less than this value. |
@@ -84,6 +84,14 @@ router's connection rate limit. See
 | `XR_SSH_CONNECT_DELAY` | 2 seconds, 0 to 60 | The pause the installer adds between SSH connections during onboarding. |
 | `XR_SCP_ATTEMPTS` | not published here | How many times the installer retries a registration transport failure. |
 | `XR_SCP_RETRY_SECONDS` | not published here | How long the installer waits between those retries. |
+| `IRIS_ARTIFACT_URL` | unset (derived from the catalog URL) | Overrides the HTTPS origin the installer fetches `iris-xr.rpm` and the catalog certificate from. Set it when the artifact server is reachable on a different hostname than the catalog. |
+| `IRIS_ARTIFACTS_PORT` | `8000` | The artifact server's port, used when `IRIS_ARTIFACT_URL` is not set. |
+
+It checks the source table before repeating an interrupted registration and
+includes the SSH error in the job log. Package registration and its
+confirming query share a session. A package rejection with a successful
+transport is reported for diagnosis rather than retried as a connection
+failure.
 
 ## Instruction files on each platform
 

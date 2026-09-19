@@ -94,7 +94,8 @@ def test_splunk_peer_evidence_collapses_repeated_capture_before_aggregation():
     The real Splunk fixture checks the arithmetic; this guards both shipped
     copies against returning to event-id-only deduplication."""
     import xml.etree.ElementTree as ET
-    document = open(os.path.join(REPO, "docs", "zensical", "splunk.md")).read()
+    document = open(os.path.join(REPO, "docs", "zensical", "user-guide",
+                                  "splunk-searches.md")).read()
     section = document.split("### Peer-to-peer evidence\n", 1)[1].split(
         "### Assignment to confirmed seeding", 1)[0]
     docs_queries = re.findall(r"```spl\n(.*?)```", section, re.S)
@@ -198,7 +199,8 @@ def test_splunk_swarm_provenance_distinguishes_windows_and_measurements():
 
 
 def test_splunk_per_sender_table_keeps_distinct_unknown_peer_addresses():
-    document = open(os.path.join(REPO, "docs", "zensical", "splunk.md")).read()
+    document = open(os.path.join(REPO, "docs", "zensical", "user-guide",
+                                  "splunk-searches.md")).read()
     query = next(query for query in re.findall(r"```spl\n(.*?)```", document, re.S)
                  if "max(received_bytes)" in query)
     group = query.split("BY ", 1)[1]

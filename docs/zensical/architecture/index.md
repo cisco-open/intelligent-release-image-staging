@@ -6,15 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # How IRIS works
 
-IRIS copies a Cisco image to many devices at once. The server holds the images and
-decides which device gets which one. The devices do most of the copying.
+IRIS copies a Cisco image to many devices at once. The server seeds the image
+once, then devices trade pieces with each other, so every finished device
+becomes another source.
 
-## Why a private swarm instead of a file server
-
-With a file server, every device pulls the whole image from one place, and a large
-fleet fills that server's uplink. With IRIS, the server seeds the image once and the
-devices trade pieces with each other. Every device that finishes becomes another
-source for the rest.
+!!! note
+    IRIS stages images. It never installs, activates, reloads, or changes boot
+    variables. See the [Overview](../index.md).
 
 ## What each part does
 
@@ -29,32 +27,15 @@ source for the rest.
 | Telemetry service | Reads device reports stored by the catalog and combines them with tracker and seeder data for swarm views, metrics, and exports. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
-IRIS builds three images. The server image runs the catalog, the tracker, the seeder,
-the artifact server, the telemetry service and the management API, and it holds the
-state. The Console image serves the browser application and forwards its API requests
-to the management API over authenticated HTTPS. The device agent image runs on IOx and
-IOS-XR appmgr; Guest Shell gets the same agent as a bundle instead.
+IRIS builds three images. The server image runs the catalog, the tracker, the seeder, the artifact server, the telemetry service and the management API, and holds the state. The management API also runs the instruction stamper and device-custody work as additional threads in that same process, not a new process or container. The server still supervises five processes. The Console image serves the browser application and forwards its API requests to the management API over authenticated HTTPS. The device agent image runs on IOx and IOS-XR appmgr, and Guest Shell gets the same agent as a bundle instead.
 
 ## Where the two containers run
 
-| Layout | What runs where | Install page |
-| --- | --- | --- |
-| One Docker host | Both containers, one Compose project, management HTTPS unpublished | [Install on one Docker host](../install/one-docker-host.md) |
-| Separate Docker hosts | Server on one host, Console on another, each with its own environment file | [Install on separate Docker hosts](../install/separate-docker-hosts.md) |
-| Kubernetes | Two Deployments, their Services, a network policy, and a server-only volume claim | [Install on Kubernetes](../install/kubernetes.md) |
-
-Only the management connection crosses from the Console to the server, so a Console
-moves without touching server data or onboarding devices again.
+The server and Console run on one Docker host, on separate Docker hosts, or as two Kubernetes Deployments. Only the management connection crosses from the Console to the server, so a Console moves without touching server data or onboarding devices again. See [Choose a layout](../install/index.md#choose-a-layout).
 
 ## The device agent
 
-One Python agent runs on every device. It reads its assignment, downloads pieces from
-the seeder and from its peers, checks the hash, writes the image to device storage and
-reports what it did. On Catalyst 9000 series switches the agent runs in Guest Shell,
-and the IOx app is the alternative on switches with app-hosting storage. Catalyst 8000
-series routers take either path. Industrial Ethernet 3000 series switches and IR 1100
-and 1800 series routers run the IOx app. Cisco 8000 series and NCS routers run the
-agent under IOS-XR appmgr.
+One Python agent runs on every device. It reads its assignment, downloads pieces from the seeder and from its peers, checks the hash, writes the image to device storage and reports what it did. See [Supported devices and platforms](../install/supported-devices.md) for which delivery path each device family uses.
 
 ## What is stored where
 
@@ -64,14 +45,7 @@ agent under IOS-XR appmgr.
 | Separate Docker hosts | The same volumes, all on the server host | Same, on the server host; the Console host keeps only its token, CA and browser certificate | Same, on the server host | Same, on the server host |
 | Kubernetes | One read-write-once claim under `/data` | `/data/state` and `/data/config`; runtime secrets in memory | Uploads on the claim | `/data/artifacts` |
 
-Back up the server host; the Console keeps nothing of its own. For the paths and the
-file formats, see
-[Server configuration](../reference/server-configuration.md) and
-[Data formats and states](../reference/state-and-data.md).
-
-!!! warning
-    Keep the encrypted signing key, the age identity and the instruction state on the
-    server host. Never copy them to the Console host.
+Back up the server host; the Console keeps nothing of its own, including the encrypted signing key, the age identity and the instruction state. See [Server configuration](../reference/server-configuration.md) and [Data formats and states](../reference/state-and-data.md).
 
 ## The rest of this guide
 
@@ -80,4 +54,4 @@ file formats, see
 | [How an image reaches a device](data-path.md) | The path from a published image to a file on device storage, and what the agent does on each pass. |
 | [Security model and trust boundaries](security-model.md) | Who holds which key, how a device trusts a staging order, and which devices may share. |
 | [Network ports and flows](network-ports.md) | Every port, who opens it, and which way traffic runs. |
-| [Limitations](limitations.md) | The limits to plan for. |
+| [Limits](limitations.md) | The limits to plan for. |

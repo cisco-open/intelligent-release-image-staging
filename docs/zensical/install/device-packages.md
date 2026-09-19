@@ -43,10 +43,10 @@ Build in the server host's checkout once the stack is healthy:
 # Build and stage both packages during server bring-up (recommended).
 tools/provision-iox-packages.sh
 
-# IE-3x00 / IR1101 / IR18xx: arm64 package served as iris-arm64.tar
+# IE-3x00, IR 1100 and 1800 series: arm64 package served as iris-arm64.tar
 tools/stage-iox-package.sh --arch arm64
 
-# SSD-equipped Catalyst 9300 IOx: amd64 package served as iris-amd64.tar
+# Catalyst 9000 series with app-hosting storage: amd64 package served as iris-amd64.tar
 tools/stage-iox-package.sh --arch amd64
 ```
 
@@ -104,24 +104,22 @@ Use this procedure for every layout. Only the destination changes.
 **1. Collect the binaries and check their architectures**, in the same shell:
 
 ```bash
-tools/get-aria2c.sh amd64
-tools/get-aria2c.sh --no-install arm64
+export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
+tools/get-aria2c.sh --for-platforms "$IRIS_DEVICE_PLATFORMS"
 tools/get-ioxclient.sh
 file bin/aria2c deliverables/aria2c-aarch64
 ```
 
-`file` reports x86-64 for `bin/aria2c` and ARM aarch64 for the second file.
-
-!!! warning
-
-    `--no-install` must come **before** `arm64`. The other order replaces the
-    server's own `aria2c` with the ARM binary.
+IRIS ships a tested `aria2c` client for each architecture, and the script
+verifies every one it installs against `tools/aria2c.sha256` before it keeps
+it. One run puts the amd64 client in `bin/` and every other architecture in
+`deliverables/`, so `file` reports x86-64 for `bin/aria2c` and ARM aarch64 for
+the second file.
 
 **2. Set the build environment and build the ARM wrapper** into a private
 directory:
 
 ```bash
-export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
 export IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"
 export ARIA2C_BIN_AMD64="$PWD/bin/aria2c"
 export ARIA2C_BIN_ARM64="$PWD/deliverables/aria2c-aarch64"
@@ -135,6 +133,10 @@ tools/stage-iox-package.sh --arch arm64 \
 The command exits zero and writes `iris-arm64.tar` and its `.manifest` into
 `$IRIS_ARM_BUILD_DIR`. Keep the image archive and its provenance in approved
 build storage.
+
+This step rebuilds the canonical device image with `--pull`, so it always
+starts from a fresh base. Set `IRIS_NO_PULL=1` to keep the cached base instead,
+for an A/B build that isolates an unrelated source change.
 
 **3. Check the wrapper against its manifest:**
 
@@ -279,8 +281,8 @@ manifest recording that output's SHA-256.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| `file` reports ARM for `bin/aria2c` | The ARM download replaced the server binary | Restore it with `tools/get-aria2c.sh amd64`, then collect the ARM binary with `--no-install arm64`. |
-| The aarch64 client is missing, or its checksum does not match | The pinned binary was never handed in, or the download is not the pinned build | Run the download commands in the order shown. Ask for a verified hand-in when you cannot download. Never replace a pin to accept an untrusted download. |
+| `file` reports ARM for `bin/aria2c` | An earlier fetch by hand put the ARM client where the server's own binary belongs | Run `tools/get-aria2c.sh --for-platforms "$IRIS_DEVICE_PLATFORMS"` again: one run restores the amd64 client in `bin/` and puts every other architecture in `deliverables/`. |
+| The aarch64 client is missing, or its checksum does not match | The pinned binary was never handed in, or the download is not the pinned build | Run the script again; it checks each client against `tools/aria2c.sha256` and stops on a mismatch. Ask for a verified hand-in when you cannot download. Never replace a pin to accept an untrusted download. |
 | `exec format error`, a missing handler, or a request for a binfmt digest | The amd64 build host has no arm64 emulation | Set emulation up as [Download the tools that build device packages](build-tools.md) describes. Do not pull an unpinned privileged image. |
 | No OCI exporter, or the ARM manifest is missing | The Buildx builder cannot write the archive, or only amd64 was built | Inspect the builder and set `IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64`. Do not reuse an amd64-only archive. |
 | The builder refuses to replace the existing image archive | The archive on disk came from different source | Build into the private build directory and keep the previous archive. |

@@ -4,7 +4,8 @@
 
 # Independent Console host. No server state or Docker network is shared.
 #   docker compose --env-file server/console.env -f server/docker-compose.console.yml up -d --build
-# See docs/zensical/docker-hosts.md for provisioning, bootstrap, and rotation.
+# See docs/zensical/install/separate-docker-hosts.md for provisioning,
+# bootstrap, and rotation.
 name: iris-console
 services:
   console:

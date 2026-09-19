@@ -11,21 +11,26 @@ Run work inside a maintenance window instead of when you press a button.
 ## Scheduling
 
 A schedule runs one action inside one maintenance window: **assign**, which
-approves images for staging, or **onboard**, which deploys the IRIS agent to
-devices that do not have it. A schedule never installs, activates, reloads, or
+approves images for a device to stage, or **onboard**, which deploys the IRIS
+agent to devices that do not have it. A schedule never installs, activates, reloads, or
 changes a boot variable. Each run is an occurrence, and records what it did on
 every device it reached.
 
 ## In the Console
 
-1. Open **Devices → Schedules**. Each row shows the target, the next run in the
-   schedule's own time zone, the state, and how the last run went.
-2. Set the **Devices** filter to the devices you want.
+1. Open **Inventory**, then **Schedules** in the table's action bar. Each row
+   shows the target, the next run in the schedule's own time zone, the state,
+   and how the last run went.
+2. Set the **Inventory** filter to the devices you want.
 3. Choose **Schedule…** in the bulk bar. The modal shows how many devices the
    filter matches now.
-4. Name the schedule, set the time, and save. The row shows the next run.
+4. Pick the **Action**: **Assign images** to stage images on devices that
+   already have the agent, or **Onboard new devices** to deploy it. For an
+   assign schedule, pick the images to assign and the assignment mode, merge
+   or replace.
+5. Name the schedule, set the time, and save. The row shows the next run.
 
-The target is the current Devices filter, re-resolved at each run; the modal
+The target is the current Inventory filter, re-resolved at each run; the modal
 also offers the selected devices as a fixed list. Edit windows, wave gates and
 payloads with the API.
 
@@ -122,6 +127,10 @@ Every scheduled attempt against one device leaves a durable outcome with a
 reason. Work is **idempotent per occurrence and device**, so a restart mid
 window cannot double-assign or double-onboard.
 
+A restart **resumes its own records only**. Interrupted occurrences are
+re-entered, their outcomes are kept as they stand, and work already admitted is
+reconciled by its own identity rather than submitted again.
+
 | Reason | What it means |
 | --- | --- |
 | `conflict` | Another writer changed the device, or the current same-name fleet row has a different registration identity from the occurrence binding. Manual work wins. Inspect `target_snapshot.registration_ids` and receipt `fleet_registration_id`, then schedule new work if intended. |
@@ -152,7 +161,10 @@ The gate reports three counts over the preceding occurrence's target:
   corroborated by the tracker's own `left == 0` where it has anything to say.
   The tracker can contradict a staged claim but never creates one.
 - **errored**: the run failed, or the heartbeat reports the image as errored.
-- **missing**: no evidence at all, such as a powered-off device.
+- **missing**: no evidence at all, such as a powered-off device, or one whose
+  heartbeat has not reported since. Missing is counted **apart** from errored
+  on purpose: folding the two together would either raise an alarm nobody can
+  act on, or let one dark device hold a wave chain open forever.
   `max_missing_ratio` says how many silent devices a wave may proceed over.
 
 The wave gate is an **operational** signal about when work is admitted. It is
@@ -171,8 +183,8 @@ assigned by the other path. Merge mode adds without removing and is the default
 `after_image_ids` and `removed_image_ids`.
 
 A schedule whose creator is gone shows `created_by <actor> (actor no longer
-exists)`. **Re-affirm** on that row rewrites `created_by` to you and bumps
-`rev` against the revision on screen; a concurrent edit makes it a refusal.
+exists)`, and **Re-affirm** on that row rewrites `created_by` to you and bumps
+`rev` against the revision on screen. A concurrent edit makes it a refusal.
 
 ## Related
 

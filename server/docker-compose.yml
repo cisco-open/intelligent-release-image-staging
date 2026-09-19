@@ -9,7 +9,7 @@
 # IRIS_HOST_IP is ALWAYS the machine running docker (the devices must be able to
 # reach it). It is baked into the catalog's self-signed TLS certificate, which is
 # generated on first start. An address change requires a certificate covering
-# the new address and updated device trust; see docs/zensical/operations.md.
+# the new address and updated device trust; see docs/zensical/admin-guide/recovery.md.
 #
 # Publish an image (run inside the container; IRIS_IMAGE_ROOT is mounted at
 # /opt/images). Runtime secret paths are declared in the container environment,
@@ -59,7 +59,8 @@
 #
 # COMPOSE_PROJECT_NAME (and `-p`) still override this, which is how you run a
 # dev stack beside a live one — set IRIS_CONTAINER too, since container names
-# are host-global. See docs/zensical/server.md -> "Compose project name".
+# are host-global. See docs/zensical/reference/server-configuration.md ->
+# "COMPOSE_PROJECT_NAME".
 name: server
 services:
   iris:
@@ -105,7 +106,7 @@ services:
       IRIS_OBSERVABILITY: "${IRIS_OBSERVABILITY:-}"
       # When observability is on, point at your collector's HTTPS OTLP/HTTP
       # endpoint, e.g. https://collector.example.com:4318. See
-      # docs/zensical/splunk.md for certificates and authentication.
+      # docs/zensical/user-guide/splunk.md for certificates and authentication.
       # Inert unless IRIS_OBSERVABILITY=1.
       IRIS_OTLP_ENDPOINT: "${IRIS_OTLP_ENDPOINT:-}"
       # Seeder/telemetry poll cadence in seconds (default 15). On a fast
@@ -133,7 +134,7 @@ services:
       # ---- Optional deployment knobs documented in the reference ----
       # Compose injects ONLY what this block names: exporting a variable in the
       # shell or listing it in server/.env does nothing unless it appears here.
-      # Every one of these is documented in docs/zensical/reference.md, so each
+      # Every one of these is documented in docs/zensical/reference/server-configuration.md, so each
       # is passed through. Where an EMPTY value would not mean the same thing as
       # "unset" to the reader on the other side, the code's own default is
       # restated as the fallback rather than the empty string.

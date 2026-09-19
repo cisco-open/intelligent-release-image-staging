@@ -28,6 +28,10 @@ Field names, file formats, and state values used by the Console, the API, and th
 !!! warning
     A delete removes the image file only when `source_dir` points at IRIS's own images directory.
 
+Catalog state is written as small JSON documents, atomically, under an
+advisory lock, so a Console write and a CLI write at the same time cannot
+corrupt it.
+
 ## Policy and heartbeat fields
 
 `POST /api/v1/devices/<id>/assign` writes the policy; the agent reads it from `GET /v1/devices/<device_id>/policy`.
@@ -73,7 +77,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 | `role` | Optional. The device's named group of devices that share with each other. |
 | `platform` | `router` for router-routed and router-nat, `xr-appmgr` for xr-host. |
 
-The Console and the API accept only these fields plus `credential_profile_id`. `schema_version`, `registered_at`, `registration_id`, and `os_family` are set by the server. Two older CSV headers, `vlan` and `guest_ip`, are still accepted on import.
+The Console and the API accept only these fields plus `credential_profile_id`. A write with any other field name is rejected, not silently stored. `schema_version`, `registered_at`, `registration_id`, and `os_family` are set by the server. `registration_id` distinguishes a device deleted and re-added under the same `device_id` within the same second. Two older CSV headers, `vlan` and `guest_ip`, are still accepted on import.
 
 Import and export this CSV from [Add and onboard devices](../user-guide/onboarding.md). Roles and schedules have their own templates: `fleet/roles.csv.example` and `fleet/schedules.csv.example`; see [Control which devices share with each other](../user-guide/roles.md) and [Schedule maintenance windows](../user-guide/scheduling.md).
 
@@ -85,7 +89,7 @@ Raw agent states: `none`, `applied`, `lkg`, `stale_expired`, `allowlist_expired`
 
 Server display states: `applied`, `lkg`, `stale`, `rejected`, `tracker-only`, `pre-instructions`, `unknown`, `unavailable`, `pending`, `forbidden`, `floor_reset`, `none`, `revoked`.
 
-`lkg` means the device fell back to its last accepted policy (LKG, last known good; see [Glossary](glossary.md)). `verifier_missing` means the device would check the signature but the tool to do so is not installed. A device with no `instr_protocol: 1` marker displays as `pre-instructions`; an unrecognized marker displays as `unknown`.
+`lkg` means the device fell back to its last accepted policy (LKG, last known good; see [Glossary](glossary.md)). `verifier_missing` means the device would check the signature but the tool to do so is not installed. A device whose `instr_protocol: 1` marker is absent displays as `pre-instructions`; an `instr_protocol` value that is invalid displays as `unknown`. A durable `revoked` display overrides the agent's own state, and the underlying agent evidence stays visible beneath it. Missing/corrupt evidence reads as null/unknown and must never become healthy zero. The server measures report age itself: an old report is marked stale while the underlying agent state and its evidence stay visible.
 
 | Revision term | Meaning |
 | --- | --- |
@@ -118,29 +122,52 @@ Each device row, and the per-device QoS response, carries one `instruction` obje
 | State | Retained QoS/peer state | Action |
 | --- | --- | --- |
 | First tick/no file: `none` | Defaults, tracker-only peers | Wait for a stamp and authenticated refresh. |
-| Valid fresh envelope: `applied` | Verified QoS and peer state | Normal cadence. |
-| Cached instructions during catalog loss: `lkg` | Locally re-encrypted verified LKG | Retry on a later tick. |
+| Valid fresh envelope: `applied` | Verified QoS and peer state, recorded as the accepted identity | Normal cadence. |
+| Cached instructions during catalog loss: `lkg` | The locally re-encrypted verified LKG is retained | Retry on a later tick. |
 | Instruction expires: `stale_expired` | Role `on_stale: keep` retains QoS; `defaults` restores defaults | Restore authenticated catalog time and fresh instructions. |
-| Attribution expires: `allowlist_expired` | Allow-list falls back to tracker-only; an expired deny-list stays effective | Refresh endpoint attribution/instructions. |
+| Attribution expires: `allowlist_expired` | An expired allow-list falls back to tracker-only, and an expired deny-list remains effective; both independently of `on_stale` | Refresh endpoint attribution and instructions. |
 | Older identity: `rollback_rejected`; authenticated reset: `floor_reset` | Reject older candidate; a validated reset adopts its new floor | Repair the server epoch/stamp. |
 | Wrong device/platform: `audience_mismatch` | Retain usable LKG/defaults | Redeliver for the exact device/platform. |
-| Unknown key: `key_rejected` (`unknown_key`) | Retain usable LKG/defaults | One unscheduled refresh, then retry later. |
-| Bad MAC: `key_rejected` (`bad_mac`) | Retain usable LKG/defaults | Record a violation and inspect integrity. |
+| Unknown key: `key_rejected` (`unknown_key`) | Retain usable LKG/defaults | One unscheduled refresh per unknown key ID, then retry later. |
+| Bad MAC: `key_rejected` (`bad_mac`) | Retain usable LKG/defaults | Record a violation and inspect integrity. There is no refresh. |
 | Bad signer or tampered bytes: `tamper_rejected` | Retain only independently usable LKG/defaults | Repair signer/keylist or envelope provenance. |
 | Missing verifier: `verifier_missing` | Tracker-only peers, verified/default QoS | Supply a supported verifier in the agent package. |
 | Bad local cache: `lkg_rejected`, `lkg_unreadable` | Defaults, tracker-only peers | Obtain a fresh envelope. |
-| Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer/transport and retry later. |
+| Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer or transport, and retry on a later tick. |
 | aria2 session restart: `reasserted` | Reapply verified/default QoS | Check `qos_drift_count`. |
 | Instructions 404/429/5xx/transport: `instr_unavailable` | Retain usable LKG/defaults | Retry on a later tick; never sleep in-tick. |
 | Instructions 409 `stale_pointer`: `instr_pending` | Retain usable LKG/defaults | Retry on a later tick; never sleep in-tick. |
-| Instructions 401/403: `instr_forbidden` | Retain usable LKG/defaults | One token refresh, then retry later. |
+| Instructions 401/403: `instr_forbidden` | Retain usable LKG/defaults | One token refresh, then retry on a later tick; no in-tick retry loop. |
 | Durable revoked principal: `revoked` | Underlying agent state stays visible | Resolve retirement/compromise on the server. |
-| Pointer/body race | A higher body serial applies; a lower-but-fresh one above the floor applies with `pointer_skew`; below the floor reports `rollback_rejected` | After three skews, check producer convergence. |
+| Pointer/body race | A higher body serial applies; a lower-but-fresh one above the floor applies with `pointer_skew`; below its accepted floor it reports `rollback_rejected`. At an equal identity, identical bytes are accepted idempotently, and different bytes report `tamper_rejected` | After three skews, check producer convergence. |
 | Explicit `tracker-only` | Tracker supplies peers under server policy | No device peer-list enforcement. |
 
 A fetch or verification failure affects only that step: heartbeat and staging continue on usable LKG or defaults. An aria2 RPC apply failure still sends a heartbeat but skips staging that tick. A rejection can coexist with a complete older accepted identity.
 
 The instruction and keylist endpoints share a per-device rate limit: a burst of 2 requests, refilling at one every 10 seconds. A `429` response carries a bounded `Retry-After` hint.
+
+## Deployment records
+
+IRIS records three parts of each device deployment:
+
+| Part | What it is |
+| --- | --- |
+| Desired inventory | Editable operator intent, `fleet.d/`. |
+| Deployment plan | An immutable, resolved plan for one action, including the resolved platform and a `plan_hash`. Computed before any device contact. |
+| Deployment record | A durable, non-secret account of what IRIS actually applied: resource ownership, lifecycle state, management IP, and processor-board identity. |
+
+A deployment record's lifecycle is fail-closed:
+
+```text
+planned → applying → active → (applying) → removed
+                 ↘ unknown / needs-reconcile / drifted / superseded
+```
+
+A controller restart converts any non-terminal record (`planned` or
+`applying`) to `unknown`; in-flight device work is never silently resumed. A
+device has exactly one live deployment, so when a new deployment record
+becomes `active`, any previous `active` record for that device is retired to
+the terminal `superseded` state.
 
 ## Setup-status states
 
@@ -158,12 +185,12 @@ The instruction and keylist endpoints share a per-device rate limit: a burst of 
 
 The management process writes these, on the server host:
 
-| Base | Files |
-| --- | --- |
-| `$IRIS_CONFIG/instr/` | `signing-key.age`, `signing-key.pub`, `signing-key-cert.pub`, `roots.d/` |
-| `$IRIS_RUN/instr/` | `signing-key`, `signing-key-cert.pub` |
-| `$IRIS_STATE/` | `instructions-epoch.json`, `.lock`, `instruction-key-status.json`, `instruction-stamper-status.json` |
-| `$IRIS_STATE/instructions/` | `keylist.current`, `keylist-state.json`, `keylist.lock`, `roles.d/`, `role-state.json`, `activation.json`, `producer.lock`, `admitted-devices.json`, `serial-history.json`, `roles.lock` |
+| Base | Files | What it holds |
+| --- | --- | --- |
+| `$IRIS_CONFIG/instr/` | `signing-key.age`, `signing-key.pub`, `signing-key-cert.pub`, `roots.d/` | The encrypted online private key, its public half and its certificate; `roots.d/` carries public roots only. |
+| `$IRIS_RUN/instr/` | `signing-key`, `signing-key-cert.pub` | Runtime plaintext only, beside the runtime certificate cache. Written on start, gone when the server stops. |
+| `$IRIS_STATE/` | `instructions-epoch.json`, `instructions-epoch.json.lock`, `instruction-key-status.json`, `instruction-stamper-status.json` | Durable instruction state: the epoch, its lock, and the key and stamper status. |
+| `$IRIS_STATE/instructions/` | `keylist.current`, `keylist-state.json`, `keylist.lock`, `roles.d/`, `role-state.json`, `activation.json`, `producer.lock`, `admitted-devices.json`, `serial-history.json`, `roles.lock` | Durable instruction state: the keylist, the role artifacts, the admitted devices and the serial history. |
 
 Every per-device store under `IRIS_STATE` is keyed state, split over 256 shard files.
 
@@ -179,3 +206,16 @@ Every per-device store under `IRIS_STATE` is keyed state, split over 256 shard f
 | Operator inventory (fleet) | `<state>/fleet.d/` |
 
 The peer endpoint map holds one row per principal, in `peer-endpoints.d/`, split over 256 shard files. An announce locks, parses, and rewrites only its own principal's shard, recording the announce's socket source as the address.
+
+### `report-attribution.json`
+
+`<state>/report-attribution.json` pins, per exported device report, the
+peer-attribution classification (origin, device, or unknown) of that
+report's rows. The server classifies a report once, at first export, and
+reuses the same classification if the same report is re-exported under the
+same `event.id` after a server restart, so a downstream system that
+deduplicates by `event.id` never sees two different records with one id. If
+the pin is lost, a later replay can classify the same rows differently,
+using whatever peer-identity view is current at replay time.
+
+If that durable write fails, the entry is queued in memory and retried on the following reconcile passes rather than dropped. The device keeps participating in the swarm meanwhile, but the reported enforcement status degrades until the write lands, because the derived deny set is computed from durable state.

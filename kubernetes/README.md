@@ -45,17 +45,18 @@ its published port. Settings reports that URL separately from the server IP.
 ## Build and pin both images
 
 Build from the repository root and push each tier to a registry the cluster can
-pull from. `tools/get-aria2c.sh` installs the handed-in seeder client from
-`deliverables/aria2c-x86_64` (or `ARIA2C_DELIVERABLE`) and verifies it against
-`tools/aria2c.sha256`; a copy that does not match the pin fails closed, so a
-change to that pin (a new aria2c build) means: refresh both `deliverables/`
-binaries, rebuild BOTH images, rebuild every device package with the same
-binaries, and copy the packages to the pod again (see
-[Operator-supplied device artifacts](#operator-supplied-device-artifacts)) before rolling the
-Deployments — the device agents must be file-identical across packages.
+pull from. The tested `aria2c` clients are committed in the repository
+(`bin/aria2c` for the server image, `deliverables/aria2c-x86_64` and
+`deliverables/aria2c-aarch64` for the device packages) and match
+`tools/aria2c.sha256`; the build scripts re-verify them and fail closed on a
+mismatch. Adopting a new aria2c build means: commit the new binaries together
+with the updated `tools/aria2c.sha256`, rebuild BOTH images, rebuild every
+device package with the same binaries, and copy the packages to the pod again
+(see [Operator-supplied device artifacts](#operator-supplied-device-artifacts))
+before rolling the Deployments — the device agents must be file-identical
+across packages.
 
 ```bash
-tools/get-aria2c.sh amd64
 docker build --pull --platform linux/amd64 \
   -f server/Dockerfile \
   -t registry.example.com/iris/server:candidate .
@@ -349,7 +350,7 @@ modes such as `0660` or `0664` fail startup validation. Keep the dedicated
 root at `2770`. Never recursively
 change permissions, delete authority evidence, or relax its validators.
 Recheck modes and management API access after starting with the corrected
-policy. Follow the [volume recovery procedure](../docs/zensical/kubernetes.md#recover-a-volume-whose-private-modes-were-changed).
+policy. Follow the [volume recovery procedure](../docs/zensical/admin-guide/recovery.md#recover-a-volume-whose-private-modes-were-changed).
 
 ## Configure and deploy
 
@@ -423,7 +424,7 @@ Bundle publication requires exactly two distinct approved public instruction
 roots under `/data/config/instr/roots.d`, readable by UID 10001. Provision the
 same `.pub` pair used by the package builders; never generate replacement roots
 in the pod or copy offline private keys there. See the
-[instruction-root ceremony](../docs/zensical/operations.md#instruction-root-ceremony-and-recovery).
+[instruction-root ceremony](../docs/zensical/admin-guide/instruction-keys.md#instruction-root-ceremony-and-recovery).
 Check Console Setup package readiness after rollout as well as pod readiness.
 Use temporary filenames and publish each manifest last:
 

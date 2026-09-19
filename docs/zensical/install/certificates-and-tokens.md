@@ -19,6 +19,8 @@ The default browser identity is generated and stored encrypted in `tls/console-f
 
 A browser warns about it the first time. Add it to each client's trust store after you check it through a channel you already trust, or install your own certificate. A certificate is tied to one address. Install a matching one whenever the address operators browse to changes.
 
+To pass this certificate as `--cafile` to a tool such as `tools/api-exercise.py` while you still run the default identity, copy it out of the running server container, for example `docker compose exec iris cat /run/iris/tls/console-fallback.pem`, over a channel you already trust.
+
 !!! warning
     Never disable TLS verification.
 
@@ -56,6 +58,10 @@ printf 'IRIS_OBSERVABILITY_TOKEN_FILE_HOST=%s\n' \
 ```
 
 Both containers run as user and group `10001`; the `chown` lets them read the file. Recreate the server container to pick up the mount; see [Send telemetry to Splunk](../user-guide/splunk.md). For rotation, see [Rotate credentials and certificates](../admin-guide/rotations.md).
+
+## How the management credential is handled
+
+The Console's management credential is compared against the current and previous values in constant time before route lookup or body buffering. It never appears in an environment value, URL, process argument, exception, or audit entry.
 
 ## Credential files on Kubernetes
 

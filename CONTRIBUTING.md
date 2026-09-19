@@ -67,7 +67,7 @@ you can do:
   issue's author on what might be missing.
 - Review and update the reference documentation under `docs/zensical/`; build
   or preview it with the Zensical commands in
-  [DEVELOPMENT.md](DEVELOPMENT.md).
+  [docs/dev/documentation.md](docs/dev/documentation.md).
 - Review existing pull requests, and testing patches against real existing
   applications that use `intelligent-release-image-staging`.
 - Write a test, or add a missing test case to an existing test.

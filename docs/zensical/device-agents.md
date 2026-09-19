@@ -1,4 +1,4 @@
 ---
 template: redirect.html
-location: ../architecture/device-agent/
+location: ../architecture/data-path/
 ---

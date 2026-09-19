@@ -52,7 +52,7 @@ package for a certificate change. If native signing changes wrapper bytes,
 publish a matching manifest for the signed output while retaining its
 canonical image provenance. The manifest does not validate a native signature;
 the device's app-hosting verifier does. See
-[Artifact handling](../../docs/zensical/iox.md#artifact-handling).
+[What onboarding puts on the device](../../docs/zensical/install/iox.md#what-onboarding-puts-on-the-device).
 
 ## Config delivery
 
@@ -121,8 +121,8 @@ itself remains unchanged and does not need rebuilding.
 
 ## Deploy to the device
 
-Use the [Console/API onboarding workflow](../../docs/zensical/fleet-workflows.md)
-or the server's [IOx control CLI](../../docs/zensical/reference.md#iox-control-cli).
+Use the [Console/API onboarding workflow](../../docs/zensical/user-guide/onboarding.md)
+or the server's [IOx control CLI](../../docs/zensical/reference/tools.md#iox-control-cli).
 `install.sh` and `uninstall.sh` are private controller recipes; real execution
 requires their inherited controller channel and cannot be run standalone.
 
@@ -131,7 +131,7 @@ requires their inherited controller channel and cannot be run standalone.
 2. Build and stage the architecture-matched package and current public catalog
    certificate. Supply the two approved public instruction roots and initialize
    the server's instruction custody as described in the
-   [IOx guide](../../docs/zensical/iox.md).
+   [IOx guide](../../docs/zensical/install/iox.md).
 3. Submit **Onboard**. The controller owns enrollment, identity checks, HTTPS
    package/certificate/envelope fetches, application configuration and lifecycle.
    It records and restores any IRIS-owned device-global verification change
@@ -145,8 +145,10 @@ The controller chooses the platform's application interface, storage and share
 settings. Catalyst 9300 uses the validated SSD share; Catalyst 8000V and IE-3400
 use SSH/SCP to IOS for image placement. Onboarding fetches its files over HTTPS
 and supplies the public certificate and sealed envelope before starting the app.
-See [IOx runtime behavior](../../docs/zensical/iox.md#runtime-behavior) for the
-platform details and [device-global verification](../../docs/zensical/iox.md#device-global-package-verification)
+See [Where the file
+lands](../../docs/zensical/architecture/data-path.md#where-the-file-lands)
+for the platform details and [device-global
+verification](../../docs/zensical/install/iox.md#device-global-package-verification)
 for the authority and recovery rules.
 
 ## On-box staging target
@@ -190,5 +192,5 @@ single `rename` put it at `<img>` (a directory-entry update, not a data
 transfer). The agent attests the final placement the same way: dir presence
 and catalog byte size, plus its own sha256 against the catalog for content
 integrity. See [Crash-safe same-name
-replacement](../../docs/zensical/device-agents.md#crash-safe-same-name-replacement)
+replacement](../../docs/zensical/architecture/data-path.md#crash-safe-same-name-replacement)
 for the full contract, shared with the Guest Shell path.

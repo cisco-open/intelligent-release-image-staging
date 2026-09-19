@@ -8661,6 +8661,52 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'href="/openapi.yaml"' in server_guide
 
 
+def test_help_pages_link_only_current_docs_pages():
+    """Every published-docs link on the two static help pages must resolve
+    to a page that still exists under docs/zensical and is not a redirect
+    stub (front matter ``template: redirect.html``) -- a stub means the old
+    slug moved, and the help page should already carry the new one. A
+    folder link (no trailing filename) resolves to that folder's
+    ``index.md``."""
+    repo_root = os.path.normpath(os.path.join(gui_server.WEBROOT, "..", ".."))
+    docs_root = os.path.join(repo_root, "docs", "zensical")
+    prefix = ("https://cisco-open.github.io/intelligent-release-image-staging"
+              "/docs/")
+    link_re = re.compile(re.escape(prefix) + r"([^\"'\s]*)")
+
+    def is_redirect_stub(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if not text.startswith("---"):
+            return False
+        end = text.find("\n---", 3)
+        front_matter = text[:end] if end != -1 else text
+        return "template: redirect.html" in front_matter
+
+    checked = 0
+    for name in ("help-server.html", "help-device.html"):
+        with open(os.path.join(gui_server.WEBROOT, name)) as f:
+            page = f.read()
+        for match in link_re.finditer(page):
+            slug = match.group(1)
+            slug = slug.split("#", 1)[0]   # anchors are not files on disk
+            if not slug:
+                continue                    # the bare docs/ site root
+            checked += 1
+            rel = slug.rstrip("/")
+            candidate = os.path.join(docs_root, rel + ".md")
+            if not os.path.isfile(candidate):
+                candidate = os.path.join(docs_root, rel, "index.md")
+            assert os.path.isfile(candidate), (
+                "%s links %s%s, which resolves to no page under "
+                "docs/zensical (%s)" % (name, prefix, slug, candidate))
+            assert not is_redirect_stub(candidate), (
+                "%s links %s%s, which is a redirect stub (%s) -- update the "
+                "help page to link the page's new location" %
+                (name, prefix, slug, candidate))
+    assert checked >= 10   # sanity: the loop actually walked real links
+
+
 @pytest.mark.parametrize("options,expected", [
     ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
 ], ids=["default", "off", "on"])

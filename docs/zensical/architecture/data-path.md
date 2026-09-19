@@ -123,14 +123,14 @@ A device that fails a check reports the failure and stops there.
 The agent never deletes the file at the target name first, which matters most
 when the device's boot setting points at that exact name. If a file of that
 name is already there, the agent counts it as staged only when the name, the
-native SHA-512 digest and the size all match the catalog: Guest Shell asks IOS
-to run that hash through a one-shot Embedded Event Manager (EEM) policy, and
-IOx runs it over a local SSH session. A file that does not match is left
-untouched and reported as a placement failure, so replacing it stays your
-decision. When no file of that name exists, IOS-XE writes the new bytes under
-a reserved temporary name, confirms they are there at the expected size, and
-only then renames the proven copy, so an interrupted run leaves any previous
-file exactly as it was. IOS-XR writes only one copy, at its final location.
+native SHA-512 digest and the size all match the catalog. Guest Shell checks
+that hash through a one-shot Embedded Event Manager (EEM) policy; IOx checks
+it over a local SSH session. A file that does not match is left untouched and
+reported as a placement failure, so replacing it stays your decision. When no
+file of that name exists, IOS-XE writes the new bytes under a reserved
+temporary name and confirms they are there at the expected size. Only then
+does it rename the proven copy, so an interrupted run leaves any previous
+file untouched. IOS-XR writes only one copy, at its final location.
 
 ## What happens when flash is nearly full
 
@@ -141,27 +141,26 @@ cannot be read. If space is still short on a device running in bundle mode,
 the agent sweeps unused image artifacts and leftover IRIS temporary files,
 keeping every package and provisioning file the boot setting names. On a
 device running in install mode the sweep is limited to the agent's own
-reserved temporary name, reclaimed only after the file has passed its size and
-digest checks and only once IOS confirms the name is gone. The agent tries the
-reclaim once per acquisition cycle. Republishing that image, a successful
-placement, or an image returning from park re-arms it; park means keeping an
-unassigned image on the device in case it is assigned again.
+reserved temporary name. It is reclaimed only after the file passes its size
+and digest checks, and only once IOS confirms the name is gone. The agent
+tries the reclaim once per acquisition cycle. Republishing that image, a
+successful placement, or an image returning from park re-arms it; park means
+keeping an unassigned image on the device in case it is assigned again.
 
-## Why a restarted agent keeps seeding
+## A restarted agent keeps seeding
 
-A device that has finished staging an image is a source for its peers, so a
-restarted agent puts itself back in the swarm: a transfer in progress resumes
-from its saved checkpoint, and a finished image is re-added from the agent's
-own record that the file is the exact catalog size and passed its content
-check. With either fact missing the agent announces nothing, because IRIS
-never offers peers bytes it cannot vouch for.
+A restarted agent rejoins the swarm right away. A transfer in progress
+resumes from its saved checkpoint. A finished image is re-added only when the
+agent's own record shows the file matches the catalog size and passed its
+content check. With either fact missing the agent announces nothing, because
+IRIS never offers peers bytes it cannot vouch for.
 
 ## What differs between Guest Shell and the app-hosting image
 
-Two terms in the table need a plain reading first. `verifier_missing` means
-the device would check the signature but the tool to do so is not installed.
-Tracker-only means the device uses the peers the tracker gives it, with no
-list of its own to enforce. For what a device administrator can still change,
+One term in the table needs a plain reading first: Tracker-only means the
+device uses the peers the tracker gives it, with no list of its own to
+enforce. See [`verifier_missing`](../reference/glossary.md#verifier_missing).
+For what a device administrator can still change,
 read
 [Security model and trust boundaries](security-model.md#device-administrator-trust-boundary).
 
