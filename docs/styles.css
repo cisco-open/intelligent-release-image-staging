@@ -490,6 +490,7 @@ code {
   gap: 6px;
 }
 
+.flow-svg .edge.management,
 .flow-svg .edge.control {
   stroke: var(--aqua);
   stroke-dasharray: 4 5;
@@ -501,6 +502,12 @@ code {
 
 .flow-svg .tracker text {
   fill: var(--aqua);
+}
+
+.flow-svg .management-label {
+  fill: var(--aqua);
+  font-family: inherit;
+  font-size: 12px;
 }
 
 .flow-svg.swarm-diagram .node text {

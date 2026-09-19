@@ -94,18 +94,21 @@ SPDX-License-Identifier: Apache-2.0
               <g class="node"><rect x="232" y="88" width="104" height="44" rx="10"></rect><text x="284" y="110">Device B</text></g>
               <g class="node"><rect x="232" y="152" width="104" height="44" rx="10"></rect><text x="284" y="174">Device C</text></g>
             </svg>
-            <p>Every device pulls the whole image from one place. A large rollout waits on the server and its uplink.</p>
+            <p>Every device pulls the whole image from one place. Transfers and image verification at the distribution source and on each device are manual or separately scripted. A large rollout waits on the server and its uplink.</p>
           </div>
           <div class="compare-card highlight">
             <h3>IRIS private swarm</h3>
             <div class="flow-figure">
-              <svg class="flow-svg swarm-diagram" viewBox="0 0 400 280" role="img" aria-label="One IRIS distribution container holds the tracker and origin seeder. The tracker coordinates eligible peers; the origin seeder and six interconnected devices supply image pieces. The rows are a layout, not a fixed forwarding hierarchy.">
-                <g class="service-group" aria-label="IRIS distribution container"><rect x="4" y="30" width="136" height="220" rx="12"></rect><text x="72" y="52">Distribution</text><text x="72" y="72">container</text></g>
+              <svg class="flow-svg swarm-diagram" viewBox="0 0 400 280" role="img" aria-label="A separate Console UI container connects to the distribution container over management HTTPS, outside the image-transfer path. One IRIS distribution container holds the tracker and origin seeder. The tracker coordinates eligible peers; the origin seeder and six interconnected devices supply image pieces. The rows are a layout, not a fixed forwarding hierarchy.">
+                <g class="node console"><rect x="4" y="4" width="136" height="54" rx="12"></rect><text x="72" y="22">Console UI</text><text x="72" y="43">container</text></g>
+                <path class="edge management" d="M72 58 V98"></path>
+                <text class="management-label" x="80" y="80">HTTPS</text>
+                <g class="service-group" aria-label="IRIS distribution container"><rect x="4" y="98" width="136" height="166" rx="12"></rect><text x="72" y="118">Distribution</text><text x="72" y="138">container</text></g>
                 <g class="peer-group"><rect x="156" y="6" width="240" height="258" rx="12"></rect><text x="276" y="24">Eligible peers</text></g>
-                <path class="edge control" d="M128 111 H144 V32 H156"></path>
-                <path class="edge seed" d="M128 183 C150 183 146 68 174 68"></path>
-                <path class="edge seed" d="M128 183 C150 183 150 148 174 148"></path>
-                <path class="edge seed" d="M128 183 C150 183 150 228 174 228"></path>
+                <path class="edge control" d="M128 175 H144 V32 H156"></path>
+                <path class="edge seed" d="M128 229 C150 229 146 68 174 68"></path>
+                <path class="edge seed" d="M128 229 C150 229 150 148 174 148"></path>
+                <path class="edge seed" d="M128 229 L174 228"></path>
                 <path class="edge peer" d="M266 68 H290"></path>
                 <path class="edge peer" d="M266 148 H290"></path>
                 <path class="edge peer" d="M266 228 H290"></path>
@@ -113,8 +116,8 @@ SPDX-License-Identifier: Apache-2.0
                 <path class="edge peer" d="M336 92 V124"></path>
                 <path class="edge peer" d="M220 172 V204"></path>
                 <path class="edge peer" d="M336 172 V204"></path>
-                <g class="node tracker"><rect x="16" y="90" width="112" height="42" rx="8"></rect><text x="72" y="111">Tracker</text></g>
-                <g class="node server"><rect x="16" y="154" width="112" height="58" rx="8"></rect><text x="72" y="174">Origin</text><text x="72" y="196">seeder</text></g>
+                <g class="node tracker"><rect x="16" y="154" width="112" height="42" rx="8"></rect><text x="72" y="175">Tracker</text></g>
+                <g class="node server"><rect x="16" y="208" width="112" height="42" rx="8"></rect><text x="72" y="220">Origin</text><text x="72" y="238">seeder</text></g>
                 <g class="node"><rect x="174" y="44" width="92" height="48" rx="8"></rect><text x="220" y="63">Peer A</text><rect class="piece" x="182" y="80" width="16" height="5" rx="2"></rect><rect class="piece" x="202" y="80" width="16" height="5" rx="2"></rect><rect class="piece" x="222" y="80" width="16" height="5" rx="2"></rect><rect class="piece empty" x="242" y="80" width="16" height="5" rx="2"></rect></g>
                 <g class="node"><rect x="290" y="44" width="92" height="48" rx="8"></rect><text x="336" y="63">Peer B</text><rect class="piece" x="298" y="80" width="16" height="5" rx="2"></rect><rect class="piece empty" x="318" y="80" width="16" height="5" rx="2"></rect><rect class="piece" x="338" y="80" width="16" height="5" rx="2"></rect><rect class="piece empty" x="358" y="80" width="16" height="5" rx="2"></rect></g>
                 <g class="node"><rect x="174" y="124" width="92" height="48" rx="8"></rect><text x="220" y="143">Peer C</text><rect class="piece empty" x="182" y="160" width="16" height="5" rx="2"></rect><rect class="piece" x="202" y="160" width="16" height="5" rx="2"></rect><rect class="piece" x="222" y="160" width="16" height="5" rx="2"></rect><rect class="piece empty" x="242" y="160" width="16" height="5" rx="2"></rect></g>
@@ -122,9 +125,9 @@ SPDX-License-Identifier: Apache-2.0
                 <g class="node"><rect x="174" y="204" width="92" height="48" rx="8"></rect><text x="220" y="223">Peer E</text><rect class="piece" x="182" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="202" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="222" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="242" y="240" width="16" height="5" rx="2"></rect></g>
                 <g class="node"><rect x="290" y="204" width="92" height="48" rx="8"></rect><text x="336" y="223">Peer F</text><rect class="piece empty" x="298" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="318" y="240" width="16" height="5" rx="2"></rect><rect class="piece" x="338" y="240" width="16" height="5" rx="2"></rect><rect class="piece empty" x="358" y="240" width="16" height="5" rx="2"></rect></g>
               </svg>
-              <div class="flow-legend" aria-hidden="true"><span class="control-key">Peer coordination</span><span class="data-key">Image pieces</span></div>
+              <div class="flow-legend" aria-hidden="true"><span class="control-key">Management &amp; coordination</span><span class="data-key">Image pieces</span></div>
             </div>
-            <p>Tracker and origin seeder run in one distribution container. A separate Console provides the management UI. Devices exchange image pieces with the seeder and eligible peers. Turn on mutual TLS to encrypt peer transfers.</p>
+            <p>Tracker and origin seeder run in one distribution container. A separate Console provides the management UI. IRIS combines peer delivery with server-side Cisco hash checks and on-device checks against the catalog hash. Turn on mutual TLS to encrypt peer transfers.</p>
           </div>
         </div>
       </section>

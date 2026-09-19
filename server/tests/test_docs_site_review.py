@@ -56,6 +56,10 @@ def test_comparison_is_compact_static_and_has_distinct_piece_states():
     assert "Turn on mutual TLS" in markup
     assert "HTTPS for every control path" not in markup
     assert "HTTPS for the Console and service APIs" in markup
+    assert "manual or separately scripted" in markup
+    assert "verification at the distribution source and on each device" in markup
+    assert "server-side Cisco hash checks" in markup
+    assert "on-device checks against the catalog hash" in markup
 
 
 def test_swarm_distinguishes_coordination_from_piece_delivery():
@@ -69,6 +73,19 @@ def test_swarm_distinguishes_coordination_from_piece_delivery():
     assert " ".join(services.itertext()) == "Distribution container"
     assert "One IRIS distribution container holds the tracker and origin seeder" in source
     assert "A separate Console provides the management UI" in markup
+    console = svg.find("g[@class='node console']")
+    assert " ".join(console.itertext()) == "Console UI container"
+    console_box = console.find("rect")
+    boundary = services.find("rect")
+    assert float(console_box.get("y")) + float(console_box.get("height")) < float(boundary.get("y"))
+    assert svg.find("path[@class='edge management']").get("d") == "M72 58 V98"
+    assert svg.find("text[@class='management-label']").text == "HTTPS"
+    assert "outside the image-transfer path" in source
+    for role in ("tracker", "server"):
+        box = svg.find(f"g[@class='node {role}']/rect")
+        for axis, size in (("x", "width"), ("y", "height")):
+            assert float(boundary.get(axis)) < float(box.get(axis))
+            assert float(box.get(axis)) + float(box.get(size)) < float(boundary.get(axis)) + float(boundary.get(size))
     assert svg.find("g[@class='node tracker']/text").text == "Tracker"
     assert " ".join(svg.find("g[@class='node server']").itertext()) == "Origin seeder"
     peers = svg.findall("g[@class='node']")
