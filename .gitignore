@@ -1,3 +1,7 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # IRIS — Intelligent Release & Image Staging
 # Keep credentials, device images, and generated artifacts OUT of the repo.
 # NOTE: *.example files are intentionally tracked (they are templates, not real config).

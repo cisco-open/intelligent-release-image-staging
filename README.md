@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # IRIS: Intelligent Release and Image Staging
 
 IRIS distributes Cisco images and patches through a private peer-to-peer swarm.

@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # intelligent-release-image-staging as a Cisco IOx Docker app
 
 IRIS can run as an architecture-matched IOx Docker app on supported Cisco
