@@ -104,6 +104,19 @@ def test_bootstrap_init_uses_same_image_and_age_secret_as_server():
     assert age["secret"]["secretName"] == "iris-age"
 
 
+def test_private_state_is_normalized_at_server_process_start():
+    pod = _pod(_load("deployment.yaml"))
+    app = pod["containers"][0]
+    assert app["command"] == ["/bin/sh", "-c"]
+    script = app["args"][0]
+    assert 'state="${IRIS_STATE:-/var/lib/iris}"' in script
+    assert '[ -L "$private_dir" ]' in script
+    assert 'owner="$(stat -c %u -- "$private_dir")"' in script
+    assert "700) ;;" in script
+    assert "2700) chmod 00700" in script
+    assert "exec /opt/iris/server/docker-entrypoint.sh" in script
+
+
 def test_only_server_mounts_the_existing_rwo_data_claim():
     server_pod = _pod(_load("deployment.yaml"))
     console_pod = _pod(_load("console-deployment.yaml"))

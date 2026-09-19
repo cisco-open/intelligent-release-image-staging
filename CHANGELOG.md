@@ -11,6 +11,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Reject duplicate directly routed application addresses and overlapping
+  dedicated application subnets in inventory, while retaining intentional
+  shared in-band networks and private router-NAT address reuse.
 - Require a fresh base-image pull when building the standalone instruction
   crypto helpers. Check documentation navigation recursively, including nested
   dashboard and Swagger provenance pages, and expose both pages in the nav.
@@ -20,6 +23,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   dashboard evidence; repair stale operator links.
 
 ### Fixed
+- Normalize the Kubernetes server's private state directories after kubelet
+  prepares the PVC, preventing local-volume `fsGroup` handling from leaving
+  setgid modes that make authority validation fail closed.
 - Make the static instruction-helper license readable by the unprivileged
   server publisher so Guest Shell bundles provision successfully at startup.
 - Batch concurrent cached inventory scans to reduce reader lock contention,

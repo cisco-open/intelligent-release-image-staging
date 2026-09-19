@@ -330,8 +330,14 @@ The server uses
 permission changes when that root already matches. The default `Always`
 behavior can widen `0600` authority locks and transcripts to `0660`, causing
 startup to fail. Secret, ConfigMap, and `emptyDir` projections keep their
-existing group handling. Verify CSI driver behavior separately if it owns
-volume permission changes.
+existing group handling. The non-root server startup wrapper also restores
+exact `0700` mode on `/data/state` and `/data/state/iox` after kubelet finishes
+preparing the mount, covering volume implementations that add setgid despite
+`OnRootMismatch`. It accepts only owner uid `10001` and modes `0700` or `2700`,
+and does not rewrite files or any wider directory tree. When repairing these
+directories manually with GNU `chmod`, use `chmod 00700`: its usual `0700`
+form preserves setgid on directories. Verify CSI driver behavior separately if
+it owns volume permission changes.
 
 The policy does not repair an already changed volume. Stop new job admission,
 wait for active jobs to finish, then stop pods mounting the PVC. Verify the

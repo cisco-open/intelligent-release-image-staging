@@ -2971,9 +2971,9 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
                   "management_type": "routed", "iris_vlan": "666",
-                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
-                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
-                  "app_gateway": "10.0.0.1",
+                  "svi_ip": "10.0.1.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.1.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.1.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -4302,9 +4302,9 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
                   "management_type": "routed", "iris_vlan": "666",
-                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
-                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
-                  "app_gateway": "10.0.0.1",
+                  "svi_ip": "10.0.1.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.1.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.1.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -11744,7 +11744,7 @@ def _fleet_of(fleet, n):
         fleet.upsert({"device_id": "dev-%02d" % i,
                       "device_ip": "10.0.0.%d" % (i + 1),
                       "management_type": "inband", "inband_vlan": "120",
-                      "app_ip": "10.9.0.2", "app_mask": "255.255.255.252",
+                      "app_ip": "10.9.0.%d" % (i + 2), "app_mask": "255.255.255.0",
                       "app_gateway": "10.9.0.1", "platform": "guestshell",
                       "model": "C9300" if i % 2 else "C9500"})
 

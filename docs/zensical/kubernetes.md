@@ -204,9 +204,16 @@ For kubelet-managed volume permissions, preparing the root as above prevents
 recursive permission changes on mount. The default `Always` behavior widens
 private `0600` authority files to `0660`, which IRIS correctly rejects.
 `OnRootMismatch` still permits a recursive change if the root does not match;
-it does not repair files changed by an earlier mount. It does not alter the
-group handling of Secret, ConfigMap, or `emptyDir` volumes, so the age-key
-projection remains readable. The Console has no PVC.
+it does not repair files changed by an earlier mount. After kubelet finishes
+preparing the mount, the non-root server startup wrapper restores exact `0700`
+mode on only `/data/state` and `/data/state/iox`. It accepts only owner uid
+`10001` and modes `0700` or the kubelet-added `2700`, covering local-volume
+implementations that add setgid despite `OnRootMismatch` without recursively
+changing private files. For a manual repair with GNU `chmod`, use the five-digit
+`chmod 00700`; the usual `0700` form preserves setgid on directories.
+`fsGroupChangePolicy` does not alter the group handling of Secret, ConfigMap,
+or `emptyDir` volumes, so the age-key projection remains readable. The Console
+has no PVC.
 
 Verify the storage driver's behavior before first deploy. CSI drivers that
 delegate `VOLUME_MOUNT_GROUP` handle permissions themselves and do not use
