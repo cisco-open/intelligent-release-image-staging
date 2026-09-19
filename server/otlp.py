@@ -87,6 +87,7 @@ def build_log_record(event):
         "role": role,
         "ip": event.get("ip"),
         "received_at": event.get("received_at", event.get("ts")),
+        "peer_tls": event.get("peer_tls"),
     }
     return build_tracker_record(mapped)
 
@@ -173,6 +174,28 @@ def _transfer_record_split_pairs(enrich):
         ("iris.transfer.peer_records.unknown_rows",
          _enrich_int(split.get("unknown_rows"))),
     ]
+
+
+def _peer_tls_pairs(value):
+    """Searchable device policy observations for peer-related log records."""
+    if not isinstance(value, dict):
+        return []
+    configured = value.get("configured_mode")
+    if configured not in ("disabled", "required"):
+        return []
+    runtime = value.get("runtime_mode")
+    source = value.get("runtime_source")
+    if runtime not in ("disabled", "required") or source != "aria2_rpc":
+        runtime, source = "unknown", "unknown"
+    pairs = [
+        ("iris.peer.tls.configured_mode", configured),
+        ("iris.peer.tls.runtime_mode", runtime),
+        ("iris.peer.tls.runtime_source", source),
+    ]
+    reported_at = value.get("reported_at")
+    if type(reported_at) in (int, float) and 0 <= reported_at < float("inf"):
+        pairs.append(("iris.peer.tls.reported_at", float(reported_at)))
+    return pairs
 
 
 def _record(name, ts_nano, attrs, event_id=None, body=None):
@@ -582,6 +605,7 @@ def build_tracker_record(event):
         ("iris.peer.role", _enrich_str(event.get("role"))),
         ("network.peer.address", _enrich_str(event.get("ip"))),
     ]
+    pairs.extend(_peer_tls_pairs(event.get("peer_tls")))
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     ts = event.get("received_at")
     if ts is None:
@@ -615,6 +639,7 @@ def build_peer_rate_record(row):
         ("iris.torrent.left", _enrich_int(row.get("left"))),
         ("iris.peer.role", _enrich_str(row.get("role"))),
     ]
+    pairs.extend(_peer_tls_pairs(row.get("peer_tls")))
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     return _record("iris.swarm.peer_rate", _ts_nano(row.get("ts")), attrs,
                    event_id=row.get("event_id"), body="measured peer rate")
@@ -655,6 +680,7 @@ def build_peer_bytes_record(row):
          _enrich_int(row.get("peer_sent_delta_bytes"))),
         ("iris.peer.role", _enrich_str(row.get("role"))),
     ]
+    pairs.extend(_peer_tls_pairs(row.get("peer_tls")))
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     return _record("iris.swarm.peer_bytes", _ts_nano(row.get("ts")), attrs,
                    event_id=row.get("event_id"), body="attributed peer bytes")

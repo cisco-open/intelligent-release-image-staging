@@ -471,6 +471,12 @@ remains pending or unavailable.
 
 ## Guest Shell fleet bundle drop
 
+The server build supplies a static instruction verifier for older Guest Shell
+hosts. For standalone bundles, first run `tools/build-ssh-verifiers.sh` on a
+Docker builder supporting both amd64 and arm64 (native workers or QEMU).
+Upgrade the device's `bootstrap.sh` through onboarding before publishing a
+bundle with this verifier; older bootstraps reject its new archive members.
+
 Treat a Phase 1 Guest Shell agent update as a fleet operation. Build each
 required architecture with `tools/make-agent-bundle.sh --arch amd64|arm64
 --aria2 PATH --instruction-roots-dir DIR --out OUTPUT`, using the canonical
@@ -485,7 +491,7 @@ mismatched evidence, unsafe members or incomplete writes must refuse the new
 bundle and preserve the prior runnable bundle. Never remove the prior runnable
 agent to force a refused update through. Check the next tick's
 `instr_protocol`, accepted identity and instruction state, including
-tracker-only fallback where Guest Shell lacks `ssh-keygen -Y verify`.
+tracker-only fallback if the bundled instruction verifier is unavailable.
 Roll back by restoring the reviewed prior bundle/evidence as one set; do not
 rewind replay state or substitute trust roots. This changes the agent only;
 it never installs or activates the staged IOS image.

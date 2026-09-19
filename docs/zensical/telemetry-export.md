@@ -16,6 +16,13 @@ Telemetry is best-effort. The bounded queue can drop records while a
 destination is unreachable; export health reports failures and queue drops.
 Image staging continues independently of telemetry export.
 
+The Console device telemetry column and Swarm Map show **Torrent TLS** as
+required, off, or unknown, with stale observations marked. This is the daemon
+policy reported through aria2 RPC, not proof of a negotiated connection.
+The peer drawer also shows the configured mode and heartbeat time; older agents
+report unknown. The Swarm Map origin drawer shows the seeder’s RPC-reported
+policy too.
+
 ## The two export paths
 
 | Path | Transport | Direction | Carries |
@@ -120,6 +127,12 @@ Key attributes on the peer records: `iris.image.id`, `iris.image.name`,
 `iris.peer.device.id`, `iris.peer.device_id`, `iris.peer.attribution`,
 `iris.transfer.session_bytes_from_peer`,
 `iris.transfer_record.capture_complete`.
+
+Authenticated device tracker, rate, and origin-byte records also carry
+`iris.peer.tls.configured_mode`, `iris.peer.tls.runtime_mode`,
+`iris.peer.tls.runtime_source`, and `iris.peer.tls.reported_at`. These are the
+device's configured policy and aria2 RPC observation, not proof of a particular
+connection's negotiated cipher.
 
 `iris.peer.attribution` is `origin` | `device` | `unknown`. The origin seeder
 is an ordinary BitTorrent peer of every device, so its bytes sit in a device's

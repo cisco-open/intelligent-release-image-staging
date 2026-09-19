@@ -49,6 +49,7 @@ COPY aria2-next/ /src/
 # SOURCE_DATE_EPOCH is supplied by build.sh from the pinned commit date so the
 # build is time-invariant.
 ARG SOURCE_DATE_EPOCH
+ARG ARIA2C_BUILD_JOBS=2
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 # Feature set:
@@ -69,7 +70,13 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 # -DCMAKE_FIND_LIBRARY_SUFFIXES is silently discarded. CMAKE_PROJECT_INCLUDE is
 # evaluated immediately after project() and before cmake/modules/FeatureChecks
 # runs, which is the only supported hook early enough to matter.
-RUN printf 'set(CMAKE_FIND_LIBRARY_SUFFIXES .a)\n' > /static-prefs.cmake
+# CMake enables IPO using -flto=auto by default, independently of Ninja -j.
+# Replace that option after compiler detection so both worker pools are bounded.
+RUN case "$ARIA2C_BUILD_JOBS" in ''|0*|*[!0-9]*) echo "FAIL: ARIA2C_BUILD_JOBS must be a positive integer" >&2; exit 2 ;; esac; \
+    printf '%s\n' 'set(CMAKE_FIND_LIBRARY_SUFFIXES .a)' \
+      'foreach(lang C CXX)' \
+      '  list(TRANSFORM CMAKE_${lang}_COMPILE_OPTIONS_IPO REPLACE "^-flto(=.*)?$" "-flto=${IRIS_LTO_JOBS}")' \
+      'endforeach()' > /static-prefs.cmake
 
 #
 # Every dependency is located through pkg_check_modules(... IMPORTED_TARGET ...),
@@ -82,6 +89,7 @@ RUN printf 'set(CMAKE_FIND_LIBRARY_SUFFIXES .a)\n' > /static-prefs.cmake
 # OpenSSL dynamically even in "static" mode.
 RUN set -o pipefail; cmake -S /src -B /build -G Ninja \
       -DCMAKE_PROJECT_INCLUDE=/static-prefs.cmake \
+      -DIRIS_LTO_JOBS="$ARIA2C_BUILD_JOBS" \
       -DCMAKE_BUILD_TYPE=Release \
       -DARIA2_STATIC_DEPENDENCIES=ON \
       -DARIA2_ENABLE_BITTORRENT=ON \
@@ -105,7 +113,7 @@ RUN if grep -q 'ARIA2_RELEASE_LTO requested but IPO is not supported' /configure
       echo "FAIL: LTO was requested but silently skipped."; exit 1; \
     fi
 
-RUN cmake --build /build --target aria2-next -j"$(nproc)"
+RUN cmake --build /build --target aria2-next -j"$ARIA2C_BUILD_JOBS"
 
 RUN cp /build/aria2-next /aria2-next.unstripped && strip /build/aria2-next
 

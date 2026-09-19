@@ -210,3 +210,26 @@ def test_size_gate_reads_a_byte_count_not_filesystem_stats():
                          env={"ARTIFACT": build_sh, "PATH": "/usr/bin:/bin"})
     assert out.stdout.strip().isdigit(), (
         "the size-gate assignment did not yield a plain byte count: %r" % out.stdout)
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "01", "2.5", "auto", "2;exit 0"])
+def test_build_rejects_invalid_parallelism_before_source_access(value):
+    import subprocess
+    driver = os.path.join(HERE, "..", "..", "tools", "aria2c-build", "build.sh")
+    env = dict(os.environ, ARIA2C_BUILD_JOBS=value)
+    result = subprocess.run(["bash", driver, "aarch64"], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "ARIA2C_BUILD_JOBS must be a positive integer" in result.stderr
+
+
+def test_compiler_and_lto_share_explicit_worker_bound():
+    # Both compiler scheduling and GCC's separately spawned LTRANS workers
+    # must use the same argument; limiting Ninja alone leaves LTO unbounded.
+    text = _text()
+    assert "ARG ARIA2C_BUILD_JOBS=2" in text
+    assert '-j"$ARIA2C_BUILD_JOBS"' in text
+    assert '-DIRIS_LTO_JOBS="$ARIA2C_BUILD_JOBS"' in text
+    assert 'CMAKE_${lang}_COMPILE_OPTIONS_IPO REPLACE "^-flto(=.*)?$" "-flto=${IRIS_LTO_JOBS}"' in text
+    assert "-DARIA2_RELEASE_LTO=ON" in text
+    assert "$(nproc)" not in text

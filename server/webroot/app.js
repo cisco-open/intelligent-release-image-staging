@@ -794,6 +794,16 @@
     }, 250);
   }
 
+  function peerTlsCell(d) {
+    var t = d.peer_tls || {}, mode = t.runtime_source === 'aria2_rpc' ? t.runtime_mode : 'unknown';
+    var known = mode === 'required' || mode === 'disabled';
+    var stale = !d.last_seen || Date.now() / 1000 - d.last_seen >= 600;
+    var label = known ? (mode === 'required' ? 'required' : 'off') : 'unknown';
+    var configured = t.configured_mode === 'required' ? 'required' : t.configured_mode === 'disabled' ? 'off' : 'unknown';
+    var title = 'Torrent transport: daemon policy last reported ' + (d.last_seen ? fmtDate(d.last_seen) : 'never') +
+      '. Configured: ' + configured + '. This is not a negotiated connection measurement.';
+    return '<span class="badge ' + (known && !stale ? 'badge-queued' : 'badge-off') + '" title="' + esc(title) + '">TLS ' + label + (stale && known ? ' (stale)' : '') + '</span>';
+  }
   function telemetryCell(d) {
     if (d.telemetry_enabled === false) {
       return '<span class="badge badge-off" title="the agent sends no telemetry">off</span>';
@@ -1651,7 +1661,7 @@
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
-        '<td>' + telemetryCell(d) + '</td>' +
+        '<td>' + telemetryCell(d) + ' ' + peerTlsCell(d) + '</td>' +
         '<td><span class="peer-intent badge ' + (peerPolicyAssigned(d.device_id) ? 'badge-fail' : 'badge-off') + '">' +
         (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
         '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +

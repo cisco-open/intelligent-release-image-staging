@@ -12,6 +12,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Refresh device-container security dependencies, apply Python's upstream Expat
+  fix, and remove unused pip/ensurepip installers from the runtime.
+- Export the shared device filesystem as one layer so IOx cannot restore older
+  libraries or deleted installer files by reordering image layers.
+- Show configured and aria2-reported torrent TLS policy in telemetry, including
+  unknown or stale reports. This reports policy, not a per-connection handshake.
+- Bundle a static instruction verifier for older Guest Shell hosts. Reject
+  unauthenticated or malformed aria2 health replies, replace stale running
+  Guest Shell binaries, and restrict secret-rotation restarts to the owned daemon.
+- Bound aria2 compile/LTO parallelism and include API fixture helpers in releases.
 - Add a default-off peer transfer TLS toggle with persistent mode, automatic origin
   restart, and matching device onboarding; require undeployment before switching.
   Historical records for devices absent from inventory do not block this control.

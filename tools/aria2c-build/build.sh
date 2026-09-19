@@ -18,6 +18,14 @@ case "$ARCH" in
   *) echo "usage: $0 <x86_64|aarch64>" >&2; exit 2 ;;
 esac
 
+# One bound covers compiler jobs and GCC's separate LTO worker pool. Keep the
+# default modest for emulated ARM builders sharing a host with lab services.
+ARIA2C_BUILD_JOBS="${ARIA2C_BUILD_JOBS-2}"
+case "$ARIA2C_BUILD_JOBS" in
+  ''|0*|*[!0-9]*)
+    echo "FAIL: ARIA2C_BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$REPO_ROOT/vendor/aria2-next"
 OUT="${ARIA2_OUTPUT_DIR:-$REPO_ROOT/out/$ARCH}"
@@ -99,6 +107,7 @@ printf '%s\n' 'aria2-next/.git' 'aria2-next/docs/media' > "$BUILD_CONTEXT/.docke
 docker buildx build \
   --platform "$PLATFORM" \
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+  --build-arg "ARIA2C_BUILD_JOBS=$ARIA2C_BUILD_JOBS" \
   --target artifact \
   --output "type=local,dest=$OUT" \
   --progress plain \

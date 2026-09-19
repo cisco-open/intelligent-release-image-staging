@@ -64,10 +64,14 @@
     iris/tools/check-package-freshness.sh \
     iris/tools/check-host-time.sh \
     iris/tools/api-exercise.py \
+    iris/tools/api_exercise_fixtures.py \
     iris/tools/test_api_exercise.py \
     iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
+  run env PYTHONPATH="$FIX/release/iris/tools" python3 -c \
+    'from api_exercise_fixtures import exercise; assert callable(exercise)'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   for template in roles.csv.example schedules.csv.example; do
     tar xOzf "$FIX/release/iris.tgz" "iris/fleet/$template" \
       | cmp "$FIX/fleet/$template" - || return 1
@@ -94,7 +98,7 @@ _make_release_fixture() {
   git -C "$FIX" config user.name t
   mkdir -p "$FIX/docs/zensical" "$FIX/server/certs" "$FIX/server/webroot/fonts" \
            "$FIX/device/xr/out" "$FIX/device/container" \
-           "$FIX/tools/aria2c-patches" "$FIX/tools/aria2c-build" "$FIX/lab" \
+           "$FIX/tools/aria2c-patches" "$FIX/tools/aria2c-build" "$FIX/tools/licenses" "$FIX/lab" \
            "$FIX/kubernetes" "$FIX/fleet"
   for f in README.md CHANGELOG.md DEVELOPMENT.md CONTRIBUTING.md TESTING.md \
            LICENSE NOTICE SECURITY.md CODE_OF_CONDUCT.md zensical.toml \
@@ -112,10 +116,13 @@ _make_release_fixture() {
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
+           build-ssh-verifier.sh build-ssh-verifiers.sh \
            agent-source-freshness.sh start-compose-server.sh check-host-time.sh vendor-swagger-ui.sh \
-           api-exercise.py test_api_exercise.py; do
+           api-exercise.py api_exercise_fixtures.py test_api_exercise.py; do
     echo "# $f" > "$FIX/tools/$f"
   done
+  cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
+  cp "$repo/tools/licenses/musl-COPYRIGHT" "$FIX/tools/licenses/musl-COPYRIGHT"
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"
   cp "$repo/tools/ioxclient.sha256" "$FIX/tools/ioxclient.sha256"
   echo "patch" > "$FIX/tools/aria2c-patches/0001.patch"

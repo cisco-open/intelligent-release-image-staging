@@ -481,11 +481,15 @@ EOF
   ! grep -iE '(TOKEN|PASS|SECRET)=' "$DOCKERFILE"
 }
 
+_runtime_stage() {
+  awk '/^FROM / { runtime = ($0 == "FROM python-base AS runtime-files" || $0 == "FROM scratch"); next } runtime { print }' "$DOCKERFILE"
+}
+
 @test "shared Dockerfile carries the IOx SSH transport but XR cannot select it" {
   # One image means the IOx transport is physically present. Runtime isolation
   # is enforced by the platform selector tests above: xr-appmgr rejects every
   # SSH credential variable before the agent starts.
-  run grep -E '^RUN apk add' "$DOCKERFILE"
+  run _runtime_stage
   [ "$status" -eq 0 ]
   [[ "$output" == *"openssh-client"* ]]
   [[ "$output" == *"sshpass"* ]]
@@ -495,7 +499,7 @@ EOF
   # Alpine BusyBox supplies the four retained diagnostic commands
   # (ps/top/free/kill), so procps would only duplicate them. Nothing may be
   # pip-installed.
-  run grep -E '^RUN apk add' "$DOCKERFILE"
+  run _runtime_stage
   [ "$status" -eq 0 ]
   [[ "$output" == *"--no-cache"* ]]
   [[ "$output" == *" curl"* ]]
@@ -504,13 +508,18 @@ EOF
   ! grep -qE '^RUN .*pip3? install' "$DOCKERFILE"
 }
 
-@test "Dockerfile is a multi-stage-free multi-architecture build" {
+@test "Dockerfile keeps the compiler in a separate multi-architecture stage" {
   # Official python image on Alpine, pinned by INDEX digest (tag@sha256:...)
   # so a rebuild is reproducible; the tag stays for human readability.
-  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$DOCKERFILE"
+  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64} AS python-base$' "$DOCKERFILE"
   run grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$DOCKERFILE"
   [ "$status" -ne 0 ]
-  [ "$(grep -c '^FROM ' "$DOCKERFILE")" -eq 1 ]
+  grep -q '^FROM python-base AS xml-build$' "$DOCKERFILE"
+  run _runtime_stage
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"gcc="* ]]
+  [[ "$output" != *"musl-dev"* ]]
+  [[ "$output" == *"COPY --from=xml-build /out/*.so"* ]]
   grep -q '^ARG TARGETARCH$' "$DOCKERFILE"
 }
 

@@ -65,13 +65,15 @@ SHIP=(
   # the notice without them would make the notice false.
   tools/get-aria2c.sh tools/aria2c.sha256 tools/make-torrent.sh
   tools/make-agent-bundle.sh tools/gen-device-installers.sh
+  tools/build-ssh-verifier.sh tools/build-ssh-verifiers.sh
+  tools/licenses/musl-COPYRIGHT
   tools/apply-assignments.sh tools/get-ioxclient.sh tools/ioxclient.sha256
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-device-image.sh tools/build-xr-package.sh
   tools/check-package-freshness.sh
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
-  tools/api-exercise.py tools/test_api_exercise.py
+  tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
   tools/aria2c-patches tools/aria2c-build
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.

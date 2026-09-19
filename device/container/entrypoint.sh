@@ -897,22 +897,42 @@ RPC_CONNECT_TIMEOUT=2
 RPC_HEALTH_TIMEOUT=10
 
 rpc_probe() {
-  # One probe; the caller reads curl's own exit status (0 answered, 7 nothing
-  # listening, 28 connected but no answer inside the bound, anything else a
-  # transport failure mid-request). Run as a tracked background child and
-  # waited on, for the same reason the tick's sleep is: a POSIX shell defers
-  # traps while a FOREGROUND command runs, and PID 1 must never make the
-  # container wait out a probe before it can act on TERM.
-  # Feed the authenticated RPC body on stdin. Putting it after -d would expose
-  # the RPC secret through /proc/<curl-pid>/cmdline.
+  # Match start_aria2c's alphabet before interpolating the request JSON.
+  case "$1" in ''|*[!A-Za-z0-9._~-]*) return 1 ;; esac
+  # Track curl so PID 1 can handle TERM while waiting. Keep authentication on
+  # stdin and bound both the request duration and the response body.
+  _probe_response="$(mktemp)" || return 1
   printf '%s' \
     '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
-    | curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+    | curl -fsS --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+      --max-filesize 65536 --output "$_probe_response" \
       "http://127.0.0.1:$RPC_PORT/jsonrpc" --data-binary @- \
-      >/dev/null 2>&1 &
+      2>/dev/null &
   _probe_pid=$!
   _probe_rc=0
   wait "$_probe_pid" || _probe_rc=$?
+  _probe_pid=""
+  if [ "$_probe_rc" -eq 0 ]; then
+    python3 - "$_probe_response" <<'PYTHON' || _probe_rc=1
+import json, sys
+try:
+    with open(sys.argv[1], 'rb') as stream:
+        raw = stream.read(65537)
+    reply = json.loads(raw) if len(raw) <= 65536 else None
+    result = reply.get('result') if isinstance(reply, dict) else None
+    valid = (isinstance(reply, dict) and reply.get('jsonrpc') == '2.0'
+             and reply.get('id') == 'h' and 'error' not in reply
+             and isinstance(result, dict)
+             and isinstance(result.get('version'), str) and bool(result['version'])
+             and isinstance(result.get('enabledFeatures'), list)
+             and all(isinstance(item, str) for item in result['enabledFeatures']))
+except (OSError, ValueError, RecursionError):
+    valid = False
+raise SystemExit(0 if valid else 1)
+PYTHON
+  fi
+  rm -f "$_probe_response"
+  _probe_response=""
   return "$_probe_rc"
 }
 
@@ -981,13 +1001,14 @@ FAIL_STREAK=0
 
 stop_agent() {
   trap - TERM INT
-  for pid in "$AGENT_PID" "$SLEEP_PID"; do
+  for pid in "$AGENT_PID" "$SLEEP_PID" "${_probe_pid:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
   stop_aria2c
-  for pid in "$AGENT_PID" "$SLEEP_PID"; do
+  for pid in "$AGENT_PID" "$SLEEP_PID" "${_probe_pid:-}"; do
     [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
   done
+  [ -z "${_probe_response:-}" ] || rm -f "$_probe_response"
   exit 0
 }
 

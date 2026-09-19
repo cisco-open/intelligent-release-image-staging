@@ -31,11 +31,14 @@ DEVICE_DOCKERFILE = os.path.join(
 
 
 def _base_image(path):
-    """The FROM line's image reference (first stage)."""
+    """The final runtime stage's image, excluding compiler/source stages."""
+    base = None
     for line in open(path).read().splitlines():
-        m = re.match(r"^FROM\s+(\S+)", line)
+        m = re.match(r"^FROM\s+(?:--platform=\S+\s+)?(\S+)", line)
         if m:
-            return m.group(1)
+            base = m.group(1)
+    if base:
+        return base
     raise AssertionError("no FROM line in %s" % path)
 
 
@@ -47,10 +50,24 @@ def test_server_base_is_trixie():
 
 
 def test_device_base_is_digest_pinned_supported_alpine():
-    base = _base_image(DEVICE_DOCKERFILE)
+    text = open(DEVICE_DOCKERFILE).read()
+    base = re.search(r"^FROM (\S+) AS python-base$", text, re.MULTILINE).group(1)
     assert re.fullmatch(
         r"python:3\.12-alpine3\.24@sha256:[0-9a-f]{64}", base
     ), "expected the audited digest-pinned Alpine device base, got %s" % base
+
+
+def test_device_filesystem_is_independent_of_caf_layer_order():
+    text = open(DEVICE_DOCKERFILE).read()
+    assert _base_image(DEVICE_DOCKERFILE) == "scratch"
+    final = text.rsplit("FROM scratch", 1)[1]
+    # A single final filesystem copy prevents CAF reordering old base files
+    # above security fixes or resurrecting removed pip/ensurepip trees.
+    assert re.findall(r"^(?:COPY|ADD|RUN) .+$", final, re.MULTILINE) == [
+        "COPY --from=runtime-files / /"
+    ]
+    assert 'PYTHONPATH="/opt/iris/agent"' in final
+    assert 'ENTRYPOINT ["/entrypoint.sh"]' in final
 
 
 def test_iox_and_xr_wrappers_share_the_canonical_device_builder():

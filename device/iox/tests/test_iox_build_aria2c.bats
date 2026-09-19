@@ -59,7 +59,8 @@ _build_stub_setup() {
   # it must validate both architecture inputs before BuildKit can run.
   touch "$STUBDIR/device/container/Dockerfile" \
     "$STUBDIR/device/container/entrypoint.sh" \
-    "$STUBDIR/device/container/reconcile.sh"
+    "$STUBDIR/device/container/reconcile.sh" \
+    "$STUBDIR/device/container/rebuild-xml.py"
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"

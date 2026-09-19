@@ -14,11 +14,11 @@ file_size() {
   grep -qF 'rotate-logs.sh' "$BATS_TEST_DIRNAME/../bootstrap.sh"
 }
 
-@test "bootstrap.sh waits for aria2c to exit after pkill before relaunching (race guard)" {
-  # Structural guard: after pkill the script must not immediately re-pgrep;
-  # it must wait for the process to exit so the pgrep in step 3 sees it gone.
-  # Check that a wait loop (while pgrep) appears after the pkill line.
-  grep -A5 'pkill -f' "$BATS_TEST_DIRNAME/../bootstrap.sh" | grep -qF 'while pgrep'
+@test "bootstrap.sh delegates daemon replacement to the scoped launcher" {
+  # The launcher owns process selection and exit waiting. Bootstrap must not
+  # terminate every aria2 process when synchronizing the RPC secret.
+  ! grep -qF 'pkill -f' "$BATS_TEST_DIRNAME/../bootstrap.sh"
+  grep -qF 'bash "$STAGE/guestshell-start.sh"' "$BATS_TEST_DIRNAME/../bootstrap.sh"
 }
 
 @test "rotate-logs truncates a log past the cap, leaves a small one alone" {

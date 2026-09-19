@@ -996,6 +996,23 @@ def _role_definition_schema():
         "qos_state": _ref("TrackerQosStateMap")}}
 
 
+def _peer_tls_schema(projected=False, origin=False):
+    properties = {
+        "configured_mode": {"enum": ["disabled", "required"]},
+        "runtime_mode": {"enum": ["disabled", "required", "unknown"]},
+        "runtime_source": {"enum": ["aria2_rpc", "unknown"]},
+    }
+    if origin:
+        properties.pop("configured_mode")
+    required = list(properties)
+    if projected:
+        properties["reported_at"] = {"type": ["number", "null"]}
+    return {"type": "object", "additionalProperties": False,
+            "required": required,
+            "properties": properties,
+            "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."}
+
+
 def _swarm_peer_schema():
     """Explicit source-grouped tracker identity variants from telemetry._peer_row."""
     variants = []
@@ -1024,6 +1041,7 @@ def _swarm_peer_schema():
             if kind == "device":
                 required.append("device_id")
                 properties["device_id"] = {"type": "string"}
+                properties["peer_tls"] = _peer_tls_schema(projected=True)
                 for name in ("model", "current_image_id", "stage_state"):
                     properties[name] = {"type": "string"}
                 for name in ("staged_image_ids", "errored_image_ids"):
@@ -1854,6 +1872,7 @@ def _request_body(route):
             "os_family fields "
             "are rejected with 422.")
     if route.service == "catalog" and path.endswith("/heartbeat"):
+        schema["properties"]["peer_tls"] = _peer_tls_schema()
         return {"required": required_body, "content": {
             "application/json": _instruction_attestation_request(schema, example)}}
     if suffix == "/settings/image-verification":
@@ -2497,6 +2516,8 @@ def _success(route):
         normal_schema["properties"]["server"]["properties"][
             "server_observation"]["properties"]["aria_session_id"] = {
                 "type": ["string", "null"]}
+        normal_schema["properties"]["server"]["properties"][
+            "server_observation"]["properties"]["peer_tls"] = _peer_tls_schema(projected=True, origin=True)
         normal_schema["properties"]["images"]["items"]["properties"][
             "total_bytes"] = {"type": ["integer", "null"]}
         normal_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
@@ -2518,6 +2539,8 @@ def _success(route):
             paged_schema["properties"]["server"]["properties"][
                 "server_observation"]["properties"]["aria_session_id"] = {
                     "type": ["string", "null"]}
+            paged_schema["properties"]["server"]["properties"][
+                "server_observation"]["properties"]["peer_tls"] = _peer_tls_schema(projected=True, origin=True)
             paged_schema["properties"]["images"]["items"]["properties"][
                 "total_bytes"] = {"type": ["integer", "null"]}
             paged_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
@@ -2676,6 +2699,7 @@ def _success(route):
     if suffix == "/devices" and route.method == "GET":
         row = schema["properties"]["devices"]["items"]
         row["properties"]["instruction"] = _instruction_device_schema()
+        row["properties"]["peer_tls"] = {"anyOf": [_peer_tls_schema(), {"type": "null"}]}
         if "instruction" not in row["required"]:
             row["required"].append("instruction")
     if suffix == "/devices/{device_id}/effective-qos":

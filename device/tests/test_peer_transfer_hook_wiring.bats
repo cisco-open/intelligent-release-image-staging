@@ -163,7 +163,14 @@ run_start_aria2c() {
   # Dropping a new bundle.tgz IS the Guest Shell agent upgrade path, so this is
   # the only route an updated hook has onto a Catalyst or a router.
   out="$BATS_TEST_TMPDIR/iris-agent.tgz"
-  printf 'fake-aria2c\n' > "$BATS_TEST_TMPDIR/aria2c"
+  python3 - "$BATS_TEST_TMPDIR/aria2c" <<'PYTHON'
+import pathlib, sys
+# Header-only packaging fixture; never executed.
+pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9)
+                                    + b'\x02\x00\x3e\x00' + bytes(44))
+PYTHON
+  cp "$BATS_TEST_TMPDIR/aria2c" "$BATS_TEST_TMPDIR/ssh-keygen"
+  printf 'license fixture\n' > "$BATS_TEST_TMPDIR/ssh-keygen.LICENCE"
   roots="$BATS_TEST_TMPDIR/roots.d"; mkdir "$roots"
   for name in root-a root-b; do
     ssh-keygen -q -t ed25519 -N '' -C test-only \
@@ -171,7 +178,8 @@ run_start_aria2c() {
     cp "$BATS_TEST_TMPDIR/$name.pub" "$roots/$name.pub"
   done
   run bash "$REPO/server/pack-agent-bundle.sh" "$DEVICE" \
-    "$BATS_TEST_TMPDIR/aria2c" "$out" --instruction-roots-dir "$roots"
+    "$BATS_TEST_TMPDIR/aria2c" "$out" --instruction-roots-dir "$roots" \
+    --ssh-keygen "$BATS_TEST_TMPDIR/ssh-keygen"
   [ "$status" -eq 0 ]
   tar tzf "$out" | grep -qx "agent/peer-transfer-hook.sh"
   x="$BATS_TEST_TMPDIR/x"; mkdir -p "$x"

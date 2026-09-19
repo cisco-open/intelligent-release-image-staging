@@ -13994,6 +13994,44 @@
                             ],
                             "additionalProperties": false,
                             "description": "Canonical bounded instruction display projection. Device facts remain assertions; server-observed revocation and report age may take display precedence while retaining the underlying report."
+                          },
+                          "peer_tls": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "configured_mode",
+                                  "runtime_mode",
+                                  "runtime_source"
+                                ],
+                                "properties": {
+                                  "configured_mode": {
+                                    "enum": [
+                                      "disabled",
+                                      "required"
+                                    ]
+                                  },
+                                  "runtime_mode": {
+                                    "enum": [
+                                      "disabled",
+                                      "required",
+                                      "unknown"
+                                    ]
+                                  },
+                                  "runtime_source": {
+                                    "enum": [
+                                      "aria2_rpc",
+                                      "unknown"
+                                    ]
+                                  }
+                                },
+                                "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -24387,6 +24425,36 @@
                                     "string",
                                     "null"
                                   ]
+                                },
+                                "peer_tls": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "runtime_mode",
+                                    "runtime_source"
+                                  ],
+                                  "properties": {
+                                    "runtime_mode": {
+                                      "enum": [
+                                        "disabled",
+                                        "required",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "runtime_source": {
+                                      "enum": [
+                                        "aria2_rpc",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "reported_at": {
+                                      "type": [
+                                        "number",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                 }
                               },
                               "required": [
@@ -24511,6 +24579,43 @@
                                         },
                                         "device_id": {
                                           "type": "string"
+                                        },
+                                        "peer_tls": {
+                                          "type": "object",
+                                          "additionalProperties": false,
+                                          "required": [
+                                            "configured_mode",
+                                            "runtime_mode",
+                                            "runtime_source"
+                                          ],
+                                          "properties": {
+                                            "configured_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required"
+                                              ]
+                                            },
+                                            "runtime_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "runtime_source": {
+                                              "enum": [
+                                                "aria2_rpc",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "reported_at": {
+                                              "type": [
+                                                "number",
+                                                "null"
+                                              ]
+                                            }
+                                          },
+                                          "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                         },
                                         "model": {
                                           "type": "string"
@@ -24742,6 +24847,36 @@
                                     "string",
                                     "null"
                                   ]
+                                },
+                                "peer_tls": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "runtime_mode",
+                                    "runtime_source"
+                                  ],
+                                  "properties": {
+                                    "runtime_mode": {
+                                      "enum": [
+                                        "disabled",
+                                        "required",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "runtime_source": {
+                                      "enum": [
+                                        "aria2_rpc",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "reported_at": {
+                                      "type": [
+                                        "number",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                 }
                               },
                               "required": [
@@ -24866,6 +25001,43 @@
                                         },
                                         "device_id": {
                                           "type": "string"
+                                        },
+                                        "peer_tls": {
+                                          "type": "object",
+                                          "additionalProperties": false,
+                                          "required": [
+                                            "configured_mode",
+                                            "runtime_mode",
+                                            "runtime_source"
+                                          ],
+                                          "properties": {
+                                            "configured_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required"
+                                              ]
+                                            },
+                                            "runtime_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "runtime_source": {
+                                              "enum": [
+                                                "aria2_rpc",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "reported_at": {
+                                              "type": [
+                                                "number",
+                                                "null"
+                                              ]
+                                            }
+                                          },
+                                          "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                         },
                                         "model": {
                                           "type": "string"
@@ -46540,6 +46712,44 @@
                             ],
                             "additionalProperties": false,
                             "description": "Canonical bounded instruction display projection. Device facts remain assertions; server-observed revocation and report age may take display precedence while retaining the underlying report."
+                          },
+                          "peer_tls": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "configured_mode",
+                                  "runtime_mode",
+                                  "runtime_source"
+                                ],
+                                "properties": {
+                                  "configured_mode": {
+                                    "enum": [
+                                      "disabled",
+                                      "required"
+                                    ]
+                                  },
+                                  "runtime_mode": {
+                                    "enum": [
+                                      "disabled",
+                                      "required",
+                                      "unknown"
+                                    ]
+                                  },
+                                  "runtime_source": {
+                                    "enum": [
+                                      "aria2_rpc",
+                                      "unknown"
+                                    ]
+                                  }
+                                },
+                                "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -55459,6 +55669,36 @@
                                     "string",
                                     "null"
                                   ]
+                                },
+                                "peer_tls": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "runtime_mode",
+                                    "runtime_source"
+                                  ],
+                                  "properties": {
+                                    "runtime_mode": {
+                                      "enum": [
+                                        "disabled",
+                                        "required",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "runtime_source": {
+                                      "enum": [
+                                        "aria2_rpc",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "reported_at": {
+                                      "type": [
+                                        "number",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                 }
                               },
                               "required": [
@@ -55583,6 +55823,43 @@
                                         },
                                         "device_id": {
                                           "type": "string"
+                                        },
+                                        "peer_tls": {
+                                          "type": "object",
+                                          "additionalProperties": false,
+                                          "required": [
+                                            "configured_mode",
+                                            "runtime_mode",
+                                            "runtime_source"
+                                          ],
+                                          "properties": {
+                                            "configured_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required"
+                                              ]
+                                            },
+                                            "runtime_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "runtime_source": {
+                                              "enum": [
+                                                "aria2_rpc",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "reported_at": {
+                                              "type": [
+                                                "number",
+                                                "null"
+                                              ]
+                                            }
+                                          },
+                                          "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                         },
                                         "model": {
                                           "type": "string"
@@ -55814,6 +56091,36 @@
                                     "string",
                                     "null"
                                   ]
+                                },
+                                "peer_tls": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "runtime_mode",
+                                    "runtime_source"
+                                  ],
+                                  "properties": {
+                                    "runtime_mode": {
+                                      "enum": [
+                                        "disabled",
+                                        "required",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "runtime_source": {
+                                      "enum": [
+                                        "aria2_rpc",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "reported_at": {
+                                      "type": [
+                                        "number",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                 }
                               },
                               "required": [
@@ -55938,6 +56245,43 @@
                                         },
                                         "device_id": {
                                           "type": "string"
+                                        },
+                                        "peer_tls": {
+                                          "type": "object",
+                                          "additionalProperties": false,
+                                          "required": [
+                                            "configured_mode",
+                                            "runtime_mode",
+                                            "runtime_source"
+                                          ],
+                                          "properties": {
+                                            "configured_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required"
+                                              ]
+                                            },
+                                            "runtime_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "runtime_source": {
+                                              "enum": [
+                                                "aria2_rpc",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "reported_at": {
+                                              "type": [
+                                                "number",
+                                                "null"
+                                              ]
+                                            }
+                                          },
+                                          "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                         },
                                         "model": {
                                           "type": "string"
@@ -66195,6 +66539,37 @@
                   "telemetry_stream_enabled": {
                     "type": "boolean"
                   },
+                  "peer_tls": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "configured_mode",
+                      "runtime_mode",
+                      "runtime_source"
+                    ],
+                    "properties": {
+                      "configured_mode": {
+                        "enum": [
+                          "disabled",
+                          "required"
+                        ]
+                      },
+                      "runtime_mode": {
+                        "enum": [
+                          "disabled",
+                          "required",
+                          "unknown"
+                        ]
+                      },
+                      "runtime_source": {
+                        "enum": [
+                          "aria2_rpc",
+                          "unknown"
+                        ]
+                      }
+                    },
+                    "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
+                  },
                   "instr_protocol": {
                     "type": [
                       "integer",
@@ -67948,6 +68323,36 @@
                                     "string",
                                     "null"
                                   ]
+                                },
+                                "peer_tls": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "runtime_mode",
+                                    "runtime_source"
+                                  ],
+                                  "properties": {
+                                    "runtime_mode": {
+                                      "enum": [
+                                        "disabled",
+                                        "required",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "runtime_source": {
+                                      "enum": [
+                                        "aria2_rpc",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "reported_at": {
+                                      "type": [
+                                        "number",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                 }
                               },
                               "required": [
@@ -68072,6 +68477,43 @@
                                         },
                                         "device_id": {
                                           "type": "string"
+                                        },
+                                        "peer_tls": {
+                                          "type": "object",
+                                          "additionalProperties": false,
+                                          "required": [
+                                            "configured_mode",
+                                            "runtime_mode",
+                                            "runtime_source"
+                                          ],
+                                          "properties": {
+                                            "configured_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required"
+                                              ]
+                                            },
+                                            "runtime_mode": {
+                                              "enum": [
+                                                "disabled",
+                                                "required",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "runtime_source": {
+                                              "enum": [
+                                                "aria2_rpc",
+                                                "unknown"
+                                              ]
+                                            },
+                                            "reported_at": {
+                                              "type": [
+                                                "number",
+                                                "null"
+                                              ]
+                                            }
+                                          },
+                                          "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
                                         },
                                         "model": {
                                           "type": "string"

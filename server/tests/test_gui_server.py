@@ -2846,7 +2846,9 @@ def test_device_view_merges_policy_and_heartbeat(tmp_path):
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
         cat.set_policy("d1", approved_image_id="img1")
-        cat.record_heartbeat("d1", {"stage_state": "verified", "stage_error": "copy denied", "model": "C9300"}, now=123)
+        peer_tls = {"configured_mode": "required", "runtime_mode": "disabled",
+                    "runtime_source": "aria2_rpc"}
+        cat.record_heartbeat("d1", {"stage_state": "verified", "stage_error": "copy denied", "model": "C9300", "peer_tls": peer_tls}, now=123)
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
         assert row["assigned_image_id"] == "img1"
@@ -2854,6 +2856,7 @@ def test_device_view_merges_policy_and_heartbeat(tmp_path):
         assert row["stage_error"] == "copy denied"
         assert row["last_seen"] == 123
         assert row["heartbeat_model"] == "C9300"
+        assert row["peer_tls"] == peer_tls
     finally:
         stop()
 
@@ -10873,25 +10876,53 @@ def test_offline_is_expected_during_active_undeploy():
 # ---------------------------------------------------------------------------
 
 def test_settings_forms_are_wrapped_in_bounded_card_sections():
-    """Each Settings form's section heading now sits inside a .card -- the
-    24px-padding/--radius-card/--shadow-xs container test_card_component_
-    matches_spec_padding_radius_and_elevation already pins -- rather than a
-    bare h3 floating directly in the pane. Button counts/ids inside each
-    <form> are untouched; only the surrounding wrapper changed."""
+    """Settings headings belong to live card ancestors, including TLS cards
+    with additional classes; a closed earlier card must not satisfy this."""
+    from html.parser import HTMLParser
+
+    class CardHeadings(HTMLParser):
+        void_tags = {"area", "base", "br", "col", "embed", "hr", "img",
+                     "input", "link", "meta", "param", "source", "track", "wbr"}
+
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.heading = None
+            self.headings = {}
+
+        def handle_starttag(self, tag, attrs):
+            classes = dict(attrs).get("class", "").split()
+            if tag == "h3":
+                self.heading = ([], any("card" in node[1]
+                                        for node in self.stack))
+            if tag not in self.void_tags:
+                self.stack.append((tag, classes))
+
+        def handle_data(self, data):
+            if self.heading is not None:
+                self.heading[0].append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "h3" and self.heading is not None:
+                text, in_card = self.heading
+                self.headings["".join(text).strip()] = in_card
+                self.heading = None
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    break
+
     html = _webroot("index.html")
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    for heading in ("<h3>Certificate</h3>", "<h3>Trusted CAs</h3>",
-                    "<h3>Telemetry destination</h3>", "<h3>Audit export</h3>",
-                    "<h3>Server &amp; build</h3>", "<h3>Schedule</h3>"):
-        assert heading in settings, heading
-        before = settings.split(heading, 1)[0]
-        last_open = before.rfind('<div class="card">')
-        assert last_open != -1, "%s has no preceding card wrapper" % heading
-        between = before[last_open:]
-        assert between.count("</div>") == 0, \
-            "%s's card wrapper closed before the heading" % heading
-    # button counts inside the pinned forms are exactly as before -- card
-    # wrapping never merges or drops a Save
+    parsed = CardHeadings()
+    parsed.feed(settings)
+    for heading in ("Peer transfer TLS", "Console certificate",
+                    "Trusted certificate authorities", "Public CA bundle",
+                    "Telemetry destination", "Audit export", "Server & build",
+                    "Schedule"):
+        assert parsed.headings.get(heading) is True, \
+            "%s must have an open card ancestor" % heading
+    # Certificate replacement and telemetry each retain their primary action.
     cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
     assert cert_form.count('class="btn"') == 1
     td_form = settings.split('id="td-form"')[1].split('</form>')[0]

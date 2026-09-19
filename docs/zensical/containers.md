@@ -265,6 +265,11 @@ tools, the agent sources, and architecture-matched `aria2c`. The IOx
 descriptor's `memory: 768` and `disk: 2048` values are runtime quotas in MB,
 not package sizes.
 
+The runtime removes unused Python package installers and applies the upstream
+Expat security backport until it is included in the pinned Python base. Run
+`device/container/tests/check_runtime.py` inside each built architecture to
+check the dependency floors, agent imports, HTTPS and SSH signature verification.
+
 `aria2c` is handed in, never downloaded: the build takes each architecture
 from an explicit `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` override, a matching
 local agent bundle, or the handed-in `deliverables/aria2c-x86_64` or
@@ -290,6 +295,10 @@ adjacent provenance manifest. It does not compare against newer source, inspect
 package contents, or validate a native package signature. After a shared-agent
 change, rebuild the server/Guest Shell bundle, both IOx tars, and XR RPM before
 rollout. See [Embedded agent packages](development.md#embedded-agent-packages).
+
+The canonical device image contains one filesystem layer. This keeps IOx CAF
+from restoring older libraries or deleted files by mounting layers out of order;
+IOx and XR still use the same architecture-specific image.
 
 The installer passes all environment-specific values at deployment time. The
 image contains no lab address:

@@ -5,8 +5,8 @@
 # aria2c deliverable — handed in as a binary artifact.
 # NOT downloaded. NOT built during a normal IRIS build.
 #
-# Rebuilt 2026-09-18 from the local aria2-next-static producer.
-# Patches 0001 through 0009; required hybrid peer TLS is explicitly opt-in.
+# Rebuilt 2026-09-19 from the local aria2-next-static producer.
+# Patches 0001 through 0010; required hybrid peer TLS is explicitly opt-in.
 # Default remains disabled. OpenSSL 3.5.8, native x86_64 / QEMU aarch64.
 # Both architectures passed 34 real transport/security checks, including
 # encrypted resume/reseed and ten concurrent transfers. ARM performance
@@ -14,7 +14,7 @@
 #
 # aria2-next version : 2.5.6
 # source pin         : d4971f0e12322e2ffcdb1721911b7d5c6206d0e5
-# patches applied    : 9
+# patches applied    : 10
 #   - 0001-getpeers-keys-filter.patch
 #   - 0002-fix-uaf-peer-blocklist-disconnect.patch
 #   - 0003-fix-pkcs12-chain-type-confusion.patch
@@ -24,9 +24,10 @@
 #   - 0007-seeder-goodbye-grace.patch
 #   - 0008-required-hybrid-peer-tls.patch
 #   - 0009-test-seeder-goodbye-grace.patch
+#   - 0010-resolve-crossed-peer-handshakes.patch
 #
 # tools/get-aria2c.sh verifies the handed-in binary against these
 # checksums and FAILS CLOSED on a mismatch, so a stale client cannot
 # silently ship. Update this file only when adopting a new build.
-81fb52c61a75dff5149730aac49267017cfe992cf2ce35e46e709357efba2587  x86_64
-67c40c1e925de79f727a365de415a476327d6e746fccf7d2f0411259cb25de4e  aarch64
+4442564f58cd3ba28953980b192d38fa45ee95fbca78ca6aa99da1c4052de8a7  x86_64
+c12d7a0d432bc5e9b80489d8f3981b0d802a4af9d4a547775e0c4306bf43a65a  aarch64

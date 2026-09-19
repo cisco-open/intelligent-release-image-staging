@@ -4356,7 +4356,7 @@ def test_task14_heartbeat_uses_authoritative_attestation_sanitizer():
         "current_image_id", "free_flash_bytes", "version", "stage_state",
         "stage_error", "target_fs", "model", "telemetry_enabled",
         "telemetry_stream_enabled", "staged_image_ids", "errored_image_ids",
-        "swarm_ip", *expected}
+        "swarm_ip", "peer_tls", *expected}
 
 
 def test_assignment_result_and_unchanged_cas_are_decided_inside_policy_callback(tmp_path):

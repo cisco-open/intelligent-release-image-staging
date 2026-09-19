@@ -243,6 +243,18 @@ n=$(cat "$CURL_STATE" 2>/dev/null || echo 0)
 n=$((n + 1)); echo "$n" > "$CURL_STATE"
 printf '%s\n' "$*" >> "$CURL_LOG"
 rc="$(sed -n "${n}p" "$CURL_CODES")"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    shift
+    if [ "${HEALTH_REPLY+x}" = x ]; then
+      printf '%s' "$HEALTH_REPLY" > "$1"
+    else
+      printf '%s' '{"jsonrpc":"2.0","id":"h","result":{"version":"2.5.6","enabledFeatures":["BitTorrent"]}}' > "$1"
+    fi
+    break
+  fi
+  shift
+done
 exit "${rc:-0}"
 CURL
   cat > "$d/harness.sh" <<'HARNESS'
@@ -313,4 +325,130 @@ HARNESS
     # and the "is anything listening" question is asked separately
     grep -q -- '--connect-timeout "\$RPC_CONNECT_TIMEOUT"' "$ep" || return 1
   done
+}
+
+@test "RPC health rejects HTTP errors even when the response could be valid" {
+  run _health_verdict "$DEVICE/container/entrypoint.sh" 22 22
+  [ "$status" -eq 1 ]
+  [ "$output" -eq 2 ]
+  grep -q -- '-fsS ' "$BATS_TEST_TMPDIR/health/log"
+}
+
+@test "RPC health rejects malformed, unauthenticated and unrelated HTTP200 responses" {
+  for reply in \
+    '' 'not-json' '[]' \
+    '{"jsonrpc":"2.0","id":"h","error":{"code":1,"message":"Unauthorized"}}' \
+    '{"jsonrpc":"2.0","id":"other","result":{"version":"2.5.6","enabledFeatures":[]}}' \
+    '{"jsonrpc":"2.0","id":"h","result":{"version":"","enabledFeatures":[]}}' \
+    '{"jsonrpc":"2.0","id":"h","result":{"version":"2.5.6"}}' \
+    '{"jsonrpc":"2.0","id":"h","result":{"version":"2.5.6","enabledFeatures":[false]}}' \
+    '{"jsonrpc":"2.0","id":"h","error":null,"result":{"version":"2.5.6","enabledFeatures":[]}}'; do
+    export HEALTH_REPLY="$reply"
+    run _health_verdict "$DEVICE/container/entrypoint.sh" 0 0
+    [ "$status" -eq 1 ] || { echo "accepted invalid RPC reply: $reply"; return 1; }
+    [ "$output" -eq 2 ]
+  done
+}
+
+@test "RPC health accepts a valid getVersion response with no enabled features" {
+  export HEALTH_REPLY='{"jsonrpc":"2.0","id":"h","result":{"version":"2.5.6","enabledFeatures":[]}}'
+  run _health_verdict "$DEVICE/container/entrypoint.sh" 0
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "RPC health bounds the body even when curl returns a successful oversized response" {
+  export HEALTH_REPLY="$(python3 -c 'print(" " * 65536)'){}"
+  run _health_verdict "$DEVICE/container/entrypoint.sh" 0 0
+  [ "$status" -eq 1 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "TERM interrupts an in-flight RPC probe and reaps its child" {
+  local d="$BATS_TEST_TMPDIR/probe-term"
+  mkdir -p "$d/bin"
+  cat > "$d/bin/curl" <<'CURL'
+#!/bin/sh
+printf '%s\n' "$$" > "$PROBE_PID_FILE"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then shift; printf '%s\n' "$1" > "$PROBE_FILE"; break; fi
+  shift
+done
+exec sleep 60
+CURL
+  cat > "$d/harness.sh" <<'HARNESS'
+#!/bin/sh
+set -eu
+eval "$(awk '/^(rpc_probe|rpc_healthy|stop_agent)\(\)/,/^}/' "$1")"
+RPC_CONNECT_TIMEOUT=2; RPC_HEALTH_TIMEOUT=10; RPC_PORT=6800
+AGENT_PID=""; SLEEP_PID=""
+stop_aria2c() { :; }
+trap stop_agent TERM INT
+rpc_healthy test-secret
+HARNESS
+  chmod +x "$d/bin/curl"
+  env PATH="$d/bin:$PATH" PROBE_PID_FILE="$d/curl.pid" PROBE_FILE="$d/response.path" \
+    sh "$d/harness.sh" "$DEVICE/container/entrypoint.sh" &
+  local supervisor=$!
+  local n=0
+  while [ ! -s "$d/response.path" ] && [ "$n" -lt 100 ]; do sleep 0.02; n=$((n + 1)); done
+  [ -s "$d/response.path" ] || { kill "$supervisor"; wait "$supervisor"; return 1; }
+  local child="$(cat "$d/curl.pid")" response="$(cat "$d/response.path")"
+  kill -TERM "$supervisor"
+  n=0
+  while kill -0 "$supervisor" 2>/dev/null && [ "$n" -lt 100 ]; do sleep 0.02; n=$((n + 1)); done
+  if kill -0 "$supervisor" 2>/dev/null; then
+    kill -KILL "$supervisor" "$child" 2>/dev/null || true
+    wait "$supervisor" || true
+    echo "supervisor did not stop within 2 seconds"; return 1
+  fi
+  wait "$supervisor"
+  ! kill -0 "$child" 2>/dev/null
+  [ ! -e "$response" ]
+}
+
+@test "RPC health validates actual loopback HTTP status and JSON responses" {
+  run python3 - "$DEVICE/container/entrypoint.sh" <<'PYTHON'
+import http.server
+import json
+import subprocess
+import sys
+import threading
+
+valid = json.dumps({'jsonrpc': '2.0', 'id': 'h', 'result': {
+    'version': '2.5.6', 'enabledFeatures': ['BitTorrent']}}).encode()
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    code, body = 200, valid
+    def log_message(self, *args):
+        pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers['Content-Length']))
+        self.send_response(self.code)
+        self.send_header('Content-Length', str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+script = '''set -eu
+eval "$(awk '/^(rpc_probe|rpc_healthy)\\(\\)/,/^}/' "$1")"
+RPC_CONNECT_TIMEOUT=2; RPC_HEALTH_TIMEOUT=10; RPC_PORT="$2"
+rpc_healthy fixture-secret
+'''
+try:
+    for status, body, expected in [(200, valid, 0), (403, valid, 1),
+                                  (200, b'{"error":{"code":1}}', 1),
+                                  (200, b'not-json', 1)]:
+        Handler.code, Handler.body = status, body
+        result = subprocess.run(['sh', '-c', script, '_', sys.argv[1],
+                                 str(server.server_port)], timeout=5)
+        assert result.returncode == expected, (status, body, result.returncode)
+finally:
+    server.shutdown()
+    server.server_close()
+    thread.join()
+PYTHON
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

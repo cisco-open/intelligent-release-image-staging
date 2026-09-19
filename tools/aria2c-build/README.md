@@ -76,6 +76,10 @@ git -C vendor/aria2-next checkout v2.5.6
 refuses any patch that does not apply cleanly to it, so a build either
 corresponds to the published patches or it fails.
 
+Builds default to two compiler and LTO jobs, including under ARM emulation.
+Set `ARIA2C_BUILD_JOBS=4 ./build.sh x86_64` to choose another positive bound.
+LTO and static linking remain enabled.
+
 ### When a pin has been withdrawn
 
 `Dockerfile` pins the base image by digest and every Alpine package by exact

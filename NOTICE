@@ -65,6 +65,14 @@ command-line / RPC interface and remains under its own license:
 Third-party programs installed in the distributed server image
 ------------------------------------------------------------------------------
 
+Guest Shell bundles additionally carry a separate static OpenSSH portable
+10.5p1 ssh-keygen for Ed25519 instruction verification on older device hosts.
+It is built by tools/build-ssh-verifier.sh from pinned upstream source, using
+musl libc 1.2.6 (MIT); no OpenSSL library is linked. The upstream OpenSSH
+LICENCE and musl COPYRIGHT are included together as agent/ssh-keygen.LICENCE
+in every bundle. musl's complete notice is also in tools/licenses/musl-COPYRIGHT
+(https://musl.libc.org/releases/musl-1.2.6.tar.gz).
+
 The published seed-server container image (server/Dockerfile) additionally
 installs the following Debian system packages. They are redistributed inside
 that image as separate, unmodified programs; IRIS does not link against, embed,
@@ -188,3 +196,9 @@ project's own code is licensed under the Apache License, Version 2.0, while each
 tool above remains governed solely by its respective license. The mention of
 GPLv2 above pertains ONLY to those external tools; the project itself is not
 licensed under the GPL.
+
+The device container includes CPython 3.12.14 XML extensions rebuilt with the
+upstream Expat 2.8.4 security backport (CPython commit
+278c3c2f0733e06613cf3e7a1d9c8c3c03248638). CPython retains its PSF license;
+Expat retains its MIT license. Their complete notices are distributed at
+/usr/local/share/licenses/iris-python/ in the device image.

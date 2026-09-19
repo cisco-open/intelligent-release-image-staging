@@ -2236,6 +2236,21 @@ def _hb_bool(value):
     return value if isinstance(value, bool) else None
 
 
+def _hb_peer_tls(value):
+    """Bounded daemon policy observation; never proof of a negotiated session."""
+    if not isinstance(value, dict):
+        return None
+    configured = value.get("configured_mode")
+    if configured not in ("disabled", "required"):
+        return None
+    runtime = value.get("runtime_mode")
+    source = value.get("runtime_source")
+    if runtime not in ("disabled", "required") or source != "aria2_rpc":
+        runtime, source = "unknown", "unknown"
+    return {"configured_mode": configured, "runtime_mode": runtime,
+            "runtime_source": source}
+
+
 def sanitize_heartbeat(data, src_ip):
     """The stored heartbeat record for one device POST body (a dict)."""
     result = {
@@ -2251,6 +2266,7 @@ def sanitize_heartbeat(data, src_ip):
                              _HEARTBEAT_STR_CAPS["target_fs"]),
         "model": _hb_str(data.get("model"), _HEARTBEAT_STR_CAPS["model"]),
         "telemetry_enabled": _hb_bool(data.get("telemetry_enabled")),
+        "peer_tls": _hb_peer_tls(data.get("peer_tls")),
         "telemetry_stream_enabled": _hb_bool(
             data.get("telemetry_stream_enabled")),
         # Multi-image staging state (issue: multi-image assignment).

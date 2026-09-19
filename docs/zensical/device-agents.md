@@ -309,10 +309,10 @@ engine runs on all supported agents; the trust boundary differs:
 | Property | Unified IOx/XR image | Guest Shell |
 | --- | --- | --- |
 | Two distinct public roots | Embedded mode-0444 signer/root files; image pin depends on enforced package signature | Same public roots in a replaceable bundle on flash; tamper-evidence |
-| Signature verifier | Bundled OpenSSH verifier on both architectures | Runtime probe of `ssh-keygen -Y verify`; absent support gives `verifier_missing` and tracker-only peers, not silent acceptance |
+| Signature verifier | Bundled OpenSSH verifier on both architectures | Static bundled verifier promoted off flash; a failed runtime probe gives `verifier_missing` and tracker-only peers |
 | Mechanical tick | Container supervisor; `IRIS_TICK_SECONDS` interval/floor | IOS-owned 60-second EEM timer with bounded startup jitter |
 | Agent update evidence | Canonical image and wrapper provenance; native signing is a separate gate | Digest-only bundle update with adjacent SHA-256 sidecar, bounded members and prior-bundle rollback |
-| Compatibility | Shared agent sources | Python 3.6 compatible; no claim that every Guest Shell includes a verifier |
+| Compatibility | Shared agent sources | Python 3.6 compatible; bundled verifier checked on the actual host |
 
 For IOx, onboarding controls the device-global verification setting through a
 durable owned transaction: signed/no mutation; unsigned with initial enabled →

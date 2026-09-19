@@ -1147,7 +1147,7 @@ def _merge_target_row(device, policies, heartbeat_by_id, jobs, observed_at,
     row["assigned_image_ids"] = policy.get("approved_image_ids")
     for name in ("last_seen", "stage_state", "stage_error", "current_image_id",
                  "staged_image_ids", "errored_image_ids", "target_fs",
-                 "telemetry_enabled", "telemetry_stream_enabled"):
+                 "telemetry_enabled", "telemetry_stream_enabled", "peer_tls"):
         row[name] = heartbeat.get(name)
     row["heartbeat_model"] = heartbeat.get("model")
     revocation_available = isinstance(revoked_principals, (set, frozenset))
@@ -5225,6 +5225,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             row["assigned_image_ids"] = pol.get("approved_image_ids")
             row["last_seen"] = h.get("last_seen")
             row["stage_state"] = h.get("stage_state")
+            row["peer_tls"] = h.get("peer_tls")
             row["stage_error"] = h.get("stage_error")
             row["current_image_id"] = h.get("current_image_id")
             # the ordered set of images the agent reports as staged

@@ -175,6 +175,16 @@ def poll_seeder(rpc):
                         "uploadSpeed", "files"]])
     except Exception:
         return {"rpc_up": False}, {}, {}
+    # One bounded read per sampler pass, never per device or API request.
+    # Old builds omit this option: absence is unknown, not disabled.
+    peer_tls = {"runtime_mode": "unknown", "runtime_source": "unknown"}
+    try:
+        options = rpc("aria2.getGlobalOption", [])
+        mode = options.get("bt-peer-tls")
+        if mode in ("disabled", "required"):
+            peer_tls = {"runtime_mode": mode, "runtime_source": "aria2_rpc"}
+    except Exception:
+        pass
     connections = sum(_int(d.get("connections")) for d in active)
     names, totals, upload_bps = {}, {}, {}
     for d in active:
@@ -201,6 +211,7 @@ def poll_seeder(rpc):
         "queued_torrents": _int(g.get("numWaiting")),
         "connections": connections,
         "torrent_upload_bps": upload_bps,
+        "peer_tls": peer_tls,
     }, names, totals
 
 
@@ -815,10 +826,16 @@ class Telemetry:
         # it only from the compiled policy snapshot, and remove it for every
         # non-device principal.
         event.pop("device_role", None)
+        event.pop("peer_tls", None)
         if event.get("principal_type") == "device":
-            role = self._enforced_device_role(event.get("principal_id"))
+            device_id = event.get("principal_id")
+            role = self._enforced_device_role(device_id)
             if role is not None:
                 event["device_role"] = role
+            record = self._read_device_info().get(str(device_id))
+            peer_tls = self._device_peer_tls(record)
+            if peer_tls is not None:
+                event["peer_tls"] = peer_tls
         self.log_queue.emit(event)
 
     def _enforced_device_role(self, device_id, policy=None):
@@ -848,6 +865,7 @@ class Telemetry:
         except Exception:
             return                      # telemetry is never on the critical path
         policy = self._policy_snapshot()
+        devices = self._read_device_info()
         for info_hash, endpoints in (peer_up or {}).items():
             peers = snap.get(info_hash) or []
             by_ip = {}
@@ -866,6 +884,8 @@ class Telemetry:
                 principal = ("%s:%s" % (ptype, pid)) if ptype and pid else None
                 device_role = (self._enforced_device_role(pid, policy)
                                if ptype == "device" else None)
+                peer_tls = self._device_peer_tls(devices.get(str(pid))) \
+                    if ptype == "device" else None
                 left = match.get("left")
                 try:
                     # evictable: a sampled record (one per connection per
@@ -877,6 +897,7 @@ class Telemetry:
                         "send_bps": bps, "left": left,
                         "role": "seeder" if left == 0 else "leecher",
                         "device_role": device_role,
+                        "peer_tls": peer_tls,
                         "ts": now, "event_id": secrets.token_hex(16)}),
                         evictable=True)
                 except Exception:
@@ -1097,6 +1118,7 @@ class Telemetry:
         now = time.time() if now is None else now
         seeder, names, totals = poll_seeder(self.rpc)
         self._seeder = seeder
+        self._seeder_observed_at = now
         peer_up, upload_lengths, session_id, peer_bytes = \
             poll_seeder_peers(self.rpc)
         polls_ok = seeder.get("rpc_up") and upload_lengths is not None
@@ -1152,7 +1174,8 @@ class Telemetry:
         ledger = self.peer_ledger
         if ledger is None:
             return
-        devices = self._device_by_ip(self._read_device_info())
+        device_records = self._read_device_info()
+        devices = self._device_by_ip(device_records)
         policy = self._policy_snapshot()
         for info_hash in sorted(set(upload_lengths or {})
                                 | set(peer_bytes or {})):
@@ -1179,6 +1202,10 @@ class Telemetry:
                     device_role = self._enforced_device_role(device_id, policy)
                     if device_role is not None:
                         record["device_role"] = device_role
+                    peer_tls = self._device_peer_tls(
+                        device_records.get(device_id))
+                    if peer_tls is not None:
+                        record["peer_tls"] = peer_tls
                 role = roles.get(row["ip"])
                 if role is not None:
                     record["role"] = "seeder" if role else "leecher"
@@ -1630,6 +1657,29 @@ class Telemetry:
                 for did, rec in devices.items()
                 if isinstance(rec, dict) and rec.get("swarm_ip")}
 
+    @staticmethod
+    def _device_peer_tls(record):
+        """Return one bounded heartbeat policy observation for OTLP records."""
+        if not isinstance(record, dict):
+            return None
+        value = record.get("peer_tls")
+        if not isinstance(value, dict):
+            return None
+        configured = value.get("configured_mode")
+        if configured not in ("disabled", "required"):
+            return None
+        runtime = value.get("runtime_mode")
+        source = value.get("runtime_source")
+        if runtime not in ("disabled", "required") or source != "aria2_rpc":
+            runtime, source = "unknown", "unknown"
+        result = {"configured_mode": configured, "runtime_mode": runtime,
+                  "runtime_source": source}
+        reported_at = record.get("last_seen")
+        if type(reported_at) in (int, float) \
+                and 0 <= reported_at < float("inf"):
+            result["reported_at"] = reported_at
+        return result
+
     def _log_delivered(self, event_ids):
         """The queue's single delivered-callback, fanned out to both owners.
 
@@ -1802,6 +1852,9 @@ class Telemetry:
             "unavailable": not bool(self._seeder.get("rpc_up")),
             "aria_session_id": self._session_id,
         }
+        observation["peer_tls"] = dict(self._seeder.get("peer_tls") or {
+            "runtime_mode": "unknown", "runtime_source": "unknown"})
+        observation["peer_tls"]["reported_at"] = getattr(self, "_seeder_observed_at", None)
         if self._seeder.get("rpc_up"):
             observation["global"] = {
                 "send_bps": self._seeder["upload_speed"],
@@ -2228,6 +2281,9 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
         device_id = pid
         rec = devices_by_id.get(device_id) or {}
         model = rec.get("model")
+        if isinstance(rec.get("peer_tls"), dict):
+            row["peer_tls"] = dict(rec["peer_tls"])
+            row["peer_tls"]["reported_at"] = rec.get("last_seen")
         dobs = _device_observation(live_by_device.get(device_id), now)
         if dobs is not None:
             row["device_observation"] = dobs

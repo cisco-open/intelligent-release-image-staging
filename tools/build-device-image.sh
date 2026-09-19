@@ -44,7 +44,7 @@ done
 # pre-populated owned path so stale/untracked bytes cannot be silently folded
 # into a supposedly source-exact build context. Wrappers always pass a private
 # mktemp directory; direct callers get the same clean-context guarantee.
-for owned in agent agent_bin Dockerfile entrypoint.sh reconcile.sh \
+for owned in agent agent_bin Dockerfile entrypoint.sh reconcile.sh rebuild-xml.py \
   iris-device-oci-path iris-device-oci.manifest; do
   { [ ! -e "$CONTEXT_DIR/$owned" ] && [ ! -L "$CONTEXT_DIR/$owned" ]; } || {
     echo "!! context contains pre-existing builder-owned path: $CONTEXT_DIR/$owned" >&2
@@ -52,7 +52,7 @@ for owned in agent agent_bin Dockerfile entrypoint.sh reconcile.sh \
     exit 1
   }
 done
-for input in Dockerfile entrypoint.sh reconcile.sh; do
+for input in Dockerfile entrypoint.sh reconcile.sh rebuild-xml.py; do
   [ -r "$CONTAINER_DIR/$input" ] \
     || { echo "!! missing unified device/container/$input" >&2; exit 1; }
 done
@@ -72,7 +72,7 @@ cp "$REPO/device/agent/peer-transfer-hook.sh" "$CONTEXT_DIR/agent/" \
 cp "$REPO/device/verify_image.py" "$CONTEXT_DIR/agent/verify_image.py"
 cp "$REPO/VERSION" "$CONTEXT_DIR/agent/VERSION"
 cp "$CONTAINER_DIR/Dockerfile" "$CONTAINER_DIR/entrypoint.sh" \
-  "$CONTAINER_DIR/reconcile.sh" "$CONTEXT_DIR/"
+  "$CONTAINER_DIR/reconcile.sh" "$CONTAINER_DIR/rebuild-xml.py" "$CONTEXT_DIR/"
 
 SUMS="$REPO/tools/aria2c.sha256"
 verify_aria2_checksum() {
@@ -136,7 +136,7 @@ done
 
 SOURCE_SHA256="$(cd "$CONTEXT_DIR" && {
   find agent agent_bin -type f -print
-  printf '%s\n' Dockerfile entrypoint.sh reconcile.sh
+  printf '%s\n' Dockerfile entrypoint.sh reconcile.sh rebuild-xml.py
 } | LC_ALL=C sort | while read -r path; do
   printf '%s  %s\n' "$(sha256sum "$path" | awk '{print $1}')" "$path"
 done | sha256sum | awk '{print $1}')"

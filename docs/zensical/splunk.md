@@ -333,6 +333,21 @@ names need single quotes when used as field values in SPL expressions, as
 shown below. Integer byte attributes use strings in OTLP JSON; use
 `tonumber()` before arithmetic.
 
+To see the latest torrent-TLS policy reported for each active device:
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "iris.peer.tls.configured_mode"=*
+| stats latest("iris.peer.tls.configured_mode") AS configured
+    latest("iris.peer.tls.runtime_mode") AS runtime
+    latest("iris.peer.tls.runtime_source") AS source
+    latest("iris.peer.tls.reported_at") AS reported_at BY "iris.principal"
+```
+
+`configured=required runtime=required source=aria2_rpc` means the device and
+its aria2 daemon both report the required policy. It does not attest an
+individual connection's negotiated cipher.
+
 ### Device staging reports
 
 ```spl
