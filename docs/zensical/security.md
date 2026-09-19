@@ -284,9 +284,10 @@ and the [platform comparison](device-agents.md#instruction-trust-by-platform).
 
 The `IRIS-INSTR/2` envelope uses **AES-256-SIV (RFC 5297)** through OpenSSL's
 maintained EVP implementation, replacing the former custom HMAC keystream.
-Responses over 256 KiB are rejected before cryptographic work. SP800-108 derives
-64 bytes of AES-SIV key material and a separate nonce-derivation key, bound to
-the device and instruction-key identity under a v2-specific label. The 16-byte
+Responses over 256 KiB are rejected before cryptographic work. The per-device
+SP800-108 KDF uses HMAC-SHA-256 to derive 64 bytes of AES-SIV key material and a
+separate nonce-derivation key, binding the audience context (device and
+instruction-key identity) under a v2-specific label. The 16-byte
 deterministic nonce binds device, key, epoch and serial. AES-SIV tolerates
 accidental nonce reuse without the old keystream-reuse failure; identical
 plaintext and associated data produce identical ciphertext. This does not make

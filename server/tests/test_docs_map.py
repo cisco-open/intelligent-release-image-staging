@@ -1029,9 +1029,11 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
                  "the named per-device KDF must bind the audience")
     _assert_unit(envelope, ("epoch", "instr_serial", "replay"),
                  "epoch and serial must explain replay rejection")
-    _assert_unit(envelope, ("MAC", "before", "decrypt"),
-                 "authentication must precede decryption")
-    _assert_unit(envelope, ("MAC", "signature", "before", "apply"),
+    _assert_unit(envelope, ("AES-256-SIV", "RFC 5297", "OpenSSL"),
+                 "the envelope must identify its maintained AEAD primitive")
+    _assert_unit(envelope, ("emits plaintext", "only after", "authentication"),
+                 "authentication must precede plaintext release")
+    _assert_unit(envelope, ("authenticates", "signature", "before", "applying"),
                  "authentication and signature checks must precede apply")
     _assert_unit(envelope, ("256 KiB", "reject", "before", "cryptograph"),
                  "the envelope cap must reject before cryptographic work")
