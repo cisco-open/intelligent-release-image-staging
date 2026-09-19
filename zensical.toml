@@ -42,6 +42,7 @@ nav = [
     { "Observability" = "observability.md" },
     { "Telemetry Export" = "telemetry-export.md" },
     { "Splunk Setup" = "splunk.md" },
+    { "Dashboard Templates" = "dashboards/README.md" },
   ] },
   { "Reference and development" = [
     { "Reference" = "reference.md" },
@@ -50,6 +51,7 @@ nav = [
     { "Problem type registry" = "problems.md" },
     { "Validation" = "validation.md" },
     { "Development" = "development.md" },
+    { "Swagger UI Provenance" = "swagger/SOURCE.md" },
   ] },
 ]
 

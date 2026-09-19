@@ -33,6 +33,52 @@ A device role mutation did not supply a valid role string or explicit `null`
 clear. Use a known non-reserved role name, or `null` to clear membership, and
 preview again.
 
+## bad_role_mapping
+
+400: role membership input must be a nonempty device-to-role mapping.
+
+## bad_device_id
+
+400: a role membership mapping contains an empty device ID.
+
+## bad_quarantine
+
+400: the quarantine value must be a JSON boolean.
+
+## unknown_device
+
+422: the legacy quarantine operation names a device absent from inventory.
+
+## bad_acl
+
+400: the ACL migration name is missing, invalid, or reserved.
+
+## acl_not_found
+
+404: the ACL named for migration does not exist in current policy.
+
+## policy_error
+
+503: role, QoS, or schedule coordination cannot use degraded policy safely.
+The legacy quarantine preflight retains its 422 compatibility response for
+the same degraded-policy condition. Repair the authoritative policy before
+retrying; a usable last-known-good copy does not authorize new mutations.
+
+## policy_fail_closed
+
+503: no trustworthy peer policy is available, so the mutation is refused.
+Recover the authoritative policy and verify its health before retrying.
+
+## role_management_error
+
+422: the role coordinator rejected the operation without a more specific
+code. Inspect the response's partial-result fields before refreshing/retrying.
+
+## schedule_target_unavailable
+
+503: the schedule target authority is unavailable. Restore inventory/policy
+availability and retry the preview; do not substitute an empty target set.
+
 ## authentication-required
 
 The operation requires a credential that was absent or invalid.

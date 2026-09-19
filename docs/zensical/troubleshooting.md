@@ -6,6 +6,19 @@ SPDX-License-Identifier: Apache-2.0
 
 # Troubleshooting
 
+## Fresh-volume startup
+
+If a new server repeatedly exits because encrypted configuration is missing,
+check whether it was started with `docker compose up` before bootstrap.
+For the one-host layout, complete the prerequisites in
+[Getting started](getting-started.md), then use `tools/start-compose-server.sh`
+to bootstrap the selected volumes and prepare packages. Separate Docker hosts
+and Kubernetes have their own documented bootstrap steps.
+
+Preserve the selected project, volumes, age identity, and environment files.
+For an existing deployment, missing state is a recovery problem: do not delete
+volumes, generate a replacement identity, or force bootstrap to hide it.
+
 ## Time synchronization
 
 **Onboarding says “time preflight failed”:** run `show ntp status` and

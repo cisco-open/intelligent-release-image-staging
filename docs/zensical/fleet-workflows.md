@@ -91,7 +91,7 @@ is created; edit them into one of the current management types first.
 The inventory carries network information only. There is no
 `credential_profile_id` column, so a newly imported device has no credential
 profile and cannot be onboarded until one is assigned. That assignment is a
-Console step: open **Devices**, check the imported rows, pick a profile in the
+Console step: open **Devices**, select the imported rows, pick a profile in the
 *credential for selected* dropdown, and press **Apply**. Creating a credential
 profile re-renders the device rows immediately, so devices imported before the
 profile existed become assignable without waiting for the next poll.
@@ -149,7 +149,7 @@ configured intent alone does not prove that a device applied it.
 ### Batch operations in the Console
 
 The Devices toolbar finishes a CSV import in bulk: onboard, undeploy, adopt,
-delete, credential assignment, role membership, and image assignment all act on the checked
+delete, credential assignment, role membership, and image assignment all act on the selected
 rows and report per-device refusals instead of failing the whole batch. Image
 assignment applies a *set* — up to ten images — to the whole selection in one
 pick, not one image per device: the toolbar opens the same checkbox picker as
@@ -210,7 +210,9 @@ Create schedules in the Console (**Devices → Schedule…** or the **Schedules*
 panel). The versioned API exposes list/read/create/update/delete, occurrences,
 execution outcomes, and reaffirm operations; see the [OpenAPI contract](openapi.yaml) for
 the accepted schema and conditional-write requirements. Do not assume schedule
-CSV import/export is available through that API.
+CSV import/export is available through that API. The CLI provides the
+round-trippable path: `iris-schedule import FILE` and `iris-schedule export`,
+using `fleet/schedules.csv.example` as the schema template.
 
 ### What a schedule targets
 
@@ -286,7 +288,8 @@ not made in ignorance of one.
 The collision that actually loses work is narrowing: a manual replacement or
 a scheduled assignment with `"mode":"replace"` replaces the whole approved
 set, including images assigned by the other path. Merge mode adds without
-removing. Every scheduled outcome records `before_image_ids`, `after_image_ids`
+removing and is the default for scheduled assignments (`"mode":"merge"`).
+Every scheduled outcome records `before_image_ids`, `after_image_ids`
 and `removed_image_ids`, so a narrowing is visible after the fact.
 
 ## Workflow map
@@ -294,9 +297,13 @@ and `removed_image_ids`, so a narrowing is visible after the fact.
 ```mermaid
 flowchart LR
     Inventory["fleet/devices.csv"] --> Console["Console / API onboarding (deployment records)"]
+    Credentials["Credential profile assigned to selected devices"] --> Console
     Console --> Device["Device onboarded"]
-    Images["Published images"] --> Assignments["fleet/assignments.csv"]
+    Images["Published images"] --> Assignments["Console / API image assignment"]
+    CSV["fleet/assignments.csv via tools/apply-assignments.sh"] --> Policy
     Assignments --> Policy["Catalog policy"]
+    Schedules["Approved schedules"] --> Console
+    Schedules --> Policy
     Policy --> Agent["Agent polls policy"]
     Agent --> Stage["Image staged on device"]
 ```
@@ -306,5 +313,8 @@ flowchart LR
 Review `fleet/devices.csv` for network correctness — including the
 `management_type` of each device and, for inband rows, that the existing
 VLAN/SVI/gateway are operator-owned and correct — and `fleet/assignments.csv`
-for release correctness. Do not mix credentials, operator passwords, or image
+for release correctness if using `tools/apply-assignments.sh`. Validate that
+CSV with the helper's `--dry-run` before applying; it is not a Console import.
+Review Console/API assignments and approved schedules as well.
+Do not mix credentials, operator passwords, or image
 binaries into either file.

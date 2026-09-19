@@ -5,7 +5,8 @@ Device agents verify and stage assigned images. Software installation,
 activation, boot changes, and reloads remain outside IRIS.
 
 Use the [Console](docs/zensical/console.md) for everyday operations and the
-[API reference](docs/zensical/swagger/index.html) for automation.
+[API reference](https://cisco-open.github.io/intelligent-release-image-staging/docs/swagger/) for automation
+([source](docs/zensical/swagger/index.html)).
 
 ## Start here
 

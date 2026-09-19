@@ -103,6 +103,22 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>
 ```
 
+For repeatable one-host deployments, persist these values in the git-ignored
+`server/.env` (plain `NAME=value` lines, without `export`). Use an absolute
+path for `IRIS_AGE_KEY_FILE_HOST`; do not put the private key itself in the
+file. Docker Compose reads this file next to `server/docker-compose.yml`.
+Also load your trusted, shell-compatible file before running host helpers:
+
+```bash
+set -a
+. server/.env
+set +a
+```
+
+Shell exports override Compose's `.env` values, so keep the two consistent.
+Separate-host deployments use the distinct environment files documented in
+[Docker on separate hosts](docker-hosts.md).
+
 That one key is a complete configuration. The list has to contain the public
 half of the key in `IRIS_AGE_KEY_FILE_HOST`, and bootstrap refuses if it does
 not.
@@ -116,8 +132,8 @@ export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<second-age-public-key>
 ```
 
 There is no need to create a second key now. One stored next to the first
-protects nothing, and `--rekey` below adds one at any time without redoing the
-deployment.
+protects nothing. Add a recovery recipient later with `iris-bootstrap --rekey`;
+see [Age recipient rotation](operations.md#age-recipient-rotation).
 
 Compose publishes the Console only on `IRIS_HOST_IP`, rather than on every
 interface of a multi-homed host. Choose the intended IRIS-facing address and
@@ -171,6 +187,10 @@ IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 The helper bootstraps encrypted configuration, installs the two public roots,
 starts the server and Console, and builds the device packages. It builds the XR
 RPM unless `IRIS_SKIP_XR` is set. It never creates trust roots.
+
+Do not start a fresh configuration volume with `docker compose up` alone:
+missing encrypted state makes the entrypoint fail closed and restart-loop.
+Use the helper above; see [Fresh-volume startup](troubleshooting.md#fresh-volume-startup).
 
 Check the helper's exit status and **Settings → Device packages**. A reachable
 Console does not mean package preparation succeeded. Package readiness checks

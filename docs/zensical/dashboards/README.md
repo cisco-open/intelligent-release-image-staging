@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dashboards
 
 Importable dashboards for rollout health and peer-to-peer distribution telemetry.
@@ -225,7 +231,7 @@ uid `iris-swarm-p2p`.
 
 ### Prerequisite: the OTLP logs must reach Loki
 
-**Eight panels select the Loki stream `{service_name="iris-tracker"}` — and
+**The Loki-backed panels select the stream `{service_name="iris-tracker"}` — and
 that includes all three headline delivery stats** (*Delivered to the fleet*,
 *Delivered peer to peer*, *Peer share of delivery*), the per-edge detail
 tables, and the per-device peer share. The collector configuration in

@@ -8,7 +8,7 @@ mkdir -p "$OUT"
 for arch in ${IRIS_CRYPTO_ARCHES:-amd64 arm64}; do
   case "$arch" in amd64|arm64) ;; *) exit 2 ;; esac
   scratch="$(mktemp -d)"
-  docker buildx build --platform "linux/$arch" \
+  docker buildx build --pull --platform "linux/$arch" \
     --output "type=local,dest=$scratch" -f "$REPO/tools/build-instruction-crypto.Dockerfile" "$REPO"
   install -m 0755 "$scratch/iris-aead" "$OUT/iris-aead-$arch"
   install -m 0644 "$scratch/iris-aead.LICENCE" "$OUT/iris-aead.LICENCE"

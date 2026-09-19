@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Swagger UI vendored source
 
 This directory vendors `swagger-ui-dist` version **5.32.15** from the npm
@@ -34,6 +40,7 @@ static routes reuse the Console's existing HTTPS listener and do not change API
 authentication or CSRF enforcement. Other methods keep the existing authenticated
 API and unknown-route handling; Swagger adds no write route. No Swagger runtime
 asset uses a CDN or requires Internet access.
+
 `iris-openapi32.js` supplements Swagger UI's documented basic OpenAPI 3.2 support
 with a canonical explorer. It displays every operation and component directly
 from the loaded contract as deferred, exact JSON, and calls out streaming

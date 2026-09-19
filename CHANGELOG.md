@@ -11,6 +11,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Require a fresh base-image pull when building the standalone instruction
+  crypto helpers. Check documentation navigation recursively, including nested
+  dashboard and Swagger provenance pages, and expose both pages in the nav.
+- Restore the shard-migration rollback runbook and document missing role and
+  schedule error codes, including the legacy quarantine status distinction.
+  Clarify first-start configuration, recipient rotation, CSV workflows and
+  dashboard evidence; repair stale operator links.
+
 ### Fixed
 - Make the static instruction-helper license readable by the unprivileged
   server publisher so Guest Shell bundles provision successfully at startup.

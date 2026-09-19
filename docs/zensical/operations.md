@@ -537,7 +537,9 @@ is treated as zero and retained stable event IDs replay; changing it by hand can
 the tracker still needs to export. Reads, refusals, and dry runs commit no new
 revision or acknowledgement epoch.
 
-The same route separates its other refusals, and they mean different things:
+The legacy quarantine route separates its other refusals, and they mean
+different things. Its degraded-policy preflight retains `422 policy_error`;
+role/QoS and schedule coordination use `503 policy_error` instead:
 
 | Response | Meaning |
 | --- | --- |
@@ -724,6 +726,38 @@ redeploy the same build.
 For Kubernetes, snapshot the `iris-data` PVC and back up the separately managed
 age identity, tier-auth Secret, and management TLS Secrets. The Console has no
 state PVC; its persistent application state is on the server.
+
+### Age recipient rotation
+
+Back up encrypted configuration and the current decrypting identity first.
+Quiesce configuration writers using the maintenance procedure for your
+deployment topology. Set `IRIS_AGE_RECIPIENTS` to the complete desired public
+recipient list, including the current service identity's public key, and run
+`iris-bootstrap --rekey` in a server container with the same configuration
+volume and current age identity mounted. Do not use `--force`.
+
+Persist the same recipient list in the service environment before resuming
+writes: otherwise subsequent encryption can revert to the previous recipients.
+Verify decryption with the intended identities and service readiness before
+retiring any old recovery material. This changes encryption recipients, not
+device credentials or instruction trust roots.
+
+### Rollback after the shard migration
+
+Per-device stores migrate whole-fleet JSON into
+[keyed shards](reference.md#keyed-per-device-state). The original document is
+retained with a `.migrated` suffix; a deliberately invalid placeholder at its
+old path prevents older code from silently treating the inventory as empty.
+
+Stop every reader and writer of the selected store before rollback and back
+up the whole state volume, including shards, revision metadata, placeholders,
+and `.migrated` files. Inspect the placeholder for the exact original and
+backup paths. Restoring that retained document at the original path allows
+pre-migration code to read it, but **does not restore writes made after the
+migration**. Do not delete the shards or overwrite the only backup. If those
+later writes matter, reconcile/export them with the newer release or restore
+a compatible, consistent backup before starting older code. Verify inventory
+and policy together; never interpret an empty store as a successful recovery.
 
 ## Audit export
 

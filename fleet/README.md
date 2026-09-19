@@ -6,7 +6,7 @@ assignments, and the per-device installers the legacy generator writes.
 The operator manual is
 [Fleet workflows](../docs/zensical/fleet-workflows.md); the CSV v2 schema is
 documented in [Management type and VLAN
-ownership](../docs/zensical/management-type.md#inventory-csv-v2). This file is
+ownership](../docs/zensical/management-type.md#inventory). This file is
 the directory-level orientation only — when the two disagree, the manual is
 right.
 

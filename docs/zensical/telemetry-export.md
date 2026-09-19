@@ -327,15 +327,15 @@ split by `iris.peer.attribution` into `origin`, `device` and `unknown`, and it
 is the exact, device-measured answer to "did this device get its image from a
 peer or from the origin?".
 
-!!! warning "Neither shipped board charts it"
-    `iris.device.peer_transfer_record` appears in **neither**
-    `grafana-iris-swarm.json` nor `splunk-iris-swarm.xml`. Every per-device
-    peer-share panel on both boards is built on `iris.swarm.peer_bytes`, the
-    origin-side **sampled** estimate with 12–27% documented sampling loss. So
-    the number you can read off a shipped board is the estimate; the number you
-    can defend has to come from a panel you write yourself against the device
-    record. Build it and you will have the better figure — the record is
-    already reaching your collector.
+!!! info "Device records and sampled origin panels are separate"
+    The **Peer-to-peer evidence** row in `splunk-iris-swarm.xml` charts
+    `iris.device.peer_transfer_record`: bytes received by source, device-peer
+    share, and peer-to-peer transfers. Its origin tracing panels still use
+    the separate, sampled `iris.swarm.peer_bytes` stream.
+    `grafana-iris-swarm.json` has no device-transfer-record panel; its
+    per-device peer-share panels remain origin-side sampled estimates.
+    Do not equate those estimates with complete device-measured transfer
+    records. See [Dashboard templates](dashboards/README.md).
 
 **Offload share.** Peer-sourced bytes as a percentage of the image, per device
 and per fleet.

@@ -10,8 +10,10 @@ through nav, preserve essential entry links, and retain safety/correctness
 contracts in the detailed guides.
 """
 import os
+import ast
 import re
 import tomllib
+from pathlib import Path
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DOCS = os.path.join(REPO, "docs", "zensical")
@@ -53,12 +55,50 @@ def test_every_nav_page_exists():
             "zensical.toml nav references missing page: %s" % page
 
 
+def _docs_pages(root):
+    root = Path(root)
+    return {path.relative_to(root).as_posix() for path in root.rglob("*.md")}
+
+
+def test_docs_page_discovery_includes_nested_pages(tmp_path):
+    (tmp_path / "index.md").touch()
+    nested = tmp_path / "guide" / "advanced"
+    nested.mkdir(parents=True)
+    (nested / "setup.md").touch()
+    (nested / "asset.json").touch()
+    assert _docs_pages(tmp_path) == {"index.md", "guide/advanced/setup.md"}
+
+
 def test_every_docs_page_is_in_the_nav():
     nav = set(_nav_pages())
-    on_disk = {name for name in os.listdir(DOCS) if name.endswith(".md")}
-    orphans = on_disk - nav
+    orphans = _docs_pages(DOCS) - nav
     assert not orphans, \
         "docs pages missing from the zensical.toml nav: %s" % sorted(orphans)
+
+
+def test_problem_registry_covers_literal_role_coordinator_codes():
+    source = Path(REPO, "server", "role_management.py").read_text()
+    codes = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.keyword) and node.arg == "code":
+            if (isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                codes.add(node.value.value)
+    codes.update({"role_management_error", "schedule_target_unavailable"})
+    headings = set(re.findall(r"^## (\S+)\s*$", _page("problems.md"), re.M))
+    assert not codes - headings, sorted(codes - headings)
+
+
+def test_rollback_guard_recovery_section_stays_available():
+    page = _page("operations.md")
+    assert "### Rollback after the shard migration" in page
+    assert "does not restore writes made after the" in page
+
+
+def test_readme_api_reference_is_rendered_site_not_html_source():
+    readme = Path(REPO, "README.md").read_text()
+    assert ("[API reference](https://cisco-open.github.io/"
+            "intelligent-release-image-staging/docs/swagger/)") in readme
 
 
 def test_index_links_core_tasks_without_duplicating_full_navigation():
