@@ -12,7 +12,7 @@ which images to stage and how. It carries the byte-level detail: the
 key-derivation function, the layout of the data the cipher authenticates, the
 adapter that runs the cipher, and the pinned OpenSSL version. For the trust
 model an architect needs, see
-[How instructions are signed and trusted](../architecture/instruction-trust.md).
+[How instructions are signed and trusted](../zensical/architecture/security-model.md#how-instructions-are-signed-and-trusted).
 That page covers who signs an instruction and what the agent checks before it
 trusts one; this page covers how the envelope, the encrypted file that carries
 an instruction, is actually encrypted.
@@ -43,7 +43,7 @@ associated data produce identical ciphertext. That is not the same as
 replay protection: seeing the same ciphertext twice does not make it safe to
 apply twice. The agent keeps its own forward-only floor on `(epoch,
 instr_serial)` and rejects anything at or behind it; see
-[How instructions are signed and trusted](../architecture/instruction-trust.md)
+[How instructions are signed and trusted](../zensical/architecture/security-model.md#how-instructions-are-signed-and-trusted)
 for how that floor is enforced.
 
 ## The PAE layout
@@ -140,7 +140,7 @@ Build both architectures with:
 tools/build-ssh-verifiers.sh
 ```
 
-which runs `docker buildx build --target ssh-verifier-artifacts` against
+which runs `docker buildx build --pull --target ssh-verifier-artifacts` against
 `server/Dockerfile` and writes `bin/ssh-keygen-amd64`, `bin/ssh-keygen-arm64`
 and a shared `bin/ssh-keygen.LICENCE` (upstream OpenSSH's license plus the
 statically linked musl libc notice). `server/pack-agent-bundle.sh` picks the
@@ -154,9 +154,9 @@ the same as `iris-aead`.
 
 ## Related
 
-- [How instructions are signed and trusted](../architecture/instruction-trust.md):
+- [How instructions are signed and trusted](../zensical/architecture/security-model.md#how-instructions-are-signed-and-trusted):
   who signs an instruction and what the agent checks before it trusts one.
-- [Replace or recover signing keys](../admin-guide/instruction-keys.md):
+- [Replace or recover signing keys](../zensical/admin-guide/instruction-keys.md):
   the operator procedure for rotating a device's instruction key or
   replacing a root.
 - [Migration notes for contributors](upgrade-notes.md): the v1-to-v2 envelope

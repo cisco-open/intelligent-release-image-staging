@@ -40,6 +40,14 @@ run `tools/check-package-freshness.sh`. Its certificate-drift check does not
 replace this rebuild step: it checks the served wrapper bytes against the
 provenance manifest next to them, not whether the source has changed.
 
+Before publishing aria2c binaries, arrange and review the matching
+corresponding-source distribution: upstream source, local patches, build
+scripts, and applicable linked dependency sources. The current checkout and
+IRIS release archive contain the binaries, patches, and build scripts, but not
+the upstream and dependency source trees. Record where recipients receive
+those source inputs; a commit link is provenance, not a complete source bundle.
+See [What the repository distributes](../../tools/aria2c-build/README.md#what-the-repository-distributes).
+
 ## Confirm each platform's verifier
 
 Test the actual verifier on each device platform, not only the tracker-side
@@ -71,7 +79,7 @@ root or the wrong namespace.
 This release covers the single-replica Kubernetes layout, the same as
 single-host and split-host Compose. Before you sign off a Kubernetes
 release, confirm the deployment still matches
-[Storage, state and deployment records](../zensical/architecture/storage-and-state.md).
+[Kubernetes topology](../zensical/install/kubernetes.md#topology).
 A multi-replica server is out of scope; see
 [Limitations](../zensical/architecture/limitations.md).
 
@@ -79,8 +87,10 @@ A multi-replica server is out of scope; see
 
 - [Building the device image, IOx wrappers, IOS-XR rpm and aria2c](device-packages.md):
   the build details behind the rebuild rule above.
-- [Storage, state and deployment records](../zensical/architecture/storage-and-state.md):
-  what the Kubernetes PVC holds and why the server runs as one replica.
+- [Where server state lives](../zensical/reference/state-and-data.md#where-server-state-lives):
+  the persistent state files and per-device stores.
+- [Kubernetes topology](../zensical/install/kubernetes.md#topology): the
+  server-only PVC and single-server replica limit.
 - [Limitations](../zensical/architecture/limitations.md): what multi-replica
   Kubernetes and an absent verifier tool do not cover.
 - [Manual checks and the test-file map](../../TESTING.md): the automated

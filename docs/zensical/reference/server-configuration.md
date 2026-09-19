@@ -69,9 +69,9 @@ instead.
 | `IRIS_SSH_LEGACY`, `IRIS_SSH_HOST_KEY`, `IRIS_SSH_KNOWN_HOSTS` | see [SSH variables](#ssh-variables) | Server-side SSH verification policy. |
 | `SVI_IGP` | `none` | Routed Guest Shell installs only: `isis` adds `ip router isis` to the IRIS SVI. A device's inventory record can override it. |
 
-Numeric variables that fail to parse fall back to their default; most also
-fall back on a zero or negative value, so `0` is not a meaningful setting for
-them. `IRIS_XR_SESSION_TIMEOUT` is the exception: `0` genuinely disables it.
+Use the documented bounds for each variable. `0` disables
+`IRIS_XR_SESSION_TIMEOUT`, `IRIS_METRICS_PORT` and API request-rate budgets;
+other settings may reject it or fall back to their defaults.
 
 ### Container paths
 
@@ -237,9 +237,11 @@ scheme, in `IRIS_TIER_AUTH_DIR` on a Docker host or in a Kubernetes secret:
 - `previous` (or `previous.json`) holds the prior token during a rotation
   overlap, empty before the first rotation.
 
-The management token file is a scoped JSON record. Observability token files
-hold the raw token value, so a Prometheus scraper's `credentials_file`
-setting can read `current` directly; the server assigns it the
-`observability` scope, so it is not accepted by the management API. See
+Management files accept a raw token or a JSON record such as
+`{"scope":"management","token":"<token>"}`. Tokens must be at least 32
+bytes long. Observability files hold the raw token value so
+Prometheus can read `current` as its `credentials_file`. Use distinct random
+values for management and observability: a raw token has no embedded scope.
+JSON records must match the listener's scope. See
 [Rotate credentials and certificates](../admin-guide/rotations.md) and
 [Install on Kubernetes](../install/kubernetes.md).

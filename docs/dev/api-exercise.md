@@ -33,7 +33,7 @@ The `--cafile` argument must point at the certificate authority your test
 deployment's Console actually presents. A single-host deployment with no
 browser certificate configured reuses its default browser identity across
 restarts; see
-[Set up certificates and tokens](../install/certificates-and-tokens.md)
+[Set up certificates and tokens](../zensical/install/certificates-and-tokens.md)
 for how that identity works. Never disable TLS verification to work around
 a certificate mismatch; point `--cafile` at the correct certificate
 instead.
@@ -105,7 +105,7 @@ costs, with no HTTP, authentication, or live server state, cannot set an
 API limit either.
 
 If you calibrate a request budget from your own clean run, see
-[Routine maintenance tasks](../admin-guide/maintenance.md) for the
+[Routine maintenance tasks](../zensical/admin-guide/maintenance.md) for the
 method and [Dated lab evidence](validation-records.md) for a worked
 example.
 
@@ -159,8 +159,8 @@ capacity or justify a rate-limit change.
 
 ## Related
 
-- [Verify the installation](../install/verify.md)
-- [Set up certificates and tokens](../install/certificates-and-tokens.md)
-- [Routine maintenance tasks](../admin-guide/maintenance.md)
-- [Limitations](../architecture/limitations.md)
+- [Verify the installation](../zensical/install/verify.md)
+- [Set up certificates and tokens](../zensical/install/certificates-and-tokens.md)
+- [Routine maintenance tasks](../zensical/admin-guide/maintenance.md)
+- [Limitations](../zensical/architecture/limitations.md)
 - [Dated lab evidence](validation-records.md)

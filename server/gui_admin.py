@@ -10,6 +10,7 @@ import os
 import sys
 
 import gui_app
+import secrets_store
 
 
 def main(argv=None):
@@ -34,6 +35,12 @@ def main(argv=None):
     )
     # Break-glass semantics: a reset from outside the console process must
     # also end every console session minted under the old credential.
-    app.set_admin(username, password, invalidate_sessions=True)
+    try:
+        app.set_admin(username, password, invalidate_sessions=True)
+    except secrets_store.StoreCorruptError:
+        print("admin reset refused: the live secret store is unavailable or "
+              "damaged; run iris-gui-admin with exec in the running server",
+              file=sys.stderr)
+        return 1
     print("admin '%s' set; existing console sessions invalidated" % username)
     return 0

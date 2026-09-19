@@ -18,7 +18,9 @@ it is never built and never published.
 ## Writing standard
 
 **Who each guide is for.** Installation Guide: a network engineer with a fresh
-host who has never seen IRIS; they follow it top to bottom once. User Guide: the
+host who has never seen IRIS; they follow it top to bottom once. Administration
+Guide: the person maintaining server state, upgrades, credentials, and recovery.
+User Guide: the
 person who runs IRIS every day; they arrive with a task and leave when it is
 done. Architecture Guide: an architect or reviewer who needs to know how it
 works and what it does not do before they approve it. Reference: anyone looking
@@ -80,8 +82,8 @@ server, the catalog, management type, Bulk Hash (as Cisco writes it).
 
 **Terms that need a plain lead-in on every page that uses them.** The first use
 on a page gets the wording below, or a link to the glossary entry that carries
-it. `reference/glossary.md` holds exactly these wordings. This applies to all
-four guides.
+it. Define a term in the glossary and at most one page per guide; elsewhere,
+link to its definition.
 
 | Term | Approved wording |
 | --- | --- |
@@ -155,16 +157,12 @@ Three rules decide whether a heading may change:
 - Landing page (`index.md` of a guide): what the guide covers, the order to
   read it in (the Installation Guide gives a reading list per layout and
   platform), a common-tasks table where the guide has tasks, and every page in
-  the section with one line of scope. Under 80 lines.
+  the section with one line of scope. At most 60 lines.
 
-**The stage-only rule.** The Overview carries the staging definition from the
-term list, then the full statement (the current "Stage only" admonition,
-verbatim). The security model keeps the guardrails table because a test pins
-three of its phrases. Every other place uses exactly one sentence in a `note`
-box, linking the Overview: "IRIS stages images. It never installs, activates,
-reloads, or changes boot variables." It appears on each guide landing page, on
-`user-guide/assignments.md`, on `install/management-types.md` and wherever a
-reader might expect an install step. Nowhere else is it restated.
+**The stage-only rule.** The Overview carries the staging definition and the
+"Stage only" warning. Each guide landing page carries one note linking the
+Overview: "IRIS stages images. It never installs, activates, reloads, or changes
+boot variables." Keep this statement on the Overview and guide landing pages.
 
 **Version numbers and measurements.** No product version numbers in prose; the
 CHANGELOG owns release history. Pinned tool versions (aria2c, ioxclient,
@@ -185,9 +183,9 @@ three or more like items and for every lookup; tables never hold procedures;
 symptom tables use the columns Symptom, Likely cause, What to do. Note boxes:
 `note`, `warning`, `danger` only. Content tabs only for short command variants
 on pages that no test slices by heading. Mermaid for diagrams, with plain
-labels. Every page starts with the SPDX header comment. No page over 400
-lines; split by moment of use (set up once versus use every day), never by
-component.
+labels. Every page starts with the SPDX header comment. Pages stay at 300
+lines or fewer, and landing pages at 60 or fewer. Split by moment of use (set
+up once versus use every day), never by component.
 
 **Links.** One fact, one home. When another page needs the fact, write one
 sentence and link with the target's title as the link text. Cross-guide links
@@ -211,9 +209,7 @@ alias becomes the heading's only id: the natural slug of the new text does not
 exist, so links inside the manual have to use the alias id as well. Add a row
 here for every pair you create.
 
-The table below is the full set for the reorganization. A page it names
-appears as that part of the manual is written, so some rows describe a page
-that does not exist yet.
+The table below records the retained aliases for the reorganization.
 
 | Alias id | Page and new heading text | Who depends on the id |
 | --- | --- | --- |
@@ -269,19 +265,22 @@ location: ../install/one-docker-host/
 ---
 ```
 
-Zensical renders its built-in redirect template: a `<noscript>` meta refresh
-and a script that replaces the location, keeping any `?query` and `#hash` the
-reader arrived with. The stub is not in the nav, not in search and not in the
-sitemap, and it produces no build warning.
+The template at `docs/overrides/redirect.html` renders a `<noscript>` meta
+refresh and a script that replaces the location, keeping any `?query` and
+`#hash` the reader arrived with. A stub can use an `anchors` map when a retained
+section moved to a different destination page, as in `aiagent.md`. Each key is
+an old fragment without `#`; its value is the new relative page and fragment.
+The default `location` remains the fallback for other fragments and readers
+without JavaScript. Stubs stay out of the navigation and search.
 
 Three things to get right:
 
 - `location` is copied through untouched. Write it relative to the OLD page's
   output directory, which is `old-name/index.html`, so a sibling page is
   `../new-name/`. Material that leaves the site takes a full URL.
-- A hash survives the redirect only when the target page carries a heading
-  with that id, as kept text or as an alias. Every other hash lands at the top
-  of the target page.
+- A hash reaches a section only when the target page carries that id, as kept
+  text or as an alias. Use an `anchors` entry if the section moved to another
+  page. Unknown fragments use the default page.
 - A stub only redirects in a browser. A README on GitHub that links the `.md`
   path shows the front matter instead, so re-point those links in the same
   pull request.
@@ -298,7 +297,7 @@ Change any of them deliberately, on its own:
 | Pin | Where | Value |
 | --- | --- | --- |
 | Zensical | `requirements-docs.txt` | `zensical==0.0.51` |
-| OpenTelemetry Collector Contrib | 0.160.0 | `docs/zensical/user-guide/splunk.md` (collector image tag) |
+| OpenTelemetry Collector Contrib | `docs/zensical/user-guide/splunk.md` (collector image tag) | `0.160.0` |
 | Python | `.github/workflows/docs.yml` (`actions/setup-python`) | `3.12` |
 | Mermaid | `docs/zensical/javascripts/mermaid.mjs` | `11.17.2`, with its Subresource Integrity digest |
 | Swagger UI | `docs/zensical/swagger/SOURCE.txt`, `tools/vendor-swagger-ui.sh` | `swagger-ui-dist` 5.32.15, with both archive checksums |
@@ -378,8 +377,8 @@ gate:
 - The writing rules. `test_docs_pages_follow_the_writing_rules` reads every
   page with its fenced code blocks stripped and refuses project labels,
   tracker issue numbers, private or lab addresses, em-dashes and the filler
-  words listed above, plus any page over 400 lines and any landing page of 80
-  lines or more. Matching is case sensitive and on word boundaries, which
+  words listed above, plus any page over 300 lines and any landing page over
+  60 lines. Matching is case sensitive and on word boundaries, which
   keeps "alphabetical" and the alias id
   `f3-offline-bootstrap-envelope-redelivery` legal. There is no exempt set of
   pages: every page `_docs_pages()` returns is checked, which is every real

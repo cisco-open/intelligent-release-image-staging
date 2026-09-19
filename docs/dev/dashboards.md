@@ -91,6 +91,6 @@ re-import. Follow this order when you change it on a live instance.
 ## Related
 
 - [Import the Splunk and Grafana dashboards](../zensical/user-guide/dashboards.md)
-- [What telemetry measures and proves](../zensical/architecture/telemetry-model.md)
+- [Monitor transfers and reports](../zensical/user-guide/monitoring.md)
 - [Telemetry signals](../zensical/reference/telemetry-signals.md)
 - [aria2 peer sampling, report ring and promotion design](telemetry-internals.md)

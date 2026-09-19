@@ -66,7 +66,7 @@ every flag and the mutation-mode example, see
 | The runtime user owns the host paths | The age identity, the host `artifacts/` directory, and the named volumes give uid `10001` access. The Console Images screen lists no file as `not readable by the server`. For a wrong owner after a restore, see [Back up and restore](../admin-guide/backups.md). |
 | Admin exists | Console login succeeds. |
 | Image publishes | The catalog lists the image id, hashes, and info hash. |
-| Import publishes in place | A file already under the read-only image root imports from the Console, and that root keeps no copy of the image and no `.torrent` beside it. |
+| Import publishes in place | A file already under the read-only image root imports from the Console. The original stays in place; IRIS creates no second image copy or adjacent `.torrent` in that root. |
 | Shared package provenance | IOx and IOS-XR wrappers match their adjacent manifests and the one Open Container Initiative (OCI) build they come from. Guest Shell and both container architectures carry the current shared agent source. |
 
 ## Next steps

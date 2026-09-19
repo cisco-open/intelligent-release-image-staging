@@ -28,6 +28,8 @@ needs the session cookie, and state-changing methods also need the
 ### 1. Log in
 
 ```bash
+set -e
+umask 077
 CONSOLE=https://console.example
 CA=/path/to/console-ca.pem
 DEVICE='<device id>'
@@ -35,7 +37,7 @@ IMAGE='<image id>'
 
 python3 -c 'import json, sys; print(json.dumps({"username": sys.argv[1], "password": open(sys.argv[2]).read().strip()}))' \
   '<username>' /path/to/admin-password |
-  curl -sS --cacert "$CA" -c session.cookie \
+  curl -fsS --cacert "$CA" -c session.cookie \
     -H 'Content-Type: application/json' \
     -X POST "$CONSOLE/api/v1/login" --data @- -o login.json
 
@@ -51,43 +53,69 @@ CSRF=$(python3 -c 'import json; print(json.load(open("login.json"))["csrf"])')
 ### 2. Assign the image
 
 ```bash
-curl -sS --cacert "$CA" -b session.cookie \
-  -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
-  -X POST "$CONSOLE/api/v1/devices/$DEVICE/assign" \
-  --data "{\"image_ids\": [\"$IMAGE\"]}"
+curl -fsS --cacert "$CA" -b session.cookie --get \
+  --data-urlencode "q=$DEVICE" "$CONSOLE/api/v1/devices" -o devices.json
+AFTER=$(python3 -c 'import json; print(json.load(open("devices.json"))["now"])')
+
+python3 -c 'import json, sys; print(json.dumps({"image_ids": [sys.argv[1]]}))' "$IMAGE" |
+  curl -fsS --cacert "$CA" -b session.cookie \
+    -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+    -X POST "$CONSOLE/api/v1/devices/$DEVICE/assign" --data @-
 ```
 
 The answer returns `assigned_image_ids`. Compare it with what you sent.
+`AFTER` records the server clock before assignment; the next step requires a
+newer heartbeat.
 
 ### 3. Poll until the device reports the image staged
 
 ```bash
-while true; do
-  curl -sS --cacert "$CA" -b session.cookie \
-    "$CONSOLE/api/v1/devices/$DEVICE/reports" -o reports.json
-  if python3 - "$IMAGE" <<'PY'
+deadline=$((SECONDS + 3600))
+staged=0
+while (( SECONDS < deadline )); do
+  curl -fsS --cacert "$CA" -b session.cookie --get \
+    --data-urlencode "q=$DEVICE" "$CONSOLE/api/v1/devices" -o devices.json
+  if python3 - "$DEVICE" "$IMAGE" "$AFTER" <<'PY'
 import json, sys
-reports = json.load(open("reports.json"))["reports"]
-sys.exit(0 if any(r.get("image_id") == sys.argv[1]
-                  and r.get("stage_state") == "ready"
-                  for r in reports) else 1)
+document = json.load(open("devices.json"))
+device_id, image_id, after = sys.argv[1:]
+row = next((r for r in document["devices"]
+            if r["device_id"] == device_id), {})
+seen = row.get("last_seen") or 0
+fresh = seen > float(after) and 0 <= document["now"] - seen < 600
+assigned = image_id in (row.get("assigned_image_ids") or [])
+errored = image_id in (row.get("errored_image_ids") or [])
+staged_ids = row.get("staged_image_ids")
+ready = (image_id in staged_ids if staged_ids is not None else
+         row.get("current_image_id") == image_id
+         and row.get("stage_state") == "ready")
+sys.exit(0 if fresh and assigned and ready and not errored else 1)
 PY
   then
+    staged=1
     break
   fi
   sleep 60
 done
+if (( ! staged )); then
+  echo "Timed out: inspect the device's current status before retrying." >&2
+fi
 ```
 
-Give the loop a deadline: an offline device never reaches `ready`.
+The loop waits up to one hour. It reads the current heartbeat, checks its age
+against the server clock, and gives a current image error precedence over a
+staged flag. Use the reports route to retain the transfer history as evidence.
 
 ### 4. Revoke the session
 
 ```bash
-curl -sS --cacert "$CA" -b session.cookie \
+curl -fsS --cacert "$CA" -b session.cookie \
   -H "X-CSRF-Token: $CSRF" \
   -X POST "$CONSOLE/api/v1/logout"
+test "$staged" -eq 1
 ```
+
+The final check returns a failure exit status if the wait timed out.
 
 ## What you see
 
@@ -95,7 +123,7 @@ curl -sS --cacert "$CA" -b session.cookie \
 | --- | --- | --- |
 | Log in | `POST /api/v1/login` | `{username, csrf}`, plus the session cookie |
 | Assign | `POST /api/v1/devices/{device_id}/assign` | `{ok, assigned_image_ids, removed_image_ids}` |
-| Poll | `GET /api/v1/devices/{device_id}/reports` | `{reports: [...]}`, oldest first, newest last; a finished one carries `image_id`, an `event` of `staging-complete` and a `stage_state` of `ready`. With several images assigned, read `staged_image_ids` and `errored_image_ids` |
+| Poll | `GET /api/v1/devices?q=<device_id>` | `{devices: [...], now, ...}`; select the exact device id from the search results. Check `last_seen`, the current assignment and the heartbeat's staging fields. |
 | Log out | `POST /api/v1/logout` | the session is revoked and the cookie expires |
 
 ## When a request is refused
@@ -123,7 +151,7 @@ stable and listed in [API error codes](../problems.md).
 | Rule | What it means for your script |
 | --- | --- |
 | An assignment replaces the whole list | `{"image_ids": [...]}` replaces the ordered approved set, up to ten images, and an empty array unassigns all. Send `expect_image_ids` with the set you believe is stored: the server returns 409 with `assigned_image_ids` when it changed under you. |
-| `Idempotency-Key` works only where a route advertises it | Onboard and undeploy accept one, assignment does not. It takes 8 to 128 safe characters and replays a successful response for 24 hours. Reusing a key with a different body is 409. A server restart clears the replay ledger, so after a lost response, read the catalog, the deployment record and the device's reports before you retry. |
+| `Idempotency-Key` works only where a route advertises it | Onboard and undeploy accept one, assignment does not. It takes 8 to 128 safe characters and retains successful responses for up to 24 hours. The process-local cache holds 512 entries; eviction or a server restart can remove one sooner. Reusing a retained key with a different body is 409. After a lost response, read the catalog, deployment record and current device status before retrying. |
 | Request acceptance does not prove staging | A 200 on the assignment route means the server stored the approved set. The device's reports are the only evidence that the image is on the flash and its hash checked. |
 
 !!! warning

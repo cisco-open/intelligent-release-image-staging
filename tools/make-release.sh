@@ -60,11 +60,8 @@ SHIP=(
   server
   # device (agent + launcher + installer + EEM refs + IOx/XR packaging + tests)
   device
-  # tools: the operator helpers, plus the corresponding source for the
-  # handed-in (GPL) aria2c binary. GPLv2 section 3 wants the source AND the
-  # scripts used to control compilation, and NOTICE now says both ship here,
-  # so the release must carry aria2c-patches/ AND aria2c-build/ -- shipping
-  # the notice without them would make the notice false.
+  # tools: operator helpers plus the local aria2c patches and build scripts.
+  # NOTICE describes these shipped inputs and the external source inputs.
   tools/get-aria2c.sh tools/aria2c.sha256 tools/make-torrent.sh
   tools/make-agent-bundle.sh tools/gen-device-installers.sh
   tools/build-ssh-verifier.sh tools/build-ssh-verifiers.sh
@@ -83,10 +80,9 @@ SHIP=(
   # re-inclusions in .gitignore), so the release is complete offline: bin/aria2c
   # is the x86_64 seeder client server/Dockerfile COPYs, and
   # deliverables/aria2c-<cpu> is what the device package builders read. The
-  # corresponding source and patches for exactly these binaries are the
-  # tools/aria2c-build and tools/aria2c-patches trees above, which is what makes
-  # shipping them GPLv2 section 3 compliant -- never ship the binaries without
-  # them.
+  # local patches and build scripts ship above. Upstream and linked dependency
+  # source trees are not bundled; arrange their distribution separately before
+  # publishing binaries (see tools/aria2c-build/README.md).
   bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.

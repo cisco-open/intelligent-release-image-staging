@@ -27,6 +27,11 @@ the included amd64 `aria2c` client against `tools/aria2c.sha256`.
 
 ### On separate Docker hosts
 
+First create and configure `server/server.env` on the server host and
+`server/console.env` on the Console host, following
+[Install on separate Docker hosts](separate-docker-hosts.md). Compose reads
+these files even for a build. That procedure includes the build commands below.
+
 On the server host, which also builds every device package:
 
 ```bash
@@ -83,11 +88,14 @@ See [When to rebuild the packages](device-packages.md#embedded-agent-packages).
 
 ## Verify
 
-On a Docker host, check the tags it built:
+On one Docker host, check both image tags:
 
 ```bash
 docker image inspect --format '{{ index .RepoTags 0 }}' iris:latest iris-console:latest
 ```
+
+For separate hosts, inspect only `iris:latest` on the server host and only
+`iris-console:latest` on the Console host. Each host needs its own image.
 
 On Kubernetes, this prints nothing when both registry names are replaced:
 

@@ -307,7 +307,7 @@ ordinary build, and never put a real device credential in one.
 - [Download the tools that build device packages](../zensical/install/build-tools.md):
   the pinned `aria2c` clients a clone already carries, and checking for ARM64
   emulation before you fall back to building anything yourself.
-- [Components and images](../zensical/architecture/components.md):
+- [What each part does](../zensical/architecture/index.md#what-each-part-does):
   what the shared image and its packages run inside IOx and IOS-XR appmgr.
 - [Writing and building the docs](documentation.md):
   the pinned tool versions for `aria2c` and `ioxclient`.

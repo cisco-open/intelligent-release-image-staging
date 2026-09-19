@@ -254,19 +254,21 @@ EOF
   exit 1
 fi
 
-# A verified download is kept in deliverables/ as well as installed into bin/.
+# Every verified candidate is kept in deliverables/ as well as installed into bin/.
 # tools/build-device-image.sh resolves each architecture's client from there,
 # so keeping it means the IOx and XR package builds need no second fetch, and
 # a later run of this script finds it locally. This restores the copy the
 # repository commits: the bytes match tools/aria2c.sha256, so the restored
 # file is identical to the tracked one and leaves no diff behind.
-if [ -n "$DOWNLOADED" ]; then
+COLLECTED="$REPO_ROOT/deliverables/aria2c-$ARCH"
+if [ ! "$DELIVERABLE" -ef "$COLLECTED" ]; then
   mkdir -p "$REPO_ROOT/deliverables"
   # 0755, the mode the committed deliverable carries, so restoring a deleted
   # one leaves git seeing no change at all -- not even a mode change.
-  install -m 0755 "$DELIVERABLE" "$REPO_ROOT/deliverables/aria2c-$ARCH"
+  install -m 0755 "$DELIVERABLE" "$COLLECTED"
   echo "Kept:      deliverables/aria2c-$ARCH"
 fi
+DELIVERABLE="$COLLECTED"
 
 if [ "$INSTALL_BIN" -eq 0 ]; then
   echo "Verified:  $ARCH deliverable (bin/aria2c left as it was)"

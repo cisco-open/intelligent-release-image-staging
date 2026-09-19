@@ -9,10 +9,11 @@ agent bundle, IOx packages, IOS-XR appmgr RPM) are **Aria2 Next 2.5.6**, a fork
 of aria2, licensed under the GNU General Public License v2 with the OpenSSL
 exception.
 
-IRIS neither downloads nor builds `aria2c`. It is handed in as an artifact,
+IRIS uses a prebuilt `aria2c` artifact,
 committed to this repository (`bin/aria2c`, `deliverables/aria2c-x86_64`,
-`deliverables/aria2c-aarch64`) beside this corresponding source, and verified
-against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
+`deliverables/aria2c-aarch64`) beside its local patches and build scripts, and
+verified against `tools/aria2c.sha256`. `tools/get-aria2c.sh` can download a
+replacement when a committed client is missing.
 
 ## The corresponding source (GPLv2 §3)
 
@@ -110,10 +111,11 @@ that step links dynamically against the host's OpenSSL and is not the
 deliverable described here.
 
 The build scripts are published in
-[`../aria2c-build/`](../aria2c-build/README.md) — the `Dockerfile` and
-`build.sh` that produce the binaries. Nothing has to be requested: source,
-patches and compilation scripts all ship in this repository, which is what
-GPLv2 section 3 asks for.
+[`../aria2c-build/`](../aria2c-build/README.md): the `Dockerfile` and
+`build.sh` that produce the binaries. Local patches and compilation scripts
+ship in this repository. The upstream tree and linked dependency sources do
+not; maintainers must arrange their corresponding-source distribution when
+publishing binaries. See [What the repository distributes](../aria2c-build/README.md#what-the-repository-distributes).
 
 ## Licensing of the patches themselves
 

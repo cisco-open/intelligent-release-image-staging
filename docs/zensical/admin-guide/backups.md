@@ -33,7 +33,11 @@ Store the age identity apart from the data it decrypts. Restore with the same de
 
 ## Signing keys and instruction state
 
-An instruction is the signed message the server sends a device saying which images to stage and how. Keep the signing key, the age identity, the runtime plaintext, and the instruction state on the server host, and back them up with the configuration. After a loss, see [Replace or recover signing keys](instruction-keys.md).
+Keep the encrypted signing key, its certificate, the public roots and keylist
+with the configuration backup. Back up the instruction serial state with the
+server state. The server recreates runtime plaintext from ciphertext at startup.
+Keep the age identity in its separate protected backup. After a loss, see
+[Replace or recover signing keys](instruction-keys.md).
 
 !!! warning
 

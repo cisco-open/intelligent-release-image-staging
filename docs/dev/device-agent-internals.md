@@ -12,7 +12,7 @@ on an operator-facing page. That detail includes exactly what each installer
 writes to a device, how a Guest Shell bundle earns the right to run, and
 what the container entrypoint and its supervisor loop do. It also covers the
 design notes behind a few rules that platform pages only state. Read
-[How the device agent works](../zensical/architecture/device-agent.md)
+[How an image reaches a device](../zensical/architecture/data-path.md)
 first; it covers the agent's ordinary check-in loop, one pass of which is a
 tick.
 
@@ -204,7 +204,7 @@ for the variables a real deployment uses.
 
 ## Related
 
-- [How the device agent works](../zensical/architecture/device-agent.md)
+- [How an image reaches a device](../zensical/architecture/data-path.md)
 - [Device agent configuration](../zensical/reference/device-configuration.md)
 - [Building the device image, IOx wrappers, IOS-XR rpm and aria2c](device-packages.md)
 - [Prepare Catalyst 9000 and 8000 devices for Guest Shell](../zensical/install/guest-shell.md)

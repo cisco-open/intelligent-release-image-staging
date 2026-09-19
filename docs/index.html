@@ -62,7 +62,7 @@ SPDX-License-Identifier: Apache-2.0
         </div>
         <div>
           <strong>Encrypted</strong>
-          <span>HTTPS for every control path, TLS between peers when you turn it on</span>
+          <span>HTTPS for the Console and service APIs, TLS between peers when you turn it on</span>
         </div>
         <div>
           <strong>Resumable</strong>
@@ -89,8 +89,6 @@ SPDX-License-Identifier: Apache-2.0
               <path class="edge pull" d="M120 110 C 172 110 186 46 232 46"></path>
               <path class="edge pull" d="M120 110 L 232 110"></path>
               <path class="edge pull" d="M120 110 C 172 110 186 174 232 174"></path>
-              <circle class="load" cx="120" cy="110" r="12"></circle>
-              <circle class="load late" cx="120" cy="110" r="12"></circle>
               <g class="node server"><rect x="16" y="86" width="104" height="48" rx="10"></rect><text x="68" y="110">File server</text></g>
               <g class="node"><rect x="232" y="24" width="104" height="44" rx="10"></rect><text x="284" y="46">Device A</text></g>
               <g class="node"><rect x="232" y="88" width="104" height="44" rx="10"></rect><text x="284" y="110">Device B</text></g>
@@ -100,23 +98,20 @@ SPDX-License-Identifier: Apache-2.0
           </div>
           <div class="compare-card highlight">
             <h3>IRIS private swarm</h3>
-            <svg class="flow-svg" viewBox="0 0 360 220" role="img" aria-label="The IRIS server seeds once and devices exchange image pieces with each other over encrypted links">
+            <svg class="flow-svg" viewBox="0 0 360 220" role="img" aria-label="The IRIS server supplies image pieces and devices share them with each other; peer TLS is optional">
               <path class="edge seed" d="M120 110 C 150 110 160 40 176 40"></path>
               <path class="edge seed" d="M120 110 L 250 110"></path>
               <path class="edge seed" d="M120 110 C 150 110 160 180 176 180"></path>
               <path class="edge peer" d="M272 40 L 300 90"></path>
-              <path class="edge peer back" d="M272 40 L 300 90"></path>
               <path class="edge peer" d="M300 130 L 272 180"></path>
-              <path class="edge peer back" d="M300 130 L 272 180"></path>
               <path class="edge peer" d="M224 60 L 224 160"></path>
-              <path class="edge peer back" d="M224 60 L 224 160"></path>
               <g class="node server"><rect x="16" y="86" width="104" height="48" rx="10"></rect><text x="68" y="110">IRIS server</text></g>
               <g class="node"><rect x="176" y="20" width="96" height="40" rx="10"></rect><text x="224" y="35">Device A</text><rect class="piece" x="188" y="46" width="16" height="5" rx="2"></rect><rect class="piece" x="208" y="46" width="16" height="5" rx="2"></rect><rect class="piece" x="228" y="46" width="16" height="5" rx="2"></rect><rect class="piece empty" x="248" y="46" width="12" height="5" rx="2"></rect></g>
               <g class="node"><rect x="252" y="90" width="96" height="40" rx="10"></rect><text x="300" y="105">Device B</text><rect class="piece" x="264" y="116" width="16" height="5" rx="2"></rect><rect class="piece" x="284" y="116" width="16" height="5" rx="2"></rect><rect class="piece empty" x="304" y="116" width="16" height="5" rx="2"></rect><rect class="piece empty" x="324" y="116" width="12" height="5" rx="2"></rect></g>
               <g class="node"><rect x="176" y="160" width="96" height="40" rx="10"></rect><text x="224" y="175">Device C</text><rect class="piece" x="188" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="208" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="228" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="248" y="186" width="12" height="5" rx="2"></rect></g>
               <g class="badge"><rect x="244" y="52" width="40" height="18" rx="9"></rect><text x="264" y="61">TLS</text></g>
             </svg>
-            <p>The server seeds each image once. Devices take missing pieces from the server and from each other, resume after an interruption, and verify the image before staging it. Peer transfers run over TLS with mutual certificates when you turn that on.</p>
+            <p>The server and eligible peers supply missing pieces. Devices resume interrupted downloads and verify each image before staging. Turn on mutual TLS to encrypt peer transfers.</p>
           </div>
         </div>
       </section>

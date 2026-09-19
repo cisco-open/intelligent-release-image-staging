@@ -6,11 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Set up certificates and tokens
 
-Skip this page until you replace the default identity.
+Trust the initial browser certificate before signing in. Use the remaining
+sections when you replace a certificate or configure monitoring.
 
 ## Before you start
 
-- Sign in to the Console as the administrator. See [Sign in for the first time](first-sign-in.md).
+- For Settings changes, sign in as the administrator. See [Sign in for the first time](first-sign-in.md).
 - The certificate and key for the browser address, or a private authority's root certificate.
 
 ## Default browser identity
@@ -19,7 +20,20 @@ The default browser identity is generated and stored encrypted in `tls/console-f
 
 A browser warns about it the first time. Add it to each client's trust store after you check it through a channel you already trust, or install your own certificate. A certificate is tied to one address. Install a matching one whenever the address operators browse to changes.
 
-To pass this certificate as `--cafile` to a tool such as `tools/api-exercise.py` while you still run the default identity, copy it out of the running server container, for example `docker compose exec iris cat /run/iris/tls/console-fallback.pem`, over a channel you already trust.
+On one Docker host, export only the public certificate through an authenticated
+host connection. Run from the repository root:
+
+```bash
+docker compose -f server/docker-compose.yml exec -T iris \
+  openssl x509 -in /run/iris/tls/console-fallback.pem -outform PEM \
+  > console-ca.pem
+openssl x509 -in console-ca.pem -noout -sha256 -fingerprint
+```
+
+Use `console-ca.pem` in the operator trust store or as `--cafile` for
+`tools/api-exercise.py`. For separate hosts or Kubernetes, obtain the public
+certificate from the Console TLS bundle or its issuing authority instead.
+Never copy the combined runtime PEM: it also contains the private key.
 
 !!! warning
     Never disable TLS verification.

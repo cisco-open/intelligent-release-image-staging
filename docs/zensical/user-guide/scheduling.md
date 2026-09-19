@@ -12,8 +12,7 @@ Run work inside a maintenance window instead of when you press a button.
 
 A schedule runs one action inside one maintenance window: **assign**, which
 approves images for a device to stage, or **onboard**, which deploys the IRIS
-agent to devices that do not have it. A schedule never installs, activates, reloads, or
-changes a boot variable. Each run is an occurrence, and records what it did on
+agent to devices that do not have it. Each run is an occurrence, and records what it did on
 every device it reached.
 
 ## In the Console

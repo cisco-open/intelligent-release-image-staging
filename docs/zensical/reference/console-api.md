@@ -19,9 +19,26 @@ The Console serves this API on its own HTTPS listener, normally port 8080, at `<
 | Body size | 64 KiB JSON; 2 MiB bulk credential assignment; 8 MiB CSV import; 4 GiB streamed image upload; 256 MiB offline Bulk Hash feed (the checksum Cisco publishes for an image). |
 | Errors | RFC 9457 Problem Details with a `type` and `code`; match against [API error codes (problem types)](../problems.md). `detail` is redacted. The tracker returns bencoded BEP failures instead. |
 | Versions | `/api/v1` (Console), `/internal/v1` (server), `/v1` (device-facing services). A major version stays published for two releases, warned first with `Deprecation`, `Sunset`, `Link` headers. |
-| Retries | Send `Idempotency-Key` to retry safely; the server replays the same response for 24 hours. A restart clears this, so check the catalog or deployment record first. |
+| Retries | Selected POST routes accept `Idempotency-Key`; see [Retry supported POST requests](#retry-supported-post-requests). Other POST routes reject the header. |
 | Schedule writes | Use `ETag` and `If-Match` instead; see Schedules, below. |
 | Polling | The Console marks its own background `GET` requests `X-IRIS-Poll: 1`; the server does not count these as session activity. |
+
+## Retry supported POST requests
+
+`Idempotency-Key` is supported only on these POST routes:
+
+- `/api/v1/devices`
+- `/api/v1/images/import`
+- `/api/v1/image-verification/refresh`
+- `/api/v1/settings/audit-export/run`
+- `/api/v1/settings/ca-trust/refresh`
+- `/api/v1/devices/<id>/request-report`, `.../adopt`, `.../onboard`, `.../undeploy`
+
+Retry with the same key and body. Reusing a key with a different body returns
+409. Completed responses remain available for up to 24 hours in a process-local
+512-entry cache; capacity pressure can evict them earlier, and a restart clears
+them. After a lost response, check the resulting resource or job before retrying
+if the cache entry may be gone. Schedule writes use `ETag` and `If-Match`.
 
 ## Session and settings
 

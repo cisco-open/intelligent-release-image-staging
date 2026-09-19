@@ -17,21 +17,23 @@ has the right size, the tools IRIS needs, a verified clock, and the code.
 
 ## Size the host
 
-These numbers cover the control plane and telemetry for 200 devices; the
-images come on top, per
-[wave](../user-guide/scheduling.md#deployment-waves).
+Start with this server budget, then measure your fleet's check-ins, telemetry,
+and image transfers before expanding a rollout.
 
 | Resource | Need |
 | --- | --- |
 | Server | 2 vCPU, 4 GB RAM |
-| Ingress | ~0.2–0.3 Mbps sustained |
-| Telemetry | ≤ ~20 MB on disk, < 10 KB/s out on the LAN |
-| NIC | 1 GbE, sized by image seeding: one to two times the image size per wave |
+| Disk | Space for retained images, encrypted state, artifacts, and build output |
+| NIC | Start with 1 GbE; size for your image sizes and rollout windows |
+
+These are planning values, not a validated 200-device capacity guarantee. See
+[Limits](../architecture/limitations.md) for the validation boundaries.
 
 ## Check Docker Engine and the tools
 
 IRIS runs in containers. The host needs Linux, Docker Engine 23.0 or newer,
-and Docker Compose. Install what is missing with your own approved method.
+and Docker Compose 2.24.4 or newer for the separate-host files. Install what
+is missing with your own approved method.
 
 | Need it for | Check | Ubuntu or Debian package |
 | --- | --- | --- |
@@ -55,7 +57,7 @@ This host needs every row above.
 
 The server host needs every row above. The Console host needs Docker, the
 Compose plugin, and room for its image. The host that prepares the bundles
-needs `python3` and SSH to both.
+needs `python3`, `openssl` and SSH to both.
 
 ### On Kubernetes
 
@@ -147,8 +149,8 @@ root-owned tree fails.
 
 On every host, at the same IRIS version:
 
-- Docker Engine, Compose and buildx report 23.0 or newer, and every
-  `command -v` check above returns a path.
+- Docker Engine reports 23.0 or newer, Compose meets the layout requirement,
+  buildx is available, and every `command -v` check above returns a path.
 - `df -h` shows room for two builds, the server image, and your images.
 - `bash tools/check-host-time.sh` passes, and NTP reports a selected peer.
 - The image tree is readable and traversable by uid `10001`.

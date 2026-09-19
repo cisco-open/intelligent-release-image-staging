@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 # Upgrade to a new release
 
 An upgrade is three steps: back up the server, undeploy the devices, and
-deploy the new release the same way you installed it. Then onboard the
-devices again. Your inventory, images, roles and schedules stay in place.
+deploy the new release with fresh device agents. Your inventory, images, roles
+and schedules stay in place.
 
 ## Before you start
 
@@ -44,7 +44,7 @@ Then deploy it the same way you installed it.
 Load `server/.env` as on the install page, then run the start script again:
 
 ```bash
-tools/start-compose-server.sh
+IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
 
 It rebuilds both images, keeps every volume and secret, restarts the two
@@ -67,7 +67,7 @@ apply, and wait for both rollouts, as in
 device packages to the server pod as in
 [Build and publish the device packages](../install/device-packages.md).
 
-## 4. Onboard the devices again
+### Onboard the devices again
 
 Open **Devices**, select the devices and choose **Onboard**. Each device gets
 the new agent package. Re-provision a device when replacing its bootstrap

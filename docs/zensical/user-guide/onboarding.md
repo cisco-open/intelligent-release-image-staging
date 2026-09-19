@@ -12,7 +12,7 @@ device agent. Images come afterwards, in
 
 ## Before you onboard
 
-Each device needs three things:
+Each device needs:
 
 - A management type: how the agent reaches the network, on its own address, on
   your management VLAN, or through the router. See

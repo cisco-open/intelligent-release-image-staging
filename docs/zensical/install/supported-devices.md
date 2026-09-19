@@ -19,7 +19,9 @@ and the package you have to build.
 
 ## Which delivery path each device family uses
 
-IRIS reaches a device over Guest Shell, IOx, or IOS-XR appmgr.
+IRIS reaches a device over Guest Shell, IOx, or IOS-XR appmgr. A series name
+does not mean every model and software release supports that delivery path.
+Check your device's app-hosting support before selecting it.
 
 | Device family | Delivery path | Staging target | When to choose it | What you must build |
 | --- | --- | --- | --- | --- |
@@ -41,8 +43,11 @@ build the IOx and IOS-XR packages yourself, with
 ## Choose between IOx and Guest Shell
 
 On Catalyst 9000 series switches the agent runs in Guest Shell; the IOx app is
-the alternative on switches with app-hosting storage. Both paths run the same
-agent and stage the same images. On Catalyst 8000 series routers both paths
+the alternative on switches with supported app-hosting storage.
+[Cisco's app-hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html)
+requires supported external storage for third-party applications. Confirm the
+IRIS share and staging path on the exact switch and software release before
+using IOx. Both paths run the same agent. On Catalyst 8000 series routers both paths
 attach the agent to the same VirtualPortGroup.
 
 - On Guest Shell an Embedded Event Manager (EEM) applet starts the agent on a
@@ -50,8 +55,9 @@ attach the agent to the same VirtualPortGroup.
   [How an image reaches a device](../architecture/data-path.md).
 - Agent upgrades differ by path. See
   [Upgrade to a new release](../admin-guide/upgrade.md).
-- The IOx path turns device-global signature verification off for the length of
-  an unsigned install, then turns it back on. Read
+- For an unsigned IOx install, IRIS temporarily disables device-global signature
+  verification when it was enabled, then restores that state before activation.
+  An initially disabled setting stays disabled. Read
   [Prepare Industrial Ethernet, Catalyst 9000 and 8000 devices for the IOx app](iox.md#device-global-package-verification)
   first.
 

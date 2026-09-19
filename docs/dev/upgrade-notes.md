@@ -127,7 +127,7 @@ to import a certificate.
 
 ## Related
 
-- [How instructions are signed and trusted](../zensical/architecture/instruction-trust.md):
+- [How instructions are signed and trusted](../zensical/architecture/security-model.md#how-instructions-are-signed-and-trusted):
   the trust model and what the agent checks before it applies an instruction.
 - [KDF, PAE layout, iris-aead adapter and the OpenSSL pin](instruction-crypto.md):
   how the v2 envelope is actually built.
@@ -135,5 +135,5 @@ to import a certificate.
   when a change under `device/agent/` needs a package rebuild.
 - [Upgrade to a new release](../zensical/admin-guide/upgrade.md): the operator
   procedure for a routine upgrade.
-- [Roles: which devices share with which](../zensical/architecture/peer-policy.md):
+- [Roles and peer sharing](../zensical/architecture/security-model.md#roles-and-peer-sharing):
   how role policy and device quarantine are stored and enforced.

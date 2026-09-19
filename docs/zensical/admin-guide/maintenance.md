@@ -59,15 +59,16 @@ Use this when nobody can sign in to the Console. It runs on the server host,
 not in the browser. Type the new password when it asks:
 
 ```bash
-docker compose -f server/docker-compose.yml run --rm iris iris-gui-admin "<username>"
+docker compose -f server/docker-compose.yml exec iris iris-gui-admin "<username>"
 ```
 
 On separate Docker hosts, run the same command on the server host, with that
-layout's compose file and environment file.
+layout's compose file and environment file. The server must be running so the
+command updates its decrypted secret store.
 
 !!! warning "Keep the password off long-lived containers"
     To set the password without a prompt, pass `IRIS_GUI_ADMIN_PASSWORD` on
-    this one-shot command only. Never add it to the Compose `environment:`
+    this `exec` command only. Never add it to the Compose `environment:`
     block, or a long-running container holds the password for as long as it
     runs.
 

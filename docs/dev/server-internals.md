@@ -11,7 +11,7 @@ belong in the user-facing guides. It covers why a timing bound sits where it
 does, why a store is shaped the way it is, and what a preflight check does
 today versus what it will do later. Read
 [Server configuration](../zensical/reference/server-configuration.md) and
-[Storage, state and deployment records](../zensical/architecture/storage-and-state.md)
+[Data formats and states](../zensical/reference/state-and-data.md)
 first for what each setting and store does; this page explains why.
 
 ## Artifact-server thread model
@@ -45,7 +45,7 @@ seeder's IPv4 address is unknown, and a count of zero means the check ran and
 found no device it would newly deny.
 
 This preflight stays open, tracked internally, until one full tagged-release dwell of observation has completed with no surprises. Only a later, separately authorized activation can turn the count into an enforced rule. That activation would apply the union of the current self-evaluation blocklist and the mutual-origin evaluation, across every ACL, including one written by hand. Nothing in the reconciler pass itself starts that dwell or grants that authorization; turning the gate on is a distinct, reviewed release. See
-[Roles: which devices share with which](../zensical/architecture/peer-policy.md)
+[Roles and peer sharing](../zensical/architecture/security-model.md#roles-and-peer-sharing)
 for the rule as an operator sees it today.
 
 ## Tracker announce cadence
@@ -229,7 +229,7 @@ belong in a commit.
 - [Developer documentation index](README.md)
 - [Writing and building the docs](documentation.md)
 - [Dated lab evidence](validation-records.md)
-- [Roles: which devices share with which](../zensical/architecture/peer-policy.md)
+- [Roles and peer sharing](../zensical/architecture/security-model.md#roles-and-peer-sharing)
 - [Peer policy API](../zensical/reference/peer-policy-api.md): the
   operator-visible QoS keys, ranges and precedence chain.
-- [Storage, state and deployment records](../zensical/architecture/storage-and-state.md)
+- [Data formats and states](../zensical/reference/state-and-data.md)

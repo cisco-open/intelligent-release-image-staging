@@ -59,11 +59,12 @@ starts.
 
 The device also fetches the public catalog certificate and its own envelope,
 the encrypted file that carries the instruction: the signed message the server
-sends a device saying which images to stage and how. Each fetch authenticates
-with the device id and a short-lived enrollment token, which the controller
-sets on the device only for the span of the fetch and removes right after. The
-token never appears in a URL or a job log, and the envelope is published for
-that one device and that one fetch.
+sends a device saying which images to stage and how. IOx and IOS-XR artifact
+fetches authenticate with the device id and its enrollment token. Guest Shell
+uses short-lived capability URLs that grant access to that installation's
+files. Treat those URLs as credentials. Bootstrap enrollment tokens also reach
+the agent's configuration or container run options for its first authenticated
+refresh. See [APIs the device agent uses](../reference/device-apis.md).
 
 ## Where the file lands
 

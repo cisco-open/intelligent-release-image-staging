@@ -107,6 +107,23 @@ def test_for_platforms_rejects_an_unsupported_platform(fixture_repo):
     assert "unsupported platform" in result.stderr
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_no_install_collects_verified_external_handin(fixture_repo, existing):
+    destination = fixture_repo / "deliverables/aria2c-aarch64"
+    handin = fixture_repo / "approved-arm-client"
+    handin.write_bytes(destination.read_bytes())
+    if existing:
+        destination.write_bytes(b"stale-unverified-client")
+    else:
+        destination.unlink()
+    result = invoke(fixture_repo, "--for-platforms", "linux/arm64",
+                    ARIA2C_DELIVERABLE=str(handin))
+    assert result.returncode == 0, result.stderr
+    assert destination.read_bytes() == handin.read_bytes()
+    assert destination.stat().st_mode & 0o777 == 0o755
+    assert (fixture_repo / "bin/aria2c").read_bytes() == b"preserve-existing-server-client"
+
+
 def test_valid_native_install_and_checksum_refusal(fixture_repo):
     assert invoke(fixture_repo, "amd64").returncode == 0
     assert (fixture_repo / "bin/aria2c").read_bytes() == b"test-client-x86_64"

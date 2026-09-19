@@ -19,8 +19,9 @@ Skip this page if you run both containers on one machine, described in
    2.24.4 or newer, that meet
    [Check the host before you install](check-the-host.md). Check out the same
    IRIS release on both.
-2. Both container images. See
-   [Build the server and Console images](build-images.md). The tested
+2. The image build prerequisites from
+   [Build the server and Console images](build-images.md). Build each image
+   after configuring that host's environment file below. The tested
    `aria2c` clients are included in the repository, and the build scripts
    verify them.
 3. The two public signing roots on the server host, from
@@ -87,11 +88,14 @@ The management certificate must cover the exact DNS name or IP in
       --console-host console.example.com
     ```
 
-    A `server/` and a `console/` directory hold self-signed certificates and
-    one scoped management token, valid for 365 days.
+    A `server/` and a `console/` directory hold self-signed certificates valid
+    for 365 days and one scoped management token. The token has no automatic
+    expiry; rotate it through the administration procedure.
 
-2. Copy `server/` to `/etc/iris/docker-hosts/` on the server host and
-   `console/` to the same path on the Console host, over SSH or SCP.
+2. Copy the **contents** of `server/` to `/etc/iris/docker-hosts/` on the server
+   host and the **contents** of `console/` to that path on the Console host,
+   over SSH or SCP. The server token path is then
+   `/etc/iris/docker-hosts/tier-auth/current.json`.
 
 3. On each host, set ownership and keep the generated permissions:
 
@@ -119,7 +123,20 @@ The management certificate must cover the exact DNS name or IP in
    [Server configuration](../reference/server-configuration.md) and
    [Install on one Docker host](one-docker-host.md#configure-the-server).
 
-3. Start a fresh server:
+3. Create the server age identity as in
+   [Configure the server](one-docker-host.md#configure-the-server), recording
+   its path and public recipients in `server/server.env`, not `server/.env`.
+   Load this layout's settings before preparing host paths:
+
+    ```bash
+    set -a
+    . server/server.env
+    set +a
+    ```
+
+    Prepare the image and artifact paths for uid `10001`, as in
+    [Give the runtime user the host paths](one-docker-host.md#give-the-runtime-user-the-host-paths),
+    using the configured paths. Then build and start a fresh server:
 
     ```bash
     iris_server() {
@@ -127,6 +144,7 @@ The management certificate must cover the exact DNS name or IP in
         -f server/docker-compose.server.yml "$@"
     }
 
+    iris_server build --pull
     iris_server run --rm iris iris-bootstrap
     iris_server run --rm \
       -v "$HOME/iris-roots:/pub:ro" --entrypoint sh iris -c \
@@ -148,12 +166,10 @@ The management certificate must cover the exact DNS name or IP in
 4. Turn on signing, described in
    [Turn on instruction signing](activate-signing.md#initialise-instruction-custody).
 
-5. Export the server settings so the package helpers match Compose:
+5. Set the public roots directory in the same shell so the package helpers
+   match the server:
 
     ```bash
-    set -a
-    . server/server.env
-    set +a
     export IRIS_INSTRUCTION_ROOTS_DIR="$HOME/iris-roots"
     ```
 
@@ -178,6 +194,7 @@ The management certificate must cover the exact DNS name or IP in
         -f server/docker-compose.console.yml "$@"
     }
 
+    iris_console build --pull
     iris_console up -d
     iris_console ps
     ```

@@ -89,8 +89,8 @@ spec:
           # than a mutable tag, makes a rollout's server bytes reproducible.
           image: iris-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
-          # Kubelet can add setgid to PVC directories after init containers,
-          # even with OnRootMismatch on some local-volume implementations.
+          # Private directories can inherit setgid from the PVC parent.
+          # GNU chmod 0700 preserves that bit on existing directories.
           # Accept and clear only that one known transformation, as the same
           # non-root owner, before the normal fail-closed entrypoint starts.
           command:

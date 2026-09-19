@@ -84,7 +84,8 @@ volume root first: a directory owned by `10001:10001` with mode `2770`, and its
 `state` child, which is `/data/state` in the pod, owned by `10001:10001` with
 exact mode `0700` and setgid cleared. A container storage interface (CSI)
 driver that handles `VOLUME_MOUNT_GROUP` itself ignores `fsGroupChangePolicy`
-and has to preserve the private file modes on its own, so check the driver:
+and has to preserve the private file modes on its own. Check the driver now;
+run the two pod checks after step 4 has started the server:
 
 ```bash
 kubectl get csidriver \
@@ -110,7 +111,21 @@ Create the namespace, then the age identity, both token pairs and both TLS
 identities, in a protected directory outside the checkout, called
 `/secure/path` below. The management certificate needs DNS names for
 `iris-server-api`, `iris-server-api.iris` and `iris-server-api.iris.svc`; the
-Console certificate must cover the name operators type in the browser.
+Console certificate must cover the name operators type in the browser. Obtain
+the certificates from your authority, or generate private self-signed bundles:
+
+```bash
+umask 077
+mkdir -p /secure/path
+python3 tools/prepare-docker-hosts.py --out /secure/path/identities \
+  --management-host iris-server-api --management-host iris-server-api.iris \
+  --management-host iris-server-api.iris.svc \
+  --console-host console.example.com
+```
+
+Replace `console.example.com` with the Console's actual DNS name or IP. The
+commands below use this generated bundle; with your own authority, substitute
+its certificate, key and CA files.
 
 !!! warning "Keep token values off the command line"
     Write each token to a file, as below, never into a command or an
@@ -135,11 +150,13 @@ kubectl -n iris create secret generic iris-observability-auth \
   --from-file=current=/secure/path/observability-current \
   --from-file=previous=/secure/path/observability-previous
 kubectl -n iris create secret tls iris-management-tls \
-  --cert=/secure/path/server-api.crt --key=/secure/path/server-api.key
+  --cert=/secure/path/identities/server/management-tls/tls.crt \
+  --key=/secure/path/identities/server/management-tls/tls.key
 kubectl -n iris create configmap iris-management-ca \
-  --from-file=ca.crt=/secure/path/server-api-ca.crt
+  --from-file=ca.crt=/secure/path/identities/console/management-ca/ca.pem
 kubectl -n iris create secret tls iris-console-tls \
-  --cert=/secure/path/console.crt --key=/secure/path/console.key
+  --cert=/secure/path/identities/console/console-tls/tls.crt \
+  --key=/secure/path/identities/console/console-tls/tls.key
 ```
 
 Each command prints `created`. Add `--dry-run=client -o yaml | kubectl apply
@@ -210,7 +227,13 @@ Open the Console at its own browser address and create the administrator;
 
 ## Verify
 
+Export the public catalog certificate through your authenticated cluster
+connection before the HTTPS checks. Use the Console bundle's public certificate
+for its separate listener:
+
 ```bash
+kubectl -n iris exec deployment/iris-seed-server -c iris -- \
+  openssl x509 -in /run/iris/tls/cert.pem -outform PEM > /secure/path/catalog-ca.crt
 kubectl -n iris get pods,svc,pvc,networkpolicy
 kubectl -n iris logs deployment/iris-seed-server -c iris
 kubectl -n iris logs deployment/iris-console -c console
@@ -218,7 +241,7 @@ curl -fsS --cacert /secure/path/catalog-ca.crt \
   https://<server-external-ip>:9101/readyz
 curl -fsS --cacert /secure/path/catalog-ca.crt \
   https://<server-external-ip>:9101/healthz
-curl -fsS --cacert /secure/path/console-ca.crt \
+curl -fsS --cacert /secure/path/identities/console/console-tls/tls.crt \
   https://<console-address>:8080/readyz
 ```
 

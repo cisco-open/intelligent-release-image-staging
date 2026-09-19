@@ -28,8 +28,8 @@ directory. See [Data formats and states](../reference/state-and-data.md).
     recorded `source_dir`. If that field is missing or its directory is
     unavailable, the server searches both image roots for a file with the
     entry's filename instead. The seeder runs with `bt-seed-unverified`, so a
-    wrong directory would serve the wrong bytes under a piece hash that still
-    matches. Keep `source_dir` accurate, and do not leave two files with the
+    wrong directory could serve bytes that fail the torrent's piece hashes.
+    Keep `source_dir` accurate, and do not leave two files with the
     same name under different roots.
 
 !!! warning
@@ -108,7 +108,7 @@ kubectl -n iris exec deployment/iris-seed-server -- \
 | `PUT /api/v1/images/upload/<filename>` | Streams the body into the uploads volume and starts a publish job. Answers 413 for a missing body or one over 4 GiB. |
 | `POST /api/v1/images/import` | Publishes a file already on disk in place. |
 
-Both routes need an authenticated session, and `POST` also needs the
+Both routes need an authenticated session and the `X-CSRF-Token`
 cross-site request forgery (CSRF) header. The import route checks the identity
 of the candidate file: a path that merely starts inside a root is refused with
 400. See [Console API](../reference/console-api.md).

@@ -26,6 +26,7 @@ transport, xr-appmgr is forbidden, and no selector retains the Guest Shell
 `cli` import. Stdlib only."""
 import os
 import re
+import stat
 import subprocess
 
 
@@ -129,14 +130,21 @@ class SSHCli(object):
             os.environ.get("IRIS_DEVICE_ENABLE_ALWAYS", "0") == "1")
 
     def _hostkey_options(self):
-        # verify-if-present, same shape as make_catalog_context's TLS pinning
-        # (spec §4.6): when a known_hosts file is configured AND exists, pin the
-        # device host key against it; otherwise keep the legacy no-verify pair
-        # unchanged, so a fleet whose conf has no pin behaves identically after
-        # an agent-only upgrade. The no-verify default is tolerable only because
-        # this is SSH-to-self over the app's point-to-point /30 to the switch's
-        # own SVI — same posture as lab/device-run.sh.
-        if self.known_hosts and os.path.exists(self.known_hosts):
+        # An explicitly configured pin is mandatory, including before reusing
+        # a control connection. Only an unset path keeps the legacy no-verify
+        # default. Validate readability without blocking on a FIFO, and leave
+        # key syntax and host matching to OpenSSH's strict verification.
+        if self.known_hosts:
+            try:
+                fd = os.open(self.known_hosts, os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    usable = stat.S_ISREG(os.fstat(fd).st_mode) and bool(os.read(fd, 1))
+                finally:
+                    os.close(fd)
+            except (OSError, ValueError, TypeError):
+                usable = False
+            if not usable:
+                raise CliTransportError("configured SSH known_hosts file is unavailable")
             return ["-o", "StrictHostKeyChecking=yes",
                     "-o", "UserKnownHostsFile=" + self.known_hosts]
         return ["-o", "StrictHostKeyChecking=no",

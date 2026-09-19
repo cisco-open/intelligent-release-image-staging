@@ -45,7 +45,7 @@ One Python agent runs on every device. It reads its assignment, downloads pieces
 | Separate Docker hosts | The same volumes, all on the server host | Same, on the server host; the Console host keeps only its token, CA and browser certificate | Same, on the server host | Same, on the server host |
 | Kubernetes | One read-write-once claim under `/data` | `/data/state` and `/data/config`; runtime secrets in memory | Uploads on the claim | `/data/artifacts` |
 
-Back up the server host; the Console keeps nothing of its own, including the encrypted signing key, the age identity and the instruction state. See [Server configuration](../reference/server-configuration.md) and [Data formats and states](../reference/state-and-data.md).
+Back up server state and the age identity. Preserve separately provisioned Console token, CA and browser-certificate files too. The signing key and instruction state belong to the server. See [Server configuration](../reference/server-configuration.md) and [Data formats and states](../reference/state-and-data.md).
 
 ## The rest of this guide
 

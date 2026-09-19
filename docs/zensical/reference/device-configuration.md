@@ -40,13 +40,19 @@ to it too, once per [tick](glossary.md#tick).
 | `IRIS_DEVICE_SSH_HOST` | required on first start | IOx only | The IOS address the agent uses to SSH to itself, for read-only discovery and staged-file placement. |
 | `IRIS_DEVICE_SSH_USER` / `IRIS_DEVICE_SSH_PASS` | required on first start | IOx only | The SSH-to-self credential, kept in the owner-only configuration file. |
 | `IRIS_DEVICE_SSH_ENABLE` / `IRIS_DEVICE_SSH_PORT` | the SSH password / `22` | IOx only | An optional enable secret, and the SSH-to-self port (1 to 65535). |
-| `IRIS_DEVICE_SSH_KNOWN_HOSTS` | unset | IOx only | An optional `known_hosts` path. When set, SSH and SCP check the host key strictly. |
+| `IRIS_DEVICE_SSH_KNOWN_HOSTS` | unset | IOx only | An optional `known_hosts` path. When configured, SSH and SCP require a readable, nonempty regular file and check the host key strictly. |
 | `IRIS_MODEL` / `IRIS_VERSION` | unset | XR only | Optional device model and version strings, recorded for observation. |
 | `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Turns on the aria2 transfer log (`on`, `1`, `true`, or `yes`). IOx and XR cap it at 50 MiB; Guest Shell trims it on a schedule. |
 
 !!! warning
     Keep `IRIS_LOG` off in normal operation. It adds flash writes and does not
     control the device's `%IRIS-6-` status messages.
+
+!!! warning "SSH-to-self host-key verification"
+    With this setting unset, the IOx agent disables host-key verification.
+    A configured path that is missing, unreadable, empty or not a regular file
+    stops SSH and SCP before connection. Provision the pinned file on persistent
+    storage. This setting is separate from server-to-device SSH verification.
 
 IOS-XR appmgr also keeps its own container log (three 1 MiB files, captured
 even with `IRIS_LOG` off): `show appmgr application name iris logs`.
@@ -65,11 +71,11 @@ The agent also reads `key = value` lines from a persistent file,
 | `device_platform` | required in a device container | The persisted copy of `IRIS_DEVICE_PLATFORM` (`iox` or `xr-appmgr`). Guest Shell does not use this key. |
 | `peer_tls_mode` | `disabled` | `required` turns on peer TLS for every transfer, with automatic certificate enrollment and renewal. It needs matching peers and server mode on. |
 | `catalog_ca` | platform-derived path | The certificate the agent uses for catalog calls and HTTPS tracker announces. A missing or invalid certificate stops the container from starting. |
-| `device_ssh_known_hosts` | unset | A `known_hosts` path pinning the device's SSH host key, for the IOx agent's SSH-to-self connection only. When set, SSH and SCP check the host key strictly. |
+| `device_ssh_known_hosts` | unset | A `known_hosts` path pinning the device's SSH host key, for the IOx agent's SSH-to-self connection only. An unavailable configured file fails closed; see the warning above. |
 | `telemetry_stream` | `off` | Turns on live transfer-sample streaming; see [Transfer streaming by platform](#transfer-streaming-by-platform). Needs `telemetry` on too. |
 | `iris_log` | unset (off) | Guest Shell's persisted opt-in for the aria2 transfer log. `bootstrap.sh` reads it every tick and exports it as `IRIS_LOG`. Non-alphanumeric values are dropped; the default applies. |
 | `rpc_port` | `6800` | The local aria2 JSON-RPC port, also read by `bootstrap.sh` for its own aria2 launch line. Out-of-range or non-numeric values are dropped; the default applies. |
-| `max_peers` | legacy only | Parsed but ignored, kept for upgrade compatibility. Current policy uses the bound in the environment variable table above. |
+| `max_peers` | legacy only | Parsed but ignored, kept for upgrade compatibility. Each successful tick applies verified instruction policy or the built-in default. See [QoS keys](peer-policy-api.md#qos-keys). |
 
 ## IOS-XR installer connection variables
 
@@ -80,8 +86,8 @@ router's connection rate limit. See
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `XR_SSH_CONNECT_DELAY` | 2 seconds, 0 to 60 | The pause the installer adds between SSH connections during onboarding. |
-| `XR_SCP_ATTEMPTS` | not published here | How many times the installer retries a registration transport failure. |
-| `XR_SCP_RETRY_SECONDS` | not published here | How long the installer waits between those retries. |
+| `XR_SCP_ATTEMPTS` | `3` attempts | Maximum attempts for SSH preflight and package registration after a transport failure. |
+| `XR_SCP_RETRY_SECONDS` | `10` seconds | Wait between failed preflight or registration attempts. |
 | `IRIS_ARTIFACT_URL` | unset (derived from the catalog URL) | Overrides the HTTPS origin the installer fetches `iris-xr.rpm` and the catalog certificate from. Set it when the artifact server is reachable on a different hostname than the catalog. |
 | `IRIS_ARTIFACTS_PORT` | `8000` | The artifact server's port, used when `IRIS_ARTIFACT_URL` is not set. |
 

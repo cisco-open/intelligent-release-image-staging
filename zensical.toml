@@ -113,6 +113,7 @@ nav = [
 
 [project.theme]
 variant = "modern"
+custom_dir = "docs/overrides"
 # Sidebar sections, a landing page per section, the breadcrumb path, the
 # previous/next footer, back-to-top, anchor tracking, a table of contents that
 # follows the reader, copy buttons on code blocks, linked content tabs and

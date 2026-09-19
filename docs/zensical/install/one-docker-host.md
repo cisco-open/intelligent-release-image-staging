@@ -97,8 +97,8 @@ the scrape token as described in
 IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
 
-The tested `aria2c` clients are included in the repository, and the helper
-verifies them against `tools/aria2c.sha256`. It then bootstraps encrypted configuration,
+The tested `aria2c` clients are included in the repository. The helper invokes
+builds that verify them against `tools/aria2c.sha256`, bootstraps encrypted configuration,
 installs the two public roots, starts both containers, and builds the device
 packages, including the IOS-XR appmgr package unless `IRIS_SKIP_XR` is set.
 

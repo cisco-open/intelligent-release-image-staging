@@ -20,7 +20,7 @@ This page says what IRIS refuses to do on a device, where each trust boundary si
 | Private swarm | Torrents use private metadata and authenticated announces. |
 | Unprivileged runtime | Every server process runs as a fixed non-root uid with `cap_drop: [ALL]`: no listener uses a privileged port, no service needs a raw socket, and nothing chowns anything at runtime. |
 
-`cap_drop` does not apply to `docker compose run`, so a permission repair on the host volumes needs a separate container. See [Install on one Docker host](../install/one-docker-host.md).
+`docker compose run` inherits `cap_drop: [ALL]`, even with `--user 0`. Repair host-volume ownership with the separate maintenance container described in [Install on one Docker host](../install/one-docker-host.md).
 
 Teardown follows the deployment record and removes only what IRIS created. See [Data formats and states](../reference/state-and-data.md).
 
@@ -72,7 +72,9 @@ Undeploying a router-nat device clears only the NAT translations whose inside-lo
 
 Each device holds what its agent needs: the catalog token, the aria2 secret, and, on IOx, the password for the app's SSH session back to IOS. Each file is readable only by the agent.
 
-> **Residual risk: device login held in cleartext.** The generated `iris-agent.conf` holds the SSH-to-self password in cleartext on the app's persistent storage (SD on IE-3x00), mode `0600` and readable only inside the app. There is no secrets broker; the credential is static until an operator rotates it. Mitigate it at the device: scope the account with AAA (`parser view` / command authorization limited to `copy`, `dir`, and `event manager`), restrict the VTY ACL to the IRIS app subnet, and prefer SSH **key** auth where the platform supports it. Rotating the credential means re-running the installer with the new value.
+> **Residual risk: device login held in cleartext.** The generated `iris-agent.conf` holds the SSH-to-self password in cleartext on the app's persistent storage, mode `0600`. Device administrators and anyone holding an offline storage copy can read it. Restrict the VTY ACL to the IRIS app subnet. Test any AAA command restrictions against discovery, verification, placement and cleanup: the agent also uses `show`, `verify`, `rename` and `delete`. The supplied installer uses password authentication. Rotate the credential by re-onboarding with the new value.
+
+The app's SSH-to-self host-key checks are separate from the server's SSH policy. See [Device agent configuration](../reference/device-configuration.md) for the `device_ssh_known_hosts` setting and its default.
 
 Guest Shell writes its RPC secret into mode-0600 `$EXEC_DIR/aria2.conf`. aria2 receives the config path and the readiness probe reads the protected file, so the secret value never reaches process arguments. See [Device agent configuration](../reference/device-configuration.md).
 
@@ -90,7 +92,7 @@ The online signing private key is stored encrypted on the server and exists as p
 
 Bootstrap is the exception: the enrollment bearer stays in IOx `run-opts` and XR `docker-run-opts`, and IOx also keeps its SSH-to-self password. Someone with full rights on the device can read those bootstrap credentials. An enrollment token lasts 3,600 seconds, one hour, by default. Complete the first authenticated refresh promptly: it replaces the agent's active credential, with a normal token overlap of 120 seconds.
 
-The server keeps a fixed list of credential widths: 128-bit bearer credentials and 256-bit cryptographic instruction keys. Missing, unsupported or mismatched widths fail before minting, without printing values. To rotate an instruction key, revoke a device, or replace both roots, see [Replace or recover signing keys](../admin-guide/instruction-keys.md).
+The secret store uses 128-bit bearer credentials for catalog and tracker access, 128-bit aria2 RPC secrets, and 256-bit cryptographic instruction keys. Missing, unsupported or mismatched widths fail before minting, without printing values. Management and monitoring credentials use the separate [credential file formats](../reference/server-configuration.md#credential-file-formats). To rotate an instruction key, revoke a device, or replace both roots, see [Replace or recover signing keys](../admin-guide/instruction-keys.md).
 
 ### What IOx verifies and what Guest Shell cannot
 
@@ -161,7 +163,9 @@ Bulk Hash is the checksum Cisco publishes for an image. Before any row of the fe
 
 ## Secrets at rest
 
-Catalog credentials, device credentials, agent RPC secrets and private server TLS material are encrypted at rest with age recipients, and their decrypted runtime copies live only in `/run/iris`. The one-host stack mounts the age private key as a Docker secret from a host path you control, never from the encrypted volume. Two things stay unencrypted: the management credential files the Console reads, and the audit trail. Treat both as credentials. The paths are in [Server configuration](../reference/server-configuration.md).
+Catalog credentials, device credentials, agent RPC secrets and generated server TLS keys are encrypted at rest with age recipients. Their decrypted runtime copies live in `/run/iris`. A browser certificate override uploaded through Settings is also stored encrypted on the server and delivered to the Console's memory-backed runtime over authenticated HTTPS.
+
+The age identity, mounted management and monitoring credentials, and separately provisioned TLS private keys remain protected by their host files or Kubernetes Secrets. The audit trail is plaintext. Protect these files and backups separately; age encryption covers only the `.age` files. The paths are in [Server configuration](../reference/server-configuration.md).
 
 ## Audit trail
 

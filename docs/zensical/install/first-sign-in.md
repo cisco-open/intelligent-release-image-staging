@@ -34,10 +34,11 @@ The sign-in page appears. In the one-host stack the address is `IRIS_HOST_IP`.
 
 ### What the browser shows
 
-The browser warns that it does not trust the certificate, because the default
-identity is generated during installation. Check the address in the bar, then
-continue past the warning. Replace that identity before you run IRIS for real:
-see [Set up certificates and tokens](certificates-and-tokens.md).
+The browser warns until it trusts the certificate generated during installation.
+Obtain the public certificate through your authenticated host connection, verify
+its fingerprint, and add it to the operator trust store before signing in. See
+[Set up certificates and tokens](certificates-and-tokens.md#default-browser-identity)
+for the export command, or install a certificate from your trusted authority.
 
 ## Claim the administrator account
 

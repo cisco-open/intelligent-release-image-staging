@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 An instruction is the signed message the server sends a device saying which
 images to stage and how. A root key, also called a signing root, is one of the
-two offline keys that sign every instruction key. Use this page to replace both
-roots, recover a lost root, answer a leaked key, publish a new Guest
+two offline keys that certify the online signer and sign revocation lists.
+Use this page to replace both roots, recover a lost root, answer a leaked key, publish a new Guest
 Shell agent bundle, or deliver a first instruction file by hand.
 
 Run every server command in the shell of your deployment:
@@ -121,8 +121,9 @@ states](../reference/state-and-data.md).
    windows you recorded, then record identities, fingerprints, times and
    outcomes.
 
-Signing again is due at 90 days, warns at 100 and is critical at 135. Both
-roots need attestations within 180 days for a healthy quorum.
+Keylist re-signing is due at 90 days, warns at 100 and is critical at 135.
+Both roots need attestations within 180 days for a healthy quorum. The online
+certificate follows the shorter renewal window in steps 3 and 4.
 
 !!! warning
 

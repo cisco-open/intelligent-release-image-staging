@@ -364,6 +364,7 @@ code {
 .architecture-section {
   grid-template-columns: 1fr;
   align-items: start;
+  gap: 24px;
 }
 
 .architecture-section .section-copy {
@@ -387,6 +388,8 @@ code {
 .distribution-visual {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  max-width: 900px;
   gap: 1px;
   overflow: hidden;
   background: var(--line);
@@ -395,10 +398,10 @@ code {
 
 .compare-card {
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  gap: 18px;
-  min-height: 420px;
-  padding: clamp(20px, 3vw, 30px);
+  grid-template-rows: auto auto 1fr;
+  align-content: start;
+  gap: 10px;
+  padding: 16px;
   background: linear-gradient(145deg, rgba(30, 20, 43, 0.98), rgba(17, 9, 27, 0.98));
 }
 
@@ -408,6 +411,7 @@ code {
 
 .compare-card h3 {
   color: var(--forest);
+  margin: 0;
 }
 
 .compare-card p {
@@ -419,7 +423,8 @@ code {
 .flow-svg {
   display: block;
   width: 100%;
-  max-width: 100%;
+  max-width: 340px;
+  justify-self: center;
   height: auto;
   overflow: visible;
 }
@@ -439,7 +444,7 @@ code {
 .flow-svg .node text {
   fill: var(--ink);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 800;
   text-anchor: middle;
   dominant-baseline: middle;
@@ -453,7 +458,6 @@ code {
   fill: none;
   stroke-width: 2;
   stroke-linecap: round;
-  animation: flow 1.6s linear infinite;
 }
 
 .flow-svg .edge.pull {
@@ -465,42 +469,20 @@ code {
 .flow-svg .edge.seed {
   stroke: rgba(136, 255, 0, 0.45);
   stroke-dasharray: 3 9;
-  animation-duration: 2.4s;
 }
 
 .flow-svg .edge.peer {
   stroke: var(--forest);
   stroke-dasharray: 6 10;
   stroke-width: 2.4;
-  animation-duration: 1.1s;
   filter: drop-shadow(0 0 8px rgba(136, 255, 0, 0.5));
 }
 
-.flow-svg .edge.peer.back {
-  stroke: var(--aqua);
-  stroke-dasharray: 2 14;
-  animation-direction: reverse;
-  filter: none;
-}
-
-.flow-svg .load {
-  fill: none;
-  stroke: var(--coral);
-  stroke-width: 2;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: pulse 2s ease-out infinite;
-}
-
-.flow-svg .load.late {
-  animation-delay: 1s;
-}
-
-.flow-svg .piece {
+.flow-svg .node .piece {
   fill: var(--forest);
 }
 
-.flow-svg .piece.empty {
+.flow-svg .node .piece.empty {
   fill: rgba(136, 255, 0, 0.18);
 }
 
@@ -518,23 +500,6 @@ code {
   letter-spacing: 0.12em;
   text-anchor: middle;
   dominant-baseline: middle;
-}
-
-@keyframes flow {
-  to {
-    stroke-dashoffset: -32;
-  }
-}
-
-@keyframes pulse {
-  0% {
-    transform: scale(0.6);
-    opacity: 0.55;
-  }
-  100% {
-    transform: scale(2.6);
-    opacity: 0;
-  }
 }
 
 .benefits-grid {

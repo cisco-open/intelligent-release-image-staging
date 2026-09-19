@@ -11,7 +11,7 @@ stores transfer reports, or decides when a plan counts as seeding. The manual
 states the resulting behavior as fact; this page argues for it, so a later
 change can tell which parts were a deliberate trade-off and which were an
 oversight. It assumes you have read
-[What telemetry measures and proves](../zensical/architecture/telemetry-model.md)
+[Monitor transfers and reports](../zensical/user-guide/monitoring.md)
 and [Telemetry signals](../zensical/reference/telemetry-signals.md) first.
 
 ## Building and testing the download-duration metric
@@ -63,7 +63,7 @@ verified.
 Recovering a lost lifecycle store can rebuild a plan's record with a
 different `seeding_started_at` than the one it originally produced, under the
 same `event.id`. See
-[What telemetry measures and proves](../zensical/architecture/telemetry-model.md)
+[Monitor transfers and reports](../zensical/user-guide/monitoring.md)
 for what an operator sees on such a record.
 
 Two of the three inputs to that timestamp are durable outside the lifecycle
@@ -137,7 +137,7 @@ itself as evidence of a bug.
 
 ## Related
 
-- [What telemetry measures and proves](../zensical/architecture/telemetry-model.md)
+- [Monitor transfers and reports](../zensical/user-guide/monitoring.md)
 - [Telemetry signals](../zensical/reference/telemetry-signals.md)
 - [Monitor transfers and device reports](../zensical/user-guide/monitoring.md)
 - [Building the device image, IOx wrappers, IOS-XR rpm and aria2c](device-packages.md)

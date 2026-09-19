@@ -22,8 +22,9 @@ Run one rotation at a time.
 The Console reaches server state over the management API on internal HTTPS port
 9443. Both sides read the credential from mounted files, and each rereads its
 file on every request, so rotating the token needs no container restart on
-Docker (Kubernetes still needs a rollout restart to pick up the new Secret
-projection). Do not start another rotation until the current one is complete.
+Docker. Kubernetes updates mounted Secret files asynchronously; the rollouts
+below force every pod to pick up the new values. Complete one rotation before
+starting the next.
 
 !!! warning "Keep the credential in files"
     Never put it in `server/.env`, a Compose `environment:` entry, a URL, or a
@@ -134,11 +135,19 @@ the server. New authority or new self-signed certificate:
 
 ### On Kubernetes
 
-1. Recreate the `iris-management-tls` Secret with the new pair. It needs DNS
-   subject names for `iris-server-api`, `iris-server-api.iris`, and
+1. Add the new issuing authority to `iris-management-ca`, retaining the old
+   authority. Restart `deployment/iris-console` and wait for its rollout.
+2. Replace the pair in `iris-management-tls`. The certificate needs DNS subject
+   names for `iris-server-api`, `iris-server-api.iris`, and
    `iris-server-api.iris.svc`.
-2. Recreate the `iris-management-ca` ConfigMap with the new issuing authority,
-   keeping the old one until the swap is confirmed.
+3. Restart `deployment/iris-seed-server` and wait for its rollout. The management
+   listener loads its certificate when it starts.
+4. Open **Devices** in the Console. Once it loads, remove the old authority from
+   `iris-management-ca`, then restart the Console and wait for its rollout.
+
+Run these rollouts with `kubectl -n iris rollout restart deployment/<name>`
+and wait with `kubectl -n iris rollout status deployment/<name>`. A replacement
+signed by the existing authority needs only the server steps.
 
 !!! warning "The management private key goes only to the server"
     The Console receives the issuing authority alone.
@@ -152,13 +161,18 @@ encrypted private key asks for its passphrase and is stored encrypted at rest.
 Drop authority files to trust them, or pick a bundle source to trust a whole
 public bundle, which appears as one row you can remove again.
 
-To replace the deployment default, replace the Console host's `tls.crt` and
-`tls.key` together and restart the Console, or on Kubernetes recreate the
-`iris-console-tls` Secret. See [Find your way around the Console](../user-guide/console.md).
+For separate Docker hosts, replace the Console host's default `tls.crt` and
+`tls.key` together and restart the Console. On Kubernetes, replace
+`iris-console-tls`, restart `deployment/iris-console` and wait for its rollout.
+The one-host stack obtains its default browser identity from the server; use
+the Settings override to replace the browser certificate there.
+See [Find your way around the Console](../user-guide/console.md).
 
-!!! warning "Keep the browser key on the Console"
-    That key never belongs in the server pod, the server volume, a ConfigMap,
-    or an image.
+!!! warning "Protect browser private keys"
+    Provisioned default keys for separate hosts and Kubernetes belong only on
+    the Console. A Settings override is stored as `gui-key.pem.age` on the
+    server and delivered to the Console's memory-backed runtime over
+    authenticated HTTPS. Never put plaintext keys in a ConfigMap or an image.
 
 ## Rotate the seeder announce credential
 

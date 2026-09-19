@@ -16,6 +16,8 @@ import re
 import tomllib
 from pathlib import Path, PurePosixPath
 
+import pytest
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DOCS = os.path.join(REPO, "docs", "zensical")
 
@@ -325,7 +327,7 @@ def test_entry_points_stay_short_and_task_oriented():
         readme = fh.read()
     assert "## Where to start" in index
     assert "## Start here" in readme
-    assert len(index.splitlines()) <= 80
+    assert len(index.splitlines()) <= 60
     assert len(readme.splitlines()) <= 60
 
 
@@ -414,11 +416,11 @@ def test_docs_pages_follow_the_writing_rules():
     for page in sorted(_docs_pages(DOCS)):
         text = Path(DOCS, page).read_text(encoding="utf-8")
         lines = text.splitlines()
-        if len(lines) > 400:
+        if len(lines) > 300:
             problems.append("%s: %d lines; split the page by moment of use"
                             % (page, len(lines)))
-        if PurePosixPath(page).name == "index.md" and len(lines) >= 80:
-            problems.append("%s: %d lines; a landing page stays under 80"
+        if PurePosixPath(page).name == "index.md" and len(lines) > 60:
+            problems.append("%s: %d lines; a landing page stays at 60 or fewer"
                             % (page, len(lines)))
         prose = _without_code_blocks(text)
         for pattern, reason in _WRITING_RULES:
@@ -445,6 +447,17 @@ def test_writing_rule_check_reads_prose_and_skips_code(tmp_path):
                          for hit in pattern.finditer(prose))
     assert found == ["loud.md:Phase 1", "loud.md:Issue #", "loud.md:10.1.2.3",
                      "loud.md:\u2014", "loud.md:robust", "loud.md:seamless"]
+
+
+@pytest.mark.parametrize("name,limit", [("topic.md", 300), ("index.md", 60)])
+def test_writing_rule_page_length_boundaries(tmp_path, monkeypatch, name, limit):
+    monkeypatch.setitem(globals(), "DOCS", str(tmp_path))
+    page = tmp_path / name
+    page.write_text("A line.\n" * limit)
+    test_docs_pages_follow_the_writing_rules()
+    page.write_text("A line.\n" * (limit + 1))
+    with pytest.raises(AssertionError, match="lines;"):
+        test_docs_pages_follow_the_writing_rules()
 
 
 # ---------------------------------------------------------------------------
@@ -1772,8 +1785,11 @@ def test_docs_phase2_verbs_targets_and_the_stage_only_invariant():
     workflows = _page("user-guide/scheduling.md")
     _assert_section_terms(
         workflows, "Scheduling",
-        ("assign", "onboard", "stage", "never", "install"),
-        "the two schedule verbs must be stated with the stage-only limit")
+        ("assign", "onboard", "stage", "agent"),
+        "the two schedule verbs must distinguish image staging from agent deployment")
+    _require("user-guide/index.md", [
+        "IRIS stages images.", "never installs, activates, reloads",
+        "variables"])
     _assert_unit(workflows, ("target", "filter", "device_ids", "and"),
                  "named devices narrow the filter rather than widening it")
     _assert_unit(workflows, ("late", "resolved", "fire"),

@@ -11,6 +11,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Tighten the website's transfer comparison into smaller, static diagrams.
+  Correct installation trust setup, deployment prerequisites, credential
+  custody, certificate rotation, API retry limits and staging checks against
+  the implementation; add executable documentation regression tests.
+- Refuse administrator resets when the decrypted secret store is unavailable,
+  preserving existing encrypted credentials. Document resets through the
+  running server rather than a fresh one-shot container.
+- Fail closed before IOx SSH/SCP when a configured known-hosts file is missing,
+  unreadable, empty or not a regular file. Rebuild the Guest Shell bundle,
+  both IOx packages and the IOS-XR RPM before rolling out this shared-agent change.
+- Collect verified external aria2c hand-ins into the architecture-specific
+  deliverables directory, including `--no-install` runs.
+- Preserve legacy package-build and instruction-recovery deep links when their
+  sections moved to separate guide pages.
 - Rewrite the documentation site into guides: an Overview, a short
   Architecture Guide, an Installation Guide, an Administration Guide, a User
   Guide and a Reference, each in its own folder with a landing page and short
@@ -28,9 +42,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   `deliverables/aria2c-x86_64`, `deliverables/aria2c-aarch64`) so a fresh
   clone or release archive is complete offline. The scripts verify them
   against `tools/aria2c.sha256` and fail closed on a mismatch; the one-host
-  start script re-verifies them itself, and `get-aria2c.sh --for-platforms`
+  start script invokes these builds, and `get-aria2c.sh --for-platforms`
   restores every architecture in one command only when a file was deleted.
-  The release archive ships the clients beside their corresponding source.
+  The release archive includes local patches and build scripts; upstream and
+  linked dependency source distribution remains a separate release requirement.
 - Reject duplicate directly routed application addresses and overlapping
   dedicated application subnets in inventory, while retaining intentional
   shared in-band networks and private router-NAT address reuse.

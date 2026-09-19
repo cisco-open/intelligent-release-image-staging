@@ -12,9 +12,6 @@ Read this guide once, in order. At the end you have a running server and Console
     IRIS stages images. It never installs, activates, reloads, or changes boot
     variables. See the [Overview](../index.md).
 
-!!! note
-    See the [Overview](../index.md) for what IRIS stages.
-
 ## Choose a layout
 
 | Layout | Where the Console runs | Deployment files |
@@ -23,7 +20,8 @@ Read this guide once, in order. At the end you have a running server and Console
 | Docker on separate hosts | On its own Docker host, reaching the server over private HTTPS 9443 with a file-mounted token and verified management TLS. | `server/docker-compose.server.yml` with `server/server.env`; `server/docker-compose.console.yml` with `server/console.env` |
 | Kubernetes | In a second Deployment, on an internal 9443 Service that a NetworkPolicy restricts. | `kubernetes/` manifests |
 
-Layouts cannot be mixed: the Console must reach port 9443, which only the same host or the same cluster exposes.
+Choose one layout and use its environment files and deployment commands throughout.
+On separate Docker hosts, the server publishes private port 9443 for the Console.
 
 ## Read these pages in order
 

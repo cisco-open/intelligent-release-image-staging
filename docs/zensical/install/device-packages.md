@@ -101,18 +101,17 @@ Put the two approved public root files under `/data/config/instr/roots.d`. See
 
 Use this procedure for every layout. Only the destination changes.
 
-**1. Collect the binaries and check their architectures**, in the same shell:
+**1. Select both device architectures and prepare ioxclient**, in the same shell:
 
 ```bash
 export IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64
 tools/get-ioxclient.sh
 ```
 
-IRIS ships a tested `aria2c` client for each architecture, and the script
-verifies every one it installs against `tools/aria2c.sha256` before it keeps
-it. One run puts the amd64 client in `bin/` and every other architecture in
-`deliverables/`, so `file` reports x86-64 for `bin/aria2c` and ARM aarch64 for
-the second file.
+IRIS includes the tested clients at `bin/aria2c` for amd64 and
+`deliverables/aria2c-aarch64` for ARM64. The package builders verify them
+against `tools/aria2c.sha256`. `get-ioxclient.sh` prepares Cisco's packaging
+tool, not the device clients.
 
 **2. Set the build environment and build the ARM wrapper** into a private
 directory:

@@ -8,14 +8,13 @@ SPDX-License-Identifier: Apache-2.0
 
 Send IRIS telemetry to Splunk Enterprise or Splunk Cloud Platform through an OpenTelemetry Collector. Every hostname, address, and path below is an example.
 
-Two paths feed Splunk, and you set up both. IRIS pushes log records and metrics
-to collector port `4318` with OTLP, the OpenTelemetry Protocol. The collector
-scrapes IRIS port `9101` for the peer and origin-byte families the views read.
+Configure both paths: IRIS sends logs and metrics to collector port `4318`
+over OTLP (OpenTelemetry Protocol); the collector scrapes IRIS port `9101`
+for the peer and origin-byte metrics the views read.
 
 ## Indexes and HEC token
 
-1. In **Settings → Indexes**, create both indexes and let dashboard users
-   search them.
+1. In **Settings → Indexes**, create both indexes and grant dashboard users search access.
 
     | Index | Data type | Source | Sourcetype |
     | --- | --- | --- | --- |
@@ -72,8 +71,7 @@ the HEC endpoint is already trusted by the collector's system roots, omit its
    observability token and the OTLP header file. Copy the raw token to
    `secrets/iris-observability-token`; the header file holds
    `Authorization=Bearer ` and the value in `secrets/collector-token`.
-3. Give the mounted files to the account the collector runs as, user and group
-   id `10001`.
+3. Give the mounted files to the collector account, user and group id `10001`.
 
     ```bash
     sudo chown -R 10001:10001 secrets tls
@@ -220,13 +218,11 @@ and [filter processor](https://github.com/open-telemetry/opentelemetry-collector
           exporters: [splunk_hec/iris_metrics]
     ```
 
-    A filter condition names the records to **drop**. These two keep the IRIS
-    logs and both metric naming styles, dotted and underscored. On a shared
-    collector, merge these components into its configuration.
+    Filters name records to **drop**; these keep IRIS logs and dotted or
+    underscored metric names. Merge these components into a shared collector.
 
-    The `sending_queue` above is held in memory: it does not survive the
-    collector container being replaced. Use the collector's persistent queue
-    support if you need that additional protection.
+    The `sending_queue` is in memory. Use persistent queue support to retain
+    queued data when the collector is replaced.
 
 4. Validate the configuration and start the collector.
 
@@ -236,16 +232,13 @@ and [filter processor](https://github.com/open-telemetry/opentelemetry-collector
     docker compose logs --tail 50 otel-collector
     ```
 
-    The logs show the receiver listening and the scrape job running.
-
 ## Turn on export in IRIS
 
 Turn OTLP export on in the server deployment file and point it at the collector base URL, as [Export telemetry](telemetry-export.md) describes.
 
 ## Verify delivery
 
-1. On the collector host, read its own counters. Accepted and sent counts rise
-   while IRIS exports.
+1. Read the collector counters. Accepted and sent counts rise while IRIS exports.
 
     ```bash
     curl --fail --silent --show-error http://127.0.0.1:8888/metrics \
@@ -270,8 +263,7 @@ Turn OTLP export on in the server deployment file and point it at the collector 
 
 ## Import the views
 
-IRIS ships the swarm view and the tracker and transfer-health view. Both read
-`iris_logs` and `iris_metrics`; edit their searches if you chose other names.
+Both supplied views read `iris_logs` and `iris_metrics`; edit their searches if you chose other names.
 
 1. Download [splunk-iris-swarm.xml](../dashboards/splunk-iris-swarm.xml) and
    [splunk-iris-rollout.xml](../dashboards/splunk-iris-rollout.xml).
@@ -297,8 +289,7 @@ That keeps the saved time picker and device filter.
 | HEC reports an incorrect index | An index is missing or not allowed on the token | Create both indexes and allow them on the token. `iris_metrics` must be a Metrics index. |
 | Log searches return rows, metric panels stay empty | The scrape path is not delivering | Check the `/metrics` scrape and the `metrics/iris9101` pipeline. OTLP metrics alone do not supply every family the views use. |
 
-For export health, read the telemetry status in the Console and the collector
-logs. For panels that read oddly, see [Troubleshoot: symptoms and first steps](troubleshooting.md).
+Check export health in Console telemetry status and collector logs. For incorrect panels, see [Troubleshoot: symptoms and first steps](troubleshooting.md).
 
 ## Related
 

@@ -13,8 +13,7 @@ compilation*.
 
 The source and the patches are described in
 [`../aria2c-patches/README.md`](../aria2c-patches/README.md). **The scripts are
-these two files.** Together the four items are the complete corresponding
-source:
+these two files.** The rebuild inputs are:
 
 | Item | Where |
 | --- | --- |
@@ -23,20 +22,21 @@ source:
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
 
-## The binaries are in this repository, next to this source
+## What the repository distributes
 
 The tested clients are **committed**: `bin/aria2c` and
 `deliverables/aria2c-x86_64` (the same bytes, the x86_64 client the server
 image copies) and `deliverables/aria2c-aarch64` (what the IOx and IOS-XR
-package builders read). A clone or an unpacked release therefore carries the
-binary and its complete corresponding source together — the upstream commit
-named in [`../aria2c-patches/README.md`](../aria2c-patches/README.md), the
-ordered patches there, and the two build scripts here — which is how GPLv2
-section 3 is discharged for what we redistribute. `tools/aria2c.sha256` names
+package builders read). A clone or an unpacked release carries the binaries,
+ordered local patches, and build scripts. The upstream commit named in
+[`../aria2c-patches/README.md`](../aria2c-patches/README.md) and the linked
+dependency sources are external inputs, not bundled source trees.
+`tools/aria2c.sha256` names
 the aria2-next version, the source pin, the patch list and the sha256 of each
-committed binary, so it is unambiguous which source produced them. Never ship
-the binaries without `tools/aria2c-patches/` and this directory:
-`tools/make-release.sh` ships all three together for exactly that reason.
+committed binary. `tools/make-release.sh` ships the binaries, patches, and
+scripts together. Maintainers must also arrange the corresponding-source
+distribution for published binaries; the provenance links alone do not make
+the archive a complete source bundle.
 
 ## IRIS does not run this
 
@@ -77,9 +77,10 @@ gh release create aria2c-<version>-p<patches> \
   deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256
 ```
 
-Publishing a binary carries the GPLv2 section 3 obligation, so the notes must
-name the exact commit whose `tools/aria2c-patches/` and `tools/aria2c-build/`
-produced it, or attach that source alongside. Update the default
+Before publishing a binary, arrange its corresponding-source distribution,
+including upstream source, local patches, build scripts, and applicable linked
+dependency sources. Have the distribution method reviewed against the license;
+release notes naming a commit are provenance, not a source bundle. Update the default
 `ARIA2C_RELEASE_TAG` in `tools/get-aria2c.sh` in the same change that adopts
 the new checksums, or the script will keep fetching the previous build.
 

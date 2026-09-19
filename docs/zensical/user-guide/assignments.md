@@ -8,10 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 
 ## What this is for
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See [the Overview](../index.md).
-
 An assignment is the list of images you want one device to
 [stage](../reference/glossary.md). To assign to many devices at once, select
 them on the Devices table and use **Assign images**; see
