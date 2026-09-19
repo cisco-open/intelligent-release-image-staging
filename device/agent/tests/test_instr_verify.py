@@ -25,6 +25,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 
 import agent_config
 import catalog_client
@@ -83,7 +84,7 @@ def make_envelope(header=None, role=None, part=None, key=KEY,
     role_bytes = role if isinstance(role, bytes) else canonical(role)
     plain = canonical(part) if plaintext is None else plaintext
     kid = hashlib.sha256(key).hexdigest()
-    hdr = {"v": 1, "device_id": "sw1", "platform": "guestshell",
+    hdr = {"v": 2, "device_id": "sw1", "platform": "guestshell",
            "epoch": NOW - 1, "instr_serial": 7, "policy_revision": 3,
            "issued_at": NOW, "expires_at": NOW + 600, "server_time": NOW,
            "verify_level": "sig", "key_id": kid, "role": "default",
@@ -94,22 +95,19 @@ def make_envelope(header=None, role=None, part=None, key=KEY,
     hdr.update(header or {})
     header_bytes = canonical(hdr)
     context = pae(hdr["device_id"].encode("ascii"), kid.encode("ascii"))
-    material = kdf(key, b"iris-instr-v1", context, 96)
-    nonce = kdf(material[64:], b"iris-instr-nonce-v1", pae(
+    material = kdf(key, b"iris-instr-aes-siv-v2", context, 96)
+    nonce = kdf(material[64:], b"iris-instr-nonce-v2", pae(
         hdr["device_id"].encode("ascii"), kid.encode("ascii"),
         struct.pack(">Q", max(0, int(hdr["epoch"]))),
         struct.pack(">Q", max(0, int(hdr["instr_serial"])))), 16)
-    stream = b"".join(hmac.new(
-        material[:32], nonce + struct.pack(">I", i), hashlib.sha256).digest()
-        for i in range(1, (len(plain) + 31) // 32 + 1))
-    ciphertext = bytes(a ^ b for a, b in zip(plain, stream))
-    tag = hmac.new(material[32:64], pae(header_bytes, role_bytes, signature,
-                                      nonce, ciphertext), hashlib.sha256).digest()
+    sealed = AESSIV(material[:64]).encrypt(
+        plain, [pae(b"IRIS-INSTR/2", header_bytes, role_bytes, signature, nonce)])
+    tag, ciphertext = sealed[:16], sealed[16:]
     return frame((header_bytes, role_bytes, signature, nonce, ciphertext, tag))
 
 
 def frame(parts):
-    return b"IRIS-INSTR/1\n" + b"\n".join(
+    return b"IRIS-INSTR/2\n" + b"\n".join(
         base64.b64encode(item) for item in parts) + b"\n"
 
 
@@ -179,7 +177,7 @@ def test_independent_envelope_round_trip_preserves_exact_signed_bytes(instr):
 def test_verification_order_short_circuits_before_mac_and_decryption(instr, monkeypatch):
     raw = make_envelope(plaintext=b"not-json")
     parts = unframe(raw)
-    parts[-1] = b"x" * 32
+    parts[-1] = b"x" * 16
     verifier = AcceptVerifier()
     # Foreign audience wins even when both authentication and plaintext are bad.
     cfg = config()
@@ -188,17 +186,15 @@ def test_verification_order_short_circuits_before_mac_and_decryption(instr, monk
     assert verifier.calls == []
     calls = []
     original = hmac.compare_digest
-    original_new = hmac.new
     decrypted_blocks = []
+    original_open = instr.instruction_aead.open_sealed
 
-    def record_hmac(key, msg=None, digestmod=None):
-        # The specified XOR stream uses nonce(16) || counter(4). These are
-        # distinct from both SP800-108 derivation and the length-framed MAC.
-        if isinstance(msg, bytes) and len(msg) == 20:
-            decrypted_blocks.append(msg)
-        return original_new(key, msg, digestmod)
+    def record_open(*args):
+        value = original_open(*args)
+        decrypted_blocks.append(value)
+        return value
 
-    monkeypatch.setattr(hmac, "new", record_hmac)
+    monkeypatch.setattr(instr.instruction_aead, "open_sealed", record_open)
 
     def record_compare(left, right):
         calls.append("mac")
@@ -225,7 +221,7 @@ def test_verification_order_short_circuits_before_mac_and_decryption(instr, monk
 
 
 @pytest.mark.parametrize("where,field,value", [
-    ("header", "extra", 1), ("header", "v", True), ("header", "v", 2),
+    ("header", "extra", 1), ("header", "v", True), ("header", "v", 3),
     ("header", "instr_serial", True), ("header", "instr_serial", -1),
     ("header", "instr_serial", (1 << 63)), ("header", "epoch", NOW + 1),
     ("header", "policy_revision", 1.0), ("header", "server_time", NOW + 1),
@@ -320,7 +316,7 @@ def test_current_previous_exact_ids_and_unknown_vs_bad_mac(instr):
     error = reject(instr, make_envelope(key=unknown), "key_rejected", cfg=cfg)
     assert error.reason == "unknown_key"
     parts = unframe(make_envelope())
-    parts[-1] = b"z" * 32
+    parts[-1] = b"z" * 16
     error = reject(instr, frame(parts), "key_rejected", cfg=cfg)
     assert error.reason == "bad_mac"
     cfg["instr_key"] = canonical({"key_id": KEY_ID, "value": previous.hex()}).decode()
@@ -365,7 +361,7 @@ def test_verification_failure_never_advances_clock_or_replay_floor(instr):
     instr.observe_clock(state, "instruction", NOW, 10, BOOT)
     before = copy.deepcopy(state)
     parts = unframe(make_envelope())
-    parts[-1] = b"x" * 32
+    parts[-1] = b"x" * 16
     reject(instr, frame(parts), state=state, date=NOW + 100, mono=110)
     assert state == before
     result = verify(instr, state=state, date=NOW + 100, mono=110)
@@ -390,7 +386,7 @@ def test_equal_replay_requires_identical_bytes_and_pending_reset_is_transactiona
         reject(instr, low, state=state)
     instr.note_hint(state, hint, authenticated=True)
     parts = unframe(low)
-    parts[-1] = b"x" * 32
+    parts[-1] = b"x" * 16
     reject(instr, frame(parts), state=state)
     assert verify(instr, high, state=state)["envelope"] == high
     candidate = verify(instr, low, state=state)
@@ -1282,7 +1278,7 @@ def test_unknown_key_refresh_is_latched_but_known_bad_mac_never_refreshes(instr,
         assert (result["instr_state"], result["instr_reason"]) == ("key_rejected", "unknown_key")
     assert len(catalog.refreshes) == 1
     parts = unframe(make_envelope())
-    parts[-1] = b"x" * 32
+    parts[-1] = b"x" * 16
     catalog.response = (200, frame(parts), {"Date": "Mon, 07 Sep 2026 12:00:00 GMT"})
     result = run_step(instr, tmp_path, catalog, state)
     assert (result["instr_state"], result["instr_reason"]) == ("key_rejected", "bad_mac")
@@ -1565,7 +1561,7 @@ def test_task19_accepted_identity_never_comes_from_failed_candidate(
     candidate = make_envelope(header={"instr_serial": 8, "policy_revision": 900})
     if damage == "rejected":
         parts = unframe(candidate)
-        parts[-1] = b"x" * 32
+        parts[-1] = b"x" * 16
         candidate = frame(parts)
     elif damage == "promotion":
         def fail(*_args, **_kwargs):

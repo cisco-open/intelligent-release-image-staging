@@ -210,7 +210,7 @@ def test_stamp_seals_deterministically_without_persisting_device_ciphertext(
         role_body, signature, stamp["part"])
     for candidate in Path(paths.directory).rglob("*"):
         if candidate.is_file():
-            assert b"IRIS-INSTR/1" not in candidate.read_bytes()
+            assert b"IRIS-INSTR/2" not in candidate.read_bytes()
     assert b"device-1" not in artifact.read_bytes()
     assert _record()["value"].encode() not in artifact.read_bytes()
 

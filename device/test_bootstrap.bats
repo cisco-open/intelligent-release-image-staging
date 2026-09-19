@@ -49,6 +49,10 @@ agent/xr_deps.py
 agent/runtime_verifier.py
 agent/ssh-keygen
 agent/ssh-keygen.LICENCE
+agent/instruction_aead.py
+agent/runtime_crypto.py
+agent/iris-aead
+agent/iris-aead.LICENCE
 aria2c
 bootstrap.sh
 guestshell-start.sh

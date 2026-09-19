@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import instruction_aead
 
 
 class InstructionError(ValueError):
@@ -40,7 +41,7 @@ class _Invalid(ValueError):
     pass
 
 
-INSTR_MAGIC = b"IRIS-INSTR/1"
+INSTR_MAGIC = b"IRIS-INSTR/2"
 
 ROLE_MAGIC = b"IRIS-ROLE/1"
 
@@ -187,30 +188,7 @@ def derive_nonce(k_nonce, device_id, key_id, epoch, instr_serial):
     _i63(instr_serial, "instr_serial")
     context = pae(device_id.encode("utf-8"), key_id.encode("ascii"),
                   struct.pack(">Q", epoch), struct.pack(">Q", instr_serial))
-    return sp800_108(k_nonce, b"iris-instr-nonce-v1", context, 16)
-
-def crypt(k_enc, nonce, data):
-    if not isinstance(k_enc, bytes) or len(k_enc) != 32:
-        raise _Invalid("encryption key must be 32 bytes")
-    if not isinstance(nonce, bytes) or len(nonce) != 16:
-        raise _Invalid("nonce must be 16 bytes")
-    if not isinstance(data, bytes) or len(data) > MAX_PLAINTEXT:
-        raise _Invalid("plaintext is too large")
-    out = bytearray(len(data))
-    for offset in range(0, len(data), 32):
-        counter = offset // 32 + 1
-        block = hmac.new(k_enc, nonce + struct.pack(">I", counter),
-                         hashlib.sha256).digest()
-        chunk = data[offset:offset + 32]
-        for index, value in enumerate(chunk):
-            out[offset + index] = value ^ block[index]
-    return bytes(out)
-
-def compute_tag(k_mac, header, role_body, signature, nonce, ciphertext):
-    if not isinstance(k_mac, bytes) or len(k_mac) != 32:
-        raise _Invalid("MAC key must be 32 bytes")
-    return hmac.new(k_mac, pae(header, role_body, signature, nonce,
-                               ciphertext), hashlib.sha256).digest()
+    return sp800_108(k_nonce, b"iris-instr-nonce-v2", context, 16)
 
 def _b64(value):
     return base64.b64encode(value)
@@ -376,7 +354,7 @@ def validate_header(value):
     )
     _closed(value, required, ("info_hash",))
     if isinstance(value["v"], bool) or not isinstance(value["v"], int) \
-            or value["v"] != 1:
+            or value["v"] != 2:
         raise _Invalid("invalid instruction version")
     _device_id(value["device_id"])
     if not isinstance(value["platform"], str) \
@@ -410,7 +388,7 @@ def validate_header(value):
     return value
 
 
-LKG_LABEL = b"iris-lkg-v1"
+LKG_LABEL = b"iris-lkg-aes-siv-v2"
 KEYLIST_MAX = 128 * 1024
 KRL_MAX = 80 * 1024
 KEYLIST_STATE_SCHEMA = "iris-device-instruction-keylist-state/v1"
@@ -558,7 +536,7 @@ def _select_key(cfg, key_id):
     raise InstructionError("key_rejected", "unknown_key")
 
 
-def _material(key, header, label=b"iris-instr-v1"):
+def _material(key, header, label=b"iris-instr-aes-siv-v2"):
     context = pae(header["device_id"].encode("utf-8"), header["key_id"].encode("ascii"))
     return sp800_108(key, label, context, 96)
 
@@ -572,7 +550,7 @@ def _components(raw, magic=INSTR_MAGIC):
     if len(lines) != 7 or lines[0] != magic or any(not line for line in lines):
         raise _Invalid("invalid framing")
     parts = tuple(_unb64(line) for line in lines[1:])
-    if not parts[2] or len(parts[3]) != 16 or len(parts[5]) != 32:
+    if not parts[2] or len(parts[3]) != 16 or len(parts[5]) != 16:
         raise _Invalid("invalid component")
     return parts
 
@@ -606,12 +584,17 @@ def _authenticate(parts, header, key, label):
     material = _material(key, header, label)
     expected_nonce = derive_nonce(material[64:], header["device_id"],
                                   header["key_id"], header["epoch"], header["instr_serial"])
-    expected_tag = compute_tag(material[32:64], hb, rb, signature, nonce, ciphertext)
-    if not hmac.compare_digest(nonce, expected_nonce) or not hmac.compare_digest(tag, expected_tag):
+    if not hmac.compare_digest(nonce, expected_nonce):
         raise InstructionError("key_rejected", "bad_mac")
     if len(ciphertext) != header["ct_len"]:
         raise _Invalid("ciphertext length mismatch")
-    part = validate_part(parse_json(crypt(material[:32], nonce, ciphertext)),
+    magic = b"IRIS-LKG/2" if label == LKG_LABEL else INSTR_MAGIC
+    try:
+        plaintext = instruction_aead.open_sealed(
+            material[:64], pae(magic, hb, rb, signature, nonce), ciphertext, tag)
+    except ValueError:
+        raise InstructionError("key_rejected", "bad_mac") from None
+    part = validate_part(parse_json(plaintext),
                          issued_at=header["issued_at"], expires_at=header["expires_at"])
     if part["peers"]["allowed_expires_at"] != header["allowed_expires_at"]:
         raise _Invalid("peer expiry mismatch")
@@ -627,7 +610,10 @@ def _replay(header, digest, state):
     if floor is not None:
         if pair < floor and pair != _pair(bag.get("pending_reset")):
             raise InstructionError("rollback_rejected")
-        if pair == floor and digest != bag.get("envelope_digest"):
+        # A one-way format upgrade can reseal the same authenticated stamp.
+        # Once v2 is accepted, equal-serial byte identity remains mandatory.
+        if (pair == floor and digest != bag.get("envelope_digest")
+                and header["v"] <= bag.get("v_floor", 1)):
             raise InstructionError("tamper_rejected")
 
 
@@ -643,7 +629,7 @@ def verify_envelope(raw, cfg, state, authenticated_date, monotonic_now, boot_id,
                                boot_id=boot_id):
             raise InstructionError("tamper_rejected")
         key = _select_key(cfg, header["key_id"])
-        part = _authenticate(parts, header, key, b"iris-instr-v1")
+        part = _authenticate(parts, header, key, b"iris-instr-aes-siv-v2")
         role = validate_role_body(parse_json(rb))
         _identity(header, role, rb)
         provisional = copy.deepcopy(state)
@@ -1300,11 +1286,12 @@ class LKGStore:
             material = _material(key, header, LKG_LABEL)
             nonce = derive_nonce(material[64:], header["device_id"], header["key_id"],
                                  header["epoch"], header["instr_serial"])
-            ciphertext = crypt(material[:32], nonce, plaintext)
+            ciphertext, tag = instruction_aead.seal(
+                material[:64], pae(b"IRIS-LKG/2", verified["header_bytes"],
+                                    verified["role_body"], verified["signature"], nonce), plaintext)
             components = (verified["header_bytes"], verified["role_body"],
                           verified["signature"], nonce, ciphertext)
-            tag = compute_tag(material[32:64], *components)
-            raw = b"IRIS-LKG/1\n" + b"\n".join(_b64(item) for item in components + (tag,)) + b"\n"
+            raw = b"IRIS-LKG/2\n" + b"\n".join(_b64(item) for item in components + (tag,)) + b"\n"
             if len(raw) > INSTR_RESPONSE_MAX:
                 raise InstructionError("oversize")
             _atomic(self.path, raw)
@@ -1321,7 +1308,7 @@ class LKGStore:
             raw = _read_bytes(self.path, INSTR_RESPONSE_MAX)
             if raw is None:
                 raise InstructionError("lkg_unreadable")
-            parts = _components(raw, b"IRIS-LKG/1")
+            parts = _components(raw, b"IRIS-LKG/2")
             hb, rb, signature = parts[:3]
             header = validate_header(parse_json(hb))
             if header["device_id"] != device_id or header["platform"] != platform:

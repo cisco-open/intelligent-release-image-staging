@@ -9,7 +9,8 @@ The project has a Python test suite (pytest) and a shell test suite (bats). Run
 both before submitting a change.
 
 Use Python 3.12 with the dependencies in `requirements-dev.txt`: `pytest`,
-`PyYAML`, and the OpenAPI 3.2 validator. CI installs the same file. `bats`,
+`PyYAML`, the independent `cryptography` AES-SIV test oracle, and the OpenAPI
+3.2 validator. CI installs the same file. `bats`,
 `mktorrent` and the `age` CLI (which carries `age-keygen`) come from your
 package manager. A handful of tests drive those two binaries for real instead
 of stubbing them and skip themselves when the binary is absent, so install
@@ -17,12 +18,16 @@ both to get the result CI reports. OpenSSH's `ssh-keygen` is assumed present.
 
 ```
 python3 -m pip install -r requirements-dev.txt
+IRIS_CRYPTO_ARCHES=amd64 bash tools/build-instruction-crypto.sh  # arm64 on an ARM host
 python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ lab/tests/ device/test_verify_image.py tools/test_api_exercise.py -q
 bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
 
-Both commands are expected to be fully green on a clean checkout, with no
-host provisioning and no running IRIS stack.
+Build the static instruction helper once with Docker/BuildKit (network access
+is needed for pinned build inputs). The test commands then run without a live
+IRIS stack or network access. A missing helper fails the crypto tests rather
+than silently skipping them. To package both architectures, omit
+`IRIS_CRYPTO_ARCHES` from the build command.
 
 ### Console and Swagger browser checks
 

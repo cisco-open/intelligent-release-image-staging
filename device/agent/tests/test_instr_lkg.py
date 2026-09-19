@@ -90,7 +90,7 @@ def _verified(serial=7, device_id=DEVICE_ID, on_stale="keep",
         "server_time": NOW,
     }
     header = {
-        "v": 1,
+        "v": 2,
         "device_id": device_id,
         "platform": "guestshell",
         "epoch": NOW,
@@ -209,7 +209,7 @@ def test_lkg_preserves_public_components_and_locally_reseals_only_device_part(
     verifier = _Verifier()
     cfg = {"lkg_key": LKG_KEY.hex()}
     module, store, _cfg, writes = _store(tmp_path, cfg, verifier)
-    assert module.LKG_LABEL == b"iris-lkg-v1"
+    assert module.LKG_LABEL == b"iris-lkg-aes-siv-v2"
     first = _verified()
 
     store.store(first, first["device"], {})

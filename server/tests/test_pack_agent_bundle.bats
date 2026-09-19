@@ -29,6 +29,9 @@ setup() {
   export IRIS_SSH_KEYGEN="$TMP/ssh-keygen"
   _elf_fixture "$IRIS_SSH_KEYGEN" 62
   printf "license fixture\n" > "$TMP/ssh-keygen.LICENCE"
+  export IRIS_AEAD_HELPER="$TMP/iris-aead"
+  _elf_fixture "$IRIS_AEAD_HELPER" 62
+  printf "license fixture\n" > "$TMP/iris-aead.LICENCE"
   _elf_fixture "$TMP/aria2c" 62
   OUT="$TMP/iris-agent.tgz"
   ROOTS="$TMP/roots.d"; mkdir "$ROOTS"
@@ -146,10 +149,44 @@ pack() {
 @test "matching ARM binaries are packed without executing on builder" {
   _elf_fixture "$TMP/aria2c" 183
   _elf_fixture "$IRIS_SSH_KEYGEN" 183
+  _elf_fixture "$IRIS_AEAD_HELPER" 183
   run pack
   [ "$status" -eq 0 ]
   tar xOf "$OUT" agent/ssh-keygen > "$TMP/packed-verifier"
   cmp "$IRIS_SSH_KEYGEN" "$TMP/packed-verifier"
+}
+
+@test "AEAD helper and license are packed executable and byte-exact" {
+  pack
+  run tar tzvf "$OUT"
+  echo "$output" | grep -E '(-rwx|x).* agent/iris-aead$'
+  tar xOf "$OUT" agent/iris-aead > "$TMP/packed-aead"
+  tar xOf "$OUT" agent/iris-aead.LICENCE > "$TMP/packed-aead-license"
+  cmp "$IRIS_AEAD_HELPER" "$TMP/packed-aead"
+  cmp "$TMP/iris-aead.LICENCE" "$TMP/packed-aead-license"
+}
+
+@test "missing AEAD helper or license cannot replace a prior bundle" {
+  printf 'prior bundle\n' > "$OUT"
+  printf 'prior digest\n' > "$OUT.sha256"
+  rm "$IRIS_AEAD_HELPER"
+  run pack
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"AEAD helper"* ]]
+  _elf_fixture "$IRIS_AEAD_HELPER" 62
+  rm "$TMP/iris-aead.LICENCE"
+  run pack
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"iris-aead.LICENCE"* ]]
+  [ "$(cat "$OUT")" = "prior bundle" ]
+  [ "$(cat "$OUT.sha256")" = "prior digest" ]
+}
+
+@test "wrong-architecture AEAD helper is rejected before packaging" {
+  _elf_fixture "$IRIS_AEAD_HELPER" 183
+  run pack
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"wrong-architecture AEAD helper"* ]]
 }
 
 @test "malformed binaries cannot bypass ELF checks through explicit verifier" {

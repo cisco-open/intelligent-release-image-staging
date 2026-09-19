@@ -11,9 +11,10 @@ import ipaddress
 import json
 import re
 import struct
+import instruction_aead
 
 
-INSTR_MAGIC = b"IRIS-INSTR/1"
+INSTR_MAGIC = b"IRIS-INSTR/2"
 ROLE_MAGIC = b"IRIS-ROLE/1"
 INSTR_RESPONSE_MAX = 256 * 1024
 MAX_PLAINTEXT = INSTR_RESPONSE_MAX
@@ -160,8 +161,8 @@ def derive_keys(key, device_id, key_id):
     if instruction_key_id(key) != key_id:
         raise InstructionError("instruction key identity mismatch")
     context = pae(device_id.encode("utf-8"), key_id.encode("ascii"))
-    material = sp800_108(key, b"iris-instr-v1", context, 96)
-    return material[:32], material[32:64], material[64:]
+    material = sp800_108(key, b"iris-instr-aes-siv-v2", context, 96)
+    return material[:64], material[64:]
 
 
 def derive_nonce(k_nonce, device_id, key_id, epoch, instr_serial):
@@ -173,32 +174,7 @@ def derive_nonce(k_nonce, device_id, key_id, epoch, instr_serial):
     _i63(instr_serial, "instr_serial")
     context = pae(device_id.encode("utf-8"), key_id.encode("ascii"),
                   struct.pack(">Q", epoch), struct.pack(">Q", instr_serial))
-    return sp800_108(k_nonce, b"iris-instr-nonce-v1", context, 16)
-
-
-def crypt(k_enc, nonce, data):
-    if not isinstance(k_enc, bytes) or len(k_enc) != 32:
-        raise InstructionError("encryption key must be 32 bytes")
-    if not isinstance(nonce, bytes) or len(nonce) != 16:
-        raise InstructionError("nonce must be 16 bytes")
-    if not isinstance(data, bytes) or len(data) > MAX_PLAINTEXT:
-        raise InstructionError("plaintext is too large")
-    out = bytearray(len(data))
-    for offset in range(0, len(data), 32):
-        counter = offset // 32 + 1
-        block = hmac.new(k_enc, nonce + struct.pack(">I", counter),
-                         hashlib.sha256).digest()
-        chunk = data[offset:offset + 32]
-        for index, value in enumerate(chunk):
-            out[offset + index] = value ^ block[index]
-    return bytes(out)
-
-
-def compute_tag(k_mac, header, role_body, signature, nonce, ciphertext):
-    if not isinstance(k_mac, bytes) or len(k_mac) != 32:
-        raise InstructionError("MAC key must be 32 bytes")
-    return hmac.new(k_mac, pae(header, role_body, signature, nonce,
-                               ciphertext), hashlib.sha256).digest()
+    return sp800_108(k_nonce, b"iris-instr-nonce-v2", context, 16)
 
 
 def _b64(value):
@@ -240,7 +216,7 @@ def parse_envelope(framed):
     header, role_body, signature, nonce, ciphertext, tag = components
     validate_header(parse_json(header))
     validate_role_body(parse_json(role_body))
-    if not signature or len(nonce) != 16 or len(tag) != 32:
+    if not signature or len(nonce) != 16 or len(tag) != 16:
         raise InstructionError("invalid instruction component")
     return components
 
@@ -269,12 +245,15 @@ def seal_parts(header_obj, part_obj, role_body, signature, key):
             or role["expires_at"] != header_obj["expires_at"]:
         raise InstructionError("role body identity mismatch")
     header = canonical_json(header_obj)
-    k_enc, k_mac, k_nonce = derive_keys(
+    k_aead, k_nonce = derive_keys(
         key, header_obj["device_id"], header_obj["key_id"])
     nonce = derive_nonce(k_nonce, header_obj["device_id"], header_obj["key_id"],
                          header_obj["epoch"], header_obj["instr_serial"])
-    ciphertext = crypt(k_enc, nonce, plaintext)
-    tag = compute_tag(k_mac, header, role_body, signature, nonce, ciphertext)
+    try:
+        ciphertext, tag = instruction_aead.seal(
+            k_aead, pae(INSTR_MAGIC, header, role_body, signature, nonce), plaintext)
+    except ValueError:
+        raise InstructionError("instruction encryption unavailable") from None
     return frame_envelope(header, role_body, signature, nonce, ciphertext, tag)
 
 
@@ -289,22 +268,22 @@ def open_parts(framed, key, before_decrypt=None):
             or role["issued_at"] != header["issued_at"] \
             or role["expires_at"] != header["expires_at"]:
         raise InstructionError("role body identity mismatch")
-    k_enc, k_mac, k_nonce = derive_keys(key, header["device_id"],
-                                        header["key_id"])
+    k_aead, k_nonce = derive_keys(key, header["device_id"], header["key_id"])
     expected_nonce = derive_nonce(k_nonce, header["device_id"],
                                   header["key_id"], header["epoch"],
                                   header["instr_serial"])
     if not hmac.compare_digest(nonce, expected_nonce):
         raise InstructionError("instruction nonce mismatch")
-    expected_tag = compute_tag(k_mac, header_b, role_b, signature, nonce,
-                               ciphertext)
-    if not hmac.compare_digest(tag, expected_tag):
-        raise InstructionError("instruction authentication failed")
     if len(ciphertext) != header["ct_len"]:
         raise InstructionError("ciphertext length mismatch")
+    try:
+        plaintext = instruction_aead.open_sealed(
+            k_aead, pae(INSTR_MAGIC, header_b, role_b, signature, nonce), ciphertext, tag)
+    except ValueError:
+        raise InstructionError("instruction authentication failed") from None
     if before_decrypt is not None:
         before_decrypt()
-    part = validate_part(parse_json(crypt(k_enc, nonce, ciphertext)),
+    part = validate_part(parse_json(plaintext),
                          issued_at=header["issued_at"],
                          expires_at=header["expires_at"])
     if part["peers"]["allowed_expires_at"] != header["allowed_expires_at"]:
@@ -597,7 +576,7 @@ def validate_header(value):
     )
     _closed(value, required, ("info_hash",))
     if isinstance(value["v"], bool) or not isinstance(value["v"], int) \
-            or value["v"] != 1:
+            or value["v"] != 2:
         raise InstructionError("invalid instruction version")
     _device_id(value["device_id"])
     if not isinstance(value["platform"], str) \
@@ -645,7 +624,7 @@ def validate_stamp(value):
         "role_gen", "role_body_sha256", "key_id", "verify_level",
         "issued_at", "expires_at", "degraded")}
     synthetic.update({
-        "v": 1, "device_id": "validation", "server_time": value.get("issued_at"),
+        "v": 2, "device_id": "validation", "server_time": value.get("issued_at"),
         "ct_len": len(canonical_json(part)),
         "allowed_expires_at": part["peers"]["allowed_expires_at"],
     })
@@ -660,7 +639,7 @@ def stamp_header(device_id, stamp):
         "role_gen", "role_body_sha256", "key_id", "verify_level",
         "issued_at", "expires_at", "degraded")}
     header.update({
-        "v": 1,
+        "v": 2,
         "device_id": device_id,
         "server_time": stamp["issued_at"],
         "ct_len": len(canonical_json(stamp["part"])),

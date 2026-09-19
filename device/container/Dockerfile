@@ -26,7 +26,16 @@ RUN tar -xJf /src/python.tar.xz -C /src \
     && PYTHONPATH=/src/Python-3.12.14/Lib python3 -m test \
         test_pyexpat test_xml_etree test_xml_etree_c test_minidom test_sax test_pulldom
 
+FROM python-base AS crypto-build
+COPY iris-aead.c /src/iris-aead.c
+COPY build-instruction-crypto-inner.sh /src/build.sh
+COPY musl-COPYRIGHT /src/musl-COPYRIGHT
+ADD --checksum=sha256:7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.8/LICENSE.txt /src/openssl-LICENSE
+RUN sh /src/build.sh
+
 FROM python-base AS runtime-files
+COPY --from=crypto-build /out/iris-aead /opt/iris/bin/iris-aead
+COPY --from=crypto-build /out/iris-aead.LICENCE /usr/local/share/licenses/iris-aead.LICENCE
 COPY --from=xml-build /out/*.so /usr/local/lib/python3.12/lib-dynload/
 COPY --from=xml-build /out/PYTHON-LICENSE /out/EXPAT-COPYING /usr/local/share/licenses/iris-python/
 

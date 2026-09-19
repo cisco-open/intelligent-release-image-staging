@@ -223,7 +223,7 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
   # from one Dockerfile, so the base must be an official multi-arch
   # Alpine keeps both manifests small and the index digest pins the base.
   dockerfile="$BATS_TEST_DIRNAME/../container/Dockerfile"
-  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$dockerfile"
+  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64} AS python-base$' "$dockerfile"
   ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$dockerfile"
 }
 

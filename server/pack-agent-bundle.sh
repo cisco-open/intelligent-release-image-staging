@@ -25,6 +25,7 @@ OUT="${3:?usage: pack-agent-bundle.sh <device-dir> <aria2c-path> <output.tgz>}"
 shift 3
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-}"
 VERIFIER="${IRIS_SSH_KEYGEN:-}"
+AEAD="${IRIS_AEAD_HELPER:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ssh-keygen)
@@ -64,6 +65,13 @@ fi
 VERIFIER_LICENSE="$(dirname "$VERIFIER")/ssh-keygen.LICENCE"
 [ -f "$VERIFIER_LICENSE" ] && [ -s "$VERIFIER_LICENSE" ] \
   || { echo "pack-agent-bundle: missing ssh-keygen.LICENCE" >&2; exit 1; }
+if [ -z "$AEAD" ]; then
+  AEAD="$(cd "$(dirname "$0")/.." && pwd)/bin/iris-aead-$arch"
+fi
+[ -s "$AEAD" ] && [ "$(elf_arch "$AEAD")" = "$arch" ] \
+  || { echo "pack-agent-bundle: missing/wrong-architecture AEAD helper; run tools/build-instruction-crypto.sh" >&2; exit 1; }
+AEAD_LICENSE="$(dirname "$AEAD")/iris-aead.LICENCE"
+[ -s "$AEAD_LICENSE" ] || { echo "pack-agent-bundle: missing iris-aead.LICENCE" >&2; exit 1; }
 [ -n "$ROOTS" ] || {
   echo "pack-agent-bundle: --instruction-roots-dir or IRIS_INSTRUCTION_ROOTS_DIR is required" >&2
   exit 1
@@ -86,6 +94,8 @@ cp "$DEVICE/bootstrap.sh" "$DEVICE/guestshell-start.sh" "$DEVICE/rotate-logs.sh"
 cp "$ARIA2" "$STAGE/aria2c"
 cp "$VERIFIER" "$STAGE/agent/ssh-keygen"
 cp "$VERIFIER_LICENSE" "$STAGE/agent/ssh-keygen.LICENCE"
+cp "$AEAD" "$STAGE/agent/iris-aead"
+cp "$AEAD_LICENSE" "$STAGE/agent/iris-aead.LICENCE"
 PYTHONPATH="$(cd "$(dirname "$0")" && pwd)${PYTHONPATH:+:$PYTHONPATH}" \
   python3 - "$ROOTS" "$STAGE" <<'PYTHON'
 import sys
@@ -98,7 +108,7 @@ except InstructionKeyError as exc:
           file=sys.stderr)
     raise SystemExit(1)
 PYTHON
-chmod +x "$STAGE/aria2c" "$STAGE/agent/ssh-keygen" "$STAGE/bootstrap.sh" "$STAGE/guestshell-start.sh" \
+chmod +x "$STAGE/aria2c" "$STAGE/agent/ssh-keygen" "$STAGE/agent/iris-aead" "$STAGE/bootstrap.sh" "$STAGE/guestshell-start.sh" \
          "$STAGE/rotate-logs.sh" "$STAGE/agent/peer-transfer-hook.sh" 2>/dev/null || true
 # Tar an explicit file list (NOT '.') so there's no './' top-dir entry. On the
 # device, guest-share is SELinux-labeled and denies chmod/utime even to the

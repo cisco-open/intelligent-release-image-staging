@@ -65137,7 +65137,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Exact IRIS-INSTR/1 framed bytes",
+            "description": "Exact IRIS-INSTR/2 framed bytes",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -65176,7 +65176,7 @@
             "content": {
               "application/octet-stream": {
                 "schema": {},
-                "example": "<IRIS-INSTR/1 bytes>"
+                "example": "<IRIS-INSTR/2 bytes>"
               }
             }
           },

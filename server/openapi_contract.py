@@ -2258,7 +2258,7 @@ def _success(route):
         return "200", {"description": "Configured mode and separately observed origin state",
                        "content": {"application/json": _media(schema, example)}}
     if _instruction_resource(route):
-        artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/1"
+        artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/2"
         return "200", {
             "description": "Exact " + artifact + " framed bytes",
             "headers": _instruction_headers(),

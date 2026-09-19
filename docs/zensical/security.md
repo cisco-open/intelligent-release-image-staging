@@ -282,25 +282,65 @@ and the [platform comparison](device-agents.md#instruction-trust-by-platform).
 
 ### Encrypted instruction envelope
 
-Phase 1 serves a bounded, per-device envelope on authenticated catalog HTTPS.
-A response over 256 KiB is rejected before parsing or cryptographic work.
-SP800-108/HMAC-SHA-256 derives separate encryption, MAC and nonce keys with
-per-device audience context; a deterministic
-16-byte nonce binds device ID, key ID, epoch and instruction serial. An
-HMAC-SHA-256 counter keystream encrypts the private device part. A separate
-HMAC authenticates the PAE-bound envelope, including header, signed role body,
-nonce and ciphertext. MAC-before-decrypt prevents unauthenticated plaintext
-from reaching the policy parser. This construction is not AES-GCM. Functional
-tests do not replace an independent review of the cryptography and key lifecycle.
+The `IRIS-INSTR/2` envelope uses **AES-256-SIV (RFC 5297)** through OpenSSL's
+maintained EVP implementation, replacing the former custom HMAC keystream.
+Responses over 256 KiB are rejected before cryptographic work. SP800-108 derives
+64 bytes of AES-SIV key material and a separate nonce-derivation key, bound to
+the device and instruction-key identity under a v2-specific label. The 16-byte
+deterministic nonce binds device, key, epoch and serial. AES-SIV tolerates
+accidental nonce reuse without the old keystream-reuse failure; identical
+plaintext and associated data produce identical ciphertext. This does not make
+replay acceptable or conceal repeated identical messages.
 
-The agent verifies the OpenSSH role signature and envelope MAC before
-decrypting or applying either part. It also checks the signer revocation list,
+The associated data is one length-framed PAE value containing the format magic,
+exact header, signed role body, signature and nonce. The 16-byte SIV tag
+authenticates this context and the ciphertext. The bounded static `iris-aead`
+adapter emits plaintext only after successful authentication; keys and plaintext
+travel through pipes, never command arguments or temporary files. Both
+architecture builds pin OpenSSL 3.5.8. Guest Shell promotes its bundled helper
+to its private executable directory, with a known-answer/tamper probe; it does
+not depend on the host's older Python crypto packages or OpenSSL.
+Local `IRIS-LKG/2` recovery records use a separate local key and KDF/AAD domain.
+This replaces the custom cipher, not an independent audit of the whole system.
+
+The agent verifies the OpenSSH role signature and authenticates the envelope
+before parsing private plaintext or applying either part. It also checks the signer revocation list,
 device/platform audience and role binding, and applies monotonic
 `(epoch, instr_serial)` replay floors. Reusing an identity with different bytes
-is rejected. An authenticated server clock anchors expiry; a wall-clock change
+is rejected after the one-way format upgrade described below. An authenticated server clock anchors expiry; a wall-clock change
 cannot silently extend validity. Signed role intent is public within the
 envelope; confidentiality protects the private per-device part. Failure never
 makes unverified instructions authoritative. See the [failure table](device-agents.md#instruction-failures-and-recovery).
+
+### Instruction v2 upgrade
+
+This is a coordinated server-and-agent upgrade, not a transparent rolling
+change. Rebuild the server, both Guest Shell bundles, both IOx packages and the
+XR RPM before rollout. Standalone Guest Shell packaging first requires
+`bash tools/build-instruction-crypto.sh` (alongside the SSH verifier build).
+The server and canonical device-image builds compile the same helper source.
+
+- Keep the server available for each agent's first v2 fetch. Old agents cannot
+  read v2 envelopes; new agents reject v1 envelopes and v1 recovery caches.
+  There is no automatic cipher downgrade or legacy decryption fallback.
+- Existing instruction keys, producer epoch/serial history, role signatures and
+  device assignments are retained. A fully authenticated v2 envelope may
+  replace the v1 bytes at the same epoch/serial once, after which the durable
+  version floor is 2 and equal-identity/different-byte rejection resumes.
+- The ordinary atomic instruction-apply transaction replaces the local cache
+  and persists its digest, replay floor and version together. An interrupted
+  transition retains/recovers the previous bytes and floor; v1 cache bytes are
+  never treated as usable v2 instructions. A fresh online fetch is required.
+- Do not downgrade upgraded agents to v1 or delete replay state to make an old
+  cache work. Restore/reprovision using the documented key/history recovery
+  procedure. AES-SIV nonce-misuse resistance does not prevent rollback when an
+  administrator restores both ciphertext and all trusted replay state.
+- Verify a fresh applied signed-instruction report and a v2 LKG recovery on
+  every platform. A missing, mismatched or failing helper rejects instructions;
+  it never selects the old cipher or makes unverified policy authoritative.
+
+The [OpenSSL SIV interface](https://docs.openssl.org/3.5/man3/EVP_EncryptInit/#siv-mode)
+and [RFC 5297](https://www.rfc-editor.org/rfc/rfc5297) define the encryption primitive.
 
 ### Two-root trust and custody
 

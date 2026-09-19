@@ -445,6 +445,7 @@ AGENT_FILES = (
     "flash_target.py", "flashcheck.py", "instr.py", "iris_agent.py",
     "peer-transfer-hook.sh", "peer_tls.py", "telemetry_report.py", "verify_image.py",
     "runtime_verifier.py", "ssh-keygen", "ssh-keygen.LICENCE", "xr_deps.py",
+    "instruction_aead.py", "runtime_crypto.py", "iris-aead", "iris-aead.LICENCE",
 )
 ROOT_FILES = (
     "aria2c", "bootstrap.sh", "guestshell-start.sh", "rotate-logs.sh",
@@ -889,7 +890,7 @@ def inspect_and_extract(bundle_path, digest_path, new_dir):
                         if hasattr(os, "O_NOFOLLOW"):
                             flags |= os.O_NOFOLLOW
                         executable = name in (
-                            "aria2c", "agent/ssh-keygen", "bootstrap.sh", "guestshell-start.sh",
+                            "aria2c", "agent/ssh-keygen", "agent/iris-aead", "bootstrap.sh", "guestshell-start.sh",
                             "rotate-logs.sh", "agent/peer-transfer-hook.sh",
                         )
                         out_fd = os.open(destination, flags,

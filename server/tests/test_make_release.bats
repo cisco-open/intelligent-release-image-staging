@@ -59,6 +59,10 @@
     iris/device/container/entrypoint.sh \
     iris/device/container/reconcile.sh \
     iris/tools/build-device-image.sh \
+    iris/tools/iris-aead.c \
+    iris/tools/build-instruction-crypto.sh \
+    iris/tools/build-instruction-crypto-inner.sh \
+    iris/tools/build-instruction-crypto.Dockerfile \
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh \
@@ -117,6 +121,8 @@ _make_release_fixture() {
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
            build-ssh-verifier.sh build-ssh-verifiers.sh \
+           iris-aead.c build-instruction-crypto.sh build-instruction-crypto-inner.sh \
+           build-instruction-crypto.Dockerfile \
            agent-source-freshness.sh start-compose-server.sh check-host-time.sh vendor-swagger-ui.sh \
            api-exercise.py api_exercise_fixtures.py test_api_exercise.py; do
     echo "# $f" > "$FIX/tools/$f"

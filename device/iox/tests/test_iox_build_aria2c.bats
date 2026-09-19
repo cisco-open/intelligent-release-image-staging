@@ -61,6 +61,9 @@ _build_stub_setup() {
     "$STUBDIR/device/container/entrypoint.sh" \
     "$STUBDIR/device/container/reconcile.sh" \
     "$STUBDIR/device/container/rebuild-xml.py"
+  mkdir -p "$STUBDIR/tools/licenses"
+  touch "$STUBDIR/tools/iris-aead.c" "$STUBDIR/tools/build-instruction-crypto-inner.sh" \
+    "$STUBDIR/tools/licenses/musl-COPYRIGHT"
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"

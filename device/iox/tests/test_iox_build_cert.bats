@@ -18,6 +18,9 @@ _build_stub_setup() {
   for file in Dockerfile entrypoint.sh reconcile.sh rebuild-xml.py; do
     printf '%s\n' "$file" > "$STUBDIR/device/container/$file"
   done
+  mkdir -p "$STUBDIR/tools/licenses"
+  touch "$STUBDIR/tools/iris-aead.c" "$STUBDIR/tools/build-instruction-crypto-inner.sh" \
+    "$STUBDIR/tools/licenses/musl-COPYRIGHT"
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"

@@ -11,7 +11,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.19]
+
 ### Added
+- Replace custom instruction and recovery-cache encryption with versioned
+  AES-256-SIV authenticated encryption through a pinned, static OpenSSL helper
+  for both architectures. Reject legacy cipher fallback; preserve keys/replay
+  history and require a coordinated server/agent upgrade with an online first
+  v2 fetch. Test authentication failures, nonce reuse and cache migration.
 - Refresh device-container security dependencies, apply Python's upstream Expat
   fix, and remove unused pip/ensurepip installers from the runtime.
 - Export the shared device filesystem as one layer so IOx cannot restore older

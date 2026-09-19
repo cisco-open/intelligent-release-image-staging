@@ -66,6 +66,8 @@ SHIP=(
   tools/get-aria2c.sh tools/aria2c.sha256 tools/make-torrent.sh
   tools/make-agent-bundle.sh tools/gen-device-installers.sh
   tools/build-ssh-verifier.sh tools/build-ssh-verifiers.sh
+  tools/iris-aead.c tools/build-instruction-crypto.sh
+  tools/build-instruction-crypto-inner.sh tools/build-instruction-crypto.Dockerfile
   tools/licenses/musl-COPYRIGHT
   tools/apply-assignments.sh tools/get-ioxclient.sh tools/ioxclient.sha256
   tools/stage-iox-package.sh tools/provision-iox-packages.sh

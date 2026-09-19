@@ -52,6 +52,13 @@ COPY --from=ssh-verifier-amd64 /out/ssh-keygen /ssh-keygen-amd64
 COPY --from=ssh-verifier-arm64 /out/ssh-keygen /ssh-keygen-arm64
 COPY --from=ssh-verifier-amd64 /out/ssh-keygen.LICENCE /ssh-keygen.LICENCE
 
+FROM --platform=linux/amd64 alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS instruction-crypto
+COPY tools/iris-aead.c /src/iris-aead.c
+COPY tools/build-instruction-crypto-inner.sh /src/build.sh
+COPY tools/licenses/musl-COPYRIGHT /src/musl-COPYRIGHT
+ADD --checksum=sha256:7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.8/LICENSE.txt /src/openssl-LICENSE
+RUN sh /src/build.sh
+
 FROM python:3.12-slim-trixie
 
 
@@ -84,6 +91,9 @@ COPY bin/aria2c /opt/iris/bin/aria2c
 # amd64 server build independent of an ARM emulation worker.
 COPY --from=ssh-verifier-amd64 /out/ssh-keygen /opt/iris/bin/ssh-keygen-amd64
 COPY --from=ssh-verifier-amd64 /out/ssh-keygen.LICENCE /opt/iris/bin/ssh-keygen.LICENCE
+COPY --from=instruction-crypto /out/iris-aead /opt/iris/bin/iris-aead
+COPY --from=instruction-crypto /out/iris-aead /opt/iris/bin/iris-aead-amd64
+COPY --from=instruction-crypto /out/iris-aead.LICENCE /opt/iris/bin/iris-aead.LICENCE
 COPY tools/aria2c.sha256 /opt/iris/tools/aria2c.sha256
 
 # Fail the build rather than ship a client that is not the manifest-pinned

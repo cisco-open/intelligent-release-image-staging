@@ -128,6 +128,8 @@ import sys
 sys.path.insert(0, sys.argv[1] + "/agent")
 import runtime_verifier
 runtime_verifier.install(sys.argv[1], sys.argv[2])
+import runtime_crypto
+runtime_crypto.install(sys.argv[1], sys.argv[2])
 PYTHON
   then
     echo "cannot promote the bundled instruction verifier; signed instructions unavailable" >&2

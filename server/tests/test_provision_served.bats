@@ -27,6 +27,9 @@ import pathlib,sys
 pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x02\x00\x3e\x00' + bytes(44))
 PYTHON
   cp "$TMP/aria2c" "$IRIS_SSH_KEYGEN"
+  export IRIS_AEAD_HELPER="$TMP/iris-aead"
+  cp "$TMP/aria2c" "$IRIS_AEAD_HELPER"
+  printf "license fixture\n" > "$TMP/iris-aead.LICENCE"
   chmod +x "$TMP/aria2c"
   printf '%s  x86_64\n' "$(sha256sum "$TMP/aria2c" | awk '{print $1}')" > "$TMP/aria2c.sha256"
   mkdir -p "$TMP/config/tls"; printf 'CRTPEM\n' > "$TMP/config/tls/crt.pem"
