@@ -79,8 +79,8 @@ carries no such applet did not finish the install. The confirmation steps are in
 
 ## Next steps
 
-- [Add and onboard devices](../user-guide/onboarding.md): onboard the device.
 - [Stage your first image](../user-guide/first-image.md): assign an image and
   watch it reach the device.
+- [Add and onboard devices](../user-guide/onboarding.md): onboard the device.
 - [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 devices for the IOx app](iox.md):
   the other way to run the agent.

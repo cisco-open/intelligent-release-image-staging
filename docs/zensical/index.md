@@ -11,10 +11,10 @@ patches on your devices. Staging means copying an image to the device's flash
 and checking its hash, then stopping. The device keeps running its current
 software until you install the image yourself. Devices take pieces of an image
 from each other, not from the server alone. The agent runs in Guest Shell on
-Catalyst 9000 series switches, or as an IOx app where the switch has
-app-hosting storage. Industrial Ethernet switches with app hosting run the
-IOx app, and Cisco 8000 series and NCS routers run the agent in IOS-XR
-appmgr. See [Supported devices and platforms](install/supported-devices.md) for which
+Catalyst 9000 series switches and Catalyst 8000 series routers, or as the IOx
+app on switches with app-hosting storage and on Catalyst 8000 series routers.
+Industrial Ethernet switches with app hosting run the IOx app, and Cisco 8000
+series and NCS routers run the agent in IOS-XR appmgr. See [Supported devices and platforms](install/supported-devices.md) for which
 platforms are validated.
 
 !!! warning "Stage only"

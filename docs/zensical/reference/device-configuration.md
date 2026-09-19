@@ -25,7 +25,7 @@ to it too, once per [tick](glossary.md#tick).
 | `IRIS_CATALOG_URL` | required on first start | IOx, XR | The catalog's HTTPS base URL. Later starts read it from persisted configuration. |
 | `IRIS_CATALOG_TOKEN` | required on first start | IOx, XR | The device's catalog enrollment token, stored in the mode-0600 persistent configuration. |
 | `IRIS_DEVICE_ID` | required on first start | IOx, XR | The device's catalog identity. Letters, digits, `.`, `_`, `:`, and `-` only. |
-| `CAF_APP_APPDATA_DIR` | required, set by CAF | IOx only | Holds the runtime-delivered `iris-catalog.pem` certificate. XR uses `/hostmount/iris-catalog.pem` instead. |
+| `CAF_APP_APPDATA_DIR` | required, set by CAF (Cisco Application Framework, the IOx host) | IOx only | Holds the runtime-delivered `iris-catalog.pem` certificate. XR uses `/hostmount/iris-catalog.pem` instead. |
 | `IRIS_TELEMETRY` | `on` | IOx, XR | Turns device reports on or off. |
 | `IRIS_TELEMETRY_STREAM` | `off` | IOx, XR | Turns on live transfer samples. See [Transfer streaming by platform](#transfer-streaming-by-platform). |
 | `IRIS_TICK_SECONDS` | `60` | IOx, XR | The mechanical tick interval, 1 to 86400 seconds. Separate from the signed logical `catalog_tick_s` cadence; every tick still reasserts policy and sends a heartbeat. |
