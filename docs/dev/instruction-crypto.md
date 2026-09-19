@@ -112,10 +112,45 @@ Build it with:
 bash tools/build-instruction-crypto.sh
 ```
 
-Run this alongside the SSH verifier build described in
-[Building the device image, IOx wrappers, IOS-XR rpm and aria2c](device-packages.md).
 The server and the shared device image compile the same helper source, so the
 two never disagree about the wire format.
+
+## The SSH signature verifier build
+
+Instruction signatures are checked with a second static binary: a statically
+linked `ssh-keygen`, used only for its `-Y verify` SSHSIG subcommand. This is
+a separate build from `iris-aead` above and from the dynamically linked
+`ssh-keygen` that `apk add openssh-keygen` installs into the shared IOx/XR
+device image; the static one feeds Guest Shell bundles only, where no system
+package manager is available to install one.
+
+`server/Dockerfile`'s `ssh-verifier-source`, `ssh-verifier-amd64` and
+`ssh-verifier-arm64` stages fetch a pinned, checksum-verified upstream
+OpenSSH release and hand it to `tools/build-ssh-verifier.sh`, which
+configures OpenSSH with `--without-openssl --without-zlib --without-pam
+--without-libedit --without-security-key-builtin`, builds only the
+`ssh-keygen` target, strips it, and fails the build if `readelf` finds a
+dynamic interpreter or a `NEEDED` entry — the binary must carry no runtime
+library dependency at all. Before accepting the binary, the script signs and
+verifies a throwaway SSHSIG message with it as a build-time sanity check.
+
+Build both architectures with:
+
+```bash
+tools/build-ssh-verifiers.sh
+```
+
+which runs `docker buildx build --target ssh-verifier-artifacts` against
+`server/Dockerfile` and writes `bin/ssh-keygen-amd64`, `bin/ssh-keygen-arm64`
+and a shared `bin/ssh-keygen.LICENCE` (upstream OpenSSH's license plus the
+statically linked musl libc notice). `server/pack-agent-bundle.sh` picks the
+architecture-matched binary by default, checks its ELF machine type against
+the `aria2c` binary going into the same bundle, and copies it into the Guest
+Shell agent bundle as `agent/ssh-keygen`; the same build stage also copies
+the amd64 binary into the server image at `/opt/iris/bin/ssh-keygen-amd64`
+for the server's own use verifying instruction signatures. Rebuild it
+whenever `tools/build-ssh-verifier.sh` or the pinned OpenSSH source changes,
+the same as `iris-aead`.
 
 ## Related
 

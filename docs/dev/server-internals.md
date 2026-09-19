@@ -48,6 +48,49 @@ This preflight stays open, tracked internally, until one full tagged-release dwe
 [Roles: which devices share with which](../zensical/architecture/peer-policy.md)
 for the rule as an operator sees it today.
 
+## Tracker announce cadence
+
+This is the contributor-level detail behind the bounded jitter and the QoS
+ranges that
+[Peer policy API](../zensical/reference/peer-policy-api.md) documents for
+operators. That page covers the operator-visible half: the bounded jitter,
+the 10-300 s and 4-200 s ranges, and the `qos_state` precedence chain. This
+section covers how the tracker actually resolves a cadence value on each
+announce.
+
+On every authenticated announce, the tracker loads the current compiled
+policy and resolves the parsed state before applying exactly one bounded
+±10% jitter within 10–300 seconds. Exact `left == 0` selects seeder;
+positive, omitted, malformed, and negative values select leecher. The
+issued value is returned as both `interval` and `min interval`, and a peer
+row expires after twice its own issued interval.
+
+The service origin seeder selects its own parsed state using global scalar
+and global state cadence, and it sits outside the handout ledger: it is not
+one of the devices the ledger accounts for. An unattributed legacy
+announce, one the tracker cannot tie to a specific device, uses the
+selected `global-state:<state>` cadence instead. An attributed legacy
+announce is resolved differently: the tracker resolves the selected state
+separately for every possible owner before aggregating the results. A
+shared or legacy NAT address can have several possible owners, so the
+tracker considers all of them and aggregates their states to the maximum
+interval and the minimum `numwant`, the slowest cadence and the smallest
+peer list among the possible owners.
+
+If attribution is unreadable, the global cadence fallback applies; the
+tracker remains fail-closed and withholds candidates.
+
+Candidate return is capped by the smaller of the request and the effective
+selected-state `numwant`; `numwant=0` returns no peers. A valid,
+port-bearing announce registers its issued interval; an invalid port
+receives cadence without registration. Selection starts at a randomized
+registry position and inspects at most the smaller of four times that
+ceiling or the whole swarm, so a policy denial can make a response shorter
+than its ceiling. Restricted-role selection uses role indexes but still
+evaluates mutual policy for every candidate, so a role edit affects the
+next requester's announce without waiting for every candidate to
+reannounce.
+
 ## Why one timeout bounds IOS-XR teardown and install
 
 `IRIS_XR_SESSION_TIMEOUT` bounds a single command session to a router, not
@@ -187,4 +230,6 @@ belong in a commit.
 - [Writing and building the docs](documentation.md)
 - [Dated lab evidence](validation-records.md)
 - [Roles: which devices share with which](../zensical/architecture/peer-policy.md)
+- [Peer policy API](../zensical/reference/peer-policy-api.md): the
+  operator-visible QoS keys, ranges and precedence chain.
 - [Storage, state and deployment records](../zensical/architecture/storage-and-state.md)

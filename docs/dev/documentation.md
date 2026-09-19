@@ -222,12 +222,12 @@ that does not exist yet.
 | `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
 | `instruction-root-ceremony-and-recovery` | `admin-guide/instruction-keys.md` "Replace the two root keys"; the pointer section on `admin-guide/recovery.md` | `tools/start-compose-server.sh`, `kubernetes/README.md:426`, older script copies, CHANGELOG. |
 | `f3-offline-bootstrap-envelope-redelivery` | `admin-guide/instruction-keys.md` "Deliver the first instruction file by hand" | Four in-docs pages, CHANGELOG. |
-| `device-administrator-trust-boundary` | `architecture/security-model.md` "What a device administrator can still change" | The literal link `test_docs_map.py` pins on `architecture/device-agent.md`. |
+| `device-administrator-trust-boundary` | `architecture/security-model.md` "What a device administrator can still change" | The literal link `test_docs_map.py` pins on `architecture/data-path.md`. |
 | `device-global-package-verification` | `install/iox.md` "Signature verification is a device-wide setting" | `device/iox/README.md:148-149`, six in-docs pages. |
 | `unassigned-image-park` | `user-guide/assignments.md` "What happens to an image you unassign" | `fleet/assignments.csv.example:15`, six in-docs pages. |
 | `recover-a-volume-whose-private-modes-were-changed` | `admin-guide/recovery.md` "Repair a volume whose file permissions were changed" | `kubernetes/README.md:352`. |
 | `rollback-after-the-shard-migration` | `admin-guide/recovery.md` "Roll back the per-device state split" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
-| `crash-safe-same-name-replacement` | `architecture/device-agent.md` "How the agent replaces an image without deleting it first" | `device/iox/README.md:193`, two in-docs pages. |
+| `crash-safe-same-name-replacement` | `architecture/data-path.md` "How the agent replaces an image without deleting it first" | `device/iox/README.md:193`, two in-docs pages. |
 
 Two test helpers already understand the attribute. `_section()` in
 `server/tests/test_docs_map.py` accepts an optional trailing `{ #id }` on the
@@ -298,6 +298,7 @@ Change any of them deliberately, on its own:
 | Pin | Where | Value |
 | --- | --- | --- |
 | Zensical | `requirements-docs.txt` | `zensical==0.0.51` |
+| OpenTelemetry Collector Contrib | 0.160.0 | `docs/zensical/user-guide/splunk.md` (collector image tag) |
 | Python | `.github/workflows/docs.yml` (`actions/setup-python`) | `3.12` |
 | Mermaid | `docs/zensical/javascripts/mermaid.mjs` | `11.17.2`, with its Subresource Integrity digest |
 | Swagger UI | `docs/zensical/swagger/SOURCE.txt`, `tools/vendor-swagger-ui.sh` | `swagger-ui-dist` 5.32.15, with both archive checksums |
@@ -380,10 +381,10 @@ gate:
   words listed above, plus any page over 400 lines and any landing page of 80
   lines or more. Matching is case sensitive and on word boundaries, which
   keeps "alphabetical" and the alias id
-  `f3-offline-bootstrap-envelope-redelivery` legal. `LEGACY_PAGES` holds the
-  pages written before the reorganization; a page leaves that set when it is
-  rewritten or becomes a stub, and a new page is checked from the day it
-  lands.
+  `f3-offline-bootstrap-envelope-redelivery` legal. There is no exempt set of
+  pages: every page `_docs_pages()` returns is checked, which is every real
+  page under `docs/zensical` except the redirect stubs the bullet above
+  already excludes.
 - Page collisions. `test_no_page_collides_with_a_folder_index` catches a
   `name.md` sitting beside a `name/index.md`: both build to the same URL and
   one of them is dropped silently.

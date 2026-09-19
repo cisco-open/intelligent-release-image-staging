@@ -61,12 +61,12 @@ SPDX-License-Identifier: Apache-2.0
           <span>devices help distribute image pieces</span>
         </div>
         <div>
-          <strong>Shared</strong>
-          <span>delivery from the server and eligible peers</span>
+          <strong>Encrypted</strong>
+          <span>HTTPS for every control path, TLS between peers when you turn it on</span>
         </div>
         <div>
-          <strong>More</strong>
-          <span>resilience through resumable piece downloads</span>
+          <strong>Resumable</strong>
+          <span>piece downloads continue after an interruption</span>
         </div>
         <div>
           <strong>Safe</strong>
@@ -85,31 +85,38 @@ SPDX-License-Identifier: Apache-2.0
         <div class="distribution-visual" aria-label="Traditional download compared with IRIS swarm delivery">
           <div class="compare-card">
             <h3>Traditional pull</h3>
-            <div class="simple-flow">
-              <div class="server-box">File server</div>
-              <div class="flow-arrows" aria-hidden="true">
-                <span></span><span></span><span></span>
-              </div>
-              <div class="device-column">
-                <div>Device A</div>
-                <div>Device B</div>
-                <div>Device C</div>
-              </div>
-            </div>
-            <p>Every device pulls the full image from one place. Large rollouts can bottleneck on the server or uplink.</p>
+            <svg class="flow-svg" viewBox="0 0 360 220" role="img" aria-label="One file server sends the whole image to every device separately">
+              <path class="edge pull" d="M120 110 C 172 110 186 46 232 46"></path>
+              <path class="edge pull" d="M120 110 L 232 110"></path>
+              <path class="edge pull" d="M120 110 C 172 110 186 174 232 174"></path>
+              <circle class="load" cx="120" cy="110" r="12"></circle>
+              <circle class="load late" cx="120" cy="110" r="12"></circle>
+              <g class="node server"><rect x="16" y="86" width="104" height="48" rx="10"></rect><text x="68" y="110">File server</text></g>
+              <g class="node"><rect x="232" y="24" width="104" height="44" rx="10"></rect><text x="284" y="46">Device A</text></g>
+              <g class="node"><rect x="232" y="88" width="104" height="44" rx="10"></rect><text x="284" y="110">Device B</text></g>
+              <g class="node"><rect x="232" y="152" width="104" height="44" rx="10"></rect><text x="284" y="174">Device C</text></g>
+            </svg>
+            <p>Every device pulls the whole image from one place. A large rollout waits on the server and its uplink.</p>
           </div>
           <div class="compare-card highlight">
             <h3>IRIS private swarm</h3>
-            <div class="swarm-flow">
-              <div class="server-box">IRIS server</div>
-              <div class="swarm-devices">
-                <div>Device A</div>
-                <div>Device B</div>
-                <div>Device C</div>
-              </div>
-              <div class="peer-ring" aria-hidden="true"></div>
-            </div>
-            <p>Devices fetch missing pieces from the server and from peers. Transfers can resume after interruption. Each agent verifies and stages the image before reporting it ready.</p>
+            <svg class="flow-svg" viewBox="0 0 360 220" role="img" aria-label="The IRIS server seeds once and devices exchange image pieces with each other over encrypted links">
+              <path class="edge seed" d="M120 110 C 150 110 160 40 176 40"></path>
+              <path class="edge seed" d="M120 110 L 250 110"></path>
+              <path class="edge seed" d="M120 110 C 150 110 160 180 176 180"></path>
+              <path class="edge peer" d="M272 40 L 300 90"></path>
+              <path class="edge peer back" d="M272 40 L 300 90"></path>
+              <path class="edge peer" d="M300 130 L 272 180"></path>
+              <path class="edge peer back" d="M300 130 L 272 180"></path>
+              <path class="edge peer" d="M224 60 L 224 160"></path>
+              <path class="edge peer back" d="M224 60 L 224 160"></path>
+              <g class="node server"><rect x="16" y="86" width="104" height="48" rx="10"></rect><text x="68" y="110">IRIS server</text></g>
+              <g class="node"><rect x="176" y="20" width="96" height="40" rx="10"></rect><text x="224" y="35">Device A</text><rect class="piece" x="188" y="46" width="16" height="5" rx="2"></rect><rect class="piece" x="208" y="46" width="16" height="5" rx="2"></rect><rect class="piece" x="228" y="46" width="16" height="5" rx="2"></rect><rect class="piece empty" x="248" y="46" width="12" height="5" rx="2"></rect></g>
+              <g class="node"><rect x="252" y="90" width="96" height="40" rx="10"></rect><text x="300" y="105">Device B</text><rect class="piece" x="264" y="116" width="16" height="5" rx="2"></rect><rect class="piece" x="284" y="116" width="16" height="5" rx="2"></rect><rect class="piece empty" x="304" y="116" width="16" height="5" rx="2"></rect><rect class="piece empty" x="324" y="116" width="12" height="5" rx="2"></rect></g>
+              <g class="node"><rect x="176" y="160" width="96" height="40" rx="10"></rect><text x="224" y="175">Device C</text><rect class="piece" x="188" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="208" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="228" y="186" width="16" height="5" rx="2"></rect><rect class="piece empty" x="248" y="186" width="12" height="5" rx="2"></rect></g>
+              <g class="badge"><rect x="244" y="52" width="40" height="18" rx="9"></rect><text x="264" y="61">TLS</text></g>
+            </svg>
+            <p>The server seeds each image once. Devices take missing pieces from the server and from each other, resume after an interruption, and verify the image before staging it. Peer transfers run over TLS with mutual certificates when you turn that on.</p>
           </div>
         </div>
       </section>
@@ -128,7 +135,7 @@ SPDX-License-Identifier: Apache-2.0
         <article>
           <span>03</span>
           <h3>Safer change control</h3>
-          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control. On an existing management VLAN (inband), IRIS also never creates, changes, or removes that VLAN, its SVI, gateway, routes, or VRF. <a href="docs/install/management-types/">Management type and VLAN ownership</a>.</p>
+          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control. On an existing management VLAN (inband), IRIS also never creates, changes, or removes that VLAN, its SVI, gateway, routes, or VRF.</p>
         </article>
       </section>
 
@@ -184,13 +191,13 @@ SPDX-License-Identifier: Apache-2.0
             IOx and IOS-XR appmgr use one device-agent container build for arm64 and amd64. Each platform has its own package and storage handling. Guest Shell runs the same agent code from a bundle.
           </p>
           <p>
-            Device families include Catalyst, Industrial Ethernet, Cisco 8000, and NCS. Available deployment paths depend on device capabilities and software; see <a href="docs/install/supported-devices/">device requirements</a>.
+            Device families include Catalyst, Industrial Ethernet, Cisco 8000, and NCS. Available deployment paths depend on device capabilities and software.
           </p>
           <p>
-            The server and web Console run in separate containers on one Docker host, <a href="docs/install/separate-docker-hosts/">separate Docker hosts</a>, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
+            The server and web Console run in separate containers on one Docker host, separate Docker hosts, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
           </p>
           <p>
-            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. An operator can turn on TLS with mutual certificates for peer transfers between devices; that setting is off by default. See <a href="docs/architecture/network-ports/">network ports and flows</a> for firewall requirements.
+            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. An operator can turn on TLS with mutual certificates for peer transfers between devices; that setting is off by default.
           </p>
         </div>
       </section>
@@ -199,16 +206,10 @@ SPDX-License-Identifier: Apache-2.0
       <section class="docs-band">
         <div>
           <p class="eyebrow">Documentation</p>
-          <h2>Guides and reference.</h2>
+          <h2>Install, run and understand IRIS.</h2>
         </div>
         <div class="doc-links">
-          <a href="docs/install/">Installation Guide</a>
-          <a href="docs/admin-guide/">Administration Guide</a>
-          <a href="docs/user-guide/">User Guide</a>
-          <a href="docs/architecture/">Architecture Guide</a>
-          <a href="docs/reference/">Reference</a>
-          <a href="docs/user-guide/troubleshooting/">Troubleshooting</a>
-          <a href="docs/swagger/">Browse the API</a>
+          <a href="docs/">Open the documentation</a>
         </div>
       </section>
     </main>

@@ -68,6 +68,33 @@ apply this figure to a different host or fleet. See
 method without the figures, and
 [tools/api-exercise.py](api-exercise.md) for the harness that produced them.
 
+## Telemetry WAN cost and peer-sampling coverage
+
+[Limitations](../zensical/architecture/limitations.md) and
+[aria2 peer sampling, report ring and promotion design](telemetry-internals.md)
+link here for the measured numbers behind two separate claims: what
+streaming telemetry costs a device's WAN link, and how much of a peer
+transfer the origin's sampling actually traces.
+
+**WAN cost.** Per device, streaming telemetry adds about 33 bps on a good
+link (about 250 bytes per minute), about 8 bps on a constrained link, and
+nothing at all on a bad link, against the roughly 800 bps the heartbeat
+itself already costs. The difference follows from how often a sample goes
+out: a `good` link samples every tick (60 s), a `constrained` link samples
+every fourth tick (about 4 minutes), and a `bad` link sends no samples at
+all, so its terminal report carries the whole story instead of an ongoing
+stream.
+
+**Peer-sampling coverage.** The origin seeder polls aria2's `getPeers` on an
+interval and banks each connection's growth into a durable ledger, but a
+connection's counter disappears the moment the connection closes, so a
+connection that opened and closed between two polls contributes nothing. On
+a 7-router pull, a 3-second poll interval (`IRIS_SAMPLE_INTERVAL=3`) traced
+73.3% of the bytes the origin actually sent to a device; a 2-second poll
+interval traced 88.1%. The untraced residue is published as its own
+measured quantity rather than folded into the traced figure, so a reader
+can tell a sampling gap from a real loss.
+
 ## The Catalyst 8000V mount record
 
 On IOS-XE 17.15.5, the Catalyst 8000V app-hosting mount did not expose an
@@ -143,6 +170,7 @@ For what each symptom means, see
 ## Related
 
 - [The assistant-facing deployment runbook](ai-assisted-deployment.md)
+- [aria2 peer sampling, report ring and promotion design](telemetry-internals.md)
 - [tools/api-exercise.py](api-exercise.md)
 - [Building the device image, IOx wrappers, IOS-XR rpm and aria2c](device-packages.md)
 - [Limitations](../zensical/architecture/limitations.md)

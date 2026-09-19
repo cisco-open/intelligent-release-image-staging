@@ -45,7 +45,9 @@ message rather than one question at a time:
    reach.
 3. **Which device types to onboard:** Guest Shell, IOx on amd64, IOx on
    arm64, IOS-XR appmgr, or none yet. This choice decides which device
-   packages it needs to build.
+   packages it needs to build. For API or infrastructure-only validation, it
+   skips device-package builds and onboarding entirely, and reports those
+   checks as not performed rather than building packages nobody asked for.
 4. **The server's device-reachable IPv4 address**, and the Console URL if it
    differs from that address on port 8080.
 
@@ -71,6 +73,12 @@ or [Install on Kubernetes](../zensical/install/kubernetes.md). It keeps the
 same layout, compose project, environment files, and container names in
 every command, and it leaves your existing server state and device
 assignments in place.
+
+When it validates an existing installation, it reuses that deployment's
+administrator account instead of asking you to set one up again. An old
+Kubernetes PVC can carry a different administrator from a Docker
+installation, so it reads that deployment's own protected credential record
+rather than guessing or retrying passwords.
 
 It keeps credentials out of chat, command output, logs, and source control,
 and reads local credentials only when a step needs them. It never copies
@@ -168,7 +176,9 @@ layout, and do not start a Docker deployment only because it is the default:
    from.
 3. Which device types will be onboarded: Guest Shell, IOx on amd64, IOx on
    arm64, IOS-XR appmgr, or none yet? Ask before building packages: asking
-   later wastes a build.
+   later wastes a build. For API or infrastructure-only validation, skip
+   device-package builds and onboarding entirely, and report those checks as
+   not performed.
 4. The server's device-reachable IPv4 address, and the Console URL if it is
    not that address on port 8080.
 

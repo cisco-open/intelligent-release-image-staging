@@ -68,3 +68,88 @@ def test_help_pages_link_only_current_docs_pages(page):
         assert not _is_redirect_stub(source), (
             "%s links to docs/%s, which resolves to %s -- a redirect stub, "
             "not a current page" % (page, slug, os.path.relpath(source, REPO_ROOT)))
+
+
+# ---------------------------------------------------------------------------
+# server/iox_verification.py embeds a rendered docs URL and heading anchor
+# directly in an operator-facing refusal detail, not in one of the help
+# pages above. Nothing else in the suite resolves that anchor against a real
+# heading, so a docs restructure that renames the heading, moves the page,
+# or drops the anchor would leave a dead link in a runtime error message an
+# operator reads during an interrupted IOx install, with every other gate
+# green (issue #361).
+# ---------------------------------------------------------------------------
+
+RUNBOOK_LINK_RE = re.compile(
+    r'^https://cisco-open\.github\.io/intelligent-release-image-staging'
+    r'/docs/([^#]*)#(.+)$'
+)
+
+_HEADING_ID_RE = re.compile(r"\{\s*#([-\w]+)\s*\}\s*$")
+
+
+def _markdown_headings(markdown_path):
+    """Every ATX heading's raw text, skipping fenced code blocks so a shell
+    comment starting with '#' is never mistaken for a heading."""
+    with open(markdown_path, encoding="utf-8") as f:
+        text = f.read()
+    headings = []
+    fence = None
+    for line in text.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence is None:
+            if marker:
+                fence = marker.group(1)[0]
+                continue
+            match = re.match(r"^#{1,6}\s+(.*?)\s*$", line)
+            if match:
+                headings.append(match.group(1))
+        elif marker and marker.group(1)[0] == fence:
+            fence = None
+    return headings
+
+
+def _slugify(heading_text):
+    """The natural heading slug: lowercase, spaces to hyphens, punctuation
+    and inline-code backticks stripped."""
+    text = _HEADING_ID_RE.sub("", heading_text).strip()
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = text.lower()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"\s+", "-", text).strip("-")
+    return text
+
+
+def _heading_slugs(markdown_path):
+    """Every id a link could target on this page: an explicit ``{ #id }``
+    attribute where present, otherwise the heading's natural slug."""
+    slugs = set()
+    for heading in _markdown_headings(markdown_path):
+        explicit = _HEADING_ID_RE.search(heading)
+        slugs.add(explicit.group(1) if explicit else _slugify(heading))
+    return slugs
+
+
+def test_iox_verification_reconcile_runbook_anchor_resolves():
+    """_RECONCILE_RUNBOOK must resolve to a real page and a real heading."""
+    import iox_verification
+
+    url = iox_verification._RECONCILE_RUNBOOK
+    match = RUNBOOK_LINK_RE.match(url)
+    assert match, "%s does not look like a rendered docs URL" % url
+    slug, fragment = match.groups()
+
+    source = _resolve_slug(slug)
+    assert source is not None, (
+        "iox_verification._RECONCILE_RUNBOOK links to docs/%s, which does "
+        "not resolve to any file under docs/zensical" % slug)
+    assert not _is_redirect_stub(source), (
+        "iox_verification._RECONCILE_RUNBOOK links to docs/%s, which "
+        "resolves to %s -- a redirect stub, not a current page"
+        % (slug, os.path.relpath(source, REPO_ROOT)))
+
+    slugs = _heading_slugs(source)
+    assert fragment in slugs, (
+        "iox_verification._RECONCILE_RUNBOOK's anchor #%s does not match "
+        "any heading in %s (found: %s)"
+        % (fragment, os.path.relpath(source, REPO_ROOT), sorted(slugs)))
