@@ -69,3 +69,11 @@ def test_missing_helper_fails_closed_without_fallback(monkeypatch):
 def test_shared_server_and_agent_adapter_bytes_match():
     root = Path(__file__).resolve().parents[2]
     assert (root/'server/instruction_aead.py').read_bytes() == (root/'device/agent/instruction_aead.py').read_bytes()
+
+
+def test_build_exports_helper_and_public_notice_with_explicit_modes():
+    root = Path(__file__).resolve().parents[2]
+    script = (root/'tools/build-instruction-crypto-inner.sh').read_text()
+    assert 'chmod 0755 /out/iris-aead' in script
+    assert 'chmod 0644 /out/iris-aead.LICENCE' in script
+    assert script.index('chmod 0644') > script.index('cat /src/musl-COPYRIGHT')

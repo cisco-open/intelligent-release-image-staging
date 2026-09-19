@@ -13,3 +13,7 @@ fi
 cp /src/openssl-LICENSE /out/iris-aead.LICENCE
 printf '\n\nStatically linked musl libc 1.2.6:\n\n' >> /out/iris-aead.LICENCE
 cat /src/musl-COPYRIGHT >> /out/iris-aead.LICENCE
+# Docker ADD of a URL creates a root-only (0600) file. cp preserves that mode;
+# the server's unprivileged artifact publisher must be able to read the notice.
+chmod 0755 /out/iris-aead
+chmod 0644 /out/iris-aead.LICENCE

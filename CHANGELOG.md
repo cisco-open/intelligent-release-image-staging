@@ -11,6 +11,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Fixed
+- Make the static instruction-helper license readable by the unprivileged
+  server publisher so Guest Shell bundles provision successfully at startup.
+- Batch concurrent cached inventory scans to reduce reader lock contention,
+  while retaining per-request content validation and independent shard writes.
+
 ## [2026.09.19]
 
 ### Added

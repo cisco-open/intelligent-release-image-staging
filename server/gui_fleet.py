@@ -802,8 +802,8 @@ class FleetStore:
         separate shard reads with no single lock spanning all of them, so a
         write racing the scan could otherwise pair fresh rows with a stale
         revision (or vice versa). This retries a settled (revision, rows)
-        pairing a few times — cheap, since nothing here holds a lock, only
-        re-reads a small file and rescans — and if it still hasn't settled,
+        pairing a few times — without holding a fleet writer lock, only
+        re-reading a small file and rescanning — and if it still hasn't settled,
         falls back to the LAST revision read next to the last scan: always
         >= what those rows reflect (see _bump_revision), so the fallback can
         only look newer than the rows actually are, never staler."""
