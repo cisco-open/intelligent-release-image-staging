@@ -12,22 +12,24 @@
 #
 # Everything a fresh clone is missing is checked BEFORE anything is built, and
 # reported as one list, so an install never fails ten minutes into a package
-# build on the next absent hand-in. The pinned aria2c clients are the one
-# hand-in this script supplies for itself: they are published, tested builds,
-# so it fetches them through tools/get-aria2c.sh (checksum-verified against
-# tools/aria2c.sha256, fail-closed) instead of handing the operator a command
-# to run. The one input this script will never create is the instruction trust
-# roots: those come from the custody ceremony in
-# docs/zensical/admin-guide/instruction-keys.md, and only their public halves
-# are read here.
+# build on the next absent hand-in. The pinned aria2c clients are committed to
+# this repository, so a normal clone already has them and nothing is fetched;
+# the one input this script supplies for itself is a client that has been
+# deleted from the working tree, which it replaces through tools/get-aria2c.sh
+# (checksum-verified against tools/aria2c.sha256, fail-closed) instead of
+# handing the operator a command to run. The one input this script will never
+# create is the instruction trust roots: those come from the custody ceremony
+# in docs/zensical/admin-guide/instruction-keys.md, and only their public
+# halves are read here.
 #
 # Usage: IRIS_INSTRUCTION_ROOTS_DIR=<dir with exactly two .pub> tools/start-compose-server.sh
 #        (the directory defaults to <repo>/instr-roots)
 #
 #   IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64  which aria2c clients to
 #                                                  install (default linux/amd64)
-#   ARIA2C_NO_DOWNLOAD=1                           forbid the fetch; hand the
-#                                                  clients in instead
+#   ARIA2C_NO_DOWNLOAD=1                           forbid the fallback fetch;
+#                                                  restore or hand the clients
+#                                                  in instead
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,17 +37,19 @@ COMPOSE=(docker compose -f "$REPO/server/docker-compose.yml")
 IRIS_RUNTIME_UID=10001
 missing=()
 
-# server/Dockerfile COPYs bin/aria2c, the seeder client. That binary is
-# git-ignored on purpose -- only its checksum and provenance live in the
-# repository (tools/aria2c.sha256) -- so a fresh clone has none and the COPY
-# fails inside BuildKit with a cache-key error naming no remedy (issue #203).
-# The clients are prebuilt and tested per architecture, so install them here
-# rather than stopping to tell the operator to: tools/get-aria2c.sh resolves
-# each one from a hand-in or this project's published release and refuses
-# anything that does not match tools/aria2c.sha256, so this is a fetch, never
-# a trust decision. ARIA2C_NO_DOWNLOAD=1 forbids it, and the missing-input
-# report below then stands. The pin itself is still enforced again in the
-# image build; the checks after this are only about the files being present.
+# server/Dockerfile COPYs bin/aria2c, the seeder client. It is committed, as
+# is each deliverables/aria2c-<cpu> the device builders read, so a normal
+# clone has every client already and this block does nothing. It exists for
+# the working tree where one of them was deleted: without it the COPY fails
+# inside BuildKit with a cache-key error naming no remedy (issue #203). The
+# clients are prebuilt and tested per architecture, so replace a missing one
+# here rather than stopping to tell the operator to: tools/get-aria2c.sh
+# resolves it from a hand-in or this project's published release and refuses
+# anything that does not match tools/aria2c.sha256, so the fallback fetch is
+# never a trust decision. ARIA2C_NO_DOWNLOAD=1 forbids it, and the
+# missing-input report below then stands. The pin itself is still enforced
+# again in the image build; the checks after this are only about the files
+# being present.
 ARIA2C_PLATFORMS="${IRIS_DEVICE_PLATFORMS:-linux/amd64,linux/arm64}"
 aria2c_wanted=0
 [ -f "$REPO/bin/aria2c" ] || aria2c_wanted=1

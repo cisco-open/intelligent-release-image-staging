@@ -23,13 +23,29 @@ source:
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
 
+## The binaries are in this repository, next to this source
+
+The tested clients are **committed**: `bin/aria2c` and
+`deliverables/aria2c-x86_64` (the same bytes, the x86_64 client the server
+image copies) and `deliverables/aria2c-aarch64` (what the IOx and IOS-XR
+package builders read). A clone or an unpacked release therefore carries the
+binary and its complete corresponding source together — the upstream commit
+named in [`../aria2c-patches/README.md`](../aria2c-patches/README.md), the
+ordered patches there, and the two build scripts here — which is how GPLv2
+section 3 is discharged for what we redistribute. `tools/aria2c.sha256` names
+the aria2-next version, the source pin, the patch list and the sha256 of each
+committed binary, so it is unambiguous which source produced them. Never ship
+the binaries without `tools/aria2c-patches/` and this directory:
+`tools/make-release.sh` ships all three together for exactly that reason.
+
 ## IRIS does not run this
 
-`tools/get-aria2c.sh` installs a binary that was **handed in** and verifies it
-against `tools/aria2c.sha256`, failing closed on a mismatch. Nothing in a
-normal IRIS build, release or device rollout executes anything in this
-directory. It is published to discharge the licence obligation and to let you
-reproduce or audit what we ship.
+`tools/get-aria2c.sh` verifies the committed binary against
+`tools/aria2c.sha256`, failing closed on a mismatch, and only fetches a
+replacement when one of those files is missing. Nothing in a normal IRIS
+build, release or device rollout executes anything in this directory. It is
+published to discharge the licence obligation and to let you reproduce or
+audit what we ship.
 
 ## The patch set is not duplicated here
 
@@ -45,8 +61,11 @@ candidate set — the default is the single home.
 The binaries this project ships are published as a release of their own, tagged
 by the aria2-next version and patch count rather than by an IRIS CalVer
 release: they change only when this build does.
-`tools/get-aria2c.sh` fetches from that tag and refuses anything that does not
-match `tools/aria2c.sha256`, so a deployment needs no local build.
+A deployment needs no local build and no download at all: the same binaries
+are committed here. The release exists so a checkout that lost them (or a
+consumer outside git) can still get them; `tools/get-aria2c.sh` fetches from
+that tag only when a committed file is missing, and refuses anything that does
+not match `tools/aria2c.sha256`.
 
 After adopting a new build, from a checkout at the commit that carries the
 matching `tools/aria2c.sha256`:
@@ -212,5 +231,6 @@ The local producer is the sibling `aria2-next-static` checkout. The driver archi
 the local pinned checkout before applying patches; it never fetches or resets
 that checkout. Patches 0008/0009 add required hybrid TLS and align upstream
 seeder tests with the already-shipped grace period. TLS defaults to disabled.
-See [peer transport](../../docs/zensical/security.md#peer-payload-transport-boundary)
+See [Peer transfer
+encryption](../../docs/zensical/architecture/security-model.md#peer-transfer-encryption)
 for enrollment, deployment and security limits.

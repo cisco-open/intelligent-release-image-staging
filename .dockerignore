@@ -30,9 +30,9 @@ server/console-ui/tests/
 creds/
 artifacts/
 bin/
-# ...except the handed-in aria2c client, which server/Dockerfile COPYs in.
-# It is produced by the aria2-next-static project and installed by
-# tools/get-aria2c.sh; it is gitignored but must reach the build context.
+# ...except the tested aria2c client, which server/Dockerfile COPYs in.
+# It is produced by the aria2-next-static project, committed here, and
+# verified by tools/get-aria2c.sh; it must reach the build context.
 !bin/aria2c
 images/
 deliverables/

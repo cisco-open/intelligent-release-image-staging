@@ -17,6 +17,16 @@ reach.
 is the operator procedure that runs these same builds during a deployment;
 this page is the detail underneath it.
 
+## Why the server and Console builds pass `--pull`
+
+The server and Console images are unrelated to the device packages above, but
+their build command carries the same floating-tag hazard, so the reason
+belongs here rather than nowhere. Their base, `python:3.12-slim-trixie`, is a
+floating tag: without `--pull`, `docker compose ... build` reuses whatever
+copy the host already cached, which can be weeks behind on Debian security
+updates. `tools/start-compose-server.sh` passes `--pull` for you; a manual
+`docker compose build` needs it added by hand.
+
 ## Files
 
 These files define and build the shared image and package it for each
@@ -148,14 +158,16 @@ The build resolves each architecture-matched `aria2c` in order. First it
 tries the `ARIA2C_BIN_AMD64` or `ARIA2C_BIN_ARM64` override, if set. Next it
 tries the matching local agent bundle, whose `aria2c` is still
 checksum-verified since a bundle's origin is not otherwise pinned. Last it
-tries the handed-in `deliverables/aria2c-<arch>` binary, checksum-verified
+tries the committed `deliverables/aria2c-<arch>` binary, checksum-verified
 against `tools/aria2c.sha256`. With none of those present the build stops
-with an error; there is no network fallback. On most hosts, `tools/get-aria2c.sh`
-fetches the pinned release and fills `deliverables/` before any of this runs;
-see
+with an error; there is no network fallback. A clone already carries the
+tested clients for both architectures — `bin/aria2c`,
+`deliverables/aria2c-x86_64` and `deliverables/aria2c-aarch64` are committed —
+so nothing is downloaded. `tools/get-aria2c.sh` re-verifies them and fetches
+the published release only when one of those files is missing; see
 [Download the tools that build device packages](../zensical/install/build-tools.md).
 
-Build your own binary only when a host cannot reach that release. Accept a
+Build your own binary only when you are adopting a different build. Accept a
 hand-in instead, at `deliverables/aria2c-<cpu>` or pointed to by
 `ARIA2C_DELIVERABLE`, or build it from the producer this repository ships:
 
@@ -293,8 +305,8 @@ ordinary build, and never put a real device credential in one.
 - [Build and publish the device packages](../zensical/install/device-packages.md):
   the operator procedure that runs these builds and publishes the results.
 - [Download the tools that build device packages](../zensical/install/build-tools.md):
-  fetching the pinned `aria2c` release and checking for ARM64 emulation
-  before you fall back to building either yourself.
+  the pinned `aria2c` clients a clone already carries, and checking for ARM64
+  emulation before you fall back to building anything yourself.
 - [Components and images](../zensical/architecture/components.md):
   what the shared image and its packages run inside IOx and IOS-XR appmgr.
 - [Writing and building the docs](documentation.md):

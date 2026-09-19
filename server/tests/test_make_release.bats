@@ -137,6 +137,14 @@ _make_release_fixture() {
   echo "patch" > "$FIX/tools/aria2c-patches/0001.patch"
   echo "FROM scratch" > "$FIX/tools/aria2c-build/Dockerfile"
   echo "# build" > "$FIX/tools/aria2c-build/build.sh"
+  # The tested aria2c clients are committed, and SHIP lists them, so the
+  # fixture has to carry them too or --error-unmatch aborts the assembly.
+  mkdir -p "$FIX/bin" "$FIX/deliverables"
+  echo "fake x86_64 client" > "$FIX/bin/aria2c"
+  echo "fake x86_64 client" > "$FIX/deliverables/aria2c-x86_64"
+  echo "fake aarch64 client" > "$FIX/deliverables/aria2c-aarch64"
+  # spares next to them stay ignored and must never reach the tarball
+  echo "stale" > "$FIX/deliverables/aria2c-x86_64.old-6patch"
   echo "# run" > "$FIX/lab/device-run.sh"; echo "# run" > "$FIX/lab/xr-run.sh"
   cp "$repo/lab/xr-dialogue.pl" "$FIX/lab/xr-dialogue.pl"
   echo "# policy" > "$FIX/lab/iris-ssh-policy.sh"
@@ -160,7 +168,8 @@ _make_release_fixture() {
   echo "planted" > "$FIX/fleet/devices.csv"
   # every planted file must really be ignored by the repo's own rules
   for f in server/.env server/certs/lab-private.key server/docker-compose.override.yml \
-           server/webroot/fonts/SharpSans-Bold.woff2 device/xr/out/iris-xr.rpm fleet/devices.csv; do
+           server/webroot/fonts/SharpSans-Bold.woff2 device/xr/out/iris-xr.rpm fleet/devices.csv \
+           deliverables/aria2c-x86_64.old-6patch; do
     git -C "$FIX" check-ignore -q "$f" || { echo "fixture: $f is not gitignored" >&2; return 1; }
   done
 }
@@ -173,7 +182,8 @@ _make_release_fixture() {
   for absent in iris/server/.env iris/server/certs/lab-private.key \
                 iris/server/docker-compose.override.yml \
                 iris/server/webroot/fonts/SharpSans-Bold.woff2 \
-                iris/device/xr/out/iris-xr.rpm iris/fleet/devices.csv; do
+                iris/device/xr/out/iris-xr.rpm iris/fleet/devices.csv \
+                iris/deliverables/aria2c-x86_64.old-6patch; do
     if echo "$members" | grep -qx "$absent"; then
       echo "leaked into the tarball: $absent" >&2; return 1
     fi
@@ -185,6 +195,8 @@ _make_release_fixture() {
   for present in iris/server/tracker.py iris/server/certs/cisco_bulkhash_verify.pem \
                  iris/tools/aria2c-patches/0001.patch iris/fleet/devices.csv.example \
                  iris/lab/iris-ssh-policy.sh \
+                 iris/bin/aria2c iris/deliverables/aria2c-x86_64 \
+                 iris/deliverables/aria2c-aarch64 \
                  iris/bin/.gitkeep iris/artifacts/.gitkeep iris/MANIFEST.txt; do
     echo "$members" | grep -qx "$present" || { echo "missing: $present" >&2; return 1; }
   done

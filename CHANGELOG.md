@@ -24,6 +24,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - The one-host start script fetches and verifies the tested aria2c clients
   itself; `get-aria2c.sh` gains `--for-platforms` so one command installs every
   architecture in `IRIS_DEVICE_PLATFORMS`.
+- Commit the tested aria2c clients for both architectures so a fresh clone
+  needs no download; the scripts verify them against `tools/aria2c.sha256` and
+  fetch only when a file is missing.
 
 ### Fixed
 - Normalize the Kubernetes server's private state directories after kubelet

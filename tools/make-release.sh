@@ -79,6 +79,15 @@ SHIP=(
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
   tools/aria2c-patches tools/aria2c-build
+  # ...and the tested aria2c clients themselves. They are committed (see the
+  # re-inclusions in .gitignore), so the release is complete offline: bin/aria2c
+  # is the x86_64 seeder client server/Dockerfile COPYs, and
+  # deliverables/aria2c-<cpu> is what the device package builders read. The
+  # corresponding source and patches for exactly these binaries are the
+  # tools/aria2c-build and tools/aria2c-patches trees above, which is what makes
+  # shipping them GPLv2 section 3 compliant -- never ship the binaries without
+  # them.
+  bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.
   lab/device-run.sh lab/xr-run.sh lab/xr-dialogue.pl lab/iris-ssh-policy.sh
@@ -107,8 +116,10 @@ while IFS= read -r -d '' rel; do
 done < "$WORK/tracked-files"
 [ "$copied" -gt 0 ] || { echo "ERROR: nothing to ship" >&2; exit 1; }
 
-# bin placeholder -- aria2c is fetched by tools/get-aria2c.sh for the DEVICE
-# agent bundle; the server gets its own copy baked into the image at build time.
+# bin/ already holds the committed x86_64 aria2c client (shipped by the
+# allowlist above), so the unpacked release needs no download. .gitkeep is
+# tracked in the checkout but sits outside the allowlist, so recreate it here
+# and the unpacked tree matches the repository.
 mkdir -p "$STAGE/bin"; : > "$STAGE/bin/.gitkeep"
 
 # artifacts dir: ship it (empty) so it exists + is owned by the unpacking user

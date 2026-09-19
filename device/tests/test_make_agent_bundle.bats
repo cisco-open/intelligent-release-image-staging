@@ -5,8 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # tools/make-agent-bundle.sh bundles bin/aria2c for every device. The binary
-# is HANDED IN (produced by aria2-next-static, installed by get-aria2c.sh),
-# and the manifest tools/aria2c.sha256 is the pin: an architecture check
+# is HANDED IN (produced by aria2-next-static) and committed here, verified by
+# get-aria2c.sh, and the manifest tools/aria2c.sha256 is the pin: an architecture check
 # alone would happily bundle a stale or substituted x86-64 static binary, so
 # the bundler must verify the checksum itself and fail closed on a mismatch.
 

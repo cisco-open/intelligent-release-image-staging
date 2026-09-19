@@ -21,11 +21,17 @@ command-line / RPC interface and remains under its own license:
                Provided by aria2-next (a fork of aria2), built as a
                fully-static musl binary by a separate project which pins the
                source by commit SHA and applies local patches. It is HANDED IN
-               to this repository as a binary artifact, verified against
-               tools/aria2c.sha256, and is NOT downloaded, NOT built, and NOT
-               stored in this source repository. This applies to every build
-               path that stages it — the server (see tools/get-aria2c.sh and
-               server/Dockerfile) and the common IOx / IOS-XR device image
+               to this repository as a binary artifact and is NOT built here.
+               The tested client for each architecture IS COMMITTED in this
+               repository — bin/aria2c and deliverables/aria2c-x86_64 (the
+               same bytes) and deliverables/aria2c-aarch64 — so a clone
+               carries the binary together with its complete corresponding
+               source below, and nothing is downloaded unless one of those
+               files has been removed. Every build path verifies what it
+               stages against tools/aria2c.sha256 and fails closed on a
+               mismatch. This applies to every build path that stages it —
+               the server (see tools/get-aria2c.sh and server/Dockerfile) and
+               the common IOx / IOS-XR device image
                (see tools/build-device-image.sh, invoked by device/iox/build.sh
                and tools/build-xr-package.sh). The common builder resolves both
                architectures from operator-supplied ARIA2C_BIN_AMD64 /
@@ -43,7 +49,12 @@ command-line / RPC interface and remains under its own license:
                tools/aria2c-patches/, applied in numeric order; and the
                scripts used to control compilation in tools/aria2c-build/
                (Dockerfile + build.sh). The README in each directory
-               explains how to rebuild.
+               explains how to rebuild. That source is the source of the
+               binaries committed here: tools/aria2c.sha256 records the
+               aria2-next version, the same source pin, the exact patch list
+               applied, and the sha256 of each committed binary, so a
+               recipient of the binary always receives the matching source in
+               the same tree or release archive.
 
   * mktorrent — GNU General Public License, version 2 (GPLv2).
                Installed as a system package and invoked as a subprocess to

@@ -40,7 +40,7 @@
 # ---------------------------------------------------------------------------
 # Behavioral tests: run the real build.sh, symlinked into a fake $REPO so we
 # control deliverables/, tools/aria2c.sha256 and the local agent bundle
-# without touching the real repository's gitignored deliverables. Mirrors the
+# without touching the real repository's committed deliverables. Mirrors the
 # STUBDIR pattern in test_iox_install_output.bats (HERE resolves off a
 # symlinked script, so the fake repo layout must live two dirs above it).
 # The failure paths below abort during aria2c staging, before docker/skopeo/

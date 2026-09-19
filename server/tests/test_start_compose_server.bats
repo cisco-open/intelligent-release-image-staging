@@ -123,11 +123,12 @@ run_bringup() {
   [[ "$output" == *"could not resolve the iris container"* ]]
 }
 
-@test "a fresh clone without the handed-in aria2c is refused before the build" {
-  # bin/aria2c is a handed-in deliverable and git-ignored by design, so a fresh
-  # clone has none and server/Dockerfile's COPY dies inside BuildKit with a
-  # cache-key error naming no remedy (issue #203). Name the remedy, and name it
-  # before anything is built or started.
+@test "a working tree whose aria2c was removed is refused before the build" {
+  # bin/aria2c is committed, so a clone has it -- but a working tree it was
+  # deleted from (or an unpacked copy it was stripped out of) makes
+  # server/Dockerfile's COPY die inside BuildKit with a cache-key error naming
+  # no remedy (issue #203). Name the remedy, and name it before anything is
+  # built or started.
   rm -f "$REPO/bin/aria2c"
   run_bringup
   [ "$status" -eq 1 ]
@@ -165,8 +166,8 @@ run_bringup() {
 }
 
 @test "ARIA2C_NO_DOWNLOAD=1 forbids the fetch and the missing input stands" {
-  # A host that must not reach the release keeps the hand-in workflow: no
-  # fetch is attempted, and the missing-input report names the remedy.
+  # A host that must not reach the release keeps the restore/hand-in workflow:
+  # no fetch is attempted, and the missing-input report names the remedy.
   rm -f "$REPO/bin/aria2c"
   ARIA2C_NO_DOWNLOAD=1 FAKE_FETCH_OK=1 run_bringup
   [ "$status" -eq 1 ]

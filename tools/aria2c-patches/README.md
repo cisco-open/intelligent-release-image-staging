@@ -9,16 +9,18 @@ agent bundle, IOx packages, IOS-XR appmgr RPM) are **Aria2 Next 2.5.6**, a fork
 of aria2, licensed under the GNU General Public License v2 with the OpenSSL
 exception.
 
-IRIS neither downloads nor builds `aria2c`. It is handed in as an artifact and
-verified against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
+IRIS neither downloads nor builds `aria2c`. It is handed in as an artifact,
+committed to this repository (`bin/aria2c`, `deliverables/aria2c-x86_64`,
+`deliverables/aria2c-aarch64`) beside this corresponding source, and verified
+against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
 
 ## The corresponding source (GPLv2 §3)
 
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
 2. **The patches in this directory**, applied in numeric order.
-   Patch `0010` is the issue #331 fix for the next binary handoff; the current
-   checksum-pinned artifacts contain patches `0001`–`0009`.
+   The current checksum-pinned artifacts contain patches `0001`–`0010`,
+   as `tools/aria2c.sha256` records.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
 
@@ -65,10 +67,11 @@ They read the patch set from *this* directory, so it still has exactly one home
 and cannot drift between two copies.
 
 IRIS itself neither runs them nor builds `aria2c` in any normal flow — the
-binary is handed in and verified. `tools/get-aria2c.sh` looks for a produced
-binary at `../aria2-next-static/out/<arch>/aria2c` by default, which is simply
-where the maintainers' own build tree happens to sit; `ARIA2C_DELIVERABLE`
-points it anywhere else.
+binary is committed and verified. `tools/get-aria2c.sh` takes the repository's
+own `deliverables/aria2c-<arch>` first, then a produced binary at
+`../aria2-next-static/out/<arch>/aria2c`, which is simply where the
+maintainers' own build tree happens to sit; `ARIA2C_DELIVERABLE` points it
+anywhere else.
 
 What is fixed about the deliverable:
 
@@ -127,5 +130,5 @@ and stop it applying; see the licensing notes in
 - `0009-test-seeder-goodbye-grace.patch`: align three upstream tests with the
   five-second grace already provided by patch 0007.
 
-Both x86_64 and aarch64 builds use all nine patches. The ARM transport tests
+Both x86_64 and aarch64 builds use all ten patches. The ARM transport tests
 run under QEMU; native device validation is a separate rollout check.
