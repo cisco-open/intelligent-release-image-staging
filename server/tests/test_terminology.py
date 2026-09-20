@@ -95,6 +95,8 @@ _TRIPWIRE_TEST_ANCHORS = (
 # allowlisted when it contains one of its file's anchors. Keep anchors narrow
 # enough that they could not accidentally cover a NEW violation.
 ALLOWLIST = [
+    ("tools/aria2c-source/COPYING3", None,
+     "unmodified GNU GPL version 3 text; legal receipt is not IRIS terminology"),
     ("tools/api_exercise_fixtures.py",
      ('for suffix in ("", "/occurrences", "/receipts"):',),
      "reads the distinct durable schedule receipts API (Tasks 22–23), "

@@ -47,6 +47,8 @@ EXEMPTIONS = {
     "server/webroot/fonts/RobotoMono-Medium.woff2": "Upstream font; see NOTICE",
     "server/webroot/fonts/RobotoMono-Regular.woff2": "Upstream font; see NOTICE",
     "tools/licenses/musl-COPYRIGHT": "Unmodified upstream license",
+    "tools/aria2c-source/COPYING3": "Unmodified GNU GPL version 3 license text",
+    "tools/aria2c-source/inputs.json": "Strict JSON source and dependency checksum manifest",
     "tools/aria2c-patches/0001-getpeers-keys-filter.patch": "GPL patch; see sibling README",
     "tools/aria2c-patches/0002-fix-uaf-peer-blocklist-disconnect.patch": "GPL patch; see sibling README",
     "tools/aria2c-patches/0003-fix-pkcs12-chain-type-confusion.patch": "GPL patch; see sibling README",

@@ -100,3 +100,9 @@ def test_explicit_ssh_pin_fails_closed_without_changing_unset_default():
     assert "With this setting unset, the IOx agent disables host-key verification" in reference
     assert "configured path that is missing, unreadable, empty or not a regular file" in reference
     assert "stops SSH and SCP before connection" in reference
+
+
+def test_peer_revocation_does_not_claim_immediate_session_termination():
+    security = page("architecture/security-model.md")
+    assert "Token revocation does not immediately disconnect established peer sessions" in security
+    assert "certificate expiry is checked during the TLS handshake" in security

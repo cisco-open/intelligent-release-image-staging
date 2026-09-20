@@ -40,13 +40,21 @@ run `tools/check-package-freshness.sh`. Its certificate-drift check does not
 replace this rebuild step: it checks the served wrapper bytes against the
 provenance manifest next to them, not whether the source has changed.
 
-Before publishing aria2c binaries, arrange and review the matching
-corresponding-source distribution: upstream source, local patches, build
-scripts, and applicable linked dependency sources. The current checkout and
-IRIS release archive contain the binaries, patches, and build scripts, but not
-the upstream and dependency source trees. Record where recipients receive
-those source inputs; a commit link is provenance, not a complete source bundle.
-See [What the repository distributes](../../tools/aria2c-build/README.md#what-the-repository-distributes).
+Before publishing aria2c binaries, build and verify the matching source
+archive with [aria2c source distribution](../../tools/aria2c-source/README.md).
+The `aria2c-2.5.6-p10-source.tar.gz` asset contains upstream source, the ten
+local patches, build scripts, dependency sources and license files. Keep
+precompiled clients available beside that source archive.
+
+- Check both binary hashes against `tools/aria2c.sha256` and the source
+  provenance record. A matching sidecar alone does not prove the source.
+- Verify the complete archive and its per-file manifest before upload.
+- Publish the source archive and its SHA-256 beside both binaries and the
+  binary checksum file in the same release. Download and verify the assets.
+- Confirm the IRIS release includes the matching source archive, not only a
+  link to an upstream commit.
+- Keep older release tags and assets intact. Publish changed bytes under a
+  new tag; never overwrite a prior release to silence a checksum mismatch.
 
 ## Confirm each platform's verifier
 

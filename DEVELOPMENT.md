@@ -123,6 +123,16 @@ To cut a release:
 Rebuild every device package family first when the release includes a
 shared-agent change.
 
+The precompiled `aria2c` clients remain committed and are verified during
+normal builds. Before packaging a release, follow
+[aria2c source distribution](tools/aria2c-source/README.md) to prepare and
+verify the matching source archive. Publish that archive, its checksum and
+both tested clients together. The IRIS release must include the source
+archive as well; an upstream commit link alone is not the source deliverable.
+Use [Release and verifier checklist](docs/dev/release-checklist.md) before
+publication. Source work does not authorize changing client checksums to
+accept an unverified binary.
+
 ## Vendored third-party assets
 
 The Console image ships a vendored copy of the Swagger UI assets under

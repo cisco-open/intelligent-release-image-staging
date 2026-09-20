@@ -11,8 +11,8 @@ one shared container image that IOx and IOS-XR appmgr both run, the IOx
 tars, the IOS-XR RPM, and the `aria2c` binary all three carry. It covers the
 files that define the image, the commands that build each package, and what
 a package provenance manifest records. It also covers how to build `aria2c`
-yourself or set up ARM64 emulation when the published release is out of
-reach.
+yourself for development or audit, and set up ARM64 emulation for package
+builds.
 [Build and publish the device packages](../zensical/install/device-packages.md)
 is the operator procedure that runs these same builds during a deployment;
 this page is the detail underneath it.
@@ -93,11 +93,11 @@ identity therefore signs one shared payload. A deployment that also requires
 a native IOx or RPM signature still signs that envelope separately. Each wrapper is
 published next to a `.manifest` tying its own SHA-256 and selected platform
 back to those shared digests. The build accepts no `CATALOG_PEM`,
-`CATALOG_PEM_URL`, or certificate fingerprint as input: neither the image nor
-its wrappers carry
-any deployment-specific trust material, so one signed set of packages works
-across every deployment. The current public certificate stays a required
-onboarding input, and it never includes the server's private key.
+`CATALOG_PEM_URL`, or certificate fingerprint as input. The packages carry
+the two approved instruction roots, but no catalog certificate or enrollment
+credentials. Reuse them only across deployments that trust those same roots.
+The current public catalog certificate stays a required onboarding input,
+and it never includes the server's private key.
 
 Rebuild the shared image and every native wrapper after a change to any
 source the device image carries. If an archive already exists for the same
@@ -109,8 +109,8 @@ need a rebuild.
 
 When the pinned `aria2c` in `tools/aria2c.sha256` changes, refresh both the
 `ARIA2C_BIN_AMD64` and `ARIA2C_BIN_ARM64` inputs and rebuild every device
-package from them. The embedded `aria2c` binary must stay file-identical
-across every published package.
+package from them. Within each architecture, the embedded `aria2c` binary
+must stay file-identical across every published package.
 [Build and publish the device packages](../zensical/install/device-packages.md)
 covers when an operator has to run this rebuild and publish the results.
 
@@ -167,9 +167,18 @@ so nothing is downloaded. `tools/get-aria2c.sh` re-verifies them and fetches
 the published release only when one of those files is missing; see
 [Download the tools that build device packages](../zensical/install/build-tools.md).
 
-Build your own binary only when you are adopting a different build. Accept a
-hand-in instead, at `deliverables/aria2c-<cpu>` or pointed to by
-`ARIA2C_DELIVERABLE`, or build it from the producer this repository ships:
+Normal installation uses the committed tested binaries. A failed download
+is a connectivity or release-availability problem. Do not bypass verification
+or substitute an unverified source build to work around it.
+
+For source audits, use the matching release's
+`aria2c-2.5.6-p10-source.tar.gz` asset. It contains the upstream source, ten
+patches, build recipes, dependency sources and license files. Follow
+[aria2c source distribution](../../tools/aria2c-source/README.md) for the
+archive checks and rebuild procedure. Source archives supplement the
+precompiled clients; they do not replace them.
+
+For development from this checkout, use the pinned source and tracked recipe:
 
 ```bash
 mkdir -p tools/aria2c-build/vendor
@@ -183,38 +192,29 @@ git -C tools/aria2c-build/vendor/aria2-next checkout v2.5.6
 pinned commit and every patch in `tools/aria2c-patches/` applies cleanly, so
 a build either matches the published patch set or fails outright.
 
-A binary you build will not match `tools/aria2c.sha256`, and that is
-expected: a different toolchain or musl version produces different bytes,
-and `tools/get-aria2c.sh` fails closed on the mismatch. Adopting your own
-build is therefore a deliberate step:
+A rebuilt binary may differ if its source, toolchain, dependencies or flags
+change. Matching inputs can reproduce the shipped bytes. Compare the result
+with `tools/aria2c.sha256`; `tools/get-aria2c.sh` fails closed on a mismatch.
 
-```bash
-cp tools/aria2c-build/out/x86_64/aria2c deliverables/aria2c-x86_64
-sha256sum deliverables/aria2c-x86_64
-```
+Adopting different bytes requires a reviewed change: test both architectures,
+record their source and dependencies, update all committed binary copies and
+their checksum pins, and publish matching source. Rebuild every device package
+before rollout. Never edit `tools/aria2c.sha256` to silence a mismatch on an
+unverified build or downloaded asset.
 
-Edit `tools/aria2c.sha256` in place with that digest, and leave it
-world-readable. `server/Dockerfile` copies it into the server image and
-reads it as the runtime user. An atomic write through a temporary file lands
-as mode `0600` by default, and that mode breaks the build that uses it.
-Check the mode after editing:
+Keep that checksum file readable by the server's runtime user. After an
+intentional pin update, check its mode:
 
 ```bash
 chmod 0644 tools/aria2c.sha256
 ls -l tools/aria2c.sha256
 ```
 
-Then `tools/get-aria2c.sh amd64` installs it. Never edit that file to
-silence a mismatch on a binary you did not build yourself. There, the
-mismatch is the mechanism working: a mismatch on a downloaded asset means
-the asset is wrong and must not be adopted.
-
-The `aarch64` build is the expensive one: it compiles under emulation, takes
-tens of minutes, and keeps every core busy, because the whole toolchain runs
-emulated. Needing it at all means the release could not be reached, so try
-that first. If you do have to build it, launch it detached, so a closing
-session cannot cancel the `buildx` client, and leave Docker's build cache
-alone:
+The `aarch64` build can take much longer under emulation. The recipe bounds
+compiler and LTO workers with `ARIA2C_BUILD_JOBS`, defaulting to two. Schedule
+an intentional ARM source build around other host workloads. Launch it
+detached so a closing session cannot cancel the `buildx` client, and leave
+Docker's build cache alone:
 
 ```bash
 (
@@ -241,8 +241,7 @@ pins.
 
 An amd64 host needs ARM64 emulation to build the arm64 IOx package, whose
 image runs `apk add` and `chmod` steps inside the target platform. The host
-also needs it to build the `aarch64` `aria2c` binary in the fallback case
-above.
+also needs it for an intentional `aarch64` `aria2c` source build.
 [Download the tools that build device packages](../zensical/install/build-tools.md)
 covers checking whether the host already has a working handler and
 installing the distribution package that provides one. Run those checks on

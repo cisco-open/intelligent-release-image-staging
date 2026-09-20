@@ -53,6 +53,8 @@ for how that setting works.
 | `tools/`, `fleet/` | Administrative helpers and inventory templates. |
 | `docs/` | Public website and Zensical documentation sources. |
 
+For builds and releases, see the [developer documentation](docs/dev/README.md) and [aria2c source distribution](tools/aria2c-source/README.md).
+
 For contribution and project policies, see [CONTRIBUTING.md](CONTRIBUTING.md),
 [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
 [LICENSE](LICENSE), and [NOTICE](NOTICE).

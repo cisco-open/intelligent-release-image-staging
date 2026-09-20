@@ -39,6 +39,32 @@ recorded, and remove only the files and catalog entries the test created.
 Undeploying a device does not remove images staged for real use, and a
 cleanup should not either.
 
+## Native security acceptance — 2026-09-20
+
+The current ten-patch aria2c client and installed instruction verifier were
+checked on a Catalyst 9300 Guest Shell, completing the remaining native
+acceptance checks after the earlier IE3400, C8KV and IOS-XR runs.
+
+- A private copy of the device's valid v2 last-known-good cache recovered an
+  effective policy without any catalog or network call. Tampered v2 and
+  legacy-format copies were rejected. The live configuration and cache were
+  unchanged.
+- Two isolated instances of the installed client transferred a 262,168-byte
+  synthetic file over native loopback with matching SHA-256. Connection logs
+  reported TLS 1.3, X25519MLKEM768, AES-256-GCM, the dedicated peer application
+  protocol and verified peer authentication. Wrong-CA and expired certificates
+  were rejected in both client and server roles before BitTorrent exchange.
+  This validates native transport behavior, not cross-device throughput.
+- An isolated catalog using the deployed server code and disposable state
+  accepted valid enrollment and rejected invalid, wrong-device and revoked
+  tokens. The issued certificate lasted 24 hours. No production identity or
+  issuing authority was used or changed.
+
+These checks did not interrupt the production agent, change image assignments,
+install device software or alter boot state. Token revocation prevents new
+enrollment; it does not immediately invalidate issued certificates or terminate
+established connections. See the [peer TLS security model](../zensical/architecture/security-model.md#peer-transfer-encryption).
+
 ## Historical lab calibration
 
 On 2026-09-15, an unthrottled repeat against 500 devices completed every

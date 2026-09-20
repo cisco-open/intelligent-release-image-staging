@@ -6,14 +6,14 @@
 
 The `aria2c` that IRIS redistributes — in the server image, the Guest Shell
 agent bundle, both IOx packages and the IOS-XR RPM — is a patched build of
-**Aria2 Next 2.5.6**, which is licensed under the GNU General Public License
-version 2. Section 3 of that licence requires that a recipient of the binary
-can also get the source it was built from *and the scripts used to control its
-compilation*.
+**Aria2 Next 2.5.6**. The aria2 source and IRIS patches retain
+**GPL-2.0-or-later** grants. IRIS distributes the combined OpenSSL 3.x-linked
+executable under **GPLv3**, with dependency notices preserved. IRIS's own
+application code remains Apache-2.0.
 
 The source and the patches are described in
-[`../aria2c-patches/README.md`](../aria2c-patches/README.md). **The scripts are
-these two files.** The rebuild inputs are:
+[`../aria2c-patches/README.md`](../aria2c-patches/README.md). The rebuild inputs
+are:
 
 | Item | Where |
 | --- | --- |
@@ -21,6 +21,7 @@ these two files.** The rebuild inputs are:
 | The ordered patches | `../aria2c-patches/*.patch` |
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
+| Original producer recipe and dependency sources | Release source asset, recorded in `../aria2c-source/` |
 
 ## What the repository distributes
 
@@ -28,15 +29,23 @@ The tested clients are **committed**: `bin/aria2c` and
 `deliverables/aria2c-x86_64` (the same bytes, the x86_64 client the server
 image copies) and `deliverables/aria2c-aarch64` (what the IOx and IOS-XR
 package builders read). A clone or an unpacked release carries the binaries,
-ordered local patches, and build scripts. The upstream commit named in
-[`../aria2c-patches/README.md`](../aria2c-patches/README.md) and the linked
-dependency sources are external inputs, not bundled source trees.
-`tools/aria2c.sha256` names
-the aria2-next version, the source pin, the patch list and the sha256 of each
-committed binary. `tools/make-release.sh` ships the binaries, patches, and
-scripts together. Maintainers must also arrange the corresponding-source
-distribution for published binaries; the provenance links alone do not make
-the archive a complete source bundle.
+ordered local patches, and build scripts. `tools/aria2c.sha256` records the
+version, source pin, patch list and SHA-256 of each committed binary.
+
+The [aria2c-2.5.6-p10 release](https://github.com/cisco-open/intelligent-release-image-staging/releases/tag/aria2c-2.5.6-p10)
+also carries `aria2c-2.5.6-p10-source.tar.gz` and its adjacent `.sha256` file.
+This source asset contains the pinned upstream tree and bundled libraries,
+all ten original patches, the original producer recipe, current build scripts,
+dependency source archives with Alpine recipes and patches, license texts,
+and binary provenance. A separately identified source tree adds dated
+modification notices without altering the preserved original inputs.
+
+The archive's `rebuild.py` supports builds from the packaged source inputs;
+its `SHA256SUMS` checks the included files. The tracked
+[`../aria2c-source/`](../aria2c-source/) directory identifies the source asset,
+its digest and the distribution terms. Keep the source asset alongside the
+binaries when redistributing them; the small IRIS checkout's patches and
+provenance links are not a substitute for that asset.
 
 ## IRIS does not run this
 
@@ -44,8 +53,7 @@ the archive a complete source bundle.
 `tools/aria2c.sha256`, failing closed on a mismatch, and only fetches a
 replacement when one of those files is missing. Nothing in a normal IRIS
 build, release or device rollout executes anything in this directory. These
-scripts support rebuilding and auditing what we ship; publishing scripts alone
-does not complete the corresponding-source distribution described above.
+scripts support rebuilding and auditing the committed clients.
 
 ## The patch set is not duplicated here
 
@@ -70,23 +78,24 @@ that tag only when a committed file is missing, and refuses anything that does
 not match `tools/aria2c.sha256`.
 
 After adopting a new build, from a checkout at the commit that carries the
-matching `tools/aria2c.sha256`:
+matching `tools/aria2c.sha256`, prepare and verify the complete source asset
+before creating the release. For the current client:
 
 ```bash
-gh release create aria2c-<version>-p<patches> \
-  --title "aria2c <version>, <patches> patches" \
+source_asset=aria2c-2.5.6-p10-source.tar.gz
+sha256sum -c "$source_asset.sha256"
+gh release create aria2c-2.5.6-p10 \
+  --title "aria2c 2.5.6, 10 patches" \
   --notes-file <notes> \
-  deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256
+  deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256 \
+  "$source_asset" "$source_asset.sha256"
 ```
 
-The command above uploads binaries and their checksum file only; it is not a
-complete source-publication procedure. Before publishing a binary, arrange its
-corresponding-source distribution,
-including upstream source, local patches, build scripts, and applicable linked
-dependency sources. Have the distribution method reviewed against the license;
-release notes naming a commit are provenance, not a source bundle. Update the default
-`ARIA2C_RELEASE_TAG` in `tools/get-aria2c.sh` in the same change that adopts
-the new checksums, or the script will keep fetching the previous build.
+Verify the uploaded binaries and source archive against their recorded hashes,
+and check the source archive's member manifest after extraction. Keep the
+source asset available at the same release as the binaries. For a new client,
+update the source asset record and default `ARIA2C_RELEASE_TAG` in
+`tools/get-aria2c.sh` with the new binary checksums and tag.
 
 ## Rebuilding
 
@@ -122,11 +131,11 @@ to the version the branch now carries — deliberately, in the file, keeping the
 will not reproduce the shipped bytes. Never replace a pin with a floating
 package name to make the error go away.
 
-**Your binary will not match `tools/aria2c.sha256`,** and that is expected: a
-different toolchain, musl version or flag set produces different bytes. The
-checksum pins the exact artifact IRIS ships, not the recipe. If you adopt a
-binary you built yourself, update that file deliberately — never edit it to
-silence a mismatch, because the mismatch is the mechanism working.
+A rebuild with the recorded inputs can match `tools/aria2c.sha256`; a fresh
+x86_64 rebuild has done so. Changing a toolchain, library version or flag can
+produce different bytes. The checksum pins the exact artifact IRIS ships.
+Update it only when deliberately adopting and validating a new binary, never
+to silence an unexplained mismatch.
 
 ## Peer-cap regression checks
 

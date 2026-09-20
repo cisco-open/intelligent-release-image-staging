@@ -6,8 +6,10 @@
 
 The `aria2c` binaries this project redistributes (server image, Guest Shell
 agent bundle, IOx packages, IOS-XR appmgr RPM) are **Aria2 Next 2.5.6**, a fork
-of aria2, licensed under the GNU General Public License v2 with the OpenSSL
-exception.
+of aria2. The aria2 source and IRIS patches are **GPL-2.0-or-later**. IRIS
+distributes the combined OpenSSL 3.x-linked executable under **GPLv3**, using
+the source files' later-version grants. Original source notices and OpenSSL
+exceptions remain intact; IRIS's application code remains Apache-2.0.
 
 IRIS uses a prebuilt `aria2c` artifact,
 committed to this repository (`bin/aria2c`, `deliverables/aria2c-x86_64`,
@@ -15,7 +17,7 @@ committed to this repository (`bin/aria2c`, `deliverables/aria2c-x86_64`,
 verified against `tools/aria2c.sha256`. `tools/get-aria2c.sh` can download a
 replacement when a committed client is missing.
 
-## The corresponding source (GPLv2 §3)
+## The corresponding source
 
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
@@ -24,6 +26,11 @@ replacement when a committed client is missing.
    as `tools/aria2c.sha256` records.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
+4. **The complete source asset** — upstream source, patches, build recipes,
+   dependency source archives, Alpine packaging changes, license texts and
+   provenance in the [aria2c-2.5.6-p10 release](https://github.com/cisco-open/intelligent-release-image-staging/releases/tag/aria2c-2.5.6-p10).
+   [`../aria2c-source/`](../aria2c-source/) records its filename and checksum.
+   Redistribute the source asset alongside the matching binaries.
 
 ## Applying the patches
 
@@ -83,11 +90,11 @@ What is fixed about the deliverable:
 - the exact bytes are pinned in `tools/aria2c.sha256`, one line per
   architecture.
 
-**A binary you build yourself will not reproduce those checksums** — a
-different toolchain, musl version, or flag set produces different bytes — and
-`tools/get-aria2c.sh` fails closed on a mismatch with no override. If you build
-from source you are adopting your own binary, which means updating
-`tools/aria2c.sha256` to its sha256 deliberately, not working around the check.
+A rebuild with the recorded inputs can reproduce the pinned checksums; a
+fresh x86_64 rebuild has matched the committed binary. Different toolchains,
+library versions or flags can change the bytes. `tools/get-aria2c.sh` fails
+closed on a mismatch with no override. Adopting different bytes requires
+deliberately updating `tools/aria2c.sha256` after validation.
 
 ### The build configuration
 
@@ -113,16 +120,23 @@ deliverable described here.
 The build scripts are published in
 [`../aria2c-build/`](../aria2c-build/README.md): the `Dockerfile` and
 `build.sh` that produce the binaries. Local patches and compilation scripts
-ship in this repository. The upstream tree and linked dependency sources do
-not; maintainers must arrange their corresponding-source distribution when
-publishing binaries. See [What the repository distributes](../aria2c-build/README.md#what-the-repository-distributes).
+ship in this repository. The matching upstream tree and linked dependency
+sources are supplied in the release's separate source asset. See
+[What the repository distributes](../aria2c-build/README.md#what-the-repository-distributes).
 
 ## Licensing of the patches themselves
 
-The patch files are modifications to GPLv2 code and are provided under GPLv2.
-They carry no inline SPDX header because a header would alter the patch content
-and stop it applying; see the licensing notes in
-[`DEVELOPMENT.md`](../../DEVELOPMENT.md).
+IRIS's modifications are provided under **GPL-2.0-or-later**, consistent with
+the retained grants in the modified source and the explicit SPDX identifiers
+in the two new peer-TLS files. The Apache-2.0 header on this README licenses
+the documentation, not the patches.
+
+The combined executable is distributed under GPLv3 with each dependency's
+notices preserved. OpenSSL 3.x is Apache-2.0; this distribution uses the
+later-version grants, not a change to upstream's historical OpenSSL/SSLeay
+exception. See the [source distribution records](../aria2c-source/) for
+license texts and the distribution statement. The patch files remain ordinary
+`git diff` input; source-file copyright notices are preserved when applied.
 
 ## Private peer transport additions (2026-09-18)
 

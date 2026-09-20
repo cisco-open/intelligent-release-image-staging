@@ -7,10 +7,19 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import re
 
 import pytest
 
 SOURCE = Path(__file__).resolve().parents[2] / "tools/get-aria2c.sh"
+
+
+def test_default_release_tag_matches_committed_patch_manifest():
+    sums = (SOURCE.parent / "aria2c.sha256").read_text()
+    version = re.search(r"aria2-next version\s*:\s*(\S+)", sums).group(1)
+    patches = re.search(r"patches applied\s*:\s*(\d+)", sums).group(1)
+    expected = f"aria2c-{version}-p{patches}"
+    assert f'ARIA2C_RELEASE_TAG="${{ARIA2C_RELEASE_TAG:-{expected}}}"' in SOURCE.read_text()
 
 
 @pytest.fixture

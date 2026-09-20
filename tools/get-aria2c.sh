@@ -155,7 +155,7 @@ esac
 # The published deliverables live on a release of their own, tagged by the
 # aria2-next version and patch count rather than by an IRIS CalVer release:
 # the binary changes only when the build does.
-ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p7}"
+ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p10}"
 ARIA2C_RELEASE_URL="${ARIA2C_RELEASE_URL:-https://github.com/cisco-open/intelligent-release-image-staging/releases/download/$ARIA2C_RELEASE_TAG/aria2c-$ARCH}"
 
 DOWNLOADED=""

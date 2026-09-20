@@ -75,14 +75,14 @@ SHIP=(
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
-  tools/aria2c-patches tools/aria2c-build
+  tools/aria2c-patches tools/aria2c-build tools/aria2c-source
   # ...and the tested aria2c clients themselves. They are committed (see the
   # re-inclusions in .gitignore), so the release is complete offline: bin/aria2c
   # is the x86_64 seeder client server/Dockerfile COPYs, and
   # deliverables/aria2c-<cpu> is what the device package builders read. The
-  # local patches and build scripts ship above. Upstream and linked dependency
-  # source trees are not bundled; arrange their distribution separately before
-  # publishing binaries (see tools/aria2c-build/README.md).
+  # local patches, build scripts and pinned source manifest ship above.
+  # Matching upstream and linked dependency sources are a separate archive
+  # alongside the client release (see tools/aria2c-source/README.md).
   bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.

@@ -74,6 +74,7 @@
     iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
+  tar tzf "$FIX/release/iris.tgz" | grep -qx 'iris/tools/aria2c-source/README.md' || return 1
   run env PYTHONPATH="$FIX/release/iris/tools" python3 -c \
     'from api_exercise_fixtures import exercise; assert callable(exercise)'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -137,6 +138,8 @@ _make_release_fixture() {
   echo "patch" > "$FIX/tools/aria2c-patches/0001.patch"
   echo "FROM scratch" > "$FIX/tools/aria2c-build/Dockerfile"
   echo "# build" > "$FIX/tools/aria2c-build/build.sh"
+  mkdir -p "$FIX/tools/aria2c-source"
+  echo "source distribution" > "$FIX/tools/aria2c-source/README.md"
   # The tested aria2c clients are committed, and SHIP lists them, so the
   # fixture has to carry them too or --error-unmatch aborts the assembly.
   mkdir -p "$FIX/bin" "$FIX/deliverables"

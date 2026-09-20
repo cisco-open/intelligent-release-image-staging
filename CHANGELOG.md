@@ -17,6 +17,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.20]
+
+- Publish the matching aria2c ten-patch source distribution alongside the
+  x86_64 and aarch64 clients, including required hybrid peer TLS support,
+  exact dependency sources, build recipes and preserved third-party notices.
+  Point missing-client downloads at the matching ten-patch release and
+  document source verification and rebuilding for contributors.
 - Tighten the website's transfer comparison into smaller, static diagrams.
   Distinguish tracker coordination from origin seeding and six-peer sharing
   inside a wider, tiered swarm illustration.
@@ -52,8 +59,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   against `tools/aria2c.sha256` and fail closed on a mismatch; the one-host
   start script invokes these builds, and `get-aria2c.sh --for-platforms`
   restores every architecture in one command only when a file was deleted.
-  The release archive includes local patches and build scripts; upstream and
-  linked dependency source distribution remains a separate release requirement.
+  The release archive includes local patches, build scripts and the pinned
+  source-distribution manifest; the matching upstream and linked dependency
+  source archive is available alongside the published aria2c clients.
 - Reject duplicate directly routed application addresses and overlapping
   dedicated application subnets in inventory, while retaining intentional
   shared in-band networks and private router-NAT address reuse.

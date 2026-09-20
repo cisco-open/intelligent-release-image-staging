@@ -155,7 +155,7 @@ Encrypting the payload between peers is one setting for the whole swarm, off by 
 When it is required, peers use TLS 1.3 with a hybrid key exchange, an authenticated cipher, a dedicated application protocol name, and mutual certificate checks, and a required peer never falls back to plain text. Each device generates its own private key, sends a certificate request over the catalog connection it already trusts, and receives a certificate valid for 24 hours, renewed six hours before it expires. A missing, expired or mismatched identity stops the peer from starting.
 
 !!! warning
-    Revoking a device's catalog token prevents renewal, but a certificate already issued stays usable until it expires. Replacing the issuing authority means enrolling every peer again. See [Find your way around the Console](../user-guide/console.md).
+    Revoking a device's catalog token prevents renewal, but a certificate already issued can still authenticate new connections until it expires. Token revocation does not immediately disconnect established peer sessions; certificate expiry is checked during the TLS handshake, not continuously on an open connection. Replacing the issuing authority means enrolling every peer again. See [Find your way around the Console](../user-guide/console.md).
 
 ## Image authenticity: the Bulk Hash check
 
