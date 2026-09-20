@@ -1,4 +1,4 @@
-# aria2c build scripts (GPLv2 corresponding source)
+# aria2c build scripts and source distribution
 
 <!-- Copyright 2026 Cisco Systems, Inc. and its affiliates
 
@@ -43,9 +43,9 @@ the archive a complete source bundle.
 `tools/get-aria2c.sh` verifies the committed binary against
 `tools/aria2c.sha256`, failing closed on a mismatch, and only fetches a
 replacement when one of those files is missing. Nothing in a normal IRIS
-build, release or device rollout executes anything in this directory. It is
-published to discharge the licence obligation and to let you reproduce or
-audit what we ship.
+build, release or device rollout executes anything in this directory. These
+scripts support rebuilding and auditing what we ship; publishing scripts alone
+does not complete the corresponding-source distribution described above.
 
 ## The patch set is not duplicated here
 
@@ -58,9 +58,11 @@ candidate set — the default is the single home.
 
 ## Publishing the deliverables
 
-The binaries this project ships are published as a release of their own, tagged
-by the aria2-next version and patch count rather than by an IRIS CalVer
-release: they change only when this build does.
+Separate client releases are tagged by the aria2-next version and patch count
+rather than by an IRIS CalVer release: they change only when this build does.
+A client committed on a development branch is not necessarily available as a
+release asset yet. Check the selected tag's assets and hashes before relying on
+the missing-file download fallback.
 A deployment needs no local build and no download at all: the same binaries
 are committed here. The release exists so a checkout that lost them (or a
 consumer outside git) can still get them; `tools/get-aria2c.sh` fetches from
@@ -77,7 +79,9 @@ gh release create aria2c-<version>-p<patches> \
   deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256
 ```
 
-Before publishing a binary, arrange its corresponding-source distribution,
+The command above uploads binaries and their checksum file only; it is not a
+complete source-publication procedure. Before publishing a binary, arrange its
+corresponding-source distribution,
 including upstream source, local patches, build scripts, and applicable linked
 dependency sources. Have the distribution method reviewed against the license;
 release notes naming a commit are provenance, not a source bundle. Update the default
