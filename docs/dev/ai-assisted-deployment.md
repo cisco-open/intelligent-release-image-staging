@@ -13,10 +13,6 @@ it asks before it changes anything, what it must never guess, and what it
 reports back when the work is done. Read it if you maintain that runbook, or
 if you want to know what an assistant did to your host.
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes
-    boot variables. See [IRIS documentation](../zensical/index.md).
-
 ## Before you start
 
 Prepare a local, git-ignored credential file if the assistant will connect to

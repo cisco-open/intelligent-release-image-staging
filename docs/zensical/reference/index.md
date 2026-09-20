@@ -9,12 +9,6 @@ SPDX-License-Identifier: Apache-2.0
 The values you look up: environment variables, API routes, file formats, state
 names, helper commands and the words IRIS uses.
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See the [Overview](../index.md).
-
-See [the Overview](../index.md) for the stage-only rule.
-
 ## Find the route for a task
 
 Use the Console by hand, and the authenticated `/api/v1` API for automation.

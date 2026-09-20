@@ -9,10 +9,6 @@ SPDX-License-Identifier: Apache-2.0
 Find your task below and do it. New to IRIS? Read [Find your way around the
 Console](console.md), then [Stage your first image](first-image.md).
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See the [Overview](../index.md).
-
 ## What you do every day
 
 List your devices, give each one a credential profile, and onboard each. Assign

@@ -585,6 +585,20 @@ def test_docs_state_stage_only_invariant():
     _require("security.md", ["No operating-system install", "No reload", "No boot mutation"])
 
 
+def test_docs_do_not_repeat_the_overview_stage_only_notice():
+    """Keep the general disclaimer in the Overview, not page boilerplate."""
+    _require("index.md", ["Stage only", "IRIS never installs or activates"])
+    repeated_notice = re.compile(
+        r"IRIS stages images\.\s+It never installs, activates, reloads, "
+        r"or changes\s+boot\s+variables\.")
+    for page in (Path(REPO) / "docs").rglob("*.md"):
+        text = page.read_text(encoding="utf-8")
+        assert not repeated_notice.search(text), str(page)
+        if page != Path(DOCS) / "index.md":
+            assert not re.search(r'^!!!\s+\w+\s+[\"\']Stage only[\"\']',
+                                 text, re.MULTILINE), str(page)
+
+
 def test_docs_state_policy_outbox_backlog():
     """A stalled consumer blocks new operations with a 503 rather than silently
     dropping them, and the bound is checked before any write."""
@@ -1787,9 +1801,8 @@ def test_docs_phase2_verbs_targets_and_the_stage_only_invariant():
         workflows, "Scheduling",
         ("assign", "onboard", "stage", "agent"),
         "the two schedule verbs must distinguish image staging from agent deployment")
-    _require("user-guide/index.md", [
-        "IRIS stages images.", "never installs, activates, reloads",
-        "variables"])
+    _require("index.md", [
+        "Stage only", "IRIS never installs or activates", "boot"])
     _assert_unit(workflows, ("target", "filter", "device_ids", "and"),
                  "named devices narrow the filter rather than widening it")
     _assert_unit(workflows, ("late", "resolved", "fire"),

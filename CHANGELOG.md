@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Remove repeated stage-only notes from guide and contributor pages; retain
+  the Overview explanation and task-specific safety instructions.
+
 ## [2026.09.20]
 
 - Publish the matching aria2c ten-patch source distribution alongside the

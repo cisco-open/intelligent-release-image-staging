@@ -160,9 +160,9 @@ Three rules decide whether a heading may change:
   the section with one line of scope. At most 60 lines.
 
 **The stage-only rule.** The Overview carries the staging definition and the
-"Stage only" warning. Each guide landing page carries one note linking the
-Overview: "IRIS stages images. It never installs, activates, reloads, or changes
-boot variables." Keep this statement on the Overview and guide landing pages.
+"Stage only" warning. Do not repeat this general disclaimer on guide landing
+pages or individual pages, including contributor docs. Keep task-specific safety
+instructions where they affect the operation being described.
 
 **Version numbers and measurements.** No product version numbers in prose; the
 CHANGELOG owns release history. Pinned tool versions (aria2c, ioxclient,

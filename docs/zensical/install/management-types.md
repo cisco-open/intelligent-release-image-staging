@@ -10,10 +10,6 @@ The management type is how the agent reaches the network: on its own address,
 on your management VLAN, or through the router. Pick one per device before you
 onboard it. It sets the network fields the Console asks for.
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See the [Overview](../index.md).
-
 ## Before you start
 
 Know whether each device is a switch or a router, and whether it has a

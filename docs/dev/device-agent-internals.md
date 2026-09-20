@@ -16,10 +16,6 @@ design notes behind a few rules that platform pages only state. Read
 first; it covers the agent's ordinary check-in loop, one pass of which is a
 tick.
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes
-    boot variables. See [IRIS documentation](../zensical/index.md).
-
 ## What the Guest Shell and router installers push
 
 `device/device-install.sh` (Catalyst 9300 Guest Shell) and

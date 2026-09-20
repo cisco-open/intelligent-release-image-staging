@@ -8,10 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 
 Read this guide once, in order. At the end you have a running server and Console, device packages the server serves, and one device staging one image.
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See the [Overview](../index.md).
-
 ## Choose a layout
 
 | Layout | Where the Console runs | Deployment files |

@@ -10,10 +10,6 @@ IRIS copies a Cisco image to many devices at once. The server seeds the image
 once, then devices trade pieces with each other, so every finished device
 becomes another source.
 
-!!! note
-    IRIS stages images. It never installs, activates, reloads, or changes boot
-    variables. See the [Overview](../index.md).
-
 ## What each part does
 
 | Component | Responsibility |
