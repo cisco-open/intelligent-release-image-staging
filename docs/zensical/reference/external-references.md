@@ -19,12 +19,12 @@ Cisco documentation and third-party tools that the guides link to.
 
 | Component | License | Used by |
 | --- | --- | --- |
-| aria2c | GPLv2 | [How an image reaches a device](../architecture/data-path.md) |
+| aria2c (distributed executable) | GPLv3; source grants GPL-2.0-or-later | [How an image reaches a device](../architecture/data-path.md) |
 | mktorrent | GPLv2 | [Helper commands](tools.md) |
 | openssl | Apache-2.0 | [Security model and trust boundaries](../architecture/security-model.md) |
 | Mermaid | MIT | Diagrams on this documentation site |
 | Swagger UI | Apache-2.0 | [Console API](console-api.md) |
 
-The repository [NOTICE](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/NOTICE) has the license text and copyright notice for every tool IRIS uses.
+The repository [NOTICE](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/NOTICE) records third-party attributions and license locations. The [aria2c distribution terms](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/tools/aria2c-source/LICENSE-DISTRIBUTION.md) explain the executable's GPLv3 selection and preserved source grants.
 
 Swagger UI's vendored files and pinned release are in the [Swagger UI provenance record](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/zensical/swagger/SOURCE.txt).

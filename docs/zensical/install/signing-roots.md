@@ -23,15 +23,39 @@ holders for the two `.pub` files and put them in the roots directory below.
 
 ## Create the keys
 
-Run these commands on the machine that holds the private key. Each holder runs
-their own `ssh-keygen` line and carries only the `.pub` file to the build host.
+### Holder A: on the first custody machine
 
 ```bash
 install -d -m 0700 ~/iris-custody
 ssh-keygen -t ed25519 -C iris-root-a -f ~/iris-custody/root-a
+ssh-keygen -lf ~/iris-custody/root-a.pub
+```
+
+Record the fingerprint. Transfer only `root-a.pub` through your approved public
+file transfer process to `~/iris-root-import/root-a.pub` on the build host.
+
+### Holder B: on the second custody machine
+
+```bash
+install -d -m 0700 ~/iris-custody
 ssh-keygen -t ed25519 -C iris-root-b -f ~/iris-custody/root-b
+ssh-keygen -lf ~/iris-custody/root-b.pub
+```
+
+Record the fingerprint. Transfer only `root-b.pub` through your approved public
+file transfer process to `~/iris-root-import/root-b.pub` on the build host.
+Each private key stays on its holder's offline custody machine.
+
+### Build host: assemble the public roots
+
+After receiving both public files, compare their fingerprints with the holders'
+records and install them:
+
+```bash
+ssh-keygen -lf ~/iris-root-import/root-a.pub
+ssh-keygen -lf ~/iris-root-import/root-b.pub
 install -d -m 0755 ~/iris-roots
-install -m 0644 ~/iris-custody/root-a.pub ~/iris-custody/root-b.pub ~/iris-roots/
+install -m 0644 ~/iris-root-import/root-a.pub ~/iris-root-import/root-b.pub ~/iris-roots/
 ls -A ~/iris-roots
 ```
 

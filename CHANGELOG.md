@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Preserve required peer TLS in Catalyst 8000 Guest Shell onboarding, reject
+  invalid modes before contacting a device, separate signing-root commands by
+  key holder, and correct the distributed aria2c license reference to GPLv3.
+
 - Remove repeated stage-only notes from guide and contributor pages; retain
   the Overview explanation and task-specific safety instructions.
 

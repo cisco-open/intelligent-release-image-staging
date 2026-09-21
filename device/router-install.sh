@@ -14,6 +14,11 @@ set -euo pipefail
 : "${VPG_NUMBER:?set VPG_NUMBER}"; : "${APP_IP:?set APP_IP}"
 : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
 
+case "${IRIS_PEER_TLS_MODE:-disabled}" in
+  disabled|required) ;;
+  *) echo "invalid IRIS_PEER_TLS_MODE" >&2; exit 1 ;;
+esac
+
 if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
   echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the router-routed default" >&2
   exit 1
@@ -163,6 +168,7 @@ agent_conf() {
 cat <<EOF
 catalog_url = $CATALOG_URL
 catalog_token = $CATALOG_TOKEN
+peer_tls_mode = ${IRIS_PEER_TLS_MODE:-disabled}
 device_id = $DEVICE_ID
 stage_dir = $STAGE
 target_fs = bootflash:

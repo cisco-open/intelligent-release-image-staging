@@ -16,6 +16,33 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALL = ROOT / "docs/zensical/install"
 
 
+def test_signing_root_commands_keep_private_keys_on_separate_holders(tmp_path):
+    if not shutil.which("ssh-keygen"):
+        pytest.skip("ssh-keygen required")
+    page = (INSTALL / "signing-roots.md").read_text()
+    blocks = re.findall(r"```bash\n(.*?)```", page, re.DOTALL)
+    holders = [tmp_path / "holder-a", tmp_path / "holder-b"]
+    build = tmp_path / "build"
+    incoming = build / "iris-root-import"
+    incoming.mkdir(parents=True)
+    for holder, name, block in zip(holders, ("root-a", "root-b"), blocks[:2]):
+        holder.mkdir()
+        # Supply a passphrase for the test's otherwise-interactive key creation.
+        command = block.replace("~/", str(holder) + "/").replace(
+            "ssh-keygen -t", "ssh-keygen -q -N test-fixture-passphrase -t")
+        subprocess.run(["bash", "-euc", command], check=True, capture_output=True)
+        custody = holder / "iris-custody"
+        assert {p.name for p in custody.iterdir()} == {name, name + ".pub"}
+        shutil.copyfile(custody / (name + ".pub"), incoming / (name + ".pub"))
+    subprocess.run(["bash", "-euc", blocks[2].replace("~/", str(build) + "/")],
+                   check=True, capture_output=True)
+    roots = build / "iris-roots"
+    assert {p.name for p in roots.iterdir()} == {"root-a.pub", "root-b.pub"}
+    for name in ("root-a.pub", "root-b.pub"):
+        assert (roots / name).read_bytes() == (incoming / name).read_bytes()
+    assert all(p.suffix == ".pub" for p in build.rglob("*") if p.is_file())
+
+
 def test_documented_export_does_not_distribute_private_key(tmp_path):
     if not shutil.which("openssl"):
         pytest.skip("openssl required")
