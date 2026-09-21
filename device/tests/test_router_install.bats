@@ -342,10 +342,10 @@ _router_install_run_live() {
 
 @test "router staging persists both peer TLS modes for a fresh agent process" {
   _router_install_stub_setup
-  for attachment in router-routed router-nat; do
+  for management_type in router-routed router-nat; do
     for mode in required disabled; do
       printf '0\n' > "$FAKE_STATE_DIR/apphost_n"
-      MANAGEMENT_TYPE="$attachment" NAT_INTERFACE=GigabitEthernet1 \
+      MANAGEMENT_TYPE="$management_type" NAT_INTERFACE=GigabitEthernet1 \
         IRIS_PEER_TLS_MODE="$mode" run _router_install_run_live
       [ "$status" -eq 0 ] || return 1
       run env -u IRIS_PEER_TLS_MODE \
