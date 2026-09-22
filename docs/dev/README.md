@@ -30,6 +30,7 @@ tracked `docs/` tree, so a recipient unpacking a release gets this folder too.
 | [documentation.md](documentation.md) | Writing and building the manual: the writing standard, heading aliases, redirect stubs, pinned tool versions, and what the documentation tests check. |
 | [ai-assisted-deployment.md](ai-assisted-deployment.md) | Assistant runbook for deployment and validation. |
 | [device-packages.md](device-packages.md) | Building and validating device packages. |
+| [installer.md](installer.md) | Production installer implementation status and runtime checks. |
 | [device-agent-internals.md](device-agent-internals.md) | Agent runtime, file placement, and verification. |
 | [server-internals.md](server-internals.md) | Server services and persistent state. |
 | [telemetry-internals.md](telemetry-internals.md) | Sampling, reports, and peer accounting. |

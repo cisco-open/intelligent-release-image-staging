@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Start the production installer foundation with scoped runtime package checks
+  for Docker and Kubernetes. Check package/certificate readability as the server
+  identity instead of accepting host-root reads, and publish public IOx artifacts
+  with explicit modes under restrictive umasks. Automated installation and
+  lifecycle operations remain under development.
+
 - Retain signature-verified offline hash feeds for later image imports for seven
   days, rechecking signatures on every use. Explain uninitialized instruction
   signing in IOx onboarding failures instead of reporting a generic rejection.

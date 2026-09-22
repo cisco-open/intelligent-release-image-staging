@@ -67,6 +67,9 @@
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh \
+    iris/tools/irisctl \
+    iris/tools/iris_installer/cli.py \
+    iris/tools/iris_installer/probe.py \
     iris/tools/check-host-time.sh \
     iris/tools/api-exercise.py \
     iris/tools/api_exercise_fixtures.py \
@@ -78,6 +81,9 @@
   run env PYTHONPATH="$FIX/release/iris/tools" python3 -c \
     'from api_exercise_fixtures import exercise; assert callable(exercise)'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run python3 "$FIX/release/iris/tools/irisctl" doctor --help
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"kubernetes"* ]]
   for template in roles.csv.example schedules.csv.example; do
     tar xOzf "$FIX/release/iris.tgz" "iris/fleet/$template" \
       | cmp "$FIX/fleet/$template" - || return 1
@@ -132,6 +138,9 @@ _make_release_fixture() {
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
+  cp "$repo/tools/irisctl" "$FIX/tools/irisctl"
+  mkdir -p "$FIX/tools/iris_installer"
+  cp "$repo/tools/iris_installer/"*.py "$FIX/tools/iris_installer/"
   cp "$repo/tools/licenses/musl-COPYRIGHT" "$FIX/tools/licenses/musl-COPYRIGHT"
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"
   cp "$repo/tools/ioxclient.sha256" "$FIX/tools/ioxclient.sha256"
