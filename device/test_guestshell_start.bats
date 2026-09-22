@@ -15,6 +15,16 @@ setup() {
   printf '#!/usr/bin/env bash\necho "$@" >> "%s/kill.log"\nexit 0\n' \
       "$BATS_GS_SAFE" > "$BATS_GS_SAFE/kill"
   chmod +x "$BATS_GS_SAFE/pgrep" "$BATS_GS_SAFE/kill"
+  # Fake PIDs never refer to the host's /proc. Model only their executable
+  # bytes, while leaving all other cmp calls (e.g. certificates) real.
+  cat > "$BATS_GS_SAFE/cmp" <<'CMP'
+#!/usr/bin/env bash
+if [[ "${!#}" == /proc/4242/exe ]]; then
+  set -- "${@:1:$#-1}" "${MOCK_RUNNING_BINARY:-$ARIA2_SRC}"
+fi
+exec /usr/bin/cmp "$@"
+CMP
+  chmod +x "$BATS_GS_SAFE/cmp"
   PATH="$BATS_GS_SAFE:$PATH"
   export PATH
 }
@@ -30,6 +40,13 @@ _stage_catalog_ca() {
   # integration test; these fixtures only prove fail-closed startup and argv.
   cp "$BATS_TEST_DIRNAME/../server/certs/cisco_bulkhash_verify.pem" \
     "$1/iris-catalog.pem"
+}
+
+_healthy_curl_stub() {
+  cat > "$1" <<'CURL'
+#!/usr/bin/env bash
+printf '%s' '{"jsonrpc":"2.0","id":"p","result":{"version":"review","enabledFeatures":["BitTorrent"]}}'
+CURL
 }
 
 _catalog_ca_digest() {
@@ -437,7 +454,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   cp "$tmp/stage/iris-catalog.pem" "$runtime_ca"
   printf 'rpc-secret=rpcsecret\n' > "$tmp/home/aria2.conf"
   chmod 600 "$tmp/home/aria2.conf"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"     # RPC answers: already up
+  _healthy_curl_stub "$tmp/bin/curl"     # RPC answers: already up
   printf '#!/usr/bin/env bash\necho 4242\n' > "$tmp/bin/pgrep"
   printf '#!/usr/bin/env bash\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --conf-path=%s --ca-certificate=%s --check-certificate=true"\n' \
     "$tmp/home/aria2.conf" "$runtime_ca" > "$tmp/bin/ps"
@@ -475,7 +492,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   [ "$cert_a_runtime" != "$cert_b_runtime" ]
 
   mkdir -p "$tmp/bin"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"
+  _healthy_curl_stub "$tmp/bin/curl"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho 4242\n' \
     "$tmp" > "$tmp/bin/pgrep"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho "$IRIS_ARIA2 $(cat "$OLD_ARGS")"\n' \
@@ -503,7 +520,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   printf '%s\n' 'not a certificate' > "$runtime_ca"
 
   mkdir -p "$tmp/bin"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"
+  _healthy_curl_stub "$tmp/bin/curl"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho 4242\n' \
     "$tmp" > "$tmp/bin/pgrep"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --ca-certificate=%s --check-certificate=true"\n' \
@@ -558,7 +575,7 @@ PYTHON
   tmp="$(mktemp -d)"; _gs_fixture "$tmp"
   mkdir -p "$tmp/bin"
   runtime_ca="$(_runtime_catalog_ca "$tmp/stage" "$tmp/home")"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"
+  _healthy_curl_stub "$tmp/bin/curl"
   cat > "$tmp/bin/pgrep" <<'PGREP'
 #!/usr/bin/env bash
 n=$(cat "$PGREP_STATE" 2>/dev/null || echo 0)
@@ -589,7 +606,7 @@ PGREP
   cp "$tmp/stage/iris-catalog.pem" "$runtime_ca"
   printf 'rpc-secret=rpcsecret\n' > "$tmp/home/aria2.conf"
   chmod 600 "$tmp/home/aria2.conf"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"
+  _healthy_curl_stub "$tmp/bin/curl"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho 4242\n' \
     "$tmp" > "$tmp/bin/pgrep"
   printf '#!/usr/bin/env bash\n[ -f "%s/gone" ] && exit 1\necho "$IRIS_ARIA2 --enable-rpc=true --rpc-listen-port=6800 --conf-path=%s --rpc-secret=legacy-secret --ca-certificate=%s --check-certificate=true"\n' \
@@ -753,6 +770,11 @@ n=$(cat "$CURL_STATE" 2>/dev/null || echo 0)
 n=$((n + 1)); echo "$n" > "$CURL_STATE"
 printf '%s\n' "$*" >> "$CURL_LOG"
 rc="$(sed -n "${n}p" "$CURL_CODES")"
+if [ -n "${CURL_BODY_FILE:-}" ]; then
+  cat "$CURL_BODY_FILE"
+else
+  printf '%s' '{"jsonrpc":"2.0","id":"p","result":{"version":"review","enabledFeatures":["BitTorrent"]}}'
+fi
 exit "${rc:-0}"
 CURL
   # pgrep/ps model one daemon launched with the secure tracker options.
@@ -920,4 +942,132 @@ STUB
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
   [ -e "$tmp/stage/aria2c.log" ]
+}
+
+@test "required peer TLS refuses launch when enrollment is unavailable" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  _stage_catalog_ca "$tmp/stage"
+  echo rpcsecret > "$tmp/stage/rpc-secret"
+  printf '#!/bin/sh\ntouch "%s/launched"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env IRIS_PEER_TLS_MODE=required STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
+      ARIA2_SRC="$tmp/aria2c-stub" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$tmp/launched" ]
+  [[ "$output" == *"aria2c remains stopped"* ]]
+  rm -rf "$tmp"
+}
+
+@test "required peer TLS is enforced on argv as well as in private config" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage/agent" "$tmp/home"
+  _stage_catalog_ca "$tmp/stage"
+  echo rpcsecret > "$tmp/stage/rpc-secret"
+  printf 'print("bt-peer-tls=required")\n' > "$tmp/stage/agent/peer_tls.py"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/launched"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env IRIS_PEER_TLS_MODE=required STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
+      ARIA2_SRC="$tmp/aria2c-stub" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--bt-peer-tls=required' "$tmp/launched"
+  grep -qx 'bt-peer-tls=required' "$tmp/home/aria2.conf"
+  rm -rf "$tmp"
+}
+
+
+@test "healthy daemon running older bytes is replaced even when disk pathname is current" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp"
+  _curl_codes_stub "$tmp" 0
+  printf 'old executing inode\n' > "$tmp/old-running-binary"
+  cp "$tmp/aria2c-stub" "$tmp/home/aria2c"
+  run env PATH="$tmp/bin:$PATH" CURL_STATE="$tmp/curl-state" \
+      CURL_LOG="$tmp/curl.log" CURL_CODES="$tmp/curl-codes" \
+      MOCK_RUNNING_BINARY="$tmp/old-running-binary" \
+      STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" IRIS_ARIA2="$tmp/home/aria2c" \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$tmp/kill.log")" = "-TERM 4242" ]
+  [ -f "$tmp/launched.txt" ]
+  cmp "$tmp/aria2c-stub" "$tmp/home/aria2c"
+  [ -z "$(find "$tmp/home" -name 'aria2c.new.*' -print -quit)" ]
+}
+
+@test "healthy daemon with identical executing bytes is retained" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp"
+  _curl_codes_stub "$tmp" 0
+  cp "$tmp/aria2c-stub" "$tmp/running-binary"
+  run env PATH="$tmp/bin:$PATH" CURL_STATE="$tmp/curl-state" \
+      CURL_LOG="$tmp/curl.log" CURL_CODES="$tmp/curl-codes" \
+      MOCK_RUNNING_BINARY="$tmp/running-binary" \
+      STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" IRIS_ARIA2="$tmp/home/aria2c" \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"already up"* ]]
+  [ ! -f "$tmp/kill.log" ]
+  [ ! -f "$tmp/launched.txt" ]
+}
+
+@test "RPC JSON errors malformed replies and HTTP errors force replacement" {
+  for reply in error malformed wrong_id http_error; do
+    tmp="$(mktemp -d)"; _gs_fixture "$tmp"
+    _curl_codes_stub "$tmp" 0 0
+    case "$reply" in
+      error) printf '%s' '{"jsonrpc":"2.0","id":"p","error":{"code":1,"message":"Unauthorized"}}' > "$tmp/body" ;;
+      malformed) printf 'not json' > "$tmp/body" ;;
+      wrong_id) printf '%s' '{"jsonrpc":"2.0","id":"other","result":{"version":"x","enabledFeatures":[]}}' > "$tmp/body" ;;
+      http_error) printf '22\n22\n' > "$tmp/curl-codes"; : > "$tmp/body" ;;
+    esac
+    run env PATH="$tmp/bin:$PATH" CURL_STATE="$tmp/curl-state" \
+        CURL_LOG="$tmp/curl.log" CURL_CODES="$tmp/curl-codes" CURL_BODY_FILE="$tmp/body" \
+        STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+        RPC_SECRET_FILE="$tmp/stage/rpc-secret" IRIS_ARIA2="$tmp/home/aria2c" \
+        bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+    [ "$status" -eq 0 ] || { echo "$reply: $output"; return 1; }
+    [ "$(cat "$tmp/kill.log")" = "-TERM 4242" ]
+    [ -f "$tmp/launched.txt" ]
+    [ "$(wc -l < "$tmp/curl.log")" -eq 2 ]
+    grep -q -- '-fsS' "$tmp/curl.log"
+    ! grep -q 'rpcsecret' "$tmp/curl.log"
+  done
+}
+
+@test "failed staged binary copy preserves previous executable and removes temporary" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp"
+  printf 'previous executable\n' > "$tmp/home/aria2c"
+  cp "$tmp/home/aria2c" "$tmp/previous"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" \
+      ARIA2_SRC="$tmp/missing" RPC_SECRET_FILE="$tmp/stage/rpc-secret" \
+      SKIP_RPC_PROBE=1 bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  cmp "$tmp/home/aria2c" "$tmp/previous"
+  [ -z "$(find "$tmp/home" -name 'aria2c.new.*' -print -quit)" ]
+}
+
+
+@test "verifier promotion failure still stops daemon when required TLS cannot enroll" {
+  tmp="$(mktemp -d)"; _gs_fixture "$tmp"
+  _curl_codes_stub "$tmp" 0
+  printf 'bad verifier\n' > "$tmp/stage/agent/ssh-keygen"
+  cat > "$tmp/stage/agent/runtime_verifier.py" <<'PYTHON'
+def install(stage, exec_dir):
+    raise ValueError("synthetic verifier promotion failure")
+PYTHON
+  # TLS enrollment deliberately fails after verifier promotion fails. The old
+  # plaintext daemon still must stop, and no replacement may be launched.
+  printf 'raise SystemExit(1)\n' > "$tmp/stage/agent/peer_tls.py"
+  run env PATH="$tmp/bin:$PATH" CURL_STATE="$tmp/curl-state" \
+      CURL_LOG="$tmp/curl.log" CURL_CODES="$tmp/curl-codes" \
+      STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" IRIS_ARIA2="$tmp/home/aria2c" \
+      IRIS_PEER_TLS_MODE=required bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot promote the bundled instruction verifier"* ]]
+  [[ "$output" == *"peer identity unavailable"* ]]
+  [ "$(cat "$tmp/kill.log")" = "-TERM 4242" ]
+  [ ! -f "$tmp/launched.txt" ]
 }

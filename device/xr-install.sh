@@ -59,6 +59,11 @@
 #     classifies the box as IOS-XR.
 #   ACTIVATE_TIMEOUT=300  ACTIVATE_POLL=10  (seconds; the appmgr application-table poll)
 set -euo pipefail
+case "${IRIS_PEER_TLS_MODE:-disabled}" in
+  disabled|required) ;;
+  *) echo "invalid IRIS_PEER_TLS_MODE" >&2; exit 1 ;;
+esac
+
 
 : "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_URL:?set CATALOG_URL}"; : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"
@@ -328,9 +333,9 @@ fi
 # logs live on (agentinfo/xr-support/research/parity/install-bootstrap-
 # parity.md), and nothing against a multi-GB harddisk: image.
 docker_run_opts() {
-  printf -- '-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s --env IRIS_LOG=%s' \
+  printf -- '-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s --env IRIS_LOG=%s --env IRIS_PEER_TLS_MODE=%s' \
     "$CATALOG_URL" "$CATALOG_TOKEN" "$DEVICE_ID" "${MODEL:-}" "${XR_VERSION:-}" \
-    "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM" "$IRIS_LOG"
+    "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM" "$IRIS_LOG" "${IRIS_PEER_TLS_MODE:-disabled}"
 }
 
 activate_line() {

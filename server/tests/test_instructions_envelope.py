@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 
 import instructions
 
@@ -50,7 +51,7 @@ def _part(payload=None):
 
 def _header(part=None):
     part = _part() if part is None else part
-    return {"v": 1, "device_id": "device-1", "platform": "guestshell",
+    return {"v": 2, "device_id": "device-1", "platform": "guestshell",
             "epoch": 99, "instr_serial": 7, "policy_revision": 3,
             "issued_at": 100, "expires_at": 700, "server_time": 100,
             "verify_level": "sig", "key_id": KEY_ID, "role": "default",
@@ -73,13 +74,6 @@ def _reference_kdf(key, label, context, length):
                  + struct.pack(">I", length * 8))
         blocks.append(hmac.new(key, fixed, hashlib.sha256).digest())
     return b"".join(blocks)[:length]
-
-
-def _reference_crypt(key, nonce, plaintext):
-    stream = b"".join(hmac.new(
-        key, nonce + struct.pack(">I", counter), hashlib.sha256).digest()
-        for counter in range(1, (len(plaintext) + 31) // 32 + 1))
-    return bytes(left ^ right for left, right in zip(plaintext, stream))
 
 
 def test_pae_vector_and_ambiguous_text_contexts_are_distinct():
@@ -107,29 +101,29 @@ def test_sp800_108_vector_domain_separation_and_bounds():
             instructions.sp800_108(KEY, b"x", b"", length)
 
 
-@pytest.mark.parametrize("plaintext", [b"", b"partial", bytes(range(97))],
-                         ids=["empty", "partial-block", "multi-block"])
-def test_stream_encryption_independent_vectors(plaintext):
+@pytest.mark.parametrize("plaintext", [b"x", b"partial", bytes(range(97))],
+                         ids=["single-byte", "partial-block", "multi-block"])
+def test_aead_encryption_independent_vectors(plaintext):
     context = _reference_pae((b"device-1", KEY_ID.encode("ascii")))
-    material = _reference_kdf(KEY, b"iris-instr-v1", context, 96)
+    material = _reference_kdf(KEY, b"iris-instr-aes-siv-v2", context, 96)
     nonce_context = _reference_pae((
         b"device-1", KEY_ID.encode("ascii"), struct.pack(">Q", 99),
         struct.pack(">Q", 7)))
     nonce = _reference_kdf(
-        material[64:], b"iris-instr-nonce-v1", nonce_context, 16)
+        material[64:], b"iris-instr-nonce-v2", nonce_context, 16)
     assert instructions.derive_keys(KEY, "device-1", KEY_ID) == (
-        material[:32], material[32:64], material[64:])
+        material[:64], material[64:])
     assert instructions.derive_nonce(
         material[64:], "device-1", KEY_ID, 99, 7) == nonce
-    assert instructions.crypt(material[:32], nonce, plaintext) == \
-        _reference_crypt(material[:32], nonce, plaintext)
-    assert instructions.crypt(
-        material[:32], nonce,
-        instructions.crypt(material[:32], nonce, plaintext)) == plaintext
+    aad = instructions.pae(b"IRIS-INSTR/2", nonce)
+    expected = AESSIV(material[:64]).encrypt(plaintext, [aad])
+    ciphertext, tag = instructions.instruction_aead.seal(material[:64], aad, plaintext)
+    assert tag + ciphertext == expected
+    assert instructions.instruction_aead.open_sealed(material[:64], aad, ciphertext, tag) == plaintext
 
 
 def test_epoch_and_serial_integer_boundaries():
-    nonce_key = instructions.derive_keys(KEY, "device-1", KEY_ID)[2]
+    nonce_key = instructions.derive_keys(KEY, "device-1", KEY_ID)[1]
     for value in (0, instructions.MAX_I63):
         assert len(instructions.derive_nonce(
             nonce_key, "device-1", KEY_ID, value, value)) == 16
@@ -303,11 +297,7 @@ def test_canonical_framed_size_boundaries_and_raw_malformed_buffers():
 
     header_bytes, role_bytes, _signature, nonce, ciphertext, _tag = components
     oversized_signature = signature + b"xyz"
-    mac_key = instructions.derive_keys(
-        KEY, header["device_id"], header["key_id"])[1]
-    oversized_tag = instructions.compute_tag(
-        mac_key, header_bytes, role_bytes, oversized_signature,
-        nonce, ciphertext)
+    oversized_tag = b"x" * 16  # Rejected by framing size before authentication.
     oversized_components = (
         header_bytes, role_bytes, oversized_signature, nonce,
         ciphertext, oversized_tag)
@@ -331,7 +321,7 @@ c = {"catalog_tick_s":60,"telemetry_every_ticks":1,"telemetry_pause":False}
 r = {"v":1,"role":"default","restricted":False,"role_gen":"a"*64,"issued_at":100,"expires_at":700,"server_time":100,"qos":q,"control":c,"on_stale":"defaults"}
 rb = instructions.canonical_json(r)
 p = {"peers":{"mode":"tracker-only","include_origin":False,"allowed_expires_at":700},"qos_override":{},"control_override":{},"server_time":100}
-h = {"v":1,"device_id":"device-1","platform":"guestshell","epoch":99,"instr_serial":7,"policy_revision":3,"issued_at":100,"expires_at":700,"server_time":100,"verify_level":"sig","key_id":kid,"role":"default","role_gen":"a"*64,"role_body_sha256":hashlib.sha256(rb).hexdigest(),"ct_len":len(instructions.canonical_json(p)),"allowed_expires_at":700,"degraded":False}
+h = {"v":2,"device_id":"device-1","platform":"guestshell","epoch":99,"instr_serial":7,"policy_revision":3,"issued_at":100,"expires_at":700,"server_time":100,"verify_level":"sig","key_id":kid,"role":"default","role_gen":"a"*64,"role_body_sha256":hashlib.sha256(rb).hexdigest(),"ct_len":len(instructions.canonical_json(p)),"allowed_expires_at":700,"degraded":False}
 print(hashlib.sha256(instructions.seal_parts(h,p,rb,b"sig",key)).hexdigest())
 '''
     values = []

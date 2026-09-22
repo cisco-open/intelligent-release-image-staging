@@ -9,6 +9,8 @@ The shim must make an SSH-to-self IOS session look EXACTLY like the Guest Shell
 command's output text (no prompt, no echoed command, no login/enable noise), so
 the existing text-exact parsers (flash_target, flashcheck) keep working unchanged.
 All tests inject a fake transcript runner -- no real SSH."""
+import os
+
 import pytest
 
 import cli_ssh
@@ -321,11 +323,11 @@ def test_sshcli_uses_shared_control_connection_for_cli_and_scp():
     assert "ControlPath=/data/iris/ios-%r@%h:%p" in opts
 
 
-# ---- host-key pinning (verify-if-present, mirroring the catalog TLS pin):
+# ---- host-key pinning (configured trust must remain available):
 # with no known_hosts configured the ssh/scp argv must stay byte-identical to
 # the legacy no-verify pair (LOCKED back-compat — a deployed fleet must not
-# change behavior on an agent-only upgrade); with a configured+existing file
-# the session pins the device host key against it. ----
+# change behavior on an agent-only upgrade); a configured pin fails closed
+# if its file becomes unavailable. ----
 
 def test_hostkey_options_default_is_legacy_no_verify():
     cli = cli_ssh.SSHCli(host="h", user="u", password="p")
@@ -344,15 +346,59 @@ def test_hostkey_options_pins_when_known_hosts_exists(tmp_path):
         "-o", "UserKnownHostsFile=" + str(kh)]
 
 
-def test_hostkey_options_missing_file_falls_back_to_legacy(tmp_path):
-    # configured but absent on disk (e.g. conf shipped before the pin file was
-    # placed) -> keep the legacy no-verify behavior rather than locking the
-    # agent out of its own device.
+@pytest.mark.parametrize("kind", ["missing", "empty", "directory", "fifo", "dangling"])
+@pytest.mark.parametrize("operation", ["execute", "configure", "put"])
+def test_unusable_configured_pin_blocks_transport(tmp_path, monkeypatch, kind, operation):
+    kh = tmp_path / "known_hosts"
+    if kind == "empty":
+        kh.touch()
+    elif kind == "directory":
+        kh.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(str(kh))
+    elif kind == "dangling":
+        kh.symlink_to(tmp_path / "absent")
+    calls = []
+    monkeypatch.setattr(cli_ssh.subprocess, "run", lambda *a, **kw: calls.append(a))
     cli = cli_ssh.SSHCli(host="h", user="u", password="p",
-                         known_hosts=str(tmp_path / "nope"))
-    assert cli._hostkey_options() == [
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null"]
+                         known_hosts=str(kh))
+    with pytest.raises(cli_ssh.CliTransportError, match="known_hosts file is unavailable"):
+        if operation == "execute":
+            cli.execute("show version")
+        elif operation == "configure":
+            cli.configure(["terminal length 0"])
+        else:
+            cli.put("/tmp/image.bin", "sdflash:image.bin")
+    assert calls == []
+
+
+def test_unreadable_configured_pin_fails_closed(tmp_path, monkeypatch):
+    kh = tmp_path / "known_hosts"
+    kh.write_text("h ssh-rsa AAAA fake\n")
+
+    def denied(*args, **kwargs):
+        raise PermissionError("sensitive-path-must-not-be-reported")
+
+    monkeypatch.setattr(cli_ssh.os, "open", denied)
+    cli = cli_ssh.SSHCli(host="h", user="u", known_hosts=str(kh))
+    with pytest.raises(cli_ssh.CliTransportError) as exc:
+        cli._hostkey_options()
+    assert str(exc.value) == "configured SSH known_hosts file is unavailable"
+
+
+def test_configured_pin_is_rechecked_after_disappearing(tmp_path):
+    kh = tmp_path / "known_hosts"
+    kh.write_text("h ssh-rsa AAAA fake\n")
+    cli = cli_ssh.SSHCli(host="h", user="u", known_hosts=str(kh))
+    assert "StrictHostKeyChecking=yes" in cli._hostkey_options()
+    kh.unlink()
+    with pytest.raises(cli_ssh.CliTransportError):
+        cli._hostkey_options()
+
+
+def test_explicit_empty_pin_keeps_legacy_default():
+    cli = cli_ssh.SSHCli(host="h", user="u", known_hosts="")
+    assert "StrictHostKeyChecking=no" in cli._hostkey_options()
 
 
 def test_select_cli_iox_platform_passes_known_hosts_through(tmp_path):

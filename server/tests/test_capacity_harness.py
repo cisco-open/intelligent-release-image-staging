@@ -84,7 +84,7 @@ sizes:
 
     python3 server/tests/test_capacity_harness.py --sizes 100 1000 10000
 
-See ``TESTING.md`` and ``docs/zensical/validation.md`` for the numbers this
+See ``TESTING.md`` and ``docs/dev/validation-records.md`` for the numbers this
 produced on record and what would invalidate a comparison against them.
 """
 import collections

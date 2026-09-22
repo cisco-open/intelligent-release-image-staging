@@ -1,0 +1,730 @@
+diff --git a/cmake/Sources.cmake b/cmake/Sources.cmake
+index 5510cc7..50ac565 100644
+--- a/cmake/Sources.cmake
++++ b/cmake/Sources.cmake
+@@ -923,6 +923,8 @@ set(ARIA2_SOURCES_ENABLE_BITTORRENT
+   src/PeerInitiateConnectionCommand.h
+   src/PeerInteractionCommand.cc
+   src/PeerInteractionCommand.h
++  src/BtPeerTLSCommand.cc
++  src/BtPeerTLSCommand.h
+   src/PeerListenCommand.cc
+   src/PeerListenCommand.h
+   src/PeerReceiveHandshakeCommand.cc
+diff --git a/src/BtPeerTLSCommand.cc b/src/BtPeerTLSCommand.cc
+new file mode 100644
+index 0000000..52c3f15
+--- /dev/null
++++ b/src/BtPeerTLSCommand.cc
+@@ -0,0 +1,116 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ *
++ * In addition, as a special exception, the copyright holders give
++ * permission to link the code of portions of this program with the
++ * OpenSSL library under certain conditions as described in each
++ * individual source file, and distribute linked combinations
++ * including the two.
++ * You must obey the GNU General Public License in all respects
++ * for all of the code used other than OpenSSL.  If you modify
++ * file(s) with this exception, you may extend this exception to your
++ * version of the file(s), but you are not obligated to do so.  If you
++ * do not wish to do so, delete this exception statement from your
++ * version.  If you delete this exception statement from all source
++ * files in the program, then also delete it here.
++ */
++/* copyright --> */
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "BtPeerTLSCommand.h"
++#include "SocketCore.h"
++#include "Peer.h"
++#include "PeerConnection.h"
++#include "DownloadEngine.h"
++#include "RequestGroup.h"
++#include "RequestGroupMan.h"
++#include "BtRuntime.h"
++#include "PeerStorage.h"
++#include "PeerReceiveHandshakeCommand.h"
++#include "PeerInteractionCommand.h"
++#include "DlAbortEx.h"
++#include "a2functional.h"
++#include "Log.h"
++#include "fmt.h"
++namespace aria2 {
++size_t BtPeerTLSCommand::pending_ = 0;
++BtPeerTLSCommand::BtPeerTLSCommand(cuid_t cuid, const std::shared_ptr<Peer>& peer,
++    DownloadEngine* engine, const std::shared_ptr<SocketCore>& socket,
++    RequestGroup* group, std::shared_ptr<BtRuntime> runtime,
++    std::shared_ptr<PeerStorage> peers, std::shared_ptr<PieceStorage> pieces)
++    : PeerAbstractCommand(cuid, peer, engine, socket), group_(group),
++      runtime_(std::move(runtime)), peers_(std::move(peers)), pieces_(std::move(pieces)),
++      started_(std::chrono::steady_clock::now())
++{
++  ++pending_;
++  setTimeout(std::chrono::seconds(10));
++  if (group_) {
++    group_->increaseNumCommand(); runtime_->increaseConnections();
++    disableReadCheckSocket(); setWriteCheckSocket(socket);
++  }
++}
++BtPeerTLSCommand::~BtPeerTLSCommand()
++{
++  --pending_;
++  if (group_) {
++    if (!handedOff_) peers_->returnPeer(getPeer());
++    group_->decreaseNumCommand(); runtime_->decreaseConnections();
++  }
++}
++bool BtPeerTLSCommand::exitBeforeExecute()
++{
++  return getDownloadEngine()->isHaltRequested() ||
++      (runtime_ && runtime_->isHalt()) ||
++      getDownloadEngine()->getRequestGroupMan()->downloadFinished();
++}
++bool BtPeerTLSCommand::executeInternal()
++try {
++  if (std::chrono::steady_clock::now() - started_ >= std::chrono::seconds(10))
++    throw DL_ABORT_EX("Private peer TLS handshake deadline exceeded");
++  if (group_ && !connected_) {
++    if (!getSocket()->isWritable(0)) { addCommandSelf(); return false; }
++    auto err = getSocket()->getSocketError();
++    if (!err.empty()) throw DL_ABORT_EX(err);
++    connected_ = true;
++  }
++  if (!getSocket()->tlsPeerHandshake(!group_)) {
++    if (getSocket()->wantRead()) setReadCheckSocket(getSocket()); else disableReadCheckSocket();
++    if (getSocket()->wantWrite()) setWriteCheckSocket(getSocket()); else disableWriteCheckSocket();
++    addCommandSelf(); return false;
++  }
++  A2_LOG_INFO(fmt("BT peer TLS established peer=%s:%u", getPeer()->getIPAddress().c_str(),
++                  getPeer()->getRemotePort()));
++  if (group_) {
++    getDownloadEngine()->addCommand(make_unique<PeerInteractionCommand>(
++        getCuid(), group_, getPeer(), getDownloadEngine(), runtime_, pieces_, peers_,
++        getSocket(), PeerInteractionCommand::INITIATOR_SEND_HANDSHAKE));
++  }
++  else {
++    getDownloadEngine()->addCommand(make_unique<PeerReceiveHandshakeCommand>(
++        getCuid(), getPeer(), getDownloadEngine(), getSocket()));
++  }
++  handedOff_ = true;
++  return true;
++}
++catch (RecoverableException& ex) {
++  A2_LOG_INFO_EX("BT peer TLS rejected before BitTorrent handshake", ex);
++  throw;
++}
++}
+diff --git a/src/BtPeerTLSCommand.h b/src/BtPeerTLSCommand.h
+new file mode 100644
+index 0000000..0d3f317
+--- /dev/null
++++ b/src/BtPeerTLSCommand.h
+@@ -0,0 +1,66 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ *
++ * In addition, as a special exception, the copyright holders give
++ * permission to link the code of portions of this program with the
++ * OpenSSL library under certain conditions as described in each
++ * individual source file, and distribute linked combinations
++ * including the two.
++ * You must obey the GNU General Public License in all respects
++ * for all of the code used other than OpenSSL.  If you modify
++ * file(s) with this exception, you may extend this exception to your
++ * version of the file(s), but you are not obligated to do so.  If you
++ * do not wish to do so, delete this exception statement from your
++ * version.  If you delete this exception statement from all source
++ * files in the program, then also delete it here.
++ */
++/* copyright --> */
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: GPL-2.0-or-later
++#ifndef D_BT_PEER_TLS_COMMAND_H
++#define D_BT_PEER_TLS_COMMAND_H
++#include "PeerAbstractCommand.h"
++#include <chrono>
++namespace aria2 {
++class RequestGroup;
++class BtRuntime;
++class PeerStorage;
++class PieceStorage;
++class BtPeerTLSCommand : public PeerAbstractCommand {
++  static size_t pending_;
++  RequestGroup* group_;
++  std::shared_ptr<BtRuntime> runtime_;
++  std::shared_ptr<PeerStorage> peers_;
++  std::shared_ptr<PieceStorage> pieces_;
++  std::chrono::steady_clock::time_point started_;
++  bool connected_ = false;
++  bool handedOff_ = false;
++  bool executeInternal() override;
++  bool exitBeforeExecute() override;
++public:
++  static bool full() { return pending_ >= 64; }
++  BtPeerTLSCommand(cuid_t, const std::shared_ptr<Peer>&, DownloadEngine*,
++      const std::shared_ptr<SocketCore>&, RequestGroup* = nullptr,
++      std::shared_ptr<BtRuntime> = {}, std::shared_ptr<PeerStorage> = {},
++      std::shared_ptr<PieceStorage> = {});
++  ~BtPeerTLSCommand();
++};
++}
++#endif
+diff --git a/src/LibsslTLSContext.cc b/src/LibsslTLSContext.cc
+index c9a1aea..7f81386 100644
+--- a/src/LibsslTLSContext.cc
++++ b/src/LibsslTLSContext.cc
+@@ -369,4 +369,51 @@ bool OpenSSLTLSContext::configurePeerVerification(
+   return true;
+ }
+ 
++bool OpenSSLTLSContext::configureBtPeer(
++    const std::string& cert, const std::string& key, const std::string& ca,
++    const std::string& groups, const std::string& suites, const std::string& alpn)
++{
++#if OPENSSL_VERSION_NUMBER >= 0x30500000L && !defined(LIBRESSL_VERSION_NUMBER)
++  if (!good() || groups != "X25519MLKEM768" || alpn != "aria2-bt/1" ||
++      cert.empty() || key.empty() || ca.empty()) return false;
++  if (suites != "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" &&
++      suites != "TLS_AES_256_GCM_SHA384" &&
++      suites != "TLS_CHACHA20_POLY1305_SHA256") return false;
++  SSL_CTX_set_default_passwd_cb(sslCtx_, [](char*, int, int, void*) -> int { return 0; });
++  if (SSL_CTX_set_min_proto_version(sslCtx_, TLS1_3_VERSION) != 1 ||
++      SSL_CTX_set_max_proto_version(sslCtx_, TLS1_3_VERSION) != 1 ||
++      SSL_CTX_set1_groups_list(sslCtx_, groups.c_str()) != 1 ||
++      SSL_CTX_set_ciphersuites(sslCtx_, suites.c_str()) != 1 ||
++      !configurePeerVerification(TLSVerification::CustomCA, ca) ||
++      !addCredentialFile(cert, key) || SSL_CTX_check_private_key(sslCtx_) != 1)
++    return false;
++  // No interactive passphrase prompt in a daemon/event loop.
++  SSL_CTX_set_session_cache_mode(sslCtx_, SSL_SESS_CACHE_OFF);
++  SSL_CTX_set_options(sslCtx_, SSL_OP_NO_TICKET);
++  if (SSL_CTX_set_num_tickets(sslCtx_, 0) != 1 ||
++      SSL_CTX_set_max_early_data(sslCtx_, 0) != 1) return false;
++  SSL_CTX_set_verify(sslCtx_, SSL_VERIFY_PEER |
++                    (side_ == TLS_SERVER ? SSL_VERIFY_FAIL_IF_NO_PEER_CERT : 0), nullptr);
++  SSL_CTX_set_verify_depth(sslCtx_, 4);
++  static const unsigned char protocol[] = {10, 'a','r','i','a','2','-','b','t','/','1'};
++  if (side_ == TLS_CLIENT) {
++    if (SSL_CTX_set_alpn_protos(sslCtx_, protocol, sizeof(protocol)) != 0) return false;
++  }
++  else {
++    SSL_CTX_set_alpn_select_cb(sslCtx_, [](SSL*, const unsigned char** out,
++        unsigned char* outlen, const unsigned char* in, unsigned int inlen, void*) -> int {
++      unsigned char* selected = nullptr;
++      if (SSL_select_next_proto(&selected, outlen, protocol, sizeof(protocol), in, inlen)
++          != OPENSSL_NPN_NEGOTIATED) return SSL_TLSEXT_ERR_ALERT_FATAL;
++      *out = selected;
++      return SSL_TLSEXT_ERR_OK;
++    }, nullptr);
++  }
++  btPeer_ = true;
++  return true;
++#else
++  return false;
++#endif
++}
++
+ } // namespace aria2
+diff --git a/src/LibsslTLSContext.h b/src/LibsslTLSContext.h
+index 06dcd5c..48dd27c 100644
+--- a/src/LibsslTLSContext.h
++++ b/src/LibsslTLSContext.h
+@@ -64,6 +64,11 @@ public:
+ 
+   virtual TLSSessionSide getSide() const override { return side_; }
+ 
++  bool configureBtPeer(const std::string& cert, const std::string& key,
++                       const std::string& ca, const std::string& groups,
++                       const std::string& suites, const std::string& alpn) override;
++  bool isBtPeer() const override { return btPeer_; }
++
+   bool isPeerVerificationEnabled() const
+   {
+     return verification_ != TLSVerification::Disabled;
+@@ -74,6 +79,7 @@ public:
+   SSL_CTX* getSSLCtx() const { return sslCtx_; }
+ 
+ private:
++  bool btPeer_ = false;
+   SSL_CTX* sslCtx_;
+   TLSSessionSide side_;
+   bool good_;
+diff --git a/src/LibsslTLSSession.cc b/src/LibsslTLSSession.cc
+index cad8a40..1f9c81b 100644
+--- a/src/LibsslTLSSession.cc
++++ b/src/LibsslTLSSession.cc
+@@ -33,6 +33,8 @@
+  */
+ /* copyright --> */
+ #include "LibsslTLSSession.h"
++#include "Log.h"
++#include "fmt.h"
+ 
+ #include <openssl/err.h>
+ #include <openssl/x509.h>
+@@ -189,6 +191,42 @@ int OpenSSLTLSSession::handshake(TLSVersion& version)
+     }
+   }
+ 
++  if (tlsContext_->isBtPeer()) {
++#if OPENSSL_VERSION_NUMBER >= 0x30500000L && !defined(LIBRESSL_VERSION_NUMBER)
++    const unsigned char* alpn = nullptr;
++    unsigned int alpnLen = 0;
++    SSL_get0_alpn_selected(ssl_, &alpn, &alpnLen);
++    auto cert = SSL_get0_peer_certificate(ssl_);
++    const char* group = SSL_get0_group_name(ssl_);
++    std::string cipher = SSL_get_cipher_name(ssl_);
++    if (!SSL_is_init_finished(ssl_) || SSL_version(ssl_) != TLS1_3_VERSION || !group ||
++        std::string(group) != "X25519MLKEM768" ||
++        !cert || SSL_get_verify_result(ssl_) != X509_V_OK ||
++        SSL_session_reused(ssl_) || alpnLen != 10 ||
++        std::string(reinterpret_cast<const char*>(alpn), alpnLen) != "aria2-bt/1" ||
++        (cipher != "TLS_AES_256_GCM_SHA384" && cipher != "TLS_CHACHA20_POLY1305_SHA256")) {
++      peerProfileError_ = "Required BitTorrent hybrid TLS/membership/ALPN profile failed";
++      return TLS_ERR_ERROR;
++    }
++    unsigned char digest[EVP_MAX_MD_SIZE];
++    unsigned int digestLen = 0;
++    if (X509_digest(cert, EVP_sha256(), digest, &digestLen) != 1) {
++      peerProfileError_ = "Cannot obtain peer certificate fingerprint";
++      return TLS_ERR_ERROR;
++    }
++    std::string fingerprint;
++    static const char hex[] = "0123456789abcdef";
++    for (unsigned int i = 0; i < digestLen; ++i) {
++      fingerprint += hex[digest[i] >> 4]; fingerprint += hex[digest[i] & 15];
++    }
++    A2_LOG_INFO(fmt("BT peer TLS profile: protocol=TLSv1.3 group=%s cipher=%s "
++                    "alpn=aria2-bt/1 peer_auth=verified cert_sha256=%s",
++                    group, cipher.c_str(), fingerprint.c_str()));
++#else
++    peerProfileError_ = "Private peer TLS requires OpenSSL 3.5+";
++    return TLS_ERR_ERROR;
++#endif
++  }
+   switch (SSL_version(ssl_)) {
+ #ifdef TLS1_1_VERSION
+   case TLS1_1_VERSION:
+@@ -227,7 +265,7 @@ int OpenSSLTLSSession::tlsConnect(const std::string& hostname,
+ #else  // !__APPLE__
+   constexpr auto useOpenSSLVerification = true;
+ #endif // !__APPLE__
+-  if (!peerVerificationConfigured_ &&
++  if (!tlsContext_->isBtPeer() && !peerVerificationConfigured_ &&
+       tlsContext_->isPeerVerificationEnabled() &&
+       useOpenSSLVerification &&
+       (util::isNumericHost(hostname)
+@@ -270,6 +308,7 @@ int OpenSSLTLSSession::tlsAccept(TLSVersion& version)
+ 
+ std::string OpenSSLTLSSession::getLastErrorString()
+ {
++  if (!peerProfileError_.empty()) return peerProfileError_;
+   if (rv_ <= 0) {
+     int sslError = SSL_get_error(ssl_, rv_);
+     switch (sslError) {
+diff --git a/src/LibsslTLSSession.h b/src/LibsslTLSSession.h
+index 406c6da..73adc96 100644
+--- a/src/LibsslTLSSession.h
++++ b/src/LibsslTLSSession.h
+@@ -59,9 +59,12 @@ public:
+                          std::string& handshakeErr) override;
+   virtual int tlsAccept(TLSVersion& version) override;
+   virtual std::string getLastErrorString() override;
+-  virtual size_t getRecvBufferedLength() override { return 0; }
++  virtual size_t getRecvBufferedLength() override {
++    return ssl_ ? static_cast<size_t>(SSL_pending(ssl_)) : 0;
++  }
+ 
+ private:
++  std::string peerProfileError_;
+   int handshake(TLSVersion& version);
+   SSL* ssl_;
+   OpenSSLTLSContext* tlsContext_;
+diff --git a/src/MultiUrlRequestInfo.cc b/src/MultiUrlRequestInfo.cc
+index 092c536..d8ec56a 100644
+--- a/src/MultiUrlRequestInfo.cc
++++ b/src/MultiUrlRequestInfo.cc
+@@ -178,6 +178,35 @@ int MultiUrlRequestInfo::prepare()
+   global::globalHaltRequested = 0;
+   try {
+     SingletonHolder<Notifier>::instance(make_unique<Notifier>());
++#ifdef ENABLE_SSL
++    SocketCore::setBtPeerTLSContexts(nullptr, nullptr);
++#endif
++#ifdef ENABLE_BITTORRENT
++    if (option_->get(PREF_BT_PEER_TLS_MODE) == "required") {
++      if (option_->getAsBool(PREF_BT_FORCE_ENCRYPTION) ||
++          option_->getAsBool(PREF_BT_REQUIRE_CRYPTO) ||
++          option_->get(PREF_BT_MIN_CRYPTO_LEVEL) == "arc4")
++        throw DL_ABORT_EX("bt-peer-tls=required cannot be combined with MSE/ARC4 options");
++      if (option_->get(PREF_BT_PEER_TLS_VERIFY_PEER) != "true")
++        throw DL_ABORT_EX("bt-peer-tls=required mandates certificate verification");
++#ifdef ENABLE_SSL
++      std::shared_ptr<TLSContext> client(TLSContext::make(TLS_CLIENT, TLS_PROTO_TLS13));
++      std::shared_ptr<TLSContext> server(TLSContext::make(TLS_SERVER, TLS_PROTO_TLS13));
++      for (auto ctx : {client, server}) {
++        if (!ctx->configureBtPeer(option_->get(PREF_BT_PEER_TLS_CERT),
++              option_->get(PREF_BT_PEER_TLS_KEY), option_->get(PREF_BT_PEER_TLS_CA),
++              option_->get(PREF_BT_PEER_TLS_GROUPS),
++              option_->get(PREF_BT_PEER_TLS_CIPHERSUITES),
++              option_->get(PREF_BT_PEER_TLS_ALPN)))
++          throw DL_ABORT_EX("Private peer TLS requires OpenSSL 3.5+, valid node cert/key/CA, "
++                            "X25519MLKEM768, approved TLS 1.3 suites and aria2-bt/1 ALPN");
++      }
++      SocketCore::setBtPeerTLSContexts(std::move(client), std::move(server));
++#else
++      throw DL_ABORT_EX("Private peer TLS requires an OpenSSL 3.5+ build");
++#endif
++    }
++#endif
+ 
+ #ifdef ENABLE_SSL
+     if (option_->getAsBool(PREF_ENABLE_RPC) &&
+diff --git a/src/OptionHandlerFactory.cc b/src/OptionHandlerFactory.cc
+index 51724bf..1a10065 100644
+--- a/src/OptionHandlerFactory.cc
++++ b/src/OptionHandlerFactory.cc
+@@ -1567,6 +1567,47 @@ std::vector<OptionHandler*> OptionHandlerFactory::createOptionHandlers()
+ #endif // ENABLE_BITTORRENT || ENABLE_ED2K
+ // BitTorrent Specific Options
+ #ifdef ENABLE_BITTORRENT
++  {
++    OptionHandler* op(new ParameterOptionHandler(PREF_BT_PEER_TLS_MODE, "Private peer TLS mode (strict hybrid TLS 1.3).", "disabled", {"disabled", "required"}));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_CERT, "Private BitTorrent TLS bt-peer-tls-cert; requires OpenSSL 3.5+.", "", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_KEY, "Private BitTorrent TLS bt-peer-tls-key; requires OpenSSL 3.5+.", "", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_CA, "Private BitTorrent TLS bt-peer-tls-ca; requires OpenSSL 3.5+.", "", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_GROUPS, "Private BitTorrent TLS bt-peer-tls-groups; requires OpenSSL 3.5+.", "X25519MLKEM768", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_CIPHERSUITES, "Private BitTorrent TLS bt-peer-tls-ciphersuites; requires OpenSSL 3.5+.", "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_ALPN, "Private BitTorrent TLS bt-peer-tls-alpn; requires OpenSSL 3.5+.", "aria2-bt/1", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new DefaultOptionHandler(PREF_BT_PEER_TLS_VERIFY_PEER, "Private BitTorrent TLS bt-peer-tls-verify-peer; requires OpenSSL 3.5+.", "true", "VALUE"));
++    op->addTag(TAG_BITTORRENT);
++    handlers.push_back(op);
++  }
++
+   {
+     OptionHandler* op(
+         new BooleanOptionHandler(PREF_BT_ENABLE_HOOK_AFTER_HASH_CHECK,
+diff --git a/src/PeerAbstractCommand.cc b/src/PeerAbstractCommand.cc
+index 0259944..36299d6 100644
+--- a/src/PeerAbstractCommand.cc
++++ b/src/PeerAbstractCommand.cc
+@@ -240,6 +240,10 @@ void PeerAbstractCommand::createSocket()
+ 
+ void PeerAbstractCommand::addCommandSelf()
+ {
++  if (socket_ && checkSocketIsReadable_ && socket_->getRecvBufferedLength() > 0) {
++    setStatus(Command::STATUS_ONESHOT_REALTIME);
++    e_->setNoWait(true);
++  }
+   e_->addCommand(std::unique_ptr<Command>(this));
+ }
+ 
+diff --git a/src/PeerInitiateConnectionCommand.cc b/src/PeerInitiateConnectionCommand.cc
+index 2680919..caa0c74 100644
+--- a/src/PeerInitiateConnectionCommand.cc
++++ b/src/PeerInitiateConnectionCommand.cc
+@@ -34,6 +34,7 @@
+ /* copyright --> */
+ #include "PeerInitiateConnectionCommand.h"
+ #include "InitiatorMSEHandshakeCommand.h"
++#include "BtPeerTLSCommand.h"
+ #include "PeerInteractionCommand.h"
+ #include "DownloadEngine.h"
+ #include "DlAbortEx.h"
+@@ -80,7 +81,12 @@ bool PeerInitiateConnectionCommand::executeInternal()
+   getSocket()->establishConnection(getPeer()->getIPAddress(),
+                                    getPeer()->getListenPort(), false);
+   getSocket()->applyIpDscp();
+-  if (mseHandshakeEnabled_) {
++  if (SocketCore::btPeerTLSRequired()) {
++    if (BtPeerTLSCommand::full()) throw DL_ABORT_EX("Private peer TLS admission limit");
++    getDownloadEngine()->addCommand(make_unique<BtPeerTLSCommand>(getCuid(), getPeer(),
++        getDownloadEngine(), getSocket(), requestGroup_, btRuntime_, peerStorage_, pieceStorage_));
++  }
++  else if (mseHandshakeEnabled_) {
+     auto c = make_unique<InitiatorMSEHandshakeCommand>(
+         getCuid(), requestGroup_, getPeer(), getDownloadEngine(), btRuntime_,
+         getSocket());
+diff --git a/src/PeerInteractionCommand.cc b/src/PeerInteractionCommand.cc
+index a5271a5..f1c8db5 100644
+--- a/src/PeerInteractionCommand.cc
++++ b/src/PeerInteractionCommand.cc
+@@ -380,6 +380,10 @@ bool PeerInteractionCommand::executeInternal()
+     disableWriteCheckSocket();
+   }
+ 
++  if (SocketCore::btPeerTLSRequired()) {
++    if (getSocket()->wantWrite()) setWriteCheckSocket(getSocket());
++    if (getSocket()->wantRead()) setReadCheckSocket(getSocket());
++  }
+   addCommandSelf();
+   return false;
+ }
+diff --git a/src/PeerListenCommand.cc b/src/PeerListenCommand.cc
+index 56096c9..e5d06c7 100644
+--- a/src/PeerListenCommand.cc
++++ b/src/PeerListenCommand.cc
+@@ -42,6 +42,7 @@
+ #include "RecoverableException.h"
+ #include "message.h"
+ #include "ReceiverMSEHandshakeCommand.h"
++#include "BtPeerTLSCommand.h"
+ #include "Log.h"
+ #include "SocketCore.h"
+ #include "fmt.h"
+@@ -85,8 +86,13 @@ bool PeerListenCommand::execute()
+         auto peer = std::make_shared<Peer>(
+             endpoint.addr, endpoint.port, Peer::ConnectionDirection::INCOMING);
+         cuid_t cuid = e_->newCUID();
+-        e_->addCommand(make_unique<ReceiverMSEHandshakeCommand>(
+-            cuid, peer, e_, peerSocket));
++        if (SocketCore::btPeerTLSRequired()) {
++          if (BtPeerTLSCommand::full()) { peerSocket->closeConnection(); continue; }
++          e_->addCommand(make_unique<BtPeerTLSCommand>(cuid, peer, e_, peerSocket));
++        }
++        else {
++          e_->addCommand(make_unique<ReceiverMSEHandshakeCommand>(cuid, peer, e_, peerSocket));
++        }
+         A2_LOG_TRACE(fmt("Accepted the connection from %s:%u.",
+                          peer->getIPAddress().c_str(), peer->getRemotePort()));
+         A2_LOG_TRACE(fmt("Added CUID#%" PRId64
+diff --git a/src/PeerReceiveHandshakeCommand.cc b/src/PeerReceiveHandshakeCommand.cc
+index b482c36..0dbace2 100644
+--- a/src/PeerReceiveHandshakeCommand.cc
++++ b/src/PeerReceiveHandshakeCommand.cc
+@@ -67,6 +67,9 @@ PeerReceiveHandshakeCommand::PeerReceiveHandshakeCommand(
+     : PeerAbstractCommand{cuid, peer, e, s},
+       peerConnection_{std::move(peerConnection)}
+ {
++  if (s->getRecvBufferedLength() > 0) {
++    setStatus(Command::STATUS_ONESHOT_REALTIME); e->setNoWait(true);
++  }
+   if (peerConnection_) {
+     if (peerConnection_->getBufferLength() > 0) {
+       setStatus(Command::STATUS_ONESHOT_REALTIME);
+diff --git a/src/Platform.cc b/src/Platform.cc
+index 3b23359..9f8995b 100644
+--- a/src/Platform.cc
++++ b/src/Platform.cc
+@@ -122,6 +122,7 @@ bool Platform::tearDown()
+ #ifdef ENABLE_SSL
+   SocketCore::setClientTLSContext(nullptr);
+   SocketCore::setServerTLSContext(nullptr);
++  SocketCore::setBtPeerTLSContexts(nullptr, nullptr);
+ #endif // ENABLE_SSL
+ 
+ #ifdef CARES_HAVE_ARES_LIBRARY_CLEANUP
+diff --git a/src/SocketCore.cc b/src/SocketCore.cc
+index f2c5f3d..7cc1588 100644
+--- a/src/SocketCore.cc
++++ b/src/SocketCore.cc
+@@ -138,6 +138,15 @@ int SocketCore::socketRecvBufferSize_ = 0;
+ #ifdef ENABLE_SSL
+ std::shared_ptr<TLSContext> SocketCore::clTlsContext_;
+ std::shared_ptr<TLSContext> SocketCore::svTlsContext_;
++std::shared_ptr<TLSContext> SocketCore::btClientTLSContext_;
++std::shared_ptr<TLSContext> SocketCore::btServerTLSContext_;
++
++void SocketCore::setBtPeerTLSContexts(std::shared_ptr<TLSContext> client,
++                                     std::shared_ptr<TLSContext> server)
++{
++  btClientTLSContext_ = std::move(client);
++  btServerTLSContext_ = std::move(server);
++}
+ 
+ void SocketCore::setClientTLSContext(
+     const std::shared_ptr<TLSContext>& tlsContext)
+@@ -152,6 +161,26 @@ void SocketCore::setServerTLSContext(
+ }
+ #endif // ENABLE_SSL
+ 
++bool SocketCore::btPeerTLSRequired()
++{
++#ifdef ENABLE_SSL
++  return static_cast<bool>(btClientTLSContext_) && static_cast<bool>(btServerTLSContext_);
++#else
++  return false;
++#endif
++}
++
++bool SocketCore::tlsPeerHandshake(bool server)
++{
++#ifdef ENABLE_SSL
++  auto ctx = server ? btServerTLSContext_ : btClientTLSContext_;
++  if (!ctx) throw DL_ABORT_EX("Private peer TLS is not initialized");
++  return tlsHandshake(ctx.get(), "");
++#else
++  throw DL_ABORT_EX("Private peer TLS requires OpenSSL 3.5+");
++#endif
++}
++
+ SocketCore::SocketCore(int sockType) : sockType_(sockType), sockfd_(-1)
+ {
+   init();
+@@ -790,6 +819,7 @@ ssize_t SocketCore::writeVector(a2iovec* iov, size_t iovcnt)
+         break;
+       }
+       ret += rv;
++      if (static_cast<size_t>(rv) < iov[i].A2IOVEC_LEN) break;
+     }
+   }
+   return ret;
+@@ -931,7 +961,7 @@ bool SocketCore::tlsHandshake(TLSContext* tlsctx, const std::string& hostname)
+       tlsSession_.reset();
+       throw DL_ABORT_EX(fmt(EX_SSL_INIT_FAILURE, error.c_str()));
+     }
+-    if (tlsctx->getSide() == TLS_CLIENT && !util::isNumericHost(hostname)) {
++    if (tlsctx->getSide() == TLS_CLIENT && !hostname.empty() && !util::isNumericHost(hostname)) {
+       rv = tlsSession_->setSNIHostname(hostname);
+       if (rv != TLS_ERR_OK) {
+         throw DL_ABORT_EX(fmt(EX_SSL_INIT_FAILURE,
+diff --git a/src/SocketCore.h b/src/SocketCore.h
+index cbd294f..a1e738b 100644
+--- a/src/SocketCore.h
++++ b/src/SocketCore.h
+@@ -90,6 +90,8 @@ private:
+   static std::shared_ptr<TLSContext> clTlsContext_;
+   // TLS context for server side
+   static std::shared_ptr<TLSContext> svTlsContext_;
++  static std::shared_ptr<TLSContext> btClientTLSContext_;
++  static std::shared_ptr<TLSContext> btServerTLSContext_;
+ 
+   std::shared_ptr<TLSSession> tlsSession_;
+ 
+@@ -282,6 +284,9 @@ public:
+    */
+   void readData(void* data, size_t& len);
+ 
++  static bool btPeerTLSRequired();
++  bool tlsPeerHandshake(bool server);
++
+   // sender.addr will be numerihost assigned.
+   ssize_t readDataFrom(void* data, size_t len, Endpoint& sender);
+ 
+@@ -289,6 +294,8 @@ public:
+   // Performs TLS server side handshake. If handshake is completed,
+   // returns true. If handshake has not been done yet, returns false.
+   bool tlsAccept();
++  static void setBtPeerTLSContexts(std::shared_ptr<TLSContext> client,
++                                   std::shared_ptr<TLSContext> server);
+ 
+   // Performs TLS client side handshake. If handshake is completed,
+   // returns true. If handshake has not been done yet, returns false.
+diff --git a/src/TLSContext.h b/src/TLSContext.h
+index b335098..c4d09be 100644
+--- a/src/TLSContext.h
++++ b/src/TLSContext.h
+@@ -64,6 +64,11 @@ public:
+   virtual bool configurePeerVerification(TLSVerification verification,
+                                          const std::string& caFile) = 0;
+ 
++  // Defaults keep other TLS backends source-compatible and fail closed.
++  virtual bool configureBtPeer(const std::string&, const std::string&,
++                               const std::string&, const std::string&,
++                               const std::string&, const std::string&) { return false; }
++  virtual bool isBtPeer() const { return false; }
+   virtual bool good() const = 0;
+ 
+   virtual TLSSessionSide getSide() const = 0;
+diff --git a/src/prefs.cc b/src/prefs.cc
+index 165a54a..56b3c39 100644
+--- a/src/prefs.cc
++++ b/src/prefs.cc
+@@ -619,6 +619,14 @@ PrefPtr PREF_BT_EXCLUDE_TRACKER = makePref("bt-exclude-tracker");
+ PrefPtr PREF_BT_REMOVE_UNSELECTED_FILE = makePref("bt-remove-unselected-file");
+ PrefPtr PREF_DETACH_SHARE_ONLY = makePref("detach-share-only");
+ PrefPtr PREF_BT_FORCE_ENCRYPTION = makePref("bt-force-encryption");
++PrefPtr PREF_BT_PEER_TLS_MODE = makePref("bt-peer-tls");
++PrefPtr PREF_BT_PEER_TLS_CERT = makePref("bt-peer-tls-cert");
++PrefPtr PREF_BT_PEER_TLS_KEY = makePref("bt-peer-tls-key");
++PrefPtr PREF_BT_PEER_TLS_CA = makePref("bt-peer-tls-ca");
++PrefPtr PREF_BT_PEER_TLS_GROUPS = makePref("bt-peer-tls-groups");
++PrefPtr PREF_BT_PEER_TLS_CIPHERSUITES = makePref("bt-peer-tls-ciphersuites");
++PrefPtr PREF_BT_PEER_TLS_ALPN = makePref("bt-peer-tls-alpn");
++PrefPtr PREF_BT_PEER_TLS_VERIFY_PEER = makePref("bt-peer-tls-verify-peer");
+ // values: true | false
+ PrefPtr PREF_BT_ENABLE_HOOK_AFTER_HASH_CHECK =
+     makePref("bt-enable-hook-after-hash-check");
+diff --git a/src/prefs.h b/src/prefs.h
+index df546ba..79cd2de 100644
+--- a/src/prefs.h
++++ b/src/prefs.h
+@@ -552,6 +552,14 @@ extern PrefPtr PREF_BT_REMOVE_UNSELECTED_FILE;
+ extern PrefPtr PREF_DETACH_SHARE_ONLY;
+ // values: true | false
+ extern PrefPtr PREF_BT_FORCE_ENCRYPTION;
++extern PrefPtr PREF_BT_PEER_TLS_MODE;
++extern PrefPtr PREF_BT_PEER_TLS_CERT;
++extern PrefPtr PREF_BT_PEER_TLS_KEY;
++extern PrefPtr PREF_BT_PEER_TLS_CA;
++extern PrefPtr PREF_BT_PEER_TLS_GROUPS;
++extern PrefPtr PREF_BT_PEER_TLS_CIPHERSUITES;
++extern PrefPtr PREF_BT_PEER_TLS_ALPN;
++extern PrefPtr PREF_BT_PEER_TLS_VERIFY_PEER;
+ // values: true | false
+ extern PrefPtr PREF_BT_ENABLE_HOOK_AFTER_HASH_CHECK;
+ // values: true | false

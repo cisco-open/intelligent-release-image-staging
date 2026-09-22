@@ -4,46 +4,110 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Installs the aria2c client that was HANDED IN to this repository.
+# Installs the aria2c client that is COMMITTED to this repository.
 #
 #   tools/get-aria2c.sh                    # host architecture
 #   tools/get-aria2c.sh amd64              # x86_64  (Catalyst / server)
 #   tools/get-aria2c.sh arm64              # aarch64 (IE-3400, Cortex-A53)
 #   tools/get-aria2c.sh --no-install arm64 # deliverables/ only, keep bin/
+#   tools/get-aria2c.sh --for-platforms linux/amd64,linux/arm64
+#                                          # every client that list needs, in
+#                                          # one run: amd64 into bin/, every
+#                                          # other architecture into
+#                                          # deliverables/. The list takes the
+#                                          # same form as IRIS_DEVICE_PLATFORMS
+#                                          # and defaults to it (else
+#                                          # linux/amd64) when left off.
 #
 # IRIS does not build aria2c. The binary is produced elsewhere, by the
 # aria2-next-static project, and delivered here as an artifact. That project
 # owns the source pin, the patch set, the build flags and the validation; this
 # repository is purely the consumer.
 #
+# The tested clients for both architectures are COMMITTED here --
+# bin/aria2c and deliverables/aria2c-x86_64 (the same bytes) plus
+# deliverables/aria2c-aarch64 -- so a fresh clone is already complete and
+# offline-capable. Normally this script only re-verifies those committed
+# files against tools/aria2c.sha256; it fetches solely when one of them is
+# missing, for instance because it was deleted from a working tree.
+#
 # Resolution order: an explicit ARIA2C_DELIVERABLE, the repository's own
-# deliverables/aria2c-<cpu>, a producer checkout beside the repository, and
-# finally this project's own published release asset. Every one of them is
-# verified against tools/aria2c.sha256 below.
+# committed deliverables/aria2c-<cpu>, a producer checkout beside the
+# repository, and finally this project's own published release asset. Every
+# one of them is verified against tools/aria2c.sha256 below.
 #
 # On downloading: an earlier implementation fetched a prebuilt binary from a
 # third party (abcfy2/aria2-static-build), which published x86_64 only while
 # device/iox/package.yaml targets aarch64 for the IE-3x00 Guest Shell, and
 # shipped an opaque zip that could be checksummed but never audited or patched.
-# The release asset this script fetches is different in every one of those
-# respects: it is published by this project, for both architectures, from the
-# pinned source and patch set in tools/aria2c-patches/ with the build scripts
-# in tools/aria2c-build/, and it is refused unless it matches the checksum
-# recorded here. Set ARIA2C_NO_DOWNLOAD=1 to forbid the fetch and require a
-# local deliverable.
+# The release asset this script falls back to is different in every one of
+# those respects: it is published by this project, for both architectures,
+# from the pinned source and patch set in tools/aria2c-patches/ with the build
+# scripts in tools/aria2c-build/, and it is refused unless it matches the
+# checksum recorded here. Set ARIA2C_NO_DOWNLOAD=1 to forbid the fetch
+# entirely and require a local deliverable.
 #
 # Why not build it here: the build carries local patches. Keeping a second copy
 # of them in this repository guarantees they drift, and a stale copy silently
 # ships a client missing fixes. There is exactly one producer.
 #
-# The delivered binary is verified against tools/aria2c.sha256 and this script
-# FAILS CLOSED on a mismatch, so an out-of-date client cannot be installed by
-# accident.
+# Whichever candidate is used -- committed, handed in, or fetched -- it is
+# verified against tools/aria2c.sha256 and this script FAILS CLOSED on a
+# mismatch, so an out-of-date client cannot be installed by accident.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="$REPO_ROOT/bin"
 SUMS="$REPO_ROOT/tools/aria2c.sha256"
+
+# --for-platforms installs every client one deployment needs in a single run,
+# from the same comma-separated list tools/build-device-image.sh reads out of
+# IRIS_DEVICE_PLATFORMS. The amd64 client goes into bin/aria2c (what
+# server/Dockerfile COPYs); every other architecture is collected into
+# deliverables/ with bin/ left alone, because the device builders read there.
+# Each client is installed by re-entering this same script one architecture at
+# a time, so every one of them is verified against tools/aria2c.sha256 and
+# fails closed exactly as a single-architecture run does -- there is no second
+# implementation of the checks to keep in step. Per-client output is one line;
+# a failing client's full diagnostic is passed through and stops the run.
+if [ "${1:-}" = "--for-platforms" ]; then
+  shift
+  PLATFORMS="${1:-${IRIS_DEVICE_PLATFORMS:-linux/amd64}}"
+  [ "$#" -eq 0 ] || shift
+  if [ "$#" -gt 0 ]; then
+    echo "usage: $0 --for-platforms linux/amd64,linux/arm64" >&2
+    exit 2
+  fi
+  for platform in ${PLATFORMS//,/ }; do
+    case "$platform" in
+      linux/amd64|amd64|linux/x86_64|x86_64)   arch=amd64; cpu=x86_64 ;;
+      linux/arm64|arm64|linux/aarch64|aarch64) arch=arm64; cpu=aarch64 ;;
+      *) echo "unsupported platform in --for-platforms: $platform" >&2; exit 2 ;;
+    esac
+    if [ "$arch" = amd64 ]; then
+      run_args=("$arch"); dest="bin/aria2c"; verb="Installed"
+    else
+      run_args=(--no-install "$arch"); dest="deliverables/aria2c-$cpu"; verb="Collected"
+    fi
+    rc=0
+    out="$(bash "$0" "${run_args[@]}" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf '%s\n' "$out" >&2
+      echo "!! no verified aria2c client for $platform; nothing further was installed" >&2
+      exit "$rc"
+    fi
+    # A client verified somewhere this repository's builders never read (a
+    # producer checkout, an ARIA2C_DELIVERABLE elsewhere) is not collected.
+    # Say so here rather than let the device build fail closed later.
+    if [ ! -f "$REPO_ROOT/$dest" ]; then
+      printf '%s\n' "$out" >&2
+      echo "!! the $cpu client verified, but $dest was not written; hand it in there" >&2
+      exit 1
+    fi
+    echo "$verb: $dest — $cpu, sha256 matched tools/aria2c.sha256"
+  done
+  exit 0
+fi
 
 # --no-install collects and verifies the deliverable without touching
 # bin/aria2c. bin/ holds ONE client, the x86_64 one the server image copies
@@ -78,16 +142,20 @@ case "${1:-}" in
 esac
 
 # Where the deliverable is collected from, in order: an explicit
-# ARIA2C_DELIVERABLE; the repository's own handed-in copy under
-# deliverables/aria2c-<cpu> (the same place tools/build-device-image.sh and
-# tools/start-compose-server.sh resolve the per-architecture binaries from,
-# so one drop serves the server image AND every device package); else the
-# producer checkout beside the repository. Every candidate is verified
-# against tools/aria2c.sha256 below, so a stale copy fails closed either way.
+# ARIA2C_DELIVERABLE (an operator pointing at a hand-in elsewhere on purpose);
+# the repository's own COMMITTED copy under deliverables/aria2c-<cpu> (the
+# same place tools/build-device-image.sh and tools/start-compose-server.sh
+# resolve the per-architecture binaries from, so the one committed client
+# serves the server image AND every device package); else a producer checkout
+# beside the repository. The committed copy comes before the producer
+# checkout deliberately: what this repository ships is what was tested, and a
+# half-built producer tree must not take its place. Every candidate is
+# verified against tools/aria2c.sha256 below, so a stale copy fails closed
+# either way.
 # The published deliverables live on a release of their own, tagged by the
 # aria2-next version and patch count rather than by an IRIS CalVer release:
 # the binary changes only when the build does.
-ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p7}"
+ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p10}"
 ARIA2C_RELEASE_URL="${ARIA2C_RELEASE_URL:-https://github.com/cisco-open/intelligent-release-image-staging/releases/download/$ARIA2C_RELEASE_TAG/aria2c-$ARCH}"
 
 DOWNLOADED=""
@@ -129,8 +197,13 @@ fetched from
   $ARIA2C_RELEASE_URL
 
 so either that release is unreachable from this host or it does not carry this
-architecture. Drop the handed-in binary at
-deliverables/aria2c-$ARCH, set ARIA2C_DELIVERABLE to it, or build one from source:
+architecture. This repository commits the tested client at
+deliverables/aria2c-$ARCH, so in a clone the first thing to try is restoring it:
+
+  git checkout -- deliverables/aria2c-$ARCH
+
+Otherwise drop the handed-in binary there, set ARIA2C_DELIVERABLE to it, or
+build one from source:
 the upstream fork pinned in tools/aria2c.sha256 plus the patches in
 tools/aria2c-patches/ (see the README there for the recipe). Maintainers
 with the producer checkout can instead run:
@@ -181,15 +254,21 @@ EOF
   exit 1
 fi
 
-# A verified download is kept in deliverables/ as well as installed into bin/.
+# Every verified candidate is kept in deliverables/ as well as installed into bin/.
 # tools/build-device-image.sh resolves each architecture's client from there,
 # so keeping it means the IOx and XR package builds need no second fetch, and
-# a later run of this script finds it locally. deliverables/ is git-ignored.
-if [ -n "$DOWNLOADED" ]; then
+# a later run of this script finds it locally. This restores the copy the
+# repository commits: the bytes match tools/aria2c.sha256, so the restored
+# file is identical to the tracked one and leaves no diff behind.
+COLLECTED="$REPO_ROOT/deliverables/aria2c-$ARCH"
+if [ ! "$DELIVERABLE" -ef "$COLLECTED" ]; then
   mkdir -p "$REPO_ROOT/deliverables"
-  install -m 0644 "$DELIVERABLE" "$REPO_ROOT/deliverables/aria2c-$ARCH"
+  # 0755, the mode the committed deliverable carries, so restoring a deleted
+  # one leaves git seeing no change at all -- not even a mode change.
+  install -m 0755 "$DELIVERABLE" "$COLLECTED"
   echo "Kept:      deliverables/aria2c-$ARCH"
 fi
+DELIVERABLE="$COLLECTED"
 
 if [ "$INSTALL_BIN" -eq 0 ]; then
   echo "Verified:  $ARCH deliverable (bin/aria2c left as it was)"

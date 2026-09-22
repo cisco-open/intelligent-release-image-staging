@@ -40,7 +40,7 @@
 # ---------------------------------------------------------------------------
 # Behavioral tests: run the real build.sh, symlinked into a fake $REPO so we
 # control deliverables/, tools/aria2c.sha256 and the local agent bundle
-# without touching the real repository's gitignored deliverables. Mirrors the
+# without touching the real repository's committed deliverables. Mirrors the
 # STUBDIR pattern in test_iox_install_output.bats (HERE resolves off a
 # symlinked script, so the fake repo layout must live two dirs above it).
 # The failure paths below abort during aria2c staging, before docker/skopeo/
@@ -59,7 +59,11 @@ _build_stub_setup() {
   # it must validate both architecture inputs before BuildKit can run.
   touch "$STUBDIR/device/container/Dockerfile" \
     "$STUBDIR/device/container/entrypoint.sh" \
-    "$STUBDIR/device/container/reconcile.sh"
+    "$STUBDIR/device/container/reconcile.sh" \
+    "$STUBDIR/device/container/rebuild-xml.py"
+  mkdir -p "$STUBDIR/tools/licenses"
+  touch "$STUBDIR/tools/iris-aead.c" "$STUBDIR/tools/build-instruction-crypto-inner.sh" \
+    "$STUBDIR/tools/licenses/musl-COPYRIGHT"
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"

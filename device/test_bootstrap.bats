@@ -42,9 +42,17 @@ agent/flashcheck.py
 agent/instr.py
 agent/iris_agent.py
 agent/peer-transfer-hook.sh
+agent/peer_tls.py
 agent/telemetry_report.py
 agent/verify_image.py
 agent/xr_deps.py
+agent/runtime_verifier.py
+agent/ssh-keygen
+agent/ssh-keygen.LICENCE
+agent/instruction_aead.py
+agent/runtime_crypto.py
+agent/iris-aead
+agent/iris-aead.LICENCE
 aria2c
 bootstrap.sh
 guestshell-start.sh
@@ -94,7 +102,7 @@ install_prior_agent() {
   printf 'prior root signer trust\n' > "$STAGE/iris-root.allowed_signers"
 }
 
-@test "bootstrap syncs rpc-secret from conf and bounces aria2c when it changed" {
+@test "bootstrap syncs rpc-secret and leaves PID-scoped replacement to launcher" {
   printf 'rpc_secret = REALSECRET123\nrpc_port = 6800\n' > "$STAGE/iris-agent.conf"
   printf '\n' > "$STAGE/rpc-secret"   # baked empty
   run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
@@ -102,8 +110,9 @@ install_prior_agent() {
   [ "$status" -eq 0 ]
   # the file aria2c reads now holds the agent's real secret
   [ "$(tr -d '[:space:]' < "$STAGE/rpc-secret")" = "REALSECRET123" ]
-  # aria2c was bounced so it relaunches with the new secret
-  [ -f "$TMP/pkill.log" ]
+  # Only the launcher may replace its exact aria2 executable/port owner.
+  [ ! -f "$TMP/pkill.log" ]
+  [ -f "$TMP/gss.log" ]
 }
 
 @test "bootstrap does NOT bounce aria2c when rpc-secret already matches the conf" {

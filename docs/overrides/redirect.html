@@ -1,0 +1,19 @@
+{# Copyright 2026 Cisco Systems, Inc. and its affiliates
+   SPDX-License-Identifier: Apache-2.0 #}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{{ config.site_name }}</title>
+    <noscript><meta http-equiv="refresh" content="0;url={{ page.meta.location }}"></noscript>
+    <script>
+      const anchors = {{ page.meta.anchors | default({}) | tojson }};
+      const target = new URL(anchors[window.location.hash.slice(1)] || {{ page.meta.location | tojson }}, window.location.href);
+      target.search = window.location.search;
+      if (!target.hash) target.hash = window.location.hash;
+      window.location.replace(target.href);
+    </script>
+  </head>
+  <body><p><a href="{{ page.meta.location }}">Continue to the documentation</a></p></body>
+</html>

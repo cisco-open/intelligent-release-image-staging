@@ -34,9 +34,11 @@ function imageState(p,id){
   if(p.stage_state&&!["ready","idle","unassigned"].includes(p.stage_state))return "pending — device reports "+p.stage_state;
   return "pending";
 }
+function peerTlsLabel(p){let t=p.peer_tls||{},m=t.runtime_source==="aria2_rpc"?t.runtime_mode:"unknown",known=m==="required"||m==="disabled",stale=t.reported_at==null||(DATA?.now??Date.now()/1000)-t.reported_at>=600;return "TLS "+(known?(m==="required"?"required":"off"):"unknown")+(known&&stale?" (stale)":"")}
 function peerStatus(p){
   let d=p.device_observation,o=p.peer_enforcement,tr=p.tracker||{},a=[];
   if(p._image_id&&p.device_id)a.push(imageState(p,p._image_id));
+  if(p.device_id)a.push(peerTlsLabel(p));
   if(tr.participant_class==="legacy_unattributed")a.push("legacy unattributed");
   if(otherImage(p,d))a.push("device observation is for another image");
   else if(d){
@@ -67,7 +69,7 @@ function peerDetails(p){
   let enforcementRows=enforcement?row("State",enforcement.state||"not directly reported")+row("Blocked",enforcement.blocked===true?"yes":enforcement.blocked===false?"no / not globally applied":"not directly reported")+(enforcement.conflict?row("Conflict",enforcement.conflict.reason||"reported")+row("Global block applied",enforcement.conflict.global_block_applied===true?"yes":enforcement.conflict.global_block_applied===false?"no":"not directly reported"):""):row("Status","not directly reported");
   let deviceRows=otherImage(p,d)?row("Status","Latest device observation is for another image")+row("Image",d.image_id):d?(d.image_id?row("Image",d.image_id):"")+row("State",d.obs_state||"observed")+row("Counts as current",d.valid===true?"yes":"no")+row("Age",d.age_s==null?"—":d.age_s+"s")+row("Receive rate",rate(d.receive_bps)):row("Status","unavailable");
   let report=otherImage(p,r)?row("Status","Latest device report is for another image")+row("Image",r.image_id):r?(r.image_id?row("Image",r.image_id):"")+row("Schema",r.schema||"v1")+row("Event",r.event||"—")+row("Content SHA-256",r.content_sha256_state||"not reported")+row("Device copy verification",r.ios_copy_verify_state||"not reported")+row("Report id",r.report_id||"—")+row("Received",age(r.received_at)):row("Status","unavailable");
-  return `<h2>${ident}</h2>${peerModel(p)?`<p class="sub">Model: ${esc(peerModel(p))}</p>`:""}${p.ip?`<p class="sub">Announce IP: ${esc(p.ip)}</p>`:""}${section("Tracker",row("Image",p._img||p._hash||"unknown")+row("Role",tr.role||"unknown")+row("Last seen",age(tr.last_seen)))}${section("Server observation",so?row("Measured server → peer",rate(so.send_bps))+(so.aggregated_connections?row("Note",so.aggregated_connections+" connections from this address, summed"):"")+row("Observed",age(so.observed_at??obs().observed_at)):row("Status","unavailable"))}${section("Device observation",deviceRows)}${section("Image staging",imageRows(p))}<p class="sub">All image states last reported by this device.</p>${section("Latest report",report)}${section("Policy intent",policyRows)}${section("Enforcement",enforcementRows)}`;
+  return `<h2>${ident}</h2>${peerModel(p)?`<p class="sub">Model: ${esc(peerModel(p))}</p>`:""}${p.ip?`<p class="sub">Announce IP: ${esc(p.ip)}</p>`:""}${section("Tracker",row("Image",p._img||p._hash||"unknown")+row("Role",tr.role||"unknown")+row("Last seen",age(tr.last_seen)))}${section("Server observation",so?row("Measured server → peer",rate(so.send_bps))+(so.aggregated_connections?row("Note",so.aggregated_connections+" connections from this address, summed"):"")+row("Observed",age(so.observed_at??obs().observed_at)):row("Status","unavailable"))}${section("Device observation",deviceRows)}${section("Torrent TLS",row("Daemon policy",peerTlsLabel(p))+row("Configured",p.peer_tls?.configured_mode||"unknown")+row("Reported",age(p.peer_tls?.reported_at)))}<p class="sub">Last reported daemon policy; negotiated connection encryption is not measured here.</p>${section("Image staging",imageRows(p))}<p class="sub">All image states last reported by this device.</p>${section("Latest report",report)}${section("Policy intent",policyRows)}${section("Enforcement",enforcementRows)}`;
 }
 function activePeer(p,my){return my===drawerGen&&selected&&selected!=="hub"&&peerKey(selected)===peerKey(p)&&drawer.classList.contains("open")}
 function openPeer(p){
@@ -75,7 +77,7 @@ function openPeer(p){
   openDrawer(`<button id="close">Close</button><div id="peer-details">${peerDetails(p)}</div>${MAP.pull&&p.device_id?'<button id="pullbtn">Pull fresh data from device</button><p id="pullstatus" role="status" aria-live="polite"></p><div id="repbox"></div>':'<p class="sub">'+(p.device_id?'Fresh report pull is unavailable.':'No device identity; fresh report pull is unavailable.')+'</p>'}`);
   if(MAP.pull&&p.device_id){refreshDrawerReport(p,my);document.getElementById("pullbtn").addEventListener("click",()=>requestPull(p,my))}
 }
-function hubDetails(){let o=obs(),g=o.global||{};return `<h2>${esc(server().host||"Origin server")}</h2>${section("Server observation",row("RPC",o.rpc_up?"up":"unavailable")+row("Observed",age(o.observed_at))+row("Upload rate",rate(g.send_bps))+row("Download rate",rate(g.receive_bps))+row("Connections",g.connections))}`}
+function hubDetails(){let o=obs(),g=o.global||{};return `<h2>${esc(server().host||"Origin server")}</h2>${section("Server observation",row("RPC",o.rpc_up?"up":"unavailable")+row("Observed",age(o.observed_at))+row("Upload rate",rate(g.send_bps))+row("Download rate",rate(g.receive_bps))+row("Connections",g.connections))}${section("Torrent TLS",row("Daemon policy",peerTlsLabel({peer_tls:o.peer_tls}))+row("Observed",age(o.peer_tls?.reported_at)))}<p class="sub">Daemon policy; negotiated connection encryption is not measured here.</p>`}
 function openHub(){selected="hub";++drawerGen;openDrawer(`<button id="close">Close</button><div id="hub-details">${hubDetails()}</div>`)}
 function refreshOpenDrawer(){
   if(!drawer.classList.contains("open")||!selected)return;

@@ -12,6 +12,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+case "${IRIS_PEER_TLS_MODE:-disabled}" in
+  disabled) ;;
+  required)
+    if [ "${IRIS_PEER_TLS_SUPERVISED:-}" != 1 ]; then
+      exec python3 "$SCRIPT_DIR/peer_tls_seed.py" "$0"
+    fi ;;
+  *) echo "FATAL: invalid peer TLS mode" >&2; exit 1 ;;
+esac
+
 IRIS_ROOT="${IRIS_ROOT:-/opt/iris}"
 IRIS_STATE="${IRIS_STATE:-/var/lib/iris}"
 IRIS_CONFIG="${IRIS_CONFIG:-/etc/iris}"
@@ -113,8 +122,16 @@ PYCONF
   exit 1
 }
 
+PEER_TLS_FLAG=""
+if [ "${IRIS_PEER_TLS_MODE:-disabled}" = required ]; then
+  PEER_TLS_FLAG="--bt-peer-tls=required"
+  [ -s "${IRIS_PEER_TLS_CONF:-}" ] || exit 1
+  cat "$IRIS_PEER_TLS_CONF" >> "$CONF"
+fi
+
 exec "$ARIA2" \
   --conf-path="$CONF" \
+  ${PEER_TLS_FLAG:+"$PEER_TLS_FLAG"} \
   --listen-port="$LISTEN_PORT" \
   ${EXT_FLAG:+"$EXT_FLAG"} \
   --enable-rpc=true \

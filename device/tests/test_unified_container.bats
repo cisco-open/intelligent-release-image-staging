@@ -85,7 +85,7 @@ PY
 
 @test "canonical image embeds rendered instruction trust and explicit verifier tooling" {
   dockerfile="$DEVICE/container/Dockerfile"
-  grep -Eq '^RUN apk add .*openssh-keygen' "$dockerfile"
+  grep -Eq 'apk add .*openssh-keygen' "$dockerfile"
   grep -q '^COPY agent/iris-signers.allowed_signers /opt/iris/agent/iris-signers.allowed_signers$' \
     "$dockerfile"
   grep -q '^COPY agent/iris-root.allowed_signers /opt/iris/agent/iris-root.allowed_signers$' \

@@ -996,6 +996,23 @@ def _role_definition_schema():
         "qos_state": _ref("TrackerQosStateMap")}}
 
 
+def _peer_tls_schema(projected=False, origin=False):
+    properties = {
+        "configured_mode": {"enum": ["disabled", "required"]},
+        "runtime_mode": {"enum": ["disabled", "required", "unknown"]},
+        "runtime_source": {"enum": ["aria2_rpc", "unknown"]},
+    }
+    if origin:
+        properties.pop("configured_mode")
+    required = list(properties)
+    if projected:
+        properties["reported_at"] = {"type": ["number", "null"]}
+    return {"type": "object", "additionalProperties": False,
+            "required": required,
+            "properties": properties,
+            "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."}
+
+
 def _swarm_peer_schema():
     """Explicit source-grouped tracker identity variants from telemetry._peer_row."""
     variants = []
@@ -1024,6 +1041,7 @@ def _swarm_peer_schema():
             if kind == "device":
                 required.append("device_id")
                 properties["device_id"] = {"type": "string"}
+                properties["peer_tls"] = _peer_tls_schema(projected=True)
                 for name in ("model", "current_image_id", "stage_state"):
                     properties[name] = {"type": "string"}
                 for name in ("staged_image_ids", "errored_image_ids"):
@@ -1750,6 +1768,8 @@ _JSON_REQUESTS = {
         {"current": "current-password", "new": "new-password",
          "confirm": "new-password"}, ("current", "new", "confirm"), True),
     "/settings/sessions/revoke-others": ({}, (), False),
+    "/settings/peer-tls": ({"mode": "required", "expected_mode": "disabled"},
+                           ("mode", "expected_mode"), True),
     "/settings/image-verification": ({"mode": "daily", "hour_utc": 3},
                                      ("mode",), True),
     "/settings/audit-export": (
@@ -1778,6 +1798,7 @@ _JSON_REQUESTS = {
     "/v1/devices/{device_id}/telemetry": (
         {"schema": "v2", "image_id": "image-01", "state": "complete",
          "timestamp": 1788470400}, ("schema", "image_id"), True),
+    "/v1/devices/{device_id}/peer-tls": ({"csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."}, ("csr",), True),
     "/v1/devices/{device_id}/token-refresh": ({}, (), False),
 }
 
@@ -1812,6 +1833,10 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix == "/settings/peer-tls":
+        schema["additionalProperties"] = False
+        for field in ("mode", "expected_mode"):
+            schema["properties"][field]["enum"] = ["disabled", "required"]
     if suffix in ("/devices/{device_id}/onboard", "/devices/{device_id}/undeploy"):
         schema["properties"]["log"].update({
             "default": False,
@@ -1847,6 +1872,7 @@ def _request_body(route):
             "os_family fields "
             "are rejected with 422.")
     if route.service == "catalog" and path.endswith("/heartbeat"):
+        schema["properties"]["peer_tls"] = _peer_tls_schema()
         return {"required": required_body, "content": {
             "application/json": _instruction_attestation_request(schema, example)}}
     if suffix == "/settings/image-verification":
@@ -2132,6 +2158,7 @@ def _json_success_example(route):
             "state": "running", "detail": "", "certs": None},
         "/settings/telemetry-destination": {
             "ok": True, "endpoint": None, "enabled": None},
+        "/settings/peer-tls": {"mode": "disabled", "origin": {"active_mode": "disabled", "state": "running"}, "active_devices": 0, "active_jobs": 0, "can_change": True},
         "/settings/gui-cert": {
             "gui_cert": {
                 "source": "custom", "subject": "CN=iris.example",
@@ -2161,6 +2188,9 @@ def _json_success_example(route):
         "/v1/devices/{device_id}/heartbeat": {
             "ok": True, "stream_every": 4, "stream_pause": False},
         "/v1/devices/{device_id}/telemetry": {"ok": True},
+        "/v1/devices/{device_id}/peer-tls": {
+            "mode": "required", "certificate": "-----BEGIN CERTIFICATE-----\n...",
+            "ca": "-----BEGIN CERTIFICATE-----\n...", "renew_before_seconds": 21600},
         "/v1/devices/{device_id}/token-refresh": {
             "catalog_token": "replacement-catalog-token",
             "expires_at": 1788556800},
@@ -2205,6 +2235,8 @@ def _json_success_example(route):
                     "issuer": "CN=IRIS CA",
                     "not_after": "Sep 4 00:00:00 2027 GMT",
                     "fingerprint_sha256": "00" * 32}}
+    if suffix == "/settings/peer-tls" and route.method == "POST":
+        return dict(exact[suffix], applied=True)
     try:
         return exact[suffix]
     except KeyError as exc:
@@ -2217,8 +2249,16 @@ def _success(route):
         return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix == "/settings/peer-tls":
+        example = _json_success_example(route)
+        schema = _schema_for_example(example, "PeerTlsSettings")
+        schema["properties"]["mode"]["enum"] = ["disabled", "required"]
+        schema["properties"]["origin"]["properties"]["active_mode"] = {
+            "type": ["string", "null"], "enum": ["disabled", "required", None]}
+        return "200", {"description": "Configured mode and separately observed origin state",
+                       "content": {"application/json": _media(schema, example)}}
     if _instruction_resource(route):
-        artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/1"
+        artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/2"
         return "200", {
             "description": "Exact " + artifact + " framed bytes",
             "headers": _instruction_headers(),
@@ -2476,6 +2516,8 @@ def _success(route):
         normal_schema["properties"]["server"]["properties"][
             "server_observation"]["properties"]["aria_session_id"] = {
                 "type": ["string", "null"]}
+        normal_schema["properties"]["server"]["properties"][
+            "server_observation"]["properties"]["peer_tls"] = _peer_tls_schema(projected=True, origin=True)
         normal_schema["properties"]["images"]["items"]["properties"][
             "total_bytes"] = {"type": ["integer", "null"]}
         normal_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
@@ -2497,6 +2539,8 @@ def _success(route):
             paged_schema["properties"]["server"]["properties"][
                 "server_observation"]["properties"]["aria_session_id"] = {
                     "type": ["string", "null"]}
+            paged_schema["properties"]["server"]["properties"][
+                "server_observation"]["properties"]["peer_tls"] = _peer_tls_schema(projected=True, origin=True)
             paged_schema["properties"]["images"]["items"]["properties"][
                 "total_bytes"] = {"type": ["integer", "null"]}
             paged_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
@@ -2655,6 +2699,7 @@ def _success(route):
     if suffix == "/devices" and route.method == "GET":
         row = schema["properties"]["devices"]["items"]
         row["properties"]["instruction"] = _instruction_device_schema()
+        row["properties"]["peer_tls"] = {"anyOf": [_peer_tls_schema(), {"type": "null"}]}
         if "instruction" not in row["required"]:
             row["required"].append("instruction")
     if suffix == "/devices/{device_id}/effective-qos":
@@ -2921,6 +2966,8 @@ def _error_statuses(route):
         if route.method == "GET":
             return (400, 401, 404, 500, 503)
         statuses = [400, 401, 404, 411, 413, 500, 503]
+        if suffix.endswith("/peer-tls"):
+            statuses.extend((403, 409, 429))
         if suffix.endswith("/token-refresh"):
             statuses.append(409)
         return tuple(sorted(statuses))
@@ -2982,7 +3029,7 @@ def _error_statuses(route):
                   "/devices/{device_id}/onboard",
                   "/devices/{device_id}/undeploy",
                   "/onboard/jobs/{job_id}/abort",
-                  "/settings/audit-export/run"):
+                  "/settings/audit-export/run", "/settings/peer-tls"):
         statuses.add(409)
     if suffix == "/devices/{device_id}/request-report":
         statuses.update((422, 429))
@@ -3083,6 +3130,22 @@ def _resource_path_exception(route):
 
 def _description(route):
     notes = [route.summary + "."]
+    if route.path.endswith("/settings/peer-tls"):
+        return ("Read or change process-wide BitTorrent peer TLS. Defaults to disabled. "
+                "Changes persist across restarts and restart the origin seeder automatically. "
+                "New device onboarding inherits the mode. Existing agents must be undeployed "
+                "and device jobs finished before a change (409 otherwise); re-onboard afterward. "
+                "POST requires mode and expected_mode (disabled or required); stale expected_mode "
+                "returns 409. Origin status is observed separately; saved mode is not proof of fleet encryption.")
+    if route.service == "catalog" and route.path == "/v1/devices/{device_id}/peer-tls":
+        return (
+            "Enroll or renew a 24-hour peer TLS certificate using the current same-device catalog Bearer "
+            "over verified HTTPS with the catalog trust provisioned during preflight. Submit a P-256 CSR; "
+            "the private key stays on the device. Renew six hours before expiry. "
+            "Peer TLS defaults to disabled and is configured in Console settings or at deployment for all torrents per process; "
+            "this endpoint does not change the mode. Returns 409 when disabled, 429 when rate-limited, "
+            "or 503 when the issuer is unavailable."
+        )
     if _instruction_resource(route):
         notes.extend([
             "Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence.",

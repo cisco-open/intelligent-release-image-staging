@@ -10,11 +10,17 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-GUIDE = (ROOT / "docs/zensical/aiagent.md").read_text()
+# The old single AI guide split when the manual was reorganized: the operator
+# steps went to the Installation Guide, the package-build recipe to the
+# developer notes. Each block below is executed from the page that owns it.
+GUIDE_INSTALL = (ROOT / "docs/zensical/install/check-the-host.md").read_text()
+GUIDE_SIGNING = (ROOT / "docs/zensical/install/activate-signing.md").read_text()
+GUIDE_BUILD = (ROOT / "docs/dev/device-packages.md").read_text()
 
 
-def command_containing(needle):
-    return next(block for block in re.findall(r"```bash\n(.*?)\n```", GUIDE, re.S)
+def command_containing(needle, guide=None):
+    text = GUIDE_INSTALL if guide is None else guide
+    return next(block for block in re.findall(r"```bash\n(.*?)\n```", text, re.S)
                 if needle in block)
 
 
@@ -94,7 +100,7 @@ def test_clone_failure_stops_before_next_step_or_changing_directory(
 def test_detached_build_keeps_checkout_working_directory(tmp_path):
     build = tmp_path / "tools/aria2c-build"
     build.mkdir(parents=True)
-    block = command_containing("setsid nohup ./build.sh aarch64")
+    block = command_containing("setsid nohup ./build.sh aarch64", GUIDE_BUILD)
     # An exported shell function substitutes only the expensive background
     # command. The documented cd/subshell/redirections execute unchanged.
     script = 'setsid() { return 0; }; export -f setsid\n' + block + '\npwd\n'
@@ -106,7 +112,7 @@ def test_detached_build_keeps_checkout_working_directory(tmp_path):
 
 
 def test_detached_build_stops_when_build_directory_is_missing(tmp_path):
-    block = command_containing("setsid nohup ./build.sh aarch64")
+    block = command_containing("setsid nohup ./build.sh aarch64", GUIDE_BUILD)
     script = 'setsid() { touch incorrectly-started; }; export -f setsid\n' + block
     result = subprocess.run(["bash", "-c", script], cwd=tmp_path,
                             text=True, capture_output=True)
@@ -121,13 +127,15 @@ def test_custody_status_requires_more_than_two_booleans():
                                  keylist_info=None, roots_configured=2)
     assert status["enabled"] is True and status["signing_refused"] is False
     assert status["state"] == "invalid"
-    section = GUIDE.split("### Reading the status\n", 1)[1].split("\n## ", 1)[0]
+    section = GUIDE_SIGNING.split("### Reading the status\n", 1)[1].split(
+        "\n## ", 1)[0]
     assert "alone as readiness" in section
     assert "state: invalid" in section and "state: error" in section
 
 
 def test_audit_export_recovery_does_not_reuse_uncertain_password():
-    troubleshooting = (ROOT / "docs/zensical/troubleshooting.md").read_text()
+    troubleshooting = (
+        ROOT / "docs/zensical/user-guide/troubleshooting.md").read_text()
     row = next(line for line in troubleshooting.splitlines()
                if line.startswith("| An audit-export save says exports are disabled |"))
     assert "Reload" in row and "complete destination and password" in row

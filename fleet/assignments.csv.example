@@ -12,7 +12,8 @@ device_id,image_id
 # another multi-gigabyte transfer. That kept copy is reclaimed by a later
 # placement that is short of room -- not at the moment you reassign -- so size
 # the storage root for the images you want resident at once. See
-# docs/zensical/device-agents.md ("Unassigned image park").
+# docs/zensical/user-guide/assignments.md ("What happens to an image you
+# unassign").
 #192.0.2.10,cat9k_iosxe.26.01.01
 #192.0.2.20,cat9k_iosxe.26.01.01
 #192.0.2.30,cat9k_iosxe.26.01.01

@@ -1,0 +1,66 @@
+diff --git a/tests/BtBitfieldMessageTest.cc b/tests/BtBitfieldMessageTest.cc
+index d7b1976..9885dc0 100644
+--- a/tests/BtBitfieldMessageTest.cc
++++ b/tests/BtBitfieldMessageTest.cc
+@@ -125,13 +125,10 @@ void BtBitfieldMessageTest::testDoReceivedAction_goodByeSeeder()
+   msg.doReceivedAction();
+ 
+   pieceStorage->setDownloadFinished(true);
+-  try {
+-    msg.doReceivedAction();
+-    FAIL("exception must be thrown.");
+-  }
+-  catch (DlAbortEx& e) {
+-    // success
+-  }
++  // The existing IRIS grace patch defers disconnect to checkActiveInteraction.
++  // Receiving the final bitfield/HAVE must leave the peer available for counters.
++  REQUIRE_NOTHROW(msg.doReceivedAction());
++  REQUIRE(peer->isSeeder());
+ }
+ 
+ void BtBitfieldMessageTest::testToString()
+diff --git a/tests/BtHaveAllMessageTest.cc b/tests/BtHaveAllMessageTest.cc
+index 9c83daf..50c362d 100644
+--- a/tests/BtHaveAllMessageTest.cc
++++ b/tests/BtHaveAllMessageTest.cc
+@@ -103,13 +103,10 @@ void BtHaveAllMessageTest::testDoReceivedAction_goodByeSeeder()
+ 
+   pieceStorage->setDownloadFinished(true);
+ 
+-  try {
+-    msg.doReceivedAction();
+-    FAIL("exception must be thrown.");
+-  }
+-  catch (DlAbortEx& e) {
+-    // success
+-  }
++  // The existing IRIS grace patch defers disconnect to checkActiveInteraction.
++  // Receiving the final bitfield/HAVE must leave the peer available for counters.
++  REQUIRE_NOTHROW(msg.doReceivedAction());
++  REQUIRE(peer->isSeeder());
+ }
+ 
+ } // namespace aria2
+diff --git a/tests/BtHaveMessageTest.cc b/tests/BtHaveMessageTest.cc
+index d919cd1..22e9094 100644
+--- a/tests/BtHaveMessageTest.cc
++++ b/tests/BtHaveMessageTest.cc
+@@ -116,13 +116,10 @@ void BtHaveMessageTest::testDoReceivedAction_goodByeSeeder()
+ 
+   pieceStorage->setDownloadFinished(true);
+   peer->updateBitfield(1, 0);
+-  try {
+-    msg.doReceivedAction();
+-    FAIL("exception must be thrown.");
+-  }
+-  catch (DlAbortEx& e) {
+-    // success
+-  }
++  // The existing IRIS grace patch defers disconnect to checkActiveInteraction.
++  // Receiving the final bitfield/HAVE must leave the peer available for counters.
++  REQUIRE_NOTHROW(msg.doReceivedAction());
++  REQUIRE(peer->isSeeder());
+ }
+ 
+ void BtHaveMessageTest::testToString()

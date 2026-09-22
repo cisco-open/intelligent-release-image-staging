@@ -50,6 +50,8 @@ SHIP=(
   # The README links into the Zensical source tree. Ship the source, static
   # public site, and exact build inputs so those links work in the unpacked
   # release and recipients can build the same manual published by CI.
+  # `docs` is the whole tracked tree, so docs/dev/ (contributor material that
+  # the site never publishes) ships with it.
   docs zensical.toml requirements-docs.txt
   # TESTING.md tells the recipient to install these before running the suites,
   # and server/ ships the tests, so the declaration has to travel with them.
@@ -58,21 +60,30 @@ SHIP=(
   server
   # device (agent + launcher + installer + EEM refs + IOx/XR packaging + tests)
   device
-  # tools: the operator helpers, plus the corresponding source for the
-  # handed-in (GPL) aria2c binary. GPLv2 section 3 wants the source AND the
-  # scripts used to control compilation, and NOTICE now says both ship here,
-  # so the release must carry aria2c-patches/ AND aria2c-build/ -- shipping
-  # the notice without them would make the notice false.
+  # tools: operator helpers plus the local aria2c patches and build scripts.
+  # NOTICE describes these shipped inputs and the external source inputs.
   tools/get-aria2c.sh tools/aria2c.sha256 tools/make-torrent.sh
   tools/make-agent-bundle.sh tools/gen-device-installers.sh
+  tools/build-ssh-verifier.sh tools/build-ssh-verifiers.sh
+  tools/iris-aead.c tools/build-instruction-crypto.sh
+  tools/build-instruction-crypto-inner.sh tools/build-instruction-crypto.Dockerfile
+  tools/licenses/musl-COPYRIGHT
   tools/apply-assignments.sh tools/get-ioxclient.sh tools/ioxclient.sha256
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-device-image.sh tools/build-xr-package.sh
   tools/check-package-freshness.sh
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
-  tools/api-exercise.py tools/test_api_exercise.py
-  tools/aria2c-patches tools/aria2c-build
+  tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
+  tools/aria2c-patches tools/aria2c-build tools/aria2c-source
+  # ...and the tested aria2c clients themselves. They are committed (see the
+  # re-inclusions in .gitignore), so the release is complete offline: bin/aria2c
+  # is the x86_64 seeder client server/Dockerfile COPYs, and
+  # deliverables/aria2c-<cpu> is what the device package builders read. The
+  # local patches, build scripts and pinned source manifest ship above.
+  # Matching upstream and linked dependency sources are a separate archive
+  # alongside the client release (see tools/aria2c-source/README.md).
+  bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.
   lab/device-run.sh lab/xr-run.sh lab/xr-dialogue.pl lab/iris-ssh-policy.sh
@@ -101,8 +112,10 @@ while IFS= read -r -d '' rel; do
 done < "$WORK/tracked-files"
 [ "$copied" -gt 0 ] || { echo "ERROR: nothing to ship" >&2; exit 1; }
 
-# bin placeholder -- aria2c is fetched by tools/get-aria2c.sh for the DEVICE
-# agent bundle; the server gets its own copy baked into the image at build time.
+# bin/ already holds the committed x86_64 aria2c client (shipped by the
+# allowlist above), so the unpacked release needs no download. .gitkeep is
+# tracked in the checkout but sits outside the allowlist, so recreate it here
+# and the unpacked tree matches the repository.
 mkdir -p "$STAGE/bin"; : > "$STAGE/bin/.gitkeep"
 
 # artifacts dir: ship it (empty) so it exists + is owned by the unpacking user

@@ -443,8 +443,9 @@ MAX_EXPANDED = MAX_TOTAL + 2 * 1024 * 1024
 AGENT_FILES = (
     "agent_config.py", "catalog_client.py", "cli_ssh.py",
     "flash_target.py", "flashcheck.py", "instr.py", "iris_agent.py",
-    "peer-transfer-hook.sh", "telemetry_report.py", "verify_image.py",
-    "xr_deps.py",
+    "peer-transfer-hook.sh", "peer_tls.py", "telemetry_report.py", "verify_image.py",
+    "runtime_verifier.py", "ssh-keygen", "ssh-keygen.LICENCE", "xr_deps.py",
+    "instruction_aead.py", "runtime_crypto.py", "iris-aead", "iris-aead.LICENCE",
 )
 ROOT_FILES = (
     "aria2c", "bootstrap.sh", "guestshell-start.sh", "rotate-logs.sh",
@@ -889,7 +890,7 @@ def inspect_and_extract(bundle_path, digest_path, new_dir):
                         if hasattr(os, "O_NOFOLLOW"):
                             flags |= os.O_NOFOLLOW
                         executable = name in (
-                            "aria2c", "bootstrap.sh", "guestshell-start.sh",
+                            "aria2c", "agent/ssh-keygen", "agent/iris-aead", "bootstrap.sh", "guestshell-start.sh",
                             "rotate-logs.sh", "agent/peer-transfer-hook.sh",
                         )
                         out_fd = os.open(destination, flags,
@@ -1404,13 +1405,8 @@ if [ -f "$STAGE/iris-agent.conf" ]; then
   file_sec="$(tr -d '[:space:]' < "$STAGE/rpc-secret" 2>/dev/null || true)"
   if [ -n "$conf_sec" ] && [ "$conf_sec" != "$file_sec" ]; then
     printf '%s\n' "$conf_sec" > "$STAGE/rpc-secret"
-    pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true   # relaunched below with the new secret
-    # wait for the dying process so pgrep in step 3 does not see it and skip the relaunch
-    _w=0
-    while pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1 && [ "$_w" -lt 5 ]; do
-      sleep 1; _w=$((_w + 1))
-    done
-    unset _w
+    # The launcher below compares private config bytes and replaces only its
+    # exact executable/port owner. Never sweep unrelated same-user daemons.
   fi
 fi
 

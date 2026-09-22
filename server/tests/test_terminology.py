@@ -95,6 +95,8 @@ _TRIPWIRE_TEST_ANCHORS = (
 # allowlisted when it contains one of its file's anchors. Keep anchors narrow
 # enough that they could not accidentally cover a NEW violation.
 ALLOWLIST = [
+    ("tools/aria2c-source/COPYING3", None,
+     "unmodified GNU GPL version 3 text; legal receipt is not IRIS terminology"),
     ("tools/api_exercise_fixtures.py",
      ('for suffix in ("", "/occurrences", "/receipts"):',),
      "reads the distinct durable schedule receipts API (Tasks 22–23), "
@@ -303,40 +305,38 @@ ALLOWLIST = [
 # Tasks 22–23's dedicated schedule implementation/tests and generated OpenAPI
 # document use "receipt" as a new, intentionally separate domain term. Exempt
 # only that pattern; the attachment guard remains active in every listed file.
-# Task 26 documents the Task 22 schedule history routes. The route path is the
-# API's own spelling; the surrounding operator prose uses "outcome".
-ALLOWLIST.append((
-    "docs/zensical/reference.md",
-    ("`GET /api/v1/schedules/{id}/receipts`",),
-    "Task 22 schedule-history route path in the operator API reference"))
-
+# The manual now says "scheduled outcome" in prose; the only lines left are the
+# API's own route path, its own field name, and the glossary line that maps the
+# two. Each one is anchored on its own.
 ALLOWLIST.extend([
-    ("docs/zensical/fleet-workflows.md",
-     ("for recovery. Inspect the occurrence and receipts before scheduling a new run.",),
-     "Task 23 schedule target identity recovery guidance uses the API's "
-     "durable schedule-receipt term"),
-    ("docs/zensical/operations.md",
-     ("Inspect the occurrence and receipts. Recover prepared work only",
-      "8. For a scheduled receipt with",
-      "and receipt"),
-     "Task 23 scheduled-outcome and recovery-checklist guidance uses durable "
-     "schedule receipts"),
-    ("docs/zensical/problems.md",
-     ("Scheduled receipt reason values",),
-     "Task 23 distinguishes durable schedule-receipt outcomes from HTTP "
-     "Problem Details types"),
-    ("docs/zensical/reference.md",
-     ("A receipt reason of",),
-     "Task 23 schedule API reference explains durable schedule-receipt "
-     "identity conflicts"),
-    ("docs/zensical/troubleshooting.md",
-     ("deployment JSON, occurrences, or receipts by hand.",
+    ("docs/zensical/reference/console-api.md",
+     ("| `GET /api/v1/schedules/{id}/receipts` |",
+      "A receipt reason of"),
+     "the schedule-history route path and the durable schedule-receipt "
+     "identity conflict it returns, in the API reference"),
+    ("docs/zensical/reference/glossary.md",
+     ("(the API calls it a receipt)",),
+     "the glossary line that maps the operator term \"scheduled outcome\" to "
+     "the API's own schedule-receipt spelling"),
+    ("docs/zensical/user-guide/assignments.md",
+     ("`GET /api/v1/schedules/{id}/receipts`.",),
+     "the schedule-history route path beside the scheduled-outcome row"),
+    ("docs/zensical/user-guide/scheduling.md",
+     ("and receipt `fleet_registration_id`",),
+     "the API field name an operator compares when a scheduled outcome "
+     "reports a conflict"),
+    ("docs/zensical/user-guide/troubleshooting.md",
+     ("receipts by hand. Undeploy a running agent",
       "| A scheduled receipt says",
-      "its receipt records",
-      "Schedule receipt reasons are durable outcomes, not HTTP problem types.",
-      "receipt revision, job id, and selected dashboard time bounds as applicable."),
-     "Task 23 troubleshooting guidance uses durable schedule receipts and "
-     "their identity-binding evidence"),
+      "occurrence id, receipt"),
+     "troubleshooting steps that name the durable schedule-receipt records "
+     "and their identity-binding evidence"),
+    ("docs/dev/documentation.md",
+     ("(the API calls it a receipt)",
+      '"receipt" outside an API route or field name'),
+     "the writing standard for contributors: the approved wording for "
+     "\"scheduled outcome\" names the API's own schedule-receipt spelling, "
+     "and the rule that every such line needs its own narrow entry here"),
 ])
 
 
@@ -357,7 +357,7 @@ TERM_FILE_ALLOWLIST = [
      "Task 23 scheduled assignment/onboarding receipt and recovery tests"),
     ("docs/zensical/swagger/swagger-ui-bundle.js", ("attachment",),
      "vendored swagger-ui-dist 5.32.15 bundle contains upstream download and "
-     "URI-scheme vocabulary; SOURCE.md records its immutable provenance. "
+     "URI-scheme vocabulary; SOURCE.txt records its immutable provenance. "
      "This term-only exemption leaves receipt and every IRIS-authored Swagger "
      "asset, including iris-openapi32.js, under the guard"),
 ]

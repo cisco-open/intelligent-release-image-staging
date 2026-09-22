@@ -80,8 +80,11 @@ _appid_block_output() {
 @test "install.sh uses one numbered run-opts line per environment variable" {
   run _appid_block_output
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts ' | tr -d ' ')" -eq 11 ]
-  ! printf '%s\n' "$output" | grep -Eq 'run-opts.* -e .* -e '
+  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts ' | tr -d ' ')" -eq 12 ]
+  if printf '%s\n' "$output" | grep -Eq 'run-opts.* -e .* -e '; then
+    return 1
+  fi
+  [[ "$output" == *'IRIS_PEER_TLS_MODE=disabled'* ]]
 }
 
 @test "install.sh explicitly passes the telemetry setting" {
@@ -109,7 +112,7 @@ _loop_cond_calls() {
   # If entrypoint.sh's condition regresses (drops the liveness or the health
   # clause), the tests below fail on the real text. Anchored on the secret
   # comparison so no other `if [` earlier in the script can be picked up.
-  cond="$(awk '/^  if \[ "\$want" != "\$cur" \]/{found=1} found{print; if(/; then/) exit}' "$ENTRYPOINT")"
+  cond="$(awk '/^[[:space:]]*if \[ "\$want" != "\$cur" \]/{found=1} found{print; if(/; then/) exit}' "$ENTRYPOINT")"
   [ -n "$cond" ] || { echo "loop condition not found in $ENTRYPOINT" >&2; return 1; }
   bash -c '
     set -u
@@ -119,6 +122,7 @@ _loop_cond_calls() {
     # Stub start_aria2c so it logs the call without launching a real daemon.
     start_aria2c() { echo "started:$1" >> "$CALL_LOG_FILE"; }
     ARIA2_PID=""; ARIA2_START=""
+    peer_fragment=""; current_peer_fragment=""
     '"$scenario"'
     cur=mysecret
     want="$(read_secret)"
@@ -219,7 +223,7 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
   # from one Dockerfile, so the base must be an official multi-arch
   # Alpine keeps both manifests small and the index digest pins the base.
   dockerfile="$BATS_TEST_DIRNAME/../container/Dockerfile"
-  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$dockerfile"
+  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64} AS python-base$' "$dockerfile"
   ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$dockerfile"
 }
 
@@ -306,4 +310,17 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
   app="$(grep -n '^appid_block_redacted$' "$INSTALL" | cut -d: -f1)"
   [ -n "$guard" ] && [ -n "$network" ] && [ -n "$app" ]
   [ "$guard" -lt "$network" ] && [ "$guard" -lt "$app" ]
+}
+
+@test "a renewed peer identity restarts an otherwise healthy aria2c" {
+  run _loop_cond_calls "$_ALIVE"'; rpc_healthy() { return 0; }; peer_fragment=renewed'
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "IOx TLS opt-in has its own numbered environment line" {
+  export IRIS_PEER_TLS_MODE=required
+  run _appid_block_output
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 15 "-e IRIS_PEER_TLS_MODE=required"'* ]]
 }

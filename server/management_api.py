@@ -39,6 +39,8 @@ import audit_export
 import assignment_service
 import bounded_pool
 import bulkhash_refresh
+import peer_tls_settings
+import peer_tls_issuer
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
 import deployment_records
@@ -1145,7 +1147,7 @@ def _merge_target_row(device, policies, heartbeat_by_id, jobs, observed_at,
     row["assigned_image_ids"] = policy.get("approved_image_ids")
     for name in ("last_seen", "stage_state", "stage_error", "current_image_id",
                  "staged_image_ids", "errored_image_ids", "target_fs",
-                 "telemetry_enabled", "telemetry_stream_enabled"):
+                 "telemetry_enabled", "telemetry_stream_enabled", "peer_tls"):
         row[name] = heartbeat.get(name)
     row["heartbeat_model"] = heartbeat.get("model")
     revocation_available = isinstance(revoked_principals, (set, frozenset))
@@ -4943,6 +4945,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     provision_startup_state=os.environ.get(
                         "_IRIS_SERVED_BUNDLE_STARTUP")))
                 return
+            if path == "/api/settings/peer-tls":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    self._json(200, peer_tls_settings.describe(record_store, onboard, fleet))
+                except Exception:
+                    self._json(503, {"error": "Peer TLS settings unavailable"})
+                return
             if path == "/api/settings/image-verification":
                 # KGV reconciler Task 4: schedule config + last_run, its own
                 # dedicated GET (unlike audit-export/ca-trust, which are read
@@ -5215,6 +5225,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             row["assigned_image_ids"] = pol.get("approved_image_ids")
             row["last_seen"] = h.get("last_seen")
             row["stage_state"] = h.get("stage_state")
+            row["peer_tls"] = h.get("peer_tls")
             row["stage_error"] = h.get("stage_error")
             row["current_image_id"] = h.get("current_image_id")
             # the ordered set of images the agent reports as staged
@@ -6586,6 +6597,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      else enabled))
                 self._json(200, {"ok": True, "endpoint": endpoint,
                                  "enabled": enabled})
+                return
+            if path == "/api/settings/peer-tls":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if (not isinstance(data, dict) or set(data) != {"mode", "expected_mode"} or
+                        data["mode"] not in peer_tls_settings.MODES or
+                        data["expected_mode"] not in peer_tls_settings.MODES):
+                    self._json(400, {"error": "mode and expected_mode must be disabled or required"}); return
+                try:
+                    with peer_tls_settings.LOCK:
+                        status = peer_tls_settings.describe(record_store, onboard, fleet)
+                        if status["mode"] != data["expected_mode"]:
+                            self._json(409, {"error": "Peer TLS mode changed; reload before retrying"}); return
+                        if status["mode"] != data["mode"]:
+                            if not status["can_change"]:
+                                self._json(409, {"error": "Finish device jobs and undeploy existing agents before switching peer TLS; the origin supervisor must also be available"}); return
+                            if data["mode"] == "required":
+                                peer_tls_issuer.Issuer().prepare()
+                            peer_tls_settings.save(data["mode"])
+                        status = peer_tls_settings.describe(record_store, onboard, fleet)
+                except Exception:
+                    self._json(503, {"error": "Peer TLS mode could not be confirmed; reload before retrying"}); return
+                self._audit("peer-tls-mode", "settings", action="set", target="peer-tls",
+                            actor=actor, detail="%s -> %s" % (data["expected_mode"], data["mode"]))
+                self._json(200, dict(status, applied=True))
                 return
             if path == "/api/settings/gui-cert":
                 data = self._json_body(raw)

@@ -15,9 +15,12 @@ _build_stub_setup() {
     "$STUBDIR/roots.d" "$BIN"
   ln -s "$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh" \
     "$STUBDIR/tools/build-device-image.sh"
-  for file in Dockerfile entrypoint.sh reconcile.sh; do
+  for file in Dockerfile entrypoint.sh reconcile.sh rebuild-xml.py; do
     printf '%s\n' "$file" > "$STUBDIR/device/container/$file"
   done
+  mkdir -p "$STUBDIR/tools/licenses"
+  touch "$STUBDIR/tools/iris-aead.c" "$STUBDIR/tools/build-instruction-crypto-inner.sh" \
+    "$STUBDIR/tools/licenses/musl-COPYRIGHT"
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"
@@ -132,4 +135,22 @@ _run_build() {
 @test "deployment-neutral builder has valid shell syntax" {
   run bash -n "$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh"
   [ "$status" -eq 0 ]
+}
+
+@test "XML rebuild helper changes invalidate the canonical cached image" {
+  _build_stub_setup
+  _run_build "$BATS_TEST_TMPDIR/context-before"
+  [ "$status" -eq 0 ]
+  source_before="$(sed -n 's/^source_sha256=//p' "$OUT.manifest")"
+  printf '\n# changed security rebuild\n' >> "$STUBDIR/device/container/rebuild-xml.py"
+  _run_build "$BATS_TEST_TMPDIR/context-stale"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not match current source"* ]]
+  [ "$(wc -l < "$DOCKER_CALLS")" -eq 1 ]
+  _run_build "$BATS_TEST_TMPDIR/context-after" IRIS_FORCE_DEVICE_IMAGE_BUILD=1
+  [ "$status" -eq 0 ]
+  source_after="$(sed -n 's/^source_sha256=//p' "$OUT.manifest")"
+  [ "$source_before" != "$source_after" ]
+  [ "$(wc -l < "$DOCKER_CALLS")" -eq 2 ]
+  grep -qx 'rebuild-xml.py' "$DOCKER_CONTEXT_FILES"
 }

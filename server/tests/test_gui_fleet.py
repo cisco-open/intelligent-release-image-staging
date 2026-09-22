@@ -143,9 +143,13 @@ def test_svi_igp_accepted_on_routed_and_blank_by_default(tmp_path):
     default = fs.upsert(dict(_ROUTED))
     assert default.get("svi_igp", "") == ""
     # an explicit per-device override is stored verbatim
-    isis = fs.upsert(dict(_ROUTED, device_id="d2", svi_igp="isis"))
+    isis = fs.upsert(dict(_ROUTED, device_id="d2", svi_igp="isis",
+                          svi_ip="10.0.0.6", app_gateway="10.0.0.6",
+                          app_ip="10.0.0.5"))
     assert isis["svi_igp"] == "isis"
-    none = fs.upsert(dict(_ROUTED, device_id="d3", svi_igp="none"))
+    none = fs.upsert(dict(_ROUTED, device_id="d3", svi_igp="none",
+                          svi_ip="10.0.0.10", app_gateway="10.0.0.10",
+                          app_ip="10.0.0.9"))
     assert none["svi_igp"] == "none"
 
 
@@ -155,11 +159,11 @@ def test_svi_igp_rejects_anything_outside_the_closed_enum(tmp_path):
     device-install.sh interpolates SVI_IGP into a live IOS config block, so
     whitespace, quotes, and shell/IOS metacharacters must be rejected here,
     not merely tolerated because they happen not to equal 'isis'."""
+    fs = _fs(tmp_path)
     # Leading/trailing whitespace is stripped by every field (_text), same as
     # every other column here, so it is deliberately NOT in this bad list --
     # what must be rejected is anything that is not exactly 'none' or 'isis'
     # once that ordinary normalization has run.
-    fs = _fs(tmp_path)
     for bad in ("isis; reload", "eigrp", "ISIS", '"isis"', "isis' ; end",
                 "isis\x00", "no ip router isis", "isis,none"):
         with pytest.raises(ValueError, match="svi_igp"):
@@ -293,6 +297,7 @@ def test_validate_record_model_guardrail_matrix(tmp_path):
         dict(_XRHOST, device_id="xr-8201"),
     ]
     for record in ok:
+        fs = _fs(tmp_path / ("ok-" + record["device_id"]))
         saved = fs.upsert(record)
         assert saved["platform"] == record["platform"], record["device_id"]
 
@@ -306,6 +311,7 @@ def test_validate_record_model_guardrail_matrix(tmp_path):
         dict(_ROUTED, device_id="isr-iox", model="ISR4451", platform="iox"),
     ]
     for record in bad:
+        fs = _fs(tmp_path / ("bad-" + record["device_id"]))
         with pytest.raises(ValueError, match="cannot run"):
             fs.upsert(record)
 
@@ -589,8 +595,8 @@ def test_import_export_csv_roundtrip(tmp_path):
     csv_in = (header + "\n"
               "# a comment line\n"
               "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"
-              "edge,10.0.0.5,inband,,,,10.0.0.6,255.255.255.0,10.0.0.1,120,,C9300,,,,,guestshell\n"
-              "r1,192.0.2.10,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router\n")
+              "edge,192.0.2.10,inband,,,,192.0.2.11,255.255.255.0,192.0.2.1,120,,C9300,,,,,guestshell\n"
+              "r1,198.51.100.10,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router\n")
     stats = fs.import_csv(csv_in)
     assert stats["imported"] == 3 and stats["new"] == 3 and stats["updated"] == 0
     assert stats["skipped"] == 2                       # header + comment line
@@ -598,8 +604,8 @@ def test_import_export_csv_roundtrip(tmp_path):
     out = fs.export_csv()
     assert out.splitlines()[0] == header
     assert "d1,10.0.0.1,routed,666" in out
-    assert "edge,10.0.0.5,inband" in out
-    assert "r1,192.0.2.10,router-nat" in out
+    assert "edge,192.0.2.10,inband" in out
+    assert "r1,198.51.100.10,router-nat" in out
     # re-importing the export reproduces the same fleet
     fs2 = gui_fleet.FleetStore(str(tmp_path / "b"))
     assert fs2.import_csv(out)["imported"] == 3
@@ -1297,6 +1303,76 @@ def test_validate_operator_upsert_is_pure_and_preserves_role_clear(tmp_path):
     assert fs.snapshot() == before
 
 
+def test_upsert_rejects_duplicate_direct_app_ip_without_mutation(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, device_id="first"))
+    before = fs.snapshot()
+
+    with pytest.raises(ValueError, match=r"app_ip 10\.0\.0\.1.*first"):
+        fs.upsert(dict(_ROUTED, device_id="second",
+                       device_ip="10.0.0.9"))
+
+    assert fs.snapshot() == before
+
+
+def test_upsert_rejects_overlapping_dedicated_app_network(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, device_id="first"))
+
+    with pytest.raises(ValueError, match=r"app network 10\.0\.0\.0/30"):
+        fs.upsert(dict(_ROUTED, device_id="second",
+                       device_ip="10.0.0.9", app_ip="10.0.0.2",
+                       app_gateway="10.0.0.1"))
+
+
+def test_inband_devices_may_share_subnet_but_not_host_address(tmp_path):
+    fs = _fs(tmp_path)
+    first = {"device_id": "first", "device_ip": "192.0.2.10",
+             "management_type": "inband", "inband_vlan": "120",
+             "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+             "app_gateway": "192.0.2.1", "model": "C9300",
+             "platform": "guestshell"}
+    second = dict(first, device_id="second", device_ip="192.0.2.12",
+                  app_ip="192.0.2.13")
+    fs.upsert(first)
+    fs.upsert(second)
+    assert {row["device_id"] for row in fs.list_devices()} == {
+        "first", "second"}
+
+    with pytest.raises(ValueError, match=r"app_ip 192\.0\.2\.13.*second"):
+        fs.upsert(dict(first, device_id="third", device_ip="192.0.2.14",
+                       app_ip="192.0.2.13"))
+
+
+def test_router_nat_private_app_networks_may_overlap(tmp_path):
+    fs = _fs(tmp_path)
+    first = dict(_ROUTER, device_id="first", management_type="router-nat",
+                 nat_interface="GigabitEthernet1")
+    second = dict(first, device_id="second", device_ip="192.0.2.11")
+
+    fs.upsert(first)
+    fs.upsert(second)
+
+    assert {row["device_id"] for row in fs.list_devices()} == {
+        "first", "second"}
+
+
+def test_csv_rejects_duplicate_direct_app_ip_atomically(tmp_path):
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    rows = []
+    for device_id, device_ip in (("first", "10.0.0.5"),
+                                 ("second", "10.0.0.9")):
+        row = dict(_ROUTED, device_id=device_id, device_ip=device_ip)
+        rows.append(",".join(str(row.get(col, ""))
+                             for col in gui_fleet.CSV_V2_COLS))
+
+    with pytest.raises(ValueError, match=r"app_ip 10\.0\.0\.1"):
+        fs.import_csv(header + "\n" + "\n".join(rows) + "\n")
+
+    assert fs.list_devices() == []
+
+
 def test_trusted_observation_write_is_named_bounded_and_existing_only(tmp_path):
     fs = _fs(tmp_path)
     fs.upsert(dict(_XRHOST))
@@ -1536,4 +1612,6 @@ def test_router_types_accept_the_iox_app_on_a_catalyst_8000(tmp_path):
     assert saved["platform"] == "iox"
     with pytest.raises(ValueError, match="router or iox"):
         fs.upsert(dict(_ROUTER, device_id="r2", model="C8000V", platform="guestshell"))
-    assert fs.upsert(dict(_ROUTER, device_id="r3", model="C8000V", platform=""))["platform"] == ""
+    assert fs.upsert(dict(_ROUTER, device_id="r3", device_ip="192.0.2.11",
+                          app_ip="10.8.0.6", app_gateway="10.8.0.5",
+                          model="C8000V", platform=""))["platform"] == ""

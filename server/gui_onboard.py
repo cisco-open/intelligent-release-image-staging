@@ -18,6 +18,7 @@ streamed job lines are the installer's stdout, which never echoes the password
 deliberately NOT exported: the console always stages locally
 (IRIS_STAGE_LOCAL=1), so no recipe can reach the ssh branch that reads it."""
 import copy
+import peer_tls_settings
 import device_action_messages
 from collections import deque
 from contextlib import contextmanager, nullcontext
@@ -1820,6 +1821,7 @@ class OnboardService:
         # last: explicit operator intent beats any inherited process env.
         if env_extra:
             env.update(env_extra)
+        env["IRIS_PEER_TLS_MODE"] = peer_tls_settings.mode()
         resolved_dev = dict(dev)
         resolved_dev.update(target)
         resolved_dev["platform"] = target.get("platform", resolved_dev.get("platform"))
@@ -2055,6 +2057,7 @@ class OnboardService:
         except ValueError:
             return candidate.get("platform") == "iox"
 
+    @peer_tls_settings.serialized
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
               pre_apply=None, env_extra=None, on_success=None, record_id=None,
               teardown_mode=None, schedule_context=None,

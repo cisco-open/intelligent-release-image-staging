@@ -1,3 +1,7 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # IRIS — Intelligent Release & Image Staging
 # Keep credentials, device images, and generated artifacts OUT of the repo.
 # NOTE: *.example files are intentionally tracked (they are templates, not real config).
@@ -46,13 +50,26 @@ images/*
 *.aria2
 
 # --- handed-in aria2c deliverables (produced by the aria2-next-static
-#     project, verified against tools/aria2c.sha256, never committed) ---
-deliverables/
+#     project, verified against tools/aria2c.sha256) ---
+# The two TESTED clients are committed, so a fresh clone is complete and needs
+# no download; tools/get-aria2c.sh verifies them against tools/aria2c.sha256
+# and only fetches when one is missing. Everything else that lands here (spare
+# `.old-*` builds, experiments, other architectures) stays ignored.
+# `deliverables/*` rather than `deliverables/` is what makes the re-inclusion
+# possible: git cannot re-include a file inside an ignored DIRECTORY.
+deliverables/*
+!deliverables/aria2c-x86_64
+!deliverables/aria2c-aarch64
 agentinfo/
 
-# --- vendored binaries (installed by tools/get-aria2c.sh) ---
+# --- vendored binaries ---
+# bin/aria2c is the tested x86_64 client (the same bytes as
+# deliverables/aria2c-x86_64) and IS committed and verified against
+# tools/aria2c.sha256; tools/get-aria2c.sh reinstalls it only if it is
+# missing. Every other binary dropped in bin/ stays ignored.
 bin/*
 !bin/.gitkeep
+!bin/aria2c
 tools/bin/
 
 # --- generated release artifacts (rebuilt by tools/make-release.sh) ---

@@ -141,7 +141,7 @@ def test_entrypoint_completes_migration_before_any_network_service():
     service_starts = [entrypoint.index(marker) for marker in (
         "python3 tracker.py & T=$!",
         "python3 catalog.py & C=$!",
-        "bash seed-launch.sh & S=$!",
+        "python3 wait_for_tracker.py python3 peer_tls_seed.py seed-launch.sh & S=$!",
         "python3 artifact_server.py & A=$!",
         "python3 management_api.py & M=$!",
     )]

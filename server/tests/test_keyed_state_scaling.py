@@ -443,7 +443,7 @@ def test_rollback_guard_names_the_migrated_file_for_the_operator(tmp_path):
     # lookup.
     assert path + ".migrated" in guard_text
     assert "mv " in guard_text
-    assert "docs/zensical/operations.md" in guard_text
+    assert "docs/zensical/admin-guide/recovery.md" in guard_text
 
 
 def test_migration_is_one_shot_even_across_process_restarts(tmp_path):
@@ -1260,3 +1260,62 @@ def test_snapshot_cache_is_disabled_by_default(tmp_path, monkeypatch):
     store.snapshot()
     store.snapshot()
     assert len(reads) == 2
+
+
+def test_cached_scan_batches_readers_without_blocking_writes(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"),
+                                   cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    entered, release, attempted = (threading.Event() for _ in range(3))
+    original = store._cached_snapshot
+    calls = []
+
+    def held_scan():
+        calls.append(threading.get_ident())
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return original()
+
+    def second_reader():
+        attempted.set()
+        return store.snapshot()
+
+    monkeypatch.setattr(store, "_cached_snapshot", held_scan)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(store.snapshot)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(second_reader)
+            assert attempted.wait(5)
+            # Same-store writes do not take the reader batching lock.
+            pool.submit(store.put, "edge-a", {"value": 2}).result(timeout=5)
+            assert not second.done()
+            assert len(calls) == 1
+        finally:
+            release.set()
+        assert first.result(timeout=5) == {"edge-a": {"value": 2}}
+        assert second.result(timeout=5) == {"edge-a": {"value": 2}}
+    assert len(calls) == 2  # No shared result or freshness-skipping shortcut.
+
+
+def test_cached_scan_releases_reader_lock_after_corruption(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"),
+                                   cache_snapshots=True)
+    store.put("edge-a", {"value": 1})
+    assert store.snapshot() == {"edge-a": {"value": 1}}
+    path = store._shard_path(keyed_state.bucket_of("edge-a"))
+    with open(path, "w") as stream:
+        stream.write("corrupt")
+    with pytest.raises(keyed_state.KeyedStateError):
+        store.snapshot()
+    with open(path, "w") as stream:
+        json.dump({"edge-a": {"value": 2}}, stream)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(store.snapshot).result(timeout=5) == {
+            "edge-a": {"value": 2}}

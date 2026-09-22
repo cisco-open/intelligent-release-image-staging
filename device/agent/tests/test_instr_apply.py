@@ -169,7 +169,7 @@ def _verified(peers=None, on_stale="keep", expires_at=NOW + 600,
                  control_override=control_override)
     role_body = _canonical(role)
     header = {
-        "v": 1,
+        "v": 2,
         "device_id": DEVICE_ID,
         "platform": "guestshell",
         "epoch": NOW - 1,

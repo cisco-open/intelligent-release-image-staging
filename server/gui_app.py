@@ -59,7 +59,14 @@ class GuiApp:
         gui_auth.set_admin. A corrupt live store raises
         secrets_store.StoreCorruptError before anything is persisted."""
         with secrets_store.store_lock(self.secrets_path):
-            store = secrets_store.load(self.secrets_path)
+            # A one-shot container has a fresh tmpfs without the decrypted
+            # store. Never replace durable credentials with an empty skeleton
+            # when a password reset runs there instead of in the live server.
+            require_existing = bool(
+                (invalidate_sessions and self.recipients_csv)
+                or (self.secrets_enc and os.path.lexists(self.secrets_enc)))
+            store = secrets_store.load(
+                self.secrets_path, require_existing=require_existing)
             gui_auth.set_admin(store, username, password, self._now(),
                                invalidate_sessions=invalidate_sessions)
             secretfs.persist_store(store, self.secrets_path,

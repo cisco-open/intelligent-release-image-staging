@@ -120,6 +120,24 @@ if ! python3 -c \
 fi
 unset _snapshot_sha _installed_sha _ca_tmp
 
+# Refresh instruction verification even when aria2's existing daemon is healthy.
+# A failed new candidate is never selected by the agent in place of its old one.
+if [ -e "$STAGE_DIR/agent/ssh-keygen" ] || [ -L "$STAGE_DIR/agent/ssh-keygen" ]; then
+  if ! python3 - "$STAGE_DIR" "$EXEC_DIR" <<'PYTHON'
+import sys
+sys.path.insert(0, sys.argv[1] + "/agent")
+import runtime_verifier
+runtime_verifier.install(sys.argv[1], sys.argv[2])
+import runtime_crypto
+runtime_crypto.install(sys.argv[1], sys.argv[2])
+PYTHON
+  then
+    echo "cannot promote the bundled instruction verifier; signed instructions unavailable" >&2
+    # Selection rejects the mismatched candidate. Continue so verifier failure
+    # cannot leave an existing daemon running with an obsolete TLS policy.
+  fi
+fi
+
 if [ -n "$BT_LISTEN_PORT" ]; then
   [[ "$BT_LISTEN_PORT" =~ ^[0-9]+$ ]] && [ "$BT_LISTEN_PORT" -ge 1 ] \
     && [ "$BT_LISTEN_PORT" -le 65535 ] \
@@ -174,6 +192,18 @@ if ! printf 'rpc-secret=%s\n' "$RPC_SECRET" > "$_aria2_conf_tmp" 2>/dev/null \
   echo "cannot install private aria2 RPC config" >&2
   exit 1
 fi
+# Enrollment uses the already provisioned catalog CA and device bearer.
+# A changed certificate changes the config bytes, forcing daemon replacement.
+_peer_tls_failed=0
+_peer_conf="${IRIS_AGENT_CONF:-$STAGE_DIR/iris-agent.conf}"
+_peer_mode="${IRIS_PEER_TLS_MODE:-$(sed -n 's/^[[:space:]]*peer_tls_mode[[:space:]]*=[[:space:]]*//p' "$_peer_conf" 2>/dev/null | sed 's/[[:space:]]*$//' | tail -1 || true)}"
+case "${_peer_mode:-disabled}" in
+  disabled) ;;
+  required)
+    python3 "$STAGE_DIR/agent/peer_tls.py" --conf "$_peer_conf" >> "$_aria2_conf_tmp" \
+      || _peer_tls_failed=1 ;;
+  *) _peer_tls_failed=1 ;;
+esac
 # Compare bytes before publishing so a rotated secret forces replacement of a
 # daemon that still has the previous value in memory. Mode-only repair does not
 # change the content generation. Reject non-regular existing destinations.
@@ -300,11 +330,31 @@ RPC_CONNECT_TIMEOUT="${RPC_CONNECT_TIMEOUT:-2}"
 RPC_HEALTH_TIMEOUT="${RPC_HEALTH_TIMEOUT:-10}"
 
 rpc_probe() {
-  printf '%s' \
+  local body
+  # An HTTP response alone is not proof that this daemon accepts our secret.
+  # Keep credentials on stdin and require a bounded, successful RPC result.
+  body="$(printf '%s' \
     '{"jsonrpc":"2.0","id":"p","method":"aria2.getVersion","params":["token:'"$RPC_SECRET"'"]}' \
-    | curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+    | curl -fsS --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+      --max-filesize 65536 \
       "http://127.0.0.1:$RPC_PORT/jsonrpc" --data-binary @- \
-      >/dev/null 2>&1
+      2>/dev/null)" || return $?
+  printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    raw = sys.stdin.buffer.read(65537)
+    reply = json.loads(raw) if len(raw) <= 65536 else None
+    result = reply.get("result") if isinstance(reply, dict) else None
+    valid = (isinstance(reply, dict) and reply.get("jsonrpc") == "2.0"
+             and reply.get("id") == "p" and "error" not in reply
+             and isinstance(result, dict)
+             and isinstance(result.get("version"), str) and bool(result["version"])
+             and isinstance(result.get("enabledFeatures"), list)
+             and all(isinstance(item, str) for item in result["enabledFeatures"]))
+except (OSError, ValueError, RecursionError):
+    valid = False
+raise SystemExit(0 if valid else 1)
+'
 }
 
 rpc_up() {
@@ -390,8 +440,13 @@ aria2_tracker_tls_ready() {
       *) continue ;;
     esac
     case " $cmd " in
-      *" --check-certificate=true "*) return 0 ;;
+      *" --check-certificate=true "*) ;;
+      *) continue ;;
     esac
+    # Compare the actual running inode: the pathname may already have been
+    # replaced by an upgrade while the process still executes older bytes.
+    cmp -s -- "$ARIA2_SRC" "/proc/$pid/exe" || continue
+    return 0
   done < <(iris_aria2_pids)
   return 1
 }
@@ -399,7 +454,8 @@ aria2_tracker_tls_ready() {
 # already up? (skip the probe in tests)
 if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
   if rpc_up; then
-    if [ "$CA_SNAPSHOT_CHANGED" = "0" ] \
+    if [ "$_peer_tls_failed" = "0" ] \
+       && [ "$CA_SNAPSHOT_CHANGED" = "0" ] \
        && [ "$RPC_CONFIG_CHANGED" = "0" ] \
        && aria2_tracker_tls_ready; then
       echo "aria2c RPC already up on :$RPC_PORT with current tracker TLS verification"
@@ -464,11 +520,24 @@ if [ "$RPC_CONFIG_CHANGED" = "1" ]; then
   publish_rpc_config
 fi
 
-# copy the binary to an exec-capable fs and run it
-cp -f "$ARIA2_SRC" "$ARIA2" \
-  || { echo "cannot install aria2c from $ARIA2_SRC to $ARIA2" >&2; exit 1; }
-chmod +x "$ARIA2" \
-  || { echo "cannot make $ARIA2 executable" >&2; exit 1; }
+if [ "$_peer_tls_failed" != "0" ]; then
+  echo "peer identity unavailable; aria2c remains stopped" >&2
+  exit 1
+fi
+
+# Publish only a complete executable, after the owned old process has stopped.
+# A failed copy leaves the previous executable intact; rename also avoids
+# writing through a symlink or a still-open executable inode.
+_aria2_binary_tmp="$(mktemp "$ARIA2.new.XXXXXX")" \
+  || { echo "cannot create aria2c replacement" >&2; exit 1; }
+if ! cp -- "$ARIA2_SRC" "$_aria2_binary_tmp" \
+   || ! chmod 755 "$_aria2_binary_tmp" \
+   || ! mv -fT -- "$_aria2_binary_tmp" "$ARIA2"; then
+  rm -f -- "$_aria2_binary_tmp"
+  echo "cannot install aria2c from $ARIA2_SRC to $ARIA2" >&2
+  exit 1
+fi
+unset _aria2_binary_tmp
 
 # --check-integrity=true is a RESUME guard. Without it aria2 trusts the piece
 # map recorded in the .aria2 control file, so a completed piece that rotted on
@@ -483,6 +552,11 @@ chmod +x "$ARIA2" \
 # COMPLETED file --bt-seed-unverified=true above marks every piece done and
 # aria2 skips validation entirely -- so a device seeding its staged images
 # never re-hashes them at launch.
+# Put the requirement on argv too: old aria2 ignores unknown config keys,
+# but rejects an unknown command-line option before opening any socket.
+if [ "${_peer_mode:-disabled}" = required ]; then
+  set -- "$@" --bt-peer-tls=required
+fi
 exec "$ARIA2" \
   --daemon=true \
   --enable-rpc=true \

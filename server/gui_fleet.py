@@ -121,6 +121,8 @@ _ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _REGISTRATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _C8K_RE = re.compile(gui_onboard._C8K_MODEL, re.IGNORECASE)
 _ROUTER_TYPES = frozenset(("router-routed", "router-nat"))
+_NETWORK_IDENTITY_FIELDS = frozenset((
+    "management_type", "app_ip", "app_mask", "svi_mask", "guest_ip"))
 
 
 def _atomic_write_json(path, obj):
@@ -476,6 +478,45 @@ def validate_record(record, allow_legacy=False):
     return result
 
 
+def _validate_app_network_ownership(records):
+    """Reject ambiguous directly routed application addresses.
+
+    ``router-nat`` app addresses are private behind a device-specific outside
+    address and may therefore overlap.  Every other app address is reachable
+    directly from the server/peers and must be unique.  Dedicated ``routed``
+    and ``router-routed`` networks must not overlap another directly routed
+    app network either; two inband devices may legitimately share one
+    operator-owned management subnet as long as their host addresses differ.
+    """
+    owners = {}
+    networks = []
+    for record in sorted(records, key=lambda row: row.get("device_id", "")):
+        mode = record.get("management_type")
+        if mode not in ("routed", "inband", "router-routed"):
+            continue
+        device_id = record.get("device_id", "")
+        app_ip = record.get("app_ip") or record.get("guest_ip")
+        app_mask = record.get("app_mask") or record.get("svi_mask")
+        if not app_ip or not app_mask:
+            continue
+        address = ipaddress.IPv4Address(app_ip)
+        prior = owners.get(address)
+        if prior is not None and prior != device_id:
+            raise ValueError("app_ip %s is already used by device %s"
+                             % (address, prior))
+        owners[address] = device_id
+        network = ipaddress.IPv4Network("%s/%s" % (address, app_mask),
+                                        strict=False)
+        for other_network, other_mode, other_id in networks:
+            if network.overlaps(other_network) \
+                    and not (mode == other_mode == "inband"):
+                raise ValueError(
+                    "app network %s for device %s overlaps app network %s "
+                    "for device %s"
+                    % (network, device_id, other_network, other_id))
+        networks.append((network, mode, device_id))
+
+
 def _legacy_record(row):
     result = dict(zip(_LEGACY_COLS, row))
     result["management_type"] = "legacy_routed"
@@ -729,6 +770,12 @@ class FleetStore:
         _check_stored_row_size(normalized)
         return normalized
 
+    def _validate_network_replacements(self, replacements):
+        """Validate a prospective final fleet under membership authority."""
+        final = {row["device_id"]: row for row in self.list_devices()}
+        final.update(replacements)
+        _validate_app_network_ownership(final.values())
+
     def _registration_stamp(self, previous):
         """When this device id was registered, or ``None`` when unknown.
 
@@ -802,8 +849,8 @@ class FleetStore:
         separate shard reads with no single lock spanning all of them, so a
         write racing the scan could otherwise pair fresh rows with a stale
         revision (or vice versa). This retries a settled (revision, rows)
-        pairing a few times — cheap, since nothing here holds a lock, only
-        re-reads a small file and rescans — and if it still hasn't settled,
+        pairing a few times — without holding a fleet writer lock, only
+        re-reading a small file and rescanning — and if it still hasn't settled,
         falls back to the LAST revision read next to the last scan: always
         >= what those rows reflect (see _bump_revision), so the fallback can
         only look newer than the rows actually are, never staler."""
@@ -827,6 +874,10 @@ class FleetStore:
         _validate_operator_fields(record)
         did = _text(record.get("device_id"))
         self._ensure_revision_readable()
+        previous = self.get_device(did)
+        if previous is None or set(record) & _NETWORK_IDENTITY_FIELDS:
+            preview = self._merge_record(previous, record)
+            self._validate_network_replacements({did: preview})
         normalized = self._devices.update(
             did, lambda old: self._merge_record(old, record))
         self._bump_revision()
@@ -840,7 +891,12 @@ class FleetStore:
         """
         _validate_operator_fields(record)
         did = _text(record.get("device_id"))
-        return self._merge_record(self.get_device(did), record)
+        with fleet_authority.membership_guard(self):
+            previous = self.get_device(did)
+            preview = self._merge_record(previous, record)
+            if previous is None or set(record) & _NETWORK_IDENTITY_FIELDS:
+                self._validate_network_replacements({did: preview})
+            return preview
 
     @_membership_mutation
     def update_observation(self, device_id, *, model=None, os_family=None):
@@ -1178,6 +1234,8 @@ class FleetStore:
         for record in records:
             previous = self.get_device(record["device_id"])
             normalized.append(self._merge_import_record(previous, record))
+        self._validate_network_replacements(
+            {record["device_id"]: record for record in normalized})
         return {"records": normalized, "skipped": skipped}
 
     @_membership_mutation
@@ -1216,6 +1274,12 @@ class FleetStore:
             previous = self.get_device(did)
             if previous is not None:
                 _validate_stored_fields(previous)
+
+        previews = {
+            did: self._merge_import_record(self.get_device(did), record)
+            for did, record in by_id.items()
+        }
+        self._validate_network_replacements(previews)
 
         def merge(did, previous):
             nonlocal new, updated, roles_cleared

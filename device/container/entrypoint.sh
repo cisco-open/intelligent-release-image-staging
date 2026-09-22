@@ -20,6 +20,11 @@ fatal() {
   exit 1
 }
 
+case "${IRIS_PEER_TLS_MODE:-disabled}" in
+  disabled|required) ;;
+  *) fatal "invalid IRIS_PEER_TLS_MODE" ;;
+esac
+
 single_line() {
   # Environment values are written to iris-agent.conf. A newline would create
   # a second key and turn a data value into configuration, so reject it before
@@ -559,6 +564,7 @@ if [ ! -f "$CONF" ]; then
     printf '%s\n' \
       "catalog_url = ${IRIS_CATALOG_URL}" \
       "catalog_token = ${IRIS_CATALOG_TOKEN}" \
+      "peer_tls_mode = ${IRIS_PEER_TLS_MODE:-disabled}" \
       "device_id = ${IRIS_DEVICE_ID}" \
       "device_platform = ${DEVICE_PLATFORM}" \
       "stage_dir = ${STAGE_DIR}" \
@@ -799,6 +805,9 @@ start_aria2c() {
     rm -f "$_aria2_tmp"
     return 1
   fi
+  if [ -n "${peer_fragment:-}" ]; then
+    printf '%s\n' "$peer_fragment" >> "$_aria2_tmp"
+  fi
   mv -f "$_aria2_tmp" "$ARIA2_CONF"
   # Hand the hook the secret this daemon is being started with, by inheritance
   # through aria2c's fork. Deliberately not re-read from $CONF: the agent
@@ -811,7 +820,10 @@ start_aria2c() {
   # --on-bt-download-complete= with an empty value. "$secret" is already saved
   # above, so reusing $@ here is safe.
   set --
-  case "${HOOK:-}" in ?*) set -- "--on-bt-download-complete=$HOOK" ;; esac
+  if [ "${peer_mode:-disabled}" = required ]; then
+    set -- --bt-peer-tls=required
+  fi
+  case "${HOOK:-}" in ?*) set -- "$@" "--on-bt-download-complete=$HOOK" ;; esac
   # --log is added only when an operator explicitly opts in (IRIS_LOG=on);
   # see the IRIS_LOG comment near the top of this file for why leaving it
   # off the launch line entirely -- not writing a smaller/rotated file -- is
@@ -885,22 +897,42 @@ RPC_CONNECT_TIMEOUT=2
 RPC_HEALTH_TIMEOUT=10
 
 rpc_probe() {
-  # One probe; the caller reads curl's own exit status (0 answered, 7 nothing
-  # listening, 28 connected but no answer inside the bound, anything else a
-  # transport failure mid-request). Run as a tracked background child and
-  # waited on, for the same reason the tick's sleep is: a POSIX shell defers
-  # traps while a FOREGROUND command runs, and PID 1 must never make the
-  # container wait out a probe before it can act on TERM.
-  # Feed the authenticated RPC body on stdin. Putting it after -d would expose
-  # the RPC secret through /proc/<curl-pid>/cmdline.
+  # Match start_aria2c's alphabet before interpolating the request JSON.
+  case "$1" in ''|*[!A-Za-z0-9._~-]*) return 1 ;; esac
+  # Track curl so PID 1 can handle TERM while waiting. Keep authentication on
+  # stdin and bound both the request duration and the response body.
+  _probe_response="$(mktemp)" || return 1
   printf '%s' \
     '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
-    | curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+    | curl -fsS --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+      --max-filesize 65536 --output "$_probe_response" \
       "http://127.0.0.1:$RPC_PORT/jsonrpc" --data-binary @- \
-      >/dev/null 2>&1 &
+      2>/dev/null &
   _probe_pid=$!
   _probe_rc=0
   wait "$_probe_pid" || _probe_rc=$?
+  _probe_pid=""
+  if [ "$_probe_rc" -eq 0 ]; then
+    python3 - "$_probe_response" <<'PYTHON' || _probe_rc=1
+import json, sys
+try:
+    with open(sys.argv[1], 'rb') as stream:
+        raw = stream.read(65537)
+    reply = json.loads(raw) if len(raw) <= 65536 else None
+    result = reply.get('result') if isinstance(reply, dict) else None
+    valid = (isinstance(reply, dict) and reply.get('jsonrpc') == '2.0'
+             and reply.get('id') == 'h' and 'error' not in reply
+             and isinstance(result, dict)
+             and isinstance(result.get('version'), str) and bool(result['version'])
+             and isinstance(result.get('enabledFeatures'), list)
+             and all(isinstance(item, str) for item in result['enabledFeatures']))
+except (OSError, ValueError, RecursionError):
+    valid = False
+raise SystemExit(0 if valid else 1)
+PYTHON
+  fi
+  rm -f "$_probe_response"
+  _probe_response=""
   return "$_probe_rc"
 }
 
@@ -969,13 +1001,14 @@ FAIL_STREAK=0
 
 stop_agent() {
   trap - TERM INT
-  for pid in "$AGENT_PID" "$SLEEP_PID"; do
+  for pid in "$AGENT_PID" "$SLEEP_PID" "${_probe_pid:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
   stop_aria2c
-  for pid in "$AGENT_PID" "$SLEEP_PID"; do
+  for pid in "$AGENT_PID" "$SLEEP_PID" "${_probe_pid:-}"; do
     [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
   done
+  [ -z "${_probe_response:-}" ] || rm -f "$_probe_response"
   exit 0
 }
 
@@ -999,13 +1032,29 @@ if [ "${IRIS_STARTUP_JITTER:-1}" != "0" ] && [ "$TICK" -gt 0 ]; then
 fi
 
 cur=""
+current_peer_fragment=""
 while true; do
+  peer_ok=1
+  peer_mode="${IRIS_PEER_TLS_MODE:-$(sed -n 's/^[[:space:]]*peer_tls_mode[[:space:]]*=[[:space:]]*//p' "$CONF" | sed 's/[[:space:]]*$//' | tail -1)}"
+  peer_fragment=""
+  case "${peer_mode:-disabled}" in
+    disabled) ;;
+    required) peer_fragment="$(python3 "$(dirname "$AGENT")/peer_tls.py" --conf "$CONF")" || peer_ok=0 ;;
+    *) peer_ok=0 ;;
+  esac
+  if [ "$peer_ok" -ne 1 ]; then
+    stop_aria2c
+  fi
   want="$(read_secret)"
   [ -z "$want" ] && want="iris"          # placeholder until the agent fetches the real secret
-  if [ "$want" != "$cur" ] \
-     || ! aria2_alive \
-     || ! rpc_healthy "$want"; then
-    start_aria2c "$want" && cur="$want"
+  if [ "$peer_ok" -eq 1 ]; then
+    if [ "$want" != "$cur" ] || [ "$peer_fragment" != "$current_peer_fragment" ] \
+       || ! aria2_alive || ! rpc_healthy "$want"; then
+      if start_aria2c "$want"; then
+        cur="$want"
+        current_peer_fragment="$peer_fragment"
+      fi
+    fi
   fi
   # Keep foreground work as tracked children. POSIX shells defer traps while a
   # foreground command runs; waiting on a background child lets PID 1 handle

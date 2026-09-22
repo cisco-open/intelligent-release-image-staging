@@ -1036,8 +1036,8 @@ def test_settings_tls_trust_and_destination_sections_wired():
         html = f.read()
     # section headings, in the Settings view
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    assert "<h3>Certificate</h3>" in settings
-    assert "<h3>Trusted CAs</h3>" in settings
+    assert "<h3>Console certificate</h3>" in settings
+    assert "<h3>Trusted certificate authorities</h3>" in settings
     assert "<h3>Telemetry destination</h3>" in settings
     # element inventory (the global orphan guard checks the JS side)
     for el in ('id="cert-status"', 'id="cert-form"', 'id="cert-pem"',
@@ -1070,8 +1070,8 @@ def test_settings_tls_trust_and_destination_sections_wired():
             "<th>Source</th><th>Certs</th>") in settings
     # the operator is told the key is write-only and that the bundle URL
     # gates both download paths
-    assert "never shown again" in settings
-    assert "https:// URL" in settings
+    assert "never returned by the server" in settings
+    assert "over HTTPS" in settings
     # CSP: still no inline styles or handlers anywhere in the page
     assert " style=" not in html and "onclick=" not in html
 
@@ -2846,7 +2846,9 @@ def test_device_view_merges_policy_and_heartbeat(tmp_path):
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
         cat.set_policy("d1", approved_image_id="img1")
-        cat.record_heartbeat("d1", {"stage_state": "verified", "stage_error": "copy denied", "model": "C9300"}, now=123)
+        peer_tls = {"configured_mode": "required", "runtime_mode": "disabled",
+                    "runtime_source": "aria2_rpc"}
+        cat.record_heartbeat("d1", {"stage_state": "verified", "stage_error": "copy denied", "model": "C9300", "peer_tls": peer_tls}, now=123)
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
         assert row["assigned_image_id"] == "img1"
@@ -2854,6 +2856,7 @@ def test_device_view_merges_policy_and_heartbeat(tmp_path):
         assert row["stage_error"] == "copy denied"
         assert row["last_seen"] == 123
         assert row["heartbeat_model"] == "C9300"
+        assert row["peer_tls"] == peer_tls
     finally:
         stop()
 
@@ -2968,9 +2971,9 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
                   "management_type": "routed", "iris_vlan": "666",
-                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
-                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
-                  "app_gateway": "10.0.0.1",
+                  "svi_ip": "10.0.1.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.1.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.1.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -4299,9 +4302,9 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
                   "management_type": "routed", "iris_vlan": "666",
-                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
-                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
-                  "app_gateway": "10.0.0.1",
+                  "svi_ip": "10.0.1.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.1.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.1.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -8658,6 +8661,52 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'href="/openapi.yaml"' in server_guide
 
 
+def test_help_pages_link_only_current_docs_pages():
+    """Every published-docs link on the two static help pages must resolve
+    to a page that still exists under docs/zensical and is not a redirect
+    stub (front matter ``template: redirect.html``) -- a stub means the old
+    slug moved, and the help page should already carry the new one. A
+    folder link (no trailing filename) resolves to that folder's
+    ``index.md``."""
+    repo_root = os.path.normpath(os.path.join(gui_server.WEBROOT, "..", ".."))
+    docs_root = os.path.join(repo_root, "docs", "zensical")
+    prefix = ("https://cisco-open.github.io/intelligent-release-image-staging"
+              "/docs/")
+    link_re = re.compile(re.escape(prefix) + r"([^\"'\s]*)")
+
+    def is_redirect_stub(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if not text.startswith("---"):
+            return False
+        end = text.find("\n---", 3)
+        front_matter = text[:end] if end != -1 else text
+        return "template: redirect.html" in front_matter
+
+    checked = 0
+    for name in ("help-server.html", "help-device.html"):
+        with open(os.path.join(gui_server.WEBROOT, name)) as f:
+            page = f.read()
+        for match in link_re.finditer(page):
+            slug = match.group(1)
+            slug = slug.split("#", 1)[0]   # anchors are not files on disk
+            if not slug:
+                continue                    # the bare docs/ site root
+            checked += 1
+            rel = slug.rstrip("/")
+            candidate = os.path.join(docs_root, rel + ".md")
+            if not os.path.isfile(candidate):
+                candidate = os.path.join(docs_root, rel, "index.md")
+            assert os.path.isfile(candidate), (
+                "%s links %s%s, which resolves to no page under "
+                "docs/zensical (%s)" % (name, prefix, slug, candidate))
+            assert not is_redirect_stub(candidate), (
+                "%s links %s%s, which is a redirect stub (%s) -- update the "
+                "help page to link the page's new location" %
+                (name, prefix, slug, candidate))
+    assert checked >= 10   # sanity: the loop actually walked real links
+
+
 @pytest.mark.parametrize("options,expected", [
     ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
 ], ids=["default", "off", "on"])
@@ -10873,25 +10922,53 @@ def test_offline_is_expected_during_active_undeploy():
 # ---------------------------------------------------------------------------
 
 def test_settings_forms_are_wrapped_in_bounded_card_sections():
-    """Each Settings form's section heading now sits inside a .card -- the
-    24px-padding/--radius-card/--shadow-xs container test_card_component_
-    matches_spec_padding_radius_and_elevation already pins -- rather than a
-    bare h3 floating directly in the pane. Button counts/ids inside each
-    <form> are untouched; only the surrounding wrapper changed."""
+    """Settings headings belong to live card ancestors, including TLS cards
+    with additional classes; a closed earlier card must not satisfy this."""
+    from html.parser import HTMLParser
+
+    class CardHeadings(HTMLParser):
+        void_tags = {"area", "base", "br", "col", "embed", "hr", "img",
+                     "input", "link", "meta", "param", "source", "track", "wbr"}
+
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.heading = None
+            self.headings = {}
+
+        def handle_starttag(self, tag, attrs):
+            classes = dict(attrs).get("class", "").split()
+            if tag == "h3":
+                self.heading = ([], any("card" in node[1]
+                                        for node in self.stack))
+            if tag not in self.void_tags:
+                self.stack.append((tag, classes))
+
+        def handle_data(self, data):
+            if self.heading is not None:
+                self.heading[0].append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "h3" and self.heading is not None:
+                text, in_card = self.heading
+                self.headings["".join(text).strip()] = in_card
+                self.heading = None
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    break
+
     html = _webroot("index.html")
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    for heading in ("<h3>Certificate</h3>", "<h3>Trusted CAs</h3>",
-                    "<h3>Telemetry destination</h3>", "<h3>Audit export</h3>",
-                    "<h3>Server &amp; build</h3>", "<h3>Schedule</h3>"):
-        assert heading in settings, heading
-        before = settings.split(heading, 1)[0]
-        last_open = before.rfind('<div class="card">')
-        assert last_open != -1, "%s has no preceding card wrapper" % heading
-        between = before[last_open:]
-        assert between.count("</div>") == 0, \
-            "%s's card wrapper closed before the heading" % heading
-    # button counts inside the pinned forms are exactly as before -- card
-    # wrapping never merges or drops a Save
+    parsed = CardHeadings()
+    parsed.feed(settings)
+    for heading in ("Peer transfer TLS", "Console certificate",
+                    "Trusted certificate authorities", "Public CA bundle",
+                    "Telemetry destination", "Audit export", "Server & build",
+                    "Schedule"):
+        assert parsed.headings.get(heading) is True, \
+            "%s must have an open card ancestor" % heading
+    # Certificate replacement and telemetry each retain their primary action.
     cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
     assert cert_form.count('class="btn"') == 1
     td_form = settings.split('id="td-form"')[1].split('</form>')[0]
@@ -11713,7 +11790,7 @@ def _fleet_of(fleet, n):
         fleet.upsert({"device_id": "dev-%02d" % i,
                       "device_ip": "10.0.0.%d" % (i + 1),
                       "management_type": "inband", "inband_vlan": "120",
-                      "app_ip": "10.9.0.2", "app_mask": "255.255.255.252",
+                      "app_ip": "10.9.0.%d" % (i + 2), "app_mask": "255.255.255.0",
                       "app_gateway": "10.9.0.1", "platform": "guestshell",
                       "model": "C9300" if i % 2 else "C9500"})
 

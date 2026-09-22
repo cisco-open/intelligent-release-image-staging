@@ -364,6 +364,7 @@ code {
 .architecture-section {
   grid-template-columns: 1fr;
   align-items: start;
+  gap: 24px;
 }
 
 .architecture-section .section-copy {
@@ -387,6 +388,8 @@ code {
 .distribution-visual {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  max-width: 1080px;
   gap: 1px;
   overflow: hidden;
   background: var(--line);
@@ -395,10 +398,10 @@ code {
 
 .compare-card {
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  gap: 18px;
-  min-height: 420px;
-  padding: clamp(20px, 3vw, 30px);
+  grid-template-rows: auto auto 1fr;
+  align-content: start;
+  gap: 10px;
+  padding: 16px;
   background: linear-gradient(145deg, rgba(30, 20, 43, 0.98), rgba(17, 9, 27, 0.98));
 }
 
@@ -408,6 +411,7 @@ code {
 
 .compare-card h3 {
   color: var(--forest);
+  margin: 0;
 }
 
 .compare-card p {
@@ -416,119 +420,141 @@ code {
   line-height: 1.6;
 }
 
-.simple-flow,
-.swarm-flow {
-  position: relative;
-  min-height: 240px;
+.flow-svg {
+  display: block;
+  width: 100%;
+  max-width: 440px;
+  justify-self: center;
+  height: auto;
+  overflow: visible;
+}
+
+.flow-svg .node rect {
+  fill: #21152d;
+  stroke: var(--line);
+  stroke-width: 1.2;
+}
+
+.flow-svg .node.server rect {
+  fill: var(--forest);
+  stroke: var(--forest);
+  filter: drop-shadow(0 0 12px rgba(136, 255, 0, 0.35));
+}
+
+.flow-svg .node text {
+  fill: var(--ink);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.flow-svg .node.server text {
+  fill: #100719;
+}
+
+.flow-svg .edge {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.flow-svg .edge.pull {
+  stroke: var(--coral);
+  filter: drop-shadow(0 0 6px rgba(189, 99, 255, 0.55));
+}
+
+.flow-svg .edge.seed {
+  stroke: var(--forest);
+}
+
+.flow-svg .edge.peer {
+  stroke: var(--forest);
+  stroke-width: 2.4;
+  filter: drop-shadow(0 0 8px rgba(136, 255, 0, 0.5));
+}
+
+.flow-svg .node .piece {
+  fill: var(--forest);
+}
+
+.flow-svg .node .piece.empty {
+  fill: rgba(136, 255, 0, 0.18);
+}
+
+.flow-figure {
   display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 6px;
+}
+
+.flow-svg .edge.management,
+.flow-svg .edge.control {
+  stroke: var(--aqua);
+  stroke-dasharray: 4 5;
+}
+
+.flow-svg .tracker rect {
+  stroke: var(--aqua);
+}
+
+.flow-svg .tracker text {
+  fill: var(--aqua);
+}
+
+.flow-svg .management-label {
+  fill: var(--aqua);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.flow-svg.swarm-diagram .node text {
+  font-size: 18px;
+}
+
+.flow-svg .service-group rect,
+.flow-svg .peer-group rect {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.flow-svg .service-group text,
+.flow-svg .peer-group text {
+  fill: var(--muted);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.flow-legend {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px 16px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.flow-legend span {
+  display: inline-flex;
   align-items: center;
-  gap: 18px;
+  gap: 6px;
 }
 
-.simple-flow {
-  grid-template-columns: minmax(110px, 0.8fr) minmax(52px, 0.4fr) minmax(110px, 1fr);
-}
-
-.server-box,
-.device-column div,
-.swarm-devices div {
-  display: grid;
-  place-items: center;
-  min-height: 56px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--ink);
-  background: #21152d;
-  font-weight: 900;
-  text-align: center;
-}
-
-.server-box {
-  color: #100719;
-  background: linear-gradient(135deg, var(--mint), var(--forest));
-  border-color: var(--forest);
-  box-shadow: 0 0 20px rgba(136, 255, 0, 0.24);
-}
-
-.device-column,
-.flow-arrows {
-  display: grid;
-  gap: 12px;
-}
-
-.flow-arrows span {
-  position: relative;
-  height: 2px;
-  background: var(--coral);
-  box-shadow: 0 0 14px rgba(189, 99, 255, 0.5);
-}
-
-.flow-arrows span::after {
+.flow-legend span::before {
   content: "";
-  position: absolute;
-  right: -1px;
-  top: -5px;
-  border-top: 6px solid transparent;
-  border-bottom: 6px solid transparent;
-  border-left: 8px solid var(--coral);
+  width: 18px;
+  border-top: 2px solid var(--forest);
 }
 
-.swarm-flow {
-  place-items: center;
-  isolation: isolate;
-}
-
-.swarm-devices {
-  position: relative;
-  z-index: 1;
-  width: min(100%, 310px);
-  min-height: 184px;
-}
-
-.swarm-devices div {
-  position: absolute;
-  width: 118px;
-  background: #21152d;
-}
-
-.swarm-devices div:nth-child(1) {
-  left: 0;
-  top: 0;
-}
-
-.swarm-devices div:nth-child(2) {
-  right: 0;
-  top: 54px;
-}
-
-.swarm-devices div:nth-child(3) {
-  left: 42px;
-  bottom: 0;
-}
-
-.peer-ring {
-  position: absolute;
-  width: min(78%, 320px);
-  aspect-ratio: 1;
-  border: 2px dashed rgba(136, 255, 0, 0.75);
-  border-radius: 50%;
-}
-
-.peer-ring::before,
-.peer-ring::after {
-  content: "";
-  position: absolute;
-  inset: 28%;
-  border-radius: 50%;
-  border: 2px solid rgba(189, 99, 255, 0.78);
-}
-
-.peer-ring::after {
-  inset: 44%;
-  background: var(--forest);
-  border: 0;
-  box-shadow: 0 0 24px rgba(136, 255, 0, 0.58);
+.flow-legend .control-key::before {
+  border-color: var(--aqua);
+  border-top-style: dashed;
 }
 
 .benefits-grid {

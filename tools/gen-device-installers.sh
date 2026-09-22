@@ -204,6 +204,7 @@ export CATALOG_URL=$(shell_literal "$CATALOG_URL") CATALOG_TOKEN=$(shell_literal
 export STAGE_HOST=$(shell_literal "$STAGE_HOST")
 export IRIS_STAGING_CAPABILITY=$(shell_literal "$capability")
 # exported empty so device-install.sh reads a defined (empty) value; the agent fetches the real rpc_secret on its first token-refresh.
+export IRIS_PEER_TLS_MODE=$(shell_literal "${IRIS_PEER_TLS_MODE:-disabled}")
 export RPC_SECRET=""
 # Materialize the server's BARE cert (crt.pem) to a temp file and hand its path to
 # the installer for the on-device PKI trustpoint + curl --cacert (#2). Removed on exit.

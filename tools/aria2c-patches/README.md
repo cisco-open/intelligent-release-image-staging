@@ -6,19 +6,31 @@
 
 The `aria2c` binaries this project redistributes (server image, Guest Shell
 agent bundle, IOx packages, IOS-XR appmgr RPM) are **Aria2 Next 2.5.6**, a fork
-of aria2, licensed under the GNU General Public License v2 with the OpenSSL
-exception.
+of aria2. The aria2 source and IRIS patches are **GPL-2.0-or-later**. IRIS
+distributes the combined OpenSSL 3.x-linked executable under **GPLv3**, using
+the source files' later-version grants. Original source notices and OpenSSL
+exceptions remain intact; IRIS's application code remains Apache-2.0.
 
-IRIS neither downloads nor builds `aria2c`. It is handed in as an artifact and
-verified against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
+IRIS uses a prebuilt `aria2c` artifact,
+committed to this repository (`bin/aria2c`, `deliverables/aria2c-x86_64`,
+`deliverables/aria2c-aarch64`) beside its local patches and build scripts, and
+verified against `tools/aria2c.sha256`. `tools/get-aria2c.sh` can download a
+replacement when a committed client is missing.
 
-## The corresponding source (GPLv2 §3)
+## The corresponding source
 
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
-2. **The seven patches in this directory**, applied in numeric order.
+2. **The patches in this directory**, applied in numeric order.
+   The current checksum-pinned artifacts contain patches `0001`–`0010`,
+   as `tools/aria2c.sha256` records.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
+4. **The complete source asset** — upstream source, patches, build recipes,
+   dependency source archives, Alpine packaging changes, license texts and
+   provenance in the [aria2c-2.5.6-p10 release](https://github.com/cisco-open/intelligent-release-image-staging/releases/tag/aria2c-2.5.6-p10).
+   [`../aria2c-source/`](../aria2c-source/) records its filename and checksum.
+   Redistribute the source asset alongside the matching binaries.
 
 ## Applying the patches
 
@@ -49,6 +61,12 @@ Which patches matter to IRIS:
 | `0006-preserve-coalesced-bt-handshake.patch` | Preserves messages received alongside the BitTorrent handshake and processes them immediately | **Yes** — prevents valid incoming peers being dropped when TCP combines messages (issue #174) |
 | `0007-seeder-goodbye-grace.patch` | Keeps a seeder↔seeder connection for 5 s after both sides are complete before the "Good Bye Seeder" drop, on both ends of the connection, instead of dropping it in the same event-loop iteration | **Yes** — `device/agent/peer-transfer-hook.sh` reads per-peer bytes over RPC after the last piece lands; upstream had already erased every seeder that fed the download, so a device fed only by the origin reported zero attributed bytes (issue #68) |
 
+Patch `0010-resolve-crossed-peer-handshakes.patch` resolves simultaneous
+outgoing handshakes at a full peer cap: the lower peer ID keeps its outgoing
+connection, and the other side releases a pending outgoing slot before admitting
+it. Established connections are retained; TLS requirements and the cap are
+unchanged. Regression: `tools/aria2c-build/test-peer-collision.py` (also `--tls`).
+
 ## Build
 
 The build scripts are [`tools/aria2c-build/`](../aria2c-build/README.md) in this
@@ -57,10 +75,11 @@ They read the patch set from *this* directory, so it still has exactly one home
 and cannot drift between two copies.
 
 IRIS itself neither runs them nor builds `aria2c` in any normal flow — the
-binary is handed in and verified. `tools/get-aria2c.sh` looks for a produced
-binary at `../aria2-next-static/out/<arch>/aria2c` by default, which is simply
-where the maintainers' own build tree happens to sit; `ARIA2C_DELIVERABLE`
-points it anywhere else.
+binary is committed and verified. `tools/get-aria2c.sh` takes the repository's
+own `deliverables/aria2c-<arch>` first, then a produced binary at
+`../aria2-next-static/out/<arch>/aria2c`, which is simply where the
+maintainers' own build tree happens to sit; `ARIA2C_DELIVERABLE` points it
+anywhere else.
 
 What is fixed about the deliverable:
 
@@ -71,11 +90,11 @@ What is fixed about the deliverable:
 - the exact bytes are pinned in `tools/aria2c.sha256`, one line per
   architecture.
 
-**A binary you build yourself will not reproduce those checksums** — a
-different toolchain, musl version, or flag set produces different bytes — and
-`tools/get-aria2c.sh` fails closed on a mismatch with no override. If you build
-from source you are adopting your own binary, which means updating
-`tools/aria2c.sha256` to its sha256 deliberately, not working around the check.
+A rebuild with the recorded inputs can reproduce the pinned checksums; a
+fresh x86_64 rebuild has matched the committed binary. Different toolchains,
+library versions or flags can change the bytes. `tools/get-aria2c.sh` fails
+closed on a mismatch with no override. Adopting different bytes requires
+deliberately updating `tools/aria2c.sha256` after validation.
 
 ### The build configuration
 
@@ -99,14 +118,33 @@ that step links dynamically against the host's OpenSSL and is not the
 deliverable described here.
 
 The build scripts are published in
-[`../aria2c-build/`](../aria2c-build/README.md) — the `Dockerfile` and
-`build.sh` that produce the binaries. Nothing has to be requested: source,
-patches and compilation scripts all ship in this repository, which is what
-GPLv2 section 3 asks for.
+[`../aria2c-build/`](../aria2c-build/README.md): the `Dockerfile` and
+`build.sh` that produce the binaries. Local patches and compilation scripts
+ship in this repository. The matching upstream tree and linked dependency
+sources are supplied in the release's separate source asset. See
+[What the repository distributes](../aria2c-build/README.md#what-the-repository-distributes).
 
 ## Licensing of the patches themselves
 
-The patch files are modifications to GPLv2 code and are provided under GPLv2.
-They carry no inline SPDX header because a header would alter the patch content
-and stop it applying; see the licensing notes in
-[`DEVELOPMENT.md`](../../DEVELOPMENT.md).
+IRIS's modifications are provided under **GPL-2.0-or-later**, consistent with
+the retained grants in the modified source and the explicit SPDX identifiers
+in the two new peer-TLS files. The Apache-2.0 header on this README licenses
+the documentation, not the patches.
+
+The combined executable is distributed under GPLv3 with each dependency's
+notices preserved. OpenSSL 3.x is Apache-2.0; this distribution uses the
+later-version grants, not a change to upstream's historical OpenSSL/SSLeay
+exception. See the [source distribution records](../aria2c-source/) for
+license texts and the distribution statement. The patch files remain ordinary
+`git diff` input; source-file copyright notices are preserved when applied.
+
+## Private peer transport additions (2026-09-18)
+
+- `0008-required-hybrid-peer-tls.patch`: opt-in TLS 1.3 with mutual swarm
+  authentication and X25519MLKEM768. Disabled by default; required mode
+  rejects unsupported backends and plaintext fallback.
+- `0009-test-seeder-goodbye-grace.patch`: align three upstream tests with the
+  five-second grace already provided by patch 0007.
+
+Both x86_64 and aarch64 builds use all ten patches. The ARM transport tests
+run under QEMU; native device validation is a separate rollout check.

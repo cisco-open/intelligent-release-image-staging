@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Changelog
 
 All notable changes to **intelligent-release-image-staging (IRIS)** are
@@ -11,7 +17,108 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Preserve required peer TLS in Catalyst 8000 Guest Shell onboarding, reject
+  invalid modes before contacting a device, separate signing-root commands by
+  key holder, and correct the distributed aria2c license reference to GPLv3.
+
+- Remove repeated stage-only notes from guide and contributor pages; retain
+  the Overview explanation and task-specific safety instructions.
+
+## [2026.09.20]
+
+- Publish the matching aria2c ten-patch source distribution alongside the
+  x86_64 and aarch64 clients, including required hybrid peer TLS support,
+  exact dependency sources, build recipes and preserved third-party notices.
+  Point missing-client downloads at the matching ten-patch release and
+  document source verification and rebuilding for contributors.
+- Tighten the website's transfer comparison into smaller, static diagrams.
+  Distinguish tracker coordination from origin seeding and six-peer sharing
+  inside a wider, tiered swarm illustration.
+  Correct installation trust setup, deployment prerequisites, credential
+  custody, certificate rotation, API retry limits and staging checks against
+  the implementation; add executable documentation regression tests.
+- Refuse administrator resets when the decrypted secret store is unavailable,
+  preserving existing encrypted credentials. Document resets through the
+  running server rather than a fresh one-shot container.
+- Fail closed before IOx SSH/SCP when a configured known-hosts file is missing,
+  unreadable, empty or not a regular file. Rebuild the Guest Shell bundle,
+  both IOx packages and the IOS-XR RPM before rolling out this shared-agent change.
+- Collect verified external aria2c hand-ins into the architecture-specific
+  deliverables directory, including `--no-install` runs.
+- Preserve legacy package-build and instruction-recovery deep links when their
+  sections moved to separate guide pages.
+- Rewrite the documentation site into guides: an Overview, a short
+  Architecture Guide, an Installation Guide, an Administration Guide, a User
+  Guide and a Reference, each in its own folder with a landing page and short
+  sidebar labels. Pages are written for network engineers in plain language:
+  device families by series, no internal labels, one home per fact, and the
+  stage-only rule stated once. Every old page URL redirects to its new home;
+  the anchors listed in `docs/dev/documentation.md` keep their ids; Console
+  and server images built before this change rely on those redirects for
+  their help links until rebuilt. Contributor and validation material moves
+  to `docs/dev/`, linked from `CONTRIBUTING.md` and not published. The site
+  gains `site_url`, builds strictly in CI, and its tests learn redirect
+  stubs, a page map for moved files, page-versus-folder collisions and the
+  plain-language rules.
+- Commit the tested aria2c clients for both architectures (`bin/aria2c`,
+  `deliverables/aria2c-x86_64`, `deliverables/aria2c-aarch64`) so a fresh
+  clone or release archive is complete offline. The scripts verify them
+  against `tools/aria2c.sha256` and fail closed on a mismatch; the one-host
+  start script invokes these builds, and `get-aria2c.sh --for-platforms`
+  restores every architecture in one command only when a file was deleted.
+  The release archive includes local patches, build scripts and the pinned
+  source-distribution manifest; the matching upstream and linked dependency
+  source archive is available alongside the published aria2c clients.
+- Reject duplicate directly routed application addresses and overlapping
+  dedicated application subnets in inventory, while retaining intentional
+  shared in-band networks and private router-NAT address reuse.
+- Require a fresh base-image pull when building the standalone instruction
+  crypto helpers. Check documentation navigation recursively, including nested
+  dashboard and Swagger provenance pages, and expose both pages in the nav.
+- Restore the shard-migration rollback runbook and document missing role and
+  schedule error codes, including the legacy quarantine status distinction.
+  Clarify first-start configuration, recipient rotation, CSV workflows and
+  dashboard evidence; repair stale operator links.
+### Fixed
+- Normalize the Kubernetes server's private state directories after kubelet
+  prepares the PVC, preventing local-volume `fsGroup` handling from leaving
+  setgid modes that make authority validation fail closed.
+- Make the static instruction-helper license readable by the unprivileged
+  server publisher so Guest Shell bundles provision successfully at startup.
+- Batch concurrent cached inventory scans to reduce reader lock contention,
+  while retaining per-request content validation and independent shard writes.
+## [2026.09.19]
+
 ### Added
+- Replace custom instruction and recovery-cache encryption with versioned
+  AES-256-SIV authenticated encryption through a pinned, static OpenSSL helper
+  for both architectures. Reject legacy cipher fallback; preserve keys/replay
+  history and require a coordinated server/agent upgrade with an online first
+  v2 fetch. Test authentication failures, nonce reuse and cache migration.
+- Refresh device-container security dependencies, apply Python's upstream Expat
+  fix, and remove unused pip/ensurepip installers from the runtime.
+- Export the shared device filesystem as one layer so IOx cannot restore older
+  libraries or deleted installer files by reordering image layers.
+- Show configured and aria2-reported torrent TLS policy in telemetry, including
+  unknown or stale reports. This reports policy, not a per-connection handshake.
+- Bundle a static instruction verifier for older Guest Shell hosts. Reject
+  unauthenticated or malformed aria2 health replies, replace stale running
+  Guest Shell binaries, and restrict secret-rotation restarts to the owned daemon.
+- Bound aria2 compile/LTO parallelism and include API fixture helpers in releases.
+- Add a default-off peer transfer TLS toggle with persistent mode, automatic origin
+  restart, and matching device onboarding; require undeployment before switching.
+  Historical records for devices absent from inventory do not block this control.
+  Accept older Guest Shell OpenSSL subject formatting during peer enrollment.
+- Prevent completed IOx undeploys from reporting a cleanup failure when concurrent
+  jobs delay record retirement past the earlier process-reaping timeout.
+- Simplify the TLS certificate page, show actionable feed-download errors, and
+  use configured trusted CAs for image-verification downloads.
+- Correct the public IE onboarding summary to HTTPS package download and
+  distinguish it from SCP-to-self image placement on deployments without a share.
+- Add opt-in hybrid TLS 1.3 peer transport with mutual swarm certificates,
+  automated enrollment through existing preflight HTTPS trust, and renewal for
+  Guest Shell, IOx, XR and the origin seeder. Requires coordinated swarm rollout;
+  default transport remains unchanged.
 - Reject incomplete Bulk Hash downloads before replacing a cached file when
   the body disagrees with its declared size. Build XR RPMs in a private directory
   to prevent log collisions and missing specification files.
@@ -119,6 +226,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   deliverable and the GPLv2 obligation that comes with it.
 
 ### Fixed
+- Add the aria2 source fix and forced-collision regression for one-peer swarms
+  stalling during simultaneous discovery (#331); pending the next binary handoff.
 - Reject a login if administrator credentials change during password verification.
 - Keep audit-export destinations and passwords consistent during saves.
   Interrupted updates disable exports until a complete retry; an unconfigured

@@ -36,6 +36,7 @@ import auth
 import bounded_pool
 import bulkhash
 import credential_cache
+import peer_tls_issuer as peer_tls
 import instruction_keys
 import instructions
 import keyed_state
@@ -2235,6 +2236,21 @@ def _hb_bool(value):
     return value if isinstance(value, bool) else None
 
 
+def _hb_peer_tls(value):
+    """Bounded daemon policy observation; never proof of a negotiated session."""
+    if not isinstance(value, dict):
+        return None
+    configured = value.get("configured_mode")
+    if configured not in ("disabled", "required"):
+        return None
+    runtime = value.get("runtime_mode")
+    source = value.get("runtime_source")
+    if runtime not in ("disabled", "required") or source != "aria2_rpc":
+        runtime, source = "unknown", "unknown"
+    return {"configured_mode": configured, "runtime_mode": runtime,
+            "runtime_source": source}
+
+
 def sanitize_heartbeat(data, src_ip):
     """The stored heartbeat record for one device POST body (a dict)."""
     result = {
@@ -2250,6 +2266,7 @@ def sanitize_heartbeat(data, src_ip):
                              _HEARTBEAT_STR_CAPS["target_fs"]),
         "model": _hb_str(data.get("model"), _HEARTBEAT_STR_CAPS["model"]),
         "telemetry_enabled": _hb_bool(data.get("telemetry_enabled")),
+        "peer_tls": _hb_peer_tls(data.get("peer_tls")),
         "telemetry_stream_enabled": _hb_bool(
             data.get("telemetry_stream_enabled")),
         # Multi-image staging state (issue: multi-image assignment).
@@ -2310,6 +2327,7 @@ class Catalog:
         self._instruction_limiter = _InstructionLimiter(
             INSTR_REQUEST_BURST, INSTR_REQUEST_REFILL_SECONDS,
             INSTR_LIMITER_MAX_DEVICES, INSTR_LIMITER_IDLE_SECONDS)
+        self._peer_tls_limiter = _InstructionLimiter(2, 300, 10000, 3600)
         self._instruction_counter_lock = threading.Lock()
         self._instruction_counters = {name: 0 for name in _INSTRUCTION_COUNTERS}
         self.live_table = live_table
@@ -2845,6 +2863,39 @@ class Catalog:
             self.store.record_telemetry(parts[2], report)
             return self._json(200, {"ok": True})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
+                and parts[3] == "peer-tls":
+            # _guard binds the current catalog token to this exact device.
+            # Re-authorize under the store lock to serialize against revocation.
+            with secrets_store.store_lock(self.secrets_path):
+                try:
+                    current = secrets_store.load(self.secrets_path)
+                    strict = secrets_store.build_catalog_auth_index(current)
+                except (secrets_store.StoreCorruptError,
+                        secrets_store.DuplicateCredentialError, OSError):
+                    return self._json(503, {"error": "credential store unavailable"})
+                ctx = auth.resolve_catalog_auth(current, strict, token, time.time(), 0)
+                if (ctx is None or ctx.principal.type != "device"
+                        or ctx.principal.id != parts[2] or ctx.secret_name != "catalog_token"):
+                    return self._json(403, {"error": "device authentication required"})
+                try:
+                    if peer_tls.mode() != "required":
+                        return self._json(409, {"error": "peer TLS is not enabled"})
+                    try:
+                        request = parse_json_body(body)
+                    except ValueError:
+                        return self._json(400, {"error": "invalid certificate request"})
+                    if not isinstance(request, dict) or set(request) != {"csr"}:
+                        return self._json(400, {"error": "invalid certificate request"})
+                    if self._peer_tls_limiter.charge(parts[2]):
+                        return self._json(429, {"error": "peer enrollment rate limited"})
+                    response = peer_tls.Issuer().issue(parts[2], request['csr'])
+                except peer_tls.InvalidCSR:
+                    return self._json(400, {"error": "invalid certificate request"})
+                except Exception:
+                    # Issuer/age errors must not disclose key paths or material.
+                    return self._json(503, {"error": "peer certificate enrollment unavailable"})
+                return self._json(200, response)
+        if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "token-refresh":
             return self._handle_token_refresh(
                 parts[2], src_ip=src_ip, store=store, index=index,
@@ -3116,7 +3167,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 len(parts) == 4
                 and parts[:2] == ["v1", "devices"]
                 and parts[3] in ("heartbeat", "token-refresh", "telemetry",
-                                 "policy", "instructions",
+                                 "policy", "instructions", "peer-tls",
                                  "instruction-keylist")
             )
 
@@ -3364,7 +3415,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            if urlsplit(self.path).path.endswith("/token-refresh"):
+            if urlsplit(self.path).path.endswith(("/token-refresh", "/peer-tls")):
                 # The response can carry three live credentials.  Never let a
                 # browser, proxy, or intermediary retain it beyond delivery.
                 self.send_header("Cache-Control", "private, no-store")

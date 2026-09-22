@@ -13,6 +13,8 @@ setup() {
   PROV="$BATS_TEST_DIRNAME/../provision-served.sh"
   DEVICE="$BATS_TEST_DIRNAME/../../device"
   TMP="$(mktemp -d)"
+  export IRIS_SSH_KEYGEN="$TMP/ssh-keygen"
+  printf "license fixture\n" > "$TMP/ssh-keygen.LICENCE"
   ART="$TMP/artifacts"; mkdir -p "$ART"
   mkdir -p "$TMP/server" "$TMP/run"
   cp "$PROV" "$TMP/server/provision-served.sh"
@@ -24,6 +26,10 @@ import pathlib,sys
 # Minimal ELF header: checksum/architecture fixture, never executed.
 pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x02\x00\x3e\x00' + bytes(44))
 PYTHON
+  cp "$TMP/aria2c" "$IRIS_SSH_KEYGEN"
+  export IRIS_AEAD_HELPER="$TMP/iris-aead"
+  cp "$TMP/aria2c" "$IRIS_AEAD_HELPER"
+  printf "license fixture\n" > "$TMP/iris-aead.LICENCE"
   chmod +x "$TMP/aria2c"
   printf '%s  x86_64\n' "$(sha256sum "$TMP/aria2c" | awk '{print $1}')" > "$TMP/aria2c.sha256"
   mkdir -p "$TMP/config/tls"; printf 'CRTPEM\n' > "$TMP/config/tls/crt.pem"

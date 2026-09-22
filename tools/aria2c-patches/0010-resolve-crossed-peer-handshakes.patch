@@ -1,0 +1,178 @@
+diff --git a/src/InitiatorMSEHandshakeCommand.cc b/src/InitiatorMSEHandshakeCommand.cc
+index 5bde13c..7273705 100644
+--- a/src/InitiatorMSEHandshakeCommand.cc
++++ b/src/InitiatorMSEHandshakeCommand.cc
+@@ -245,7 +245,7 @@ bool InitiatorMSEHandshakeCommand::prepareForNextPeer(time_t wait)
+ 
+ void InitiatorMSEHandshakeCommand::onAbort()
+ {
+-  if (sequence_ == INITIATOR_SEND_KEY ||
++  if (getPeer()->isConnectionSuperseded() || sequence_ == INITIATOR_SEND_KEY ||
+       getOption()->getAsBool(PREF_BT_FORCE_ENCRYPTION) ||
+       getOption()->getAsBool(PREF_BT_REQUIRE_CRYPTO)) {
+     peerStorage_->returnPeer(getPeer());
+diff --git a/src/Peer.cc b/src/Peer.cc
+index addbe4a..e11ada6 100644
+--- a/src/Peer.cc
++++ b/src/Peer.cc
+@@ -62,7 +62,13 @@ Peer::Peer(std::string ipaddr, uint16_t port, ConnectionDirection direction)
+ 
+ Peer::~Peer() { releaseSessionResource(); }
+ 
+-void Peer::usedBy(cuid_t cuid) { cuid_ = cuid; }
++void Peer::usedBy(cuid_t cuid)
++{
++  cuid_ = cuid;
++  if (cuid != 0) {
++    connectionSuperseded_ = false;
++  }
++}
+ 
+ void Peer::allocateSessionResource(int32_t pieceLength, int64_t totalLength)
+ {
+diff --git a/src/Peer.h b/src/Peer.h
+index 1768901..0dada98 100644
+--- a/src/Peer.h
++++ b/src/Peer.h
+@@ -81,6 +81,7 @@ private:
+ 
+   // If true, this peer is disconnected gracefully.
+   bool disconnectedGracefully_;
++  bool connectionSuperseded_ = false;
+ 
+   // Before calling updateSeeder(),  make sure that
+   // allocateSessionResource() is called and res_ is created.
+@@ -259,6 +260,10 @@ public:
+ 
+   int64_t getCompletedLength() const;
+ 
++  // Cancel only an uncompleted outgoing handshake after collision arbitration.
++  bool isConnectionSuperseded() const { return connectionSuperseded_; }
++  void supersedeConnection() { connectionSuperseded_ = true; }
++
+   bool isIncomingConnection() const { return incomingConnection_; }
+ 
+   bool isLocalPeer() const { return localPeer_; }
+diff --git a/src/PeerAbstractCommand.cc b/src/PeerAbstractCommand.cc
+index 36299d6..cb68691 100644
+--- a/src/PeerAbstractCommand.cc
++++ b/src/PeerAbstractCommand.cc
+@@ -83,7 +83,7 @@ bool PeerAbstractCommand::execute()
+                    " socket: read:%d, write:%d, hup:%d, err:%d, noCheck:%d",
+                    getCuid(), readEventEnabled(), writeEventEnabled(),
+                    hupEventEnabled(), errorEventEnabled(), noCheck_));
+-  if (exitBeforeExecute()) {
++  if (peer_->isConnectionSuperseded() || exitBeforeExecute()) {
+     onAbort();
+     return true;
+   }
+diff --git a/src/PeerReceiveHandshakeCommand.cc b/src/PeerReceiveHandshakeCommand.cc
+index 0dbace2..5502bcc 100644
+--- a/src/PeerReceiveHandshakeCommand.cc
++++ b/src/PeerReceiveHandshakeCommand.cc
+@@ -37,6 +37,7 @@
+ #include <cstring>
+ 
+ #include "PeerConnection.h"
++#include "bittorrent_helper.h"
+ #include "DownloadEngine.h"
+ #include "BtHandshakeMessage.h"
+ #include "util.h"
+@@ -123,6 +124,48 @@ bool PeerReceiveHandshakeCommand::executeInternal()
+                    " Dropping connection.");
+       return true;
+     }
++    if (!btRuntime->lessThanMaxPeers()) {
++      if (!collisionPeer_) {
++        // At a one-peer cap, symmetric discovery can fill both peers' slots
++        // with outgoing handshakes. Prefer the connection initiated by the
++        // smaller peer ID. Read the complete handshake before arbitrating;
++        // never evict established peers or relax the connection limit.
++        if (peerConnection_->getBufferLength() <
++            BtHandshakeMessage::MESSAGE_LENGTH) {
++          size_t length = 0;
++          peerConnection_->receiveHandshake(nullptr, length, true);
++          if (peerConnection_->getBufferLength() <
++              BtHandshakeMessage::MESSAGE_LENGTH) {
++            addCommandSelf();
++            return false;
++          }
++          data = peerConnection_->getBuffer();
++        }
++        if (data[0] == 19 && memcmp(data + 1, BtHandshakeMessage::BT_PSTR, 19) == 0 &&
++            memcmp(data + 48, bittorrent::getStaticPeerId(), PEER_ID_LENGTH) < 0) {
++          for (const auto& pending : peerStorage->getUsedPeers()) {
++            if (!pending->isIncomingConnection() &&
++                pending->getIPAddress() == getPeer()->getIPAddress() &&
++                !pending->isConnectionSuperseded() &&
++                (!pending->isActive() || !pending->isHandshakeCompleted())) {
++              pending->supersedeConnection();
++              collisionPeer_ = pending;
++              A2_LOG_DEBUG("Yielding pending outgoing peer slot to incoming "
++                           "handshake");
++              break;
++            }
++          }
++        }
++      }
++      if (collisionPeer_ && collisionPeer_->usedBy() != 0) {
++        // Let the owning command unregister its socket and release the slot
++        // through normal destruction before admitting the incoming peer.
++        getDownloadEngine()->setRefreshInterval(std::chrono::milliseconds(0));
++        getDownloadEngine()->setNoWait(true);
++        addCommandSelf();
++        return false;
++      }
++    }
+     // Admission is bounded for both seeders and slow/stalled leechers.
+     if (btRuntime->lessThanMaxPeers()) {
+       // TODO addPeer and checkoutPeer must be "atomic", in a sense
+diff --git a/src/PeerReceiveHandshakeCommand.h b/src/PeerReceiveHandshakeCommand.h
+index c85ee01..58e377b 100644
+--- a/src/PeerReceiveHandshakeCommand.h
++++ b/src/PeerReceiveHandshakeCommand.h
+@@ -46,6 +46,7 @@ class Peer;
+ class PeerReceiveHandshakeCommand : public PeerAbstractCommand {
+ private:
+   std::unique_ptr<PeerConnection> peerConnection_;
++  std::shared_ptr<Peer> collisionPeer_;
+ 
+ protected:
+   virtual bool executeInternal() override;
+diff --git a/tests/PeerTest.cc b/tests/PeerTest.cc
+index 8092ff1..2c0b888 100644
+--- a/tests/PeerTest.cc
++++ b/tests/PeerTest.cc
+@@ -19,11 +19,13 @@ public:
+   void testPeerAllowedIndexSet();
+   void testAmAllowedIndexSet();
+   void testCountSeeder();
++  void testSupersededConnectionReuse();
+ };
+ 
+ A2_TEST(PeerTest, testPeerAllowedIndexSet)
+ A2_TEST(PeerTest, testAmAllowedIndexSet)
+ A2_TEST(PeerTest, testCountSeeder)
++A2_TEST(PeerTest, testSupersededConnectionReuse)
+ 
+ void PeerTest::testPeerAllowedIndexSet()
+ {
+@@ -39,6 +41,18 @@ void PeerTest::testAmAllowedIndexSet()
+   REQUIRE(peer->isInAmAllowedIndexSet(0));
+ }
+ 
++void PeerTest::testSupersededConnectionReuse()
++{
++  peer->usedBy(1);
++  REQUIRE(!peer->isConnectionSuperseded());
++  peer->supersedeConnection();
++  REQUIRE(peer->isConnectionSuperseded());
++  peer->usedBy(0);
++  REQUIRE(peer->isConnectionSuperseded());
++  peer->usedBy(2);
++  REQUIRE(!peer->isConnectionSuperseded());
++}
++
+ void PeerTest::testCountSeeder()
+ {
+   std::vector<std::shared_ptr<Peer>> peers(5);

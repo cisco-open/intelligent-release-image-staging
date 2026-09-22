@@ -89,6 +89,44 @@ spec:
           # than a mutable tag, makes a rollout's server bytes reproducible.
           image: iris-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
+          # Private directories can inherit setgid from the PVC parent.
+          # GNU chmod 0700 preserves that bit on existing directories.
+          # Accept and clear only that one known transformation, as the same
+          # non-root owner, before the normal fail-closed entrypoint starts.
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              state="${IRIS_STATE:-/var/lib/iris}"
+              if [ ! -e "$state" ]; then
+                mkdir -m 0700 -- "$state"
+              fi
+              for private_dir in "$state" "$state/iox"; do
+                [ -e "$private_dir" ] || continue
+                if [ -L "$private_dir" ] || [ ! -d "$private_dir" ]; then
+                  echo "FATAL: unsafe private state path: $private_dir" >&2
+                  exit 1
+                fi
+                owner="$(stat -c %u -- "$private_dir")"
+                mode="$(stat -c %a -- "$private_dir")"
+                if [ "$owner" != "$(id -u)" ]; then
+                  echo "FATAL: private state owner mismatch: $private_dir" >&2
+                  exit 1
+                fi
+                case "$mode" in
+                  700) ;;
+                  # GNU chmod preserves setgid on directories for the common
+                  # four-digit form. Five digits explicitly clear it.
+                  2700) chmod 00700 -- "$private_dir" ;;
+                  *)
+                    echo "FATAL: unsafe private state mode $mode: $private_dir" >&2
+                    exit 1
+                    ;;
+                esac
+              done
+              exec /opt/iris/server/docker-entrypoint.sh
           envFrom:
             - configMapRef:
                 name: iris-seed-server

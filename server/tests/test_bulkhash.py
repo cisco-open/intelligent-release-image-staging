@@ -994,3 +994,72 @@ def test_full_pipeline_local_server_to_verdict(tmp_path, signing_key):
         assert verdicts["img-1"]["state"] == "verified"
     finally:
         srv.shutdown()
+
+
+@pytest.mark.parametrize('kind,expected', [
+    ('dns', 'DNS lookup failed'),
+    ('certificate', 'TLS certificate verification failed'),
+    ('tls', 'TLS connection failed'),
+    ('timeout', 'connection timed out'),
+    ('refused', 'connection refused'),
+    ('unknown', 'URLError'),
+])
+def test_fetch_reports_safe_network_cause(tmp_path, monkeypatch, kind, expected):
+    import socket
+    import ssl
+    import urllib.error
+    errors = {
+        'dns': socket.gaierror(-2, 'https://user:secret@private.invalid/feed'),
+        'certificate': ssl.SSLCertVerificationError('private certificate details'),
+        'tls': ssl.SSLError('private TLS details'),
+        'timeout': TimeoutError('private target'),
+        'refused': ConnectionRefusedError('private target'),
+        'unknown': 'https://user:secret@private.invalid/feed',
+    }
+    class FailedOpener:
+        def open(self, *args, **kwargs):
+            raise urllib.error.URLError(errors[kind])
+    monkeypatch.setattr(bulkhash.urllib.request, 'build_opener', lambda *args: FailedOpener())
+    dest = tmp_path / 'feed.tar'
+    dest.write_bytes(b'previous verified feed')
+    with pytest.raises(bulkhash.BulkHashError, match=expected) as raised:
+        bulkhash.fetch('https://private.invalid/feed', 1, str(dest))
+    assert 'private' not in str(raised.value) and 'secret' not in str(raised.value)
+    assert dest.read_bytes() == b'previous verified feed'
+    assert list(tmp_path.iterdir()) == [dest]
+
+
+def test_fetch_uses_configured_ca_and_rejects_untrusted_https(tmp_path, monkeypatch):
+    import ssl
+    import trust
+    cert, key = tmp_path / 'ca.pem', tmp_path / 'key.pem'
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                    '-days', '1', '-subj', '/CN=localhost', '-addext',
+                    'subjectAltName=DNS:localhost', '-keyout', str(key), '-out', str(cert)],
+                   check=True, capture_output=True)
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'signed-feed-placeholder')
+        def log_message(self, *args):
+            pass
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    srv.socket = context.wrap_socket(srv.socket, server_side=True)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv('IRIS_CA_BUNDLE', str(tmp_path / 'absent.pem'))
+        dest = str(tmp_path / 'download.tar')
+        url = 'https://localhost:%s/feed' % srv.server_port
+        with pytest.raises(bulkhash.BulkHashError, match='TLS certificate verification failed'):
+            bulkhash.fetch(url, 2, dest)
+        monkeypatch.setenv('IRIS_CA_BUNDLE', str(cert))
+        bulkhash.fetch(url, 2, dest)
+        assert open(dest, 'rb').read() == b'signed-feed-placeholder'
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join()

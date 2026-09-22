@@ -294,10 +294,12 @@ class Deps(_BaseDeps):
         instruction_step = kwargs.pop("instruction_step", None)
         aria_rpc = kwargs.pop("aria_rpc", None)
         torrent_defaults = kwargs.pop("torrent_defaults", None)
+        peer_tls = kwargs.pop("peer_tls", None)
         value = _BaseDeps.__new__(cls, *args, **kwargs)
         value._instruction_step = instruction_step
         value._aria_rpc = aria_rpc
         value._torrent_defaults = torrent_defaults
+        value._peer_tls = peer_tls
         return value
 
     @property
@@ -312,11 +314,16 @@ class Deps(_BaseDeps):
     def torrent_defaults(self):
         return self._torrent_defaults
 
+    @property
+    def peer_tls(self):
+        return self._peer_tls
+
     def _replace(self, **kwargs):
         marker = object()
         instruction_step = kwargs.pop("instruction_step", marker)
         aria_rpc = kwargs.pop("aria_rpc", marker)
         torrent_defaults = kwargs.pop("torrent_defaults", marker)
+        peer_tls = kwargs.pop("peer_tls", marker)
         replaced_defaults = torrent_defaults is not marker
         if instruction_step is marker:
             instruction_step = self.instruction_step
@@ -324,6 +331,8 @@ class Deps(_BaseDeps):
             aria_rpc = self.aria_rpc
         if torrent_defaults is marker:
             torrent_defaults = self.torrent_defaults
+        if peer_tls is marker:
+            peer_tls = self.peer_tls
         value = _BaseDeps._replace(self, **kwargs)
         wrapper = _instruction_aria_add_protocol(value.aria_add)
         if replaced_defaults and wrapper is not None:
@@ -332,6 +341,7 @@ class Deps(_BaseDeps):
         value._instruction_step = instruction_step
         value._aria_rpc = aria_rpc
         value._torrent_defaults = torrent_defaults
+        value._peer_tls = peer_tls
         return value
 
 
@@ -551,6 +561,14 @@ def _send_heartbeat(deps, sid, payload, instruction_attestation=None):
     realistic on enterprise networks and would discard progress. Mirrors
     _emit_impl's unconditional best-effort try/except."""
     try:
+        transport = getattr(deps, "peer_tls", None)
+        if callable(transport):
+            payload = dict(payload)
+            try:
+                payload["peer_tls"] = transport()
+            except Exception:
+                # Transport telemetry must never suppress the heartbeat.
+                pass
         return deps.catalog.heartbeat(
             sid, _heartbeat_with_instruction(payload, instruction_attestation))
     except Exception as e:
@@ -5379,6 +5397,20 @@ def _instruction_platform(platform, cfg):
     return "guestshell"
 
 
+def _peer_tls_observation(cfg, rpc):
+    """Report configured and running daemon policy, not negotiated traffic."""
+    result = {"configured_mode": cfg.get("peer_tls_mode", "disabled"),
+              "runtime_mode": "unknown", "runtime_source": "unknown"}
+    try:
+        options = rpc("aria2.getGlobalOption", [])
+        mode = options.get("bt-peer-tls") if isinstance(options, dict) else None
+        if mode in ("disabled", "required"):
+            result.update(runtime_mode=mode, runtime_source="aria2_rpc")
+    except Exception:
+        pass
+    return result
+
+
 def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
     """Attach the contained instruction and loopback aria2 runtime."""
     # Preserve the established platform-dispatch seam: tests and downstream
@@ -5391,8 +5423,12 @@ def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
 
     runtime_platform = _instruction_platform(platform, cfg)
     paths = instr.paths_for(runtime_platform, cfg)
+    executable = shutil.which("ssh-keygen") or "/usr/bin/ssh-keygen"
+    if runtime_platform in ("guestshell", "router"):
+        import runtime_verifier
+        executable = runtime_verifier.select(cfg["stage_dir"])
     verifier = instr.SSHVerifier(
-        shutil.which("ssh-keygen") or "/usr/bin/ssh-keygen",
+        executable,
         paths["signers"], paths["root_signers"], paths["work_dir"])
     current_boot_id = instr.boot_id()
 
@@ -5461,12 +5497,22 @@ def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
                 raise InstructionApplyError("RPC unavailable") from None
 
     defaults = {}
+    # One query per dependency lifetime (one agent tick), even when several
+    # images produce heartbeats. No stale value persists across ticks/restarts.
+    transport_observation = []
+
+    def peer_tls():
+        if not transport_observation:
+            transport_observation.append(_peer_tls_observation(cfg, aria_rpc))
+        return dict(transport_observation[0])
+
     aria_add = deps.aria_add
     wrapper = _instruction_aria_add_protocol(aria_add)
     if wrapper is not None:
         aria_add = wrapper[1]()
     return deps._replace(
         instruction_step=instruction_step, aria_rpc=aria_rpc,
+        peer_tls=peer_tls,
         torrent_defaults=defaults,
         aria_add=_InstructionAriaAdd(aria_add, defaults))
 

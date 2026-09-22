@@ -46,7 +46,7 @@ const paths = {
     title: "Industrial Ethernet IOx",
     copy: "Run the shared IOx/XR device image as an IOx app. The agent uses SSH-to-self for IOS file placement.",
     items: [
-      "Receives iris-arm64.tar over SCP during onboarding.",
+      "Downloads iris-arm64.tar over authenticated HTTPS during onboarding.",
       "Downloads image pieces through the private swarm.",
       "Stages approved images to device storage.",
     ],

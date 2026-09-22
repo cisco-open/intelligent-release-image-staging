@@ -24,8 +24,13 @@ ARIA2="${2:?usage: pack-agent-bundle.sh <device-dir> <aria2c-path> <output.tgz>}
 OUT="${3:?usage: pack-agent-bundle.sh <device-dir> <aria2c-path> <output.tgz>}"
 shift 3
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-}"
+VERIFIER="${IRIS_SSH_KEYGEN:-}"
+AEAD="${IRIS_AEAD_HELPER:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --ssh-keygen)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || exit 2
+      VERIFIER="$2"; shift 2 ;;
     --instruction-roots-dir)
       [ "$#" -ge 2 ] && [ -n "$2" ] \
         || { echo "pack-agent-bundle: --instruction-roots-dir needs a value" >&2; exit 2; }
@@ -36,6 +41,37 @@ done
 
 [ -d "$DEVICE/agent" ] || { echo "pack-agent-bundle: no agent/ under $DEVICE" >&2; exit 1; }
 [ -f "$ARIA2" ] || { echo "pack-agent-bundle: aria2c not found: $ARIA2" >&2; exit 1; }
+elf_arch() {
+  python3 - "$1" <<'PYTHON'
+import struct, sys
+with open(sys.argv[1], 'rb') as source:
+    header = source.read(20)
+if len(header) != 20 or header[:6] != b'\x7fELF\x02\x01':
+    raise SystemExit('pack-agent-bundle: unsupported ELF executable')
+machine = struct.unpack('<H', header[18:20])[0]
+if machine not in (62, 183):
+    raise SystemExit('pack-agent-bundle: unsupported ELF architecture')
+print('amd64' if machine == 62 else 'arm64')
+PYTHON
+}
+arch="$(elf_arch "$ARIA2")"
+if [ -z "$VERIFIER" ]; then
+  VERIFIER="$(cd "$(dirname "$0")/.." && pwd)/bin/ssh-keygen-$arch"
+fi
+[ -f "$VERIFIER" ] && [ -s "$VERIFIER" ] \
+  || { echo "pack-agent-bundle: missing static verifier; run tools/build-ssh-verifiers.sh" >&2; exit 1; }
+[ "$(elf_arch "$VERIFIER")" = "$arch" ] \
+  || { echo "pack-agent-bundle: verifier architecture does not match aria2c" >&2; exit 1; }
+VERIFIER_LICENSE="$(dirname "$VERIFIER")/ssh-keygen.LICENCE"
+[ -f "$VERIFIER_LICENSE" ] && [ -s "$VERIFIER_LICENSE" ] \
+  || { echo "pack-agent-bundle: missing ssh-keygen.LICENCE" >&2; exit 1; }
+if [ -z "$AEAD" ]; then
+  AEAD="$(cd "$(dirname "$0")/.." && pwd)/bin/iris-aead-$arch"
+fi
+[ -s "$AEAD" ] && [ "$(elf_arch "$AEAD")" = "$arch" ] \
+  || { echo "pack-agent-bundle: missing/wrong-architecture AEAD helper; run tools/build-instruction-crypto.sh" >&2; exit 1; }
+AEAD_LICENSE="$(dirname "$AEAD")/iris-aead.LICENCE"
+[ -s "$AEAD_LICENSE" ] || { echo "pack-agent-bundle: missing iris-aead.LICENCE" >&2; exit 1; }
 [ -n "$ROOTS" ] || {
   echo "pack-agent-bundle: --instruction-roots-dir or IRIS_INSTRUCTION_ROOTS_DIR is required" >&2
   exit 1
@@ -56,6 +92,10 @@ cp "$DEVICE/agent/peer-transfer-hook.sh" "$STAGE/agent/"
 cp "$DEVICE/verify_image.py" "$STAGE/agent/"    # so the agent's "import verify_image" works
 cp "$DEVICE/bootstrap.sh" "$DEVICE/guestshell-start.sh" "$DEVICE/rotate-logs.sh" "$STAGE/"
 cp "$ARIA2" "$STAGE/aria2c"
+cp "$VERIFIER" "$STAGE/agent/ssh-keygen"
+cp "$VERIFIER_LICENSE" "$STAGE/agent/ssh-keygen.LICENCE"
+cp "$AEAD" "$STAGE/agent/iris-aead"
+cp "$AEAD_LICENSE" "$STAGE/agent/iris-aead.LICENCE"
 PYTHONPATH="$(cd "$(dirname "$0")" && pwd)${PYTHONPATH:+:$PYTHONPATH}" \
   python3 - "$ROOTS" "$STAGE" <<'PYTHON'
 import sys
@@ -68,14 +108,15 @@ except InstructionKeyError as exc:
           file=sys.stderr)
     raise SystemExit(1)
 PYTHON
-chmod +x "$STAGE/aria2c" "$STAGE/bootstrap.sh" "$STAGE/guestshell-start.sh" \
+chmod +x "$STAGE/aria2c" "$STAGE/agent/ssh-keygen" "$STAGE/agent/iris-aead" "$STAGE/bootstrap.sh" "$STAGE/guestshell-start.sh" \
          "$STAGE/rotate-logs.sh" "$STAGE/agent/peer-transfer-hook.sh" 2>/dev/null || true
 # Tar an explicit file list (NOT '.') so there's no './' top-dir entry. On the
 # device, guest-share is SELinux-labeled and denies chmod/utime even to the
 # owner, so extracting a './' entry fails. Extract on-box with:
 #   tar xzf bundle.tgz -C <dir> --no-same-owner --no-same-permissions -m
 tar czf "$TMP_BUNDLE" -C "$STAGE" agent bootstrap.sh guestshell-start.sh \
-  rotate-logs.sh aria2c iris-signers.allowed_signers iris-root.allowed_signers
+  rotate-logs.sh aria2c \
+  iris-signers.allowed_signers iris-root.allowed_signers
 DIGEST="$( (shasum -a 256 "$TMP_BUNDLE" 2>/dev/null \
   || sha256sum "$TMP_BUNDLE") | awk '{print $1}')"
 case "$DIGEST" in

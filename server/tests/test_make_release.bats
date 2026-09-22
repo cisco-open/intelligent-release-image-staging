@@ -42,6 +42,7 @@
 
   for path in \
     iris/docs/zensical/index.md \
+    iris/docs/dev/README.md \
     iris/zensical.toml \
     iris/requirements-docs.txt \
     iris/requirements-dev.txt \
@@ -59,15 +60,24 @@
     iris/device/container/entrypoint.sh \
     iris/device/container/reconcile.sh \
     iris/tools/build-device-image.sh \
+    iris/tools/iris-aead.c \
+    iris/tools/build-instruction-crypto.sh \
+    iris/tools/build-instruction-crypto-inner.sh \
+    iris/tools/build-instruction-crypto.Dockerfile \
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh \
     iris/tools/check-host-time.sh \
     iris/tools/api-exercise.py \
+    iris/tools/api_exercise_fixtures.py \
     iris/tools/test_api_exercise.py \
     iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
+  tar tzf "$FIX/release/iris.tgz" | grep -qx 'iris/tools/aria2c-source/README.md' || return 1
+  run env PYTHONPATH="$FIX/release/iris/tools" python3 -c \
+    'from api_exercise_fixtures import exercise; assert callable(exercise)'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   for template in roles.csv.example schedules.csv.example; do
     tar xOzf "$FIX/release/iris.tgz" "iris/fleet/$template" \
       | cmp "$FIX/fleet/$template" - || return 1
@@ -92,9 +102,9 @@ _make_release_fixture() {
   git -C "$FIX" init -q
   git -C "$FIX" config user.email t@example.com
   git -C "$FIX" config user.name t
-  mkdir -p "$FIX/docs/zensical" "$FIX/server/certs" "$FIX/server/webroot/fonts" \
+  mkdir -p "$FIX/docs/zensical" "$FIX/docs/dev" "$FIX/server/certs" "$FIX/server/webroot/fonts" \
            "$FIX/device/xr/out" "$FIX/device/container" \
-           "$FIX/tools/aria2c-patches" "$FIX/tools/aria2c-build" "$FIX/lab" \
+           "$FIX/tools/aria2c-patches" "$FIX/tools/aria2c-build" "$FIX/tools/licenses" "$FIX/lab" \
            "$FIX/kubernetes" "$FIX/fleet"
   for f in README.md CHANGELOG.md DEVELOPMENT.md CONTRIBUTING.md TESTING.md \
            LICENSE NOTICE SECURITY.md CODE_OF_CONDUCT.md zensical.toml \
@@ -102,6 +112,8 @@ _make_release_fixture() {
   echo "0.0.0-test" > "$FIX/VERSION"
   cp "$repo/.gitignore" "$repo/.dockerignore" "$FIX/"
   echo "# index" > "$FIX/docs/zensical/index.md"
+  # docs/ ships whole, so the contributor folder travels with the manual.
+  echo "# dev" > "$FIX/docs/dev/README.md"
   echo "# server" > "$FIX/server/tracker.py"
   echo "PUBLIC CERT" > "$FIX/server/certs/cisco_bulkhash_verify.pem"
   echo "# device" > "$FIX/device/bootstrap.sh"
@@ -112,15 +124,30 @@ _make_release_fixture() {
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
+           build-ssh-verifier.sh build-ssh-verifiers.sh \
+           iris-aead.c build-instruction-crypto.sh build-instruction-crypto-inner.sh \
+           build-instruction-crypto.Dockerfile \
            agent-source-freshness.sh start-compose-server.sh check-host-time.sh vendor-swagger-ui.sh \
-           api-exercise.py test_api_exercise.py; do
+           api-exercise.py api_exercise_fixtures.py test_api_exercise.py; do
     echo "# $f" > "$FIX/tools/$f"
   done
+  cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
+  cp "$repo/tools/licenses/musl-COPYRIGHT" "$FIX/tools/licenses/musl-COPYRIGHT"
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"
   cp "$repo/tools/ioxclient.sha256" "$FIX/tools/ioxclient.sha256"
   echo "patch" > "$FIX/tools/aria2c-patches/0001.patch"
   echo "FROM scratch" > "$FIX/tools/aria2c-build/Dockerfile"
   echo "# build" > "$FIX/tools/aria2c-build/build.sh"
+  mkdir -p "$FIX/tools/aria2c-source"
+  echo "source distribution" > "$FIX/tools/aria2c-source/README.md"
+  # The tested aria2c clients are committed, and SHIP lists them, so the
+  # fixture has to carry them too or --error-unmatch aborts the assembly.
+  mkdir -p "$FIX/bin" "$FIX/deliverables"
+  echo "fake x86_64 client" > "$FIX/bin/aria2c"
+  echo "fake x86_64 client" > "$FIX/deliverables/aria2c-x86_64"
+  echo "fake aarch64 client" > "$FIX/deliverables/aria2c-aarch64"
+  # spares next to them stay ignored and must never reach the tarball
+  echo "stale" > "$FIX/deliverables/aria2c-x86_64.old-6patch"
   echo "# run" > "$FIX/lab/device-run.sh"; echo "# run" > "$FIX/lab/xr-run.sh"
   cp "$repo/lab/xr-dialogue.pl" "$FIX/lab/xr-dialogue.pl"
   echo "# policy" > "$FIX/lab/iris-ssh-policy.sh"
@@ -144,7 +171,8 @@ _make_release_fixture() {
   echo "planted" > "$FIX/fleet/devices.csv"
   # every planted file must really be ignored by the repo's own rules
   for f in server/.env server/certs/lab-private.key server/docker-compose.override.yml \
-           server/webroot/fonts/SharpSans-Bold.woff2 device/xr/out/iris-xr.rpm fleet/devices.csv; do
+           server/webroot/fonts/SharpSans-Bold.woff2 device/xr/out/iris-xr.rpm fleet/devices.csv \
+           deliverables/aria2c-x86_64.old-6patch; do
     git -C "$FIX" check-ignore -q "$f" || { echo "fixture: $f is not gitignored" >&2; return 1; }
   done
 }
@@ -157,7 +185,8 @@ _make_release_fixture() {
   for absent in iris/server/.env iris/server/certs/lab-private.key \
                 iris/server/docker-compose.override.yml \
                 iris/server/webroot/fonts/SharpSans-Bold.woff2 \
-                iris/device/xr/out/iris-xr.rpm iris/fleet/devices.csv; do
+                iris/device/xr/out/iris-xr.rpm iris/fleet/devices.csv \
+                iris/deliverables/aria2c-x86_64.old-6patch; do
     if echo "$members" | grep -qx "$absent"; then
       echo "leaked into the tarball: $absent" >&2; return 1
     fi
@@ -169,6 +198,8 @@ _make_release_fixture() {
   for present in iris/server/tracker.py iris/server/certs/cisco_bulkhash_verify.pem \
                  iris/tools/aria2c-patches/0001.patch iris/fleet/devices.csv.example \
                  iris/lab/iris-ssh-policy.sh \
+                 iris/bin/aria2c iris/deliverables/aria2c-x86_64 \
+                 iris/deliverables/aria2c-aarch64 \
                  iris/bin/.gitkeep iris/artifacts/.gitkeep iris/MANIFEST.txt; do
     echo "$members" | grep -qx "$present" || { echo "missing: $present" >&2; return 1; }
   done

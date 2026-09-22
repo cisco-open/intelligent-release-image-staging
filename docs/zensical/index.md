@@ -4,53 +4,42 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# IRIS Documentation
+# IRIS documentation
 
-IRIS — Intelligent Release and Image Staging — distributes Cisco images and
-patches through a private peer-to-peer swarm. Devices verify and stage assigned
-images; operators remain responsible for software installation and reloads.
+IRIS, short for Intelligent Release and Image Staging, stages Cisco images and
+patches on your devices. Staging means copying an image to the device's flash
+and checking its hash, then stopping. The device keeps running its current
+software until you install the image yourself. Devices take pieces of an image
+from each other, not from the server alone. The agent runs in Guest Shell on
+Catalyst 9000 series switches and Catalyst 8000 series routers, or as the IOx
+app on switches with app-hosting storage and on Catalyst 8000 series routers.
+Industrial Ethernet switches with app hosting run the IOx app, and Cisco 8000
+series and NCS routers run the agent in IOS-XR appmgr. See [Supported devices and platforms](install/supported-devices.md) for which
+platforms are validated.
 
 !!! warning "Stage only"
     IRIS never installs or activates a staged software image, changes boot
     variables, or reloads a device. Onboarding deploys the IRIS agent, not the
     software image being staged.
 
-Use the [Console](console.md) for everyday operations and the
-[API reference](swagger/index.html) for automation. Server deployment and
-offline trust provisioning are separate administrative tasks.
-
-## What IRIS provides
-
-- Image upload/import, device inventory, assignments, and agent lifecycle management.
-- Peer-assisted delivery governed by device assignments and peer policy.
-- Staging status, transfer measurements, audit events, and optional telemetry export.
-- Guest Shell, IOx, and IOS-XR appmgr deployment paths for eligible Catalyst,
-  Industrial Ethernet, Cisco 8000, and NCS devices.
-
-Platform family names describe deployment paths, not compatibility with every
-model or software release. Check [device requirements](device-agents.md) before
-onboarding. Peer delivery depends on connectivity, policy, and available pieces;
-it is not a fixed performance guarantee.
-
 ## Where to start
 
-| Task | Guide |
+| If you want to | Read |
 | --- | --- |
-| Set up IRIS and stage an image | [Getting started](getting-started.md) |
-| Manage images and devices | [Console](console.md) |
-| Automate operations | [API reference](swagger/index.html), [API testing and limits](api-testing.md) |
-| Plan a fleet rollout | [Network workflows](fleet-workflows.md) |
-| Choose device connectivity | [Management types](management-type.md) |
-| Understand trust and network access | [Architecture](architecture.md), [Security](security.md), [Network ports](network-ports.md) |
-| Deploy on separate hosts or Kubernetes | [Docker hosts](docker-hosts.md), [Kubernetes](kubernetes.md) |
-| Investigate a problem | [Troubleshooting](troubleshooting.md) |
+| Set up IRIS on a host that has never run it | [Install IRIS](install/index.md) |
+| Run IRIS every day | [Run IRIS day to day](user-guide/index.md) |
+| Keep the server running: upgrades, backups, credentials, signing keys | [Keep IRIS running](admin-guide/index.md) |
+| See how IRIS works | [How IRIS works](architecture/index.md) |
+| Look up one value, route, file format or term | [Look up a setting, route or term](reference/index.md) |
 
-## Further reference
+## Common tasks
 
-Use [Operations](operations.md) for recovery and maintenance,
-[Reference](reference.md) for configuration and API behavior, and
-[Observability](observability.md) for dashboards. [Telemetry export](telemetry-export.md)
-explains what transfer measurements do and do not establish.
-
-Implementation and verification details live in [Development](development.md)
-and [Validation](validation.md), separately from the operator workflow.
+| Task | Page |
+| --- | --- |
+| Deploy the server | [Install on one Docker host](install/one-docker-host.md) |
+| Onboard a device | [Add and onboard devices](user-guide/onboarding.md) |
+| Stage your first image | [Stage your first image](user-guide/first-image.md) |
+| Check staging status | [Assign images and check staging status](user-guide/assignments.md) |
+| Schedule a maintenance window | [Schedule maintenance windows](user-guide/scheduling.md) |
+| Upgrade IRIS to a new release | [Upgrade to a new release](admin-guide/upgrade.md) |
+| Work out why something failed | [Troubleshoot: symptoms and first steps](user-guide/troubleshooting.md) |

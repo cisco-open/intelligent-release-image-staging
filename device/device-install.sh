@@ -36,6 +36,11 @@
 # would drop every other IOx app's VLAN from the switch's single app-hosting
 # uplink. Teardown removes only the IRIS VLAN from that list.
 set -euo pipefail
+case "${IRIS_PEER_TLS_MODE:-disabled}" in
+  disabled|required) ;;
+  *) echo "invalid IRIS_PEER_TLS_MODE" >&2; exit 1 ;;
+esac
+
 
 : "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_URL:?set CATALOG_URL}"; : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"
@@ -207,6 +212,7 @@ agent_conf() {
 cat <<EOF
 catalog_url = $CATALOG_URL
 catalog_token = $CATALOG_TOKEN
+peer_tls_mode = ${IRIS_PEER_TLS_MODE:-disabled}
 device_id = $DEVICE_ID
 stage_dir = $STAGE
 rpc_secret = $RPC_SECRET

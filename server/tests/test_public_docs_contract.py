@@ -27,11 +27,24 @@ def test_introductory_api_examples_are_registered_console_operations():
     registered = {(route.method, normalize(route.path))
                   for route in api_routes.ROUTES if route.service == "console"}
     examples = []
+    # The manual reorganized into four guides; these are the pages that carry
+    # introductory API examples now. reference/device-apis.md is deliberately
+    # absent: it documents catalog and tracker routes, which are not Console
+    # operations and would fail this gate.
     for name in ("docs/index.html", "docs/app.js",
-                 "docs/zensical/getting-started.md", "docs/zensical/console.md",
-                 "docs/zensical/fleet-workflows.md", "docs/zensical/reference.md",
-                 "docs/zensical/device-agents.md", "docs/zensical/iox.md",
-                 "docs/zensical/operations.md"):
+                 "docs/zensical/install/certificates-and-tokens.md",
+                 "docs/zensical/reference/index.md",
+                 "docs/zensical/reference/console-api.md",
+                 "docs/zensical/reference/peer-policy-api.md",
+                 "docs/zensical/user-guide/console.md",
+                 "docs/zensical/user-guide/onboarding.md",
+                 "docs/zensical/user-guide/assignments.md",
+                 "docs/zensical/user-guide/scheduling.md",
+                 "docs/zensical/user-guide/roles.md",
+                 "docs/zensical/user-guide/images.md",
+                 "docs/zensical/admin-guide/rotations.md",
+                 "docs/zensical/admin-guide/recovery.md",
+                 "docs/zensical/user-guide/automation.md"):
         text = (ROOT / name).read_text()
         for method, path in re.findall(
                 r"\b(GET|POST|PUT|PATCH|DELETE) (/api/v1/(?:[A-Za-z0-9_/{}/.-]|<[A-Za-z_][A-Za-z0-9_-]*>)+)", text):
@@ -50,8 +63,9 @@ def test_static_workflow_fallback_matches_initial_script_copy():
         assert html.unescape(actual) == expected
 
 
-def test_api_test_guide_describes_persisted_default_browser_identity():
-    guide = (ROOT / "docs/zensical/api-testing.md").read_text()
+def test_install_guide_describes_persisted_default_browser_identity():
+    guide = (
+        ROOT / "docs/zensical/install/certificates-and-tokens.md").read_text()
     assert "tls/console-fallback.pem.age" in guide
     assert "reused on restart" in guide
     assert "not durable across" not in guide

@@ -978,7 +978,7 @@ def test_role_qos_routes_map_both_tiers(method, suffix):
 
 
 @pytest.fixture
-def policy_tiers(tmp_path, monkeypatch):
+def policy_tiers(tmp_path, monkeypatch, request):
     import gui_app
     import gui_fleet
     import peer_policy
@@ -996,11 +996,21 @@ def policy_tiers(tmp_path, monkeypatch):
     management = management_api.make_server(
         "127.0.0.1", 0, app, fleet=fleet, catalog=store, certfile=str(cert),
         keyfile=str(key), management_token_file=str(token))
-    _thread(management)
+    management_thread = _thread(management)
+
+    def stop_server(server, thread):
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+            thread.join(timeout=3)
+
+    request.addfinalizer(lambda: stop_server(management, management_thread))
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server("127.0.0.1", 0,
         "https://localhost:%d" % management.server_address[1], str(token), str(cert))
-    _thread(console)
+    console_thread = _thread(console)
+    request.addfinalizer(lambda: stop_server(console, console_thread))
     headers = {}
     def request(tier, method, suffix, body=None, duplicates=False,
                 authorized=True, declared_length=None, match=True,
@@ -1033,12 +1043,53 @@ def policy_tiers(tmp_path, monkeypatch):
         return result
     status, response_headers, login = request("console", "POST", "/login",
         {"username": "admin", "password": "pw"})
-    assert status == 200
+    assert status == 200, {"status": status, "problem": login}
     headers.update(Cookie=response_headers["Set-Cookie"].split(";", 1)[0])
     headers["X-CSRF-Token"] = login["csrf"]
     yield request, fleet, store
-    console.shutdown(); console.server_close()
-    management.shutdown(); management.server_close()
+
+
+@pytest.mark.parametrize("failure", ["console-construction", "login-upstream"])
+def test_policy_tiers_setup_failure_closes_started_servers(
+        tmp_path, monkeypatch, failure):
+    """Setup failures retain their diagnosis without leaking listener threads."""
+    finalizers = []
+    started = []
+
+    class FixtureRequest:
+        addfinalizer = staticmethod(finalizers.append)
+
+    original_thread = _thread
+
+    def record_thread(server):
+        thread = original_thread(server)
+        started.append((server, thread))
+        return thread
+
+    monkeypatch.setitem(globals(), "_thread", record_thread)
+    if failure == "console-construction":
+        def unavailable_console(*args, **kwargs):
+            raise gui_server.ConsoleConfigurationError("fixture console unavailable")
+        monkeypatch.setattr(gui_server, "make_server", unavailable_console)
+        expected = gui_server.ConsoleConfigurationError
+        message = "fixture console unavailable"
+    else:
+        def unavailable_upstream(*args, **kwargs):
+            raise ConnectionRefusedError("fixture upstream unavailable")
+        monkeypatch.setattr(gui_server, "_management_request", unavailable_upstream)
+        expected = AssertionError
+        message = "management-api-unavailable"
+    fixture = policy_tiers.__wrapped__(tmp_path, monkeypatch, FixtureRequest())
+    try:
+        with pytest.raises(expected, match=message):
+            next(fixture)
+        assert len(finalizers) == (1 if failure == "console-construction" else 2)
+    finally:
+        for finalize in reversed(finalizers):
+            finalize()
+        fixture.close()
+    assert all(server.socket.fileno() == -1 for server, _ in started)
+    assert all(not thread.is_alive() for _, thread in started)
 
 
 @pytest.mark.parametrize("method,suffix,body", [

@@ -5079,3 +5079,16 @@ def test_iox_on_a_router_binds_both_preflights():
     bound = gui_onboard.bind_preflight(resolved, evidence)
     assert bound["device_identity"] == "FDO123" and bound["model"] == "C8000V"
     assert bound["nat_outside_owned"] == "0" and bound["file_prompt_quiet_preexisting"] == "1"
+
+
+def test_build_env_inherits_saved_peer_mode_over_process_default(tmp_path, monkeypatch):
+    import peer_tls_settings
+    monkeypatch.setenv('IRIS_CONFIG', str(tmp_path))
+    monkeypatch.setenv('IRIS_PEER_TLS_MODE', 'disabled')
+    peer_tls_settings.save('required')
+    svc = _svc(lambda *args: 0)
+    try:
+        _, env = svc._build_env('d1', mint=False, env_extra={'IRIS_PEER_TLS_MODE': 'disabled'})
+        assert env['IRIS_PEER_TLS_MODE'] == 'required'
+    finally:
+        svc.shutdown()

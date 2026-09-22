@@ -50,11 +50,15 @@ import collections
 import csv
 import io
 import os
+import socket
+import ssl
 import subprocess
 import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+
+import trust
 
 _DOWNLOAD_CHUNK = 1024 * 1024
 _OPENSSL_TIMEOUT = 60
@@ -117,6 +121,22 @@ class _NoDowngradeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _download_error_detail(exc):
+    """Useful failure categories without leaking request URLs or credentials."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, socket.gaierror):
+        return "DNS lookup failed; check the server DNS resolver or upload the feed offline"
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "TLS certificate verification failed; check server time and trusted CAs"
+    if isinstance(reason, ssl.SSLError):
+        return "TLS connection failed; check the server's HTTPS path"
+    if isinstance(reason, TimeoutError):
+        return "connection timed out; check server connectivity or upload the feed offline"
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection refused; check server connectivity or upload the feed offline"
+    return exc.__class__.__name__
+
+
 def fetch(url, timeout, out_path):
     """Stream-download `url` to `out_path`, atomically: a temp file in the
     same directory is renamed into place only once every byte has arrived,
@@ -130,7 +150,9 @@ def fetch(url, timeout, out_path):
     os.makedirs(dest_dir, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=dest_dir, prefix=".bulkhash-",
                                     suffix=".tmp")
-    opener = urllib.request.build_opener(_NoDowngradeRedirectHandler)
+    opener = urllib.request.build_opener(
+        _NoDowngradeRedirectHandler,
+        urllib.request.HTTPSHandler(context=trust.ssl_context()))
     try:
         with os.fdopen(fd, "wb") as f:
             try:
@@ -166,10 +188,8 @@ def fetch(url, timeout, out_path):
                 raise BulkHashError(
                     "download failed: HTTP %d" % exc.code) from exc
             except Exception as exc:
-                # class name only: urllib error text can embed request
-                # details (host, path) that need not end up in logs/UI.
                 raise BulkHashError(
-                    "download failed: %s" % exc.__class__.__name__) from exc
+                    "download failed: %s" % _download_error_detail(exc)) from exc
         os.replace(tmp_path, out_path)
     finally:
         if os.path.exists(tmp_path):

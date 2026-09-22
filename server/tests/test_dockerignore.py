@@ -187,7 +187,7 @@ def test_material_the_image_needs_is_included(rel, patterns):
 SWAGGER_FILES = (
     "index.html", "swagger-initializer.js", "swagger-ui-bundle.js",
     "swagger-ui.css", "iris-swagger.css", "iris-openapi32.js",
-    "LICENSE", "NOTICE", "SOURCE.md", "package.json",
+    "LICENSE", "NOTICE", "SOURCE.txt", "package.json",
     "swagger-ui-bundle.js.LICENSE.txt",
 )
 

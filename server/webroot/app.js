@@ -794,6 +794,16 @@
     }, 250);
   }
 
+  function peerTlsCell(d) {
+    var t = d.peer_tls || {}, mode = t.runtime_source === 'aria2_rpc' ? t.runtime_mode : 'unknown';
+    var known = mode === 'required' || mode === 'disabled';
+    var stale = !d.last_seen || Date.now() / 1000 - d.last_seen >= 600;
+    var label = known ? (mode === 'required' ? 'required' : 'off') : 'unknown';
+    var configured = t.configured_mode === 'required' ? 'required' : t.configured_mode === 'disabled' ? 'off' : 'unknown';
+    var title = 'Torrent transport: daemon policy last reported ' + (d.last_seen ? fmtDate(d.last_seen) : 'never') +
+      '. Configured: ' + configured + '. This is not a negotiated connection measurement.';
+    return '<span class="badge ' + (known && !stale ? 'badge-queued' : 'badge-off') + '" title="' + esc(title) + '">TLS ' + label + (stale && known ? ' (stale)' : '') + '</span>';
+  }
   function telemetryCell(d) {
     if (d.telemetry_enabled === false) {
       return '<span class="badge badge-off" title="the agent sends no telemetry">off</span>';
@@ -1651,7 +1661,7 @@
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
-        '<td>' + telemetryCell(d) + '</td>' +
+        '<td>' + telemetryCell(d) + ' ' + peerTlsCell(d) + '</td>' +
         '<td><span class="peer-intent badge ' + (peerPolicyAssigned(d.device_id) ? 'badge-fail' : 'badge-off') + '">' +
         (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
         '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
@@ -5315,12 +5325,19 @@
     var gc = s.gui_cert || {};
     var certStatus = document.getElementById('cert-status');
     if (gc.source === 'custom' || gc.source === 'built-in') {
-      certStatus.innerHTML = (gc.source === 'custom'
-          ? '<span class="badge badge-running">custom</span> '
-          : '<span class="badge badge-queued">deployment default</span> ') +
-        esc(gc.subject || 'unknown') +
-        ' — expires ' + esc(gc.not_after || 'unknown') +
-        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>';
+      var expiry = Date.parse(gc.not_after || '');
+      var expired = Number.isFinite(expiry) && expiry <= Date.now();
+      var expiring = Number.isFinite(expiry) && !expired && expiry - Date.now() < 30 * 86400000;
+      var expiryBadge = !Number.isFinite(expiry) ? '' : '<span class="badge ' +
+        (expired ? 'badge-fail' : expiring ? 'badge-queued' : 'badge-ok') + '">' +
+        (expired ? 'Expired' : expiring ? 'Expires soon' : 'In date') + '</span>';
+      certStatus.innerHTML = '<div class="tls-certificate-heading"><strong>Active browser identity</strong>' +
+        '<span class="badge badge-running">' + (gc.source === 'custom' ? 'Custom' : 'Deployment default') +
+        '</span>' + expiryBadge + '</div><dl class="tls-certificate-facts">' +
+        '<div><dt>Issued to</dt><dd>' + esc(gc.subject || 'Unavailable') + '</dd></div>' +
+        '<div><dt>Expires</dt><dd>' + esc(gc.not_after || 'Unavailable') + '</dd></div>' +
+        '<div class="tls-fingerprint"><dt>SHA-256 fingerprint</dt><dd>' +
+        esc(gc.fingerprint_sha256 || 'Unavailable') + '</dd></div></dl>';
     } else {
       certStatus.textContent =
         'Certificate details are unavailable.';
@@ -5330,6 +5347,8 @@
     document.getElementById('cert-revert').hidden = false;
     // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
     var trust = s.trust || [];
+    document.getElementById('trust-tbl').hidden = !trust.length;
+    document.getElementById('trust-empty').hidden = !!trust.length;
     var caSrcNow = (s.ca_trust || {}).url;
     var bundleLabel = !caSrcNow || caSrcNow === CA_CISCO_URL ? 'Cisco Trusted Root Store'
       : (caSrcNow === CA_MOZILLA_URL ? 'Mozilla CA bundle (curl.se)' : 'Custom URL');
@@ -5423,8 +5442,61 @@
     // --- Image verification (KGV / Cisco Bulk Hash reconciler, Task 5) ---
     // Its own dedicated GET, unlike the panes above -- not part of the big
     // /api/v1/settings blob (see the endpoint contract in Task 4's report).
+    await refreshPeerTls();
     await refreshImageVerificationSettings();
   }
+  var peerTlsMode = null;
+  var peerTlsCanChange = false;
+  var peerTlsPoll = null;
+  async function refreshPeerTls() {
+    var toggle = document.getElementById('peer-tls-toggle');
+    var save = document.getElementById('peer-tls-save');
+    var status = document.getElementById('peer-tls-status');
+    clearTimeout(peerTlsPoll);
+    try {
+      var r = await fetch('/api/v1/settings/peer-tls');
+      if (!r.ok) throw new Error('unavailable');
+      var data = await r.json();
+      if (!data || !['disabled', 'required'].includes(data.mode) || !data.origin || typeof data.can_change !== 'boolean') throw new Error('invalid');
+      peerTlsMode = data.mode;
+      peerTlsCanChange = data.can_change;
+      toggle.checked = data.mode === 'required';
+      toggle.disabled = !peerTlsCanChange;
+      save.disabled = true;
+      var label = data.origin.active_mode === 'required' ? 'TLS required' : data.origin.active_mode === 'disabled' ? 'TLS off' : 'not active';
+      status.textContent = 'Origin seeder: ' + label + ' · ' + data.origin.state +
+        (data.active_devices ? ' · ' + data.active_devices + ' device(s) must be undeployed before switching.' : '') +
+        (data.active_jobs ? ' · Wait for ' + data.active_jobs + ' device job(s) to finish.' : '');
+      if (data.origin.active_mode !== data.mode || data.origin.state !== 'running') {
+        peerTlsPoll = setTimeout(function () {
+          if (!document.getElementById('settings-pane-tls').hidden) refreshPeerTls();
+        }, 2000);
+      }
+    } catch (e) {
+      toggle.disabled = true; save.disabled = true; peerTlsMode = null;
+      status.textContent = 'Peer transport status unavailable. Reload before changing the mode.';
+    }
+  }
+  document.getElementById('peer-tls-toggle').addEventListener('change', function () {
+    document.getElementById('peer-tls-save').disabled = !peerTlsCanChange ||
+      (this.checked ? 'required' : 'disabled') === peerTlsMode;
+  });
+  document.getElementById('peer-tls-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (!peerTlsCanChange || peerTlsMode === null) return;
+    var next = document.getElementById('peer-tls-toggle').checked ? 'required' : 'disabled';
+    if (next === peerTlsMode) return;
+    if (!confirm(next === 'required' ? 'Require TLS for all torrent traffic? The origin seeder will restart. Onboard devices afterward so they receive the same mode.' : 'Turn off peer TLS? Torrent traffic will no longer require encryption. The origin seeder will restart.')) return;
+    var msg = document.getElementById('peer-tls-msg');
+    var save = document.getElementById('peer-tls-save');
+    msg.textContent = ''; save.disabled = true;
+    var r = await settingsWrite('/api/v1/settings/peer-tls', {mode: next, expected_mode: peerTlsMode}, msg);
+    if (r) {
+      var result = await settingsResult(r, msg, function (body) { return body.applied === true && body.mode === next; });
+      if (result) msg.textContent = 'Mode saved. Checking the origin seeder…';
+    }
+    await refreshPeerTls();
+  });
   // ---- Settings: Image verification (KGV / Cisco Bulk Hash reconciler) ----
   // Schedule select + hour, Refresh now, offline .tar upload. Its own
   // dedicated GET/POST at /api/v1/settings/image-verification and
@@ -5708,6 +5780,7 @@
   function syncPassphraseRow() {
     var t = document.getElementById('cert-key').value;
     document.getElementById('cert-passphrase-row').hidden = !keyLooksEncrypted(t);
+    if (keyLooksEncrypted(t)) document.querySelector('#cert-form details').open = true;
   }
   document.getElementById('cert-key').addEventListener('input', syncPassphraseRow);
   var PEM_CERTIFICATE_RE = /-----BEGIN CERTIFICATE-----/;
@@ -5788,6 +5861,7 @@
       var pw = document.getElementById('cert-passphrase').value;
       if (!pw) {
         document.getElementById('cert-passphrase-row').hidden = false;
+        document.querySelector('#cert-form details').open = true;
         msg.textContent = 'This private key is passphrase-protected — enter its passphrase.';
         return;
       }

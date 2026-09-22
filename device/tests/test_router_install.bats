@@ -238,7 +238,18 @@ case "$cmds" in
       echo "__IRIS_VERIFY_RUNNING__"
       echo "interface VirtualPortGroup${VPG_NUMBER}"
       echo " ip address ${APP_GATEWAY} ${APP_MASK}"
+      if [ "$MANAGEMENT_TYPE" = router-nat ]; then
+        echo " ip nat inside"
+      fi
       echo " no shutdown"
+      if [ "$MANAGEMENT_TYPE" = router-nat ]; then
+        echo "interface ${NAT_INTERFACE}"
+        echo " ip nat outside"
+        echo "ip access-list standard IRIS-NAT-${VPG_NUMBER}"
+        echo " permit 10.8.0.0 0.0.0.3"
+        echo "ip nat inside source list IRIS-NAT-${VPG_NUMBER} interface ${NAT_INTERFACE} overload"
+        echo "ip nat inside source static tcp ${APP_IP} ${BT_LISTEN_PORT:-6881} interface ${NAT_INTERFACE} ${BT_LISTEN_PORT:-6881}"
+      fi
       echo "app-hosting appid guestshell"
       echo " app-vnic gateway0 virtualportgroup ${VPG_NUMBER} guest-interface 0"
       echo "  guest-ipaddress ${APP_IP} netmask ${APP_MASK}"
@@ -327,6 +338,40 @@ _router_install_run_live() {
   [ "$status" -eq 0 ] || return 1
   grep -qx "lkg_key = $key" \
     "$ARTDIR/staging/iris-agent-router-1-$TEST_CAP.conf"
+}
+
+@test "router staging persists both peer TLS modes for a fresh agent process" {
+  _router_install_stub_setup
+  for management_type in router-routed router-nat; do
+    for mode in required disabled; do
+      printf '0\n' > "$FAKE_STATE_DIR/apphost_n"
+      MANAGEMENT_TYPE="$management_type" NAT_INTERFACE=GigabitEthernet1 \
+        IRIS_PEER_TLS_MODE="$mode" run _router_install_run_live
+      [ "$status" -eq 0 ] || return 1
+      run env -u IRIS_PEER_TLS_MODE \
+        PYTHONPATH="$BATS_TEST_DIRNAME/../agent" python3 -c \
+        'import agent_config, sys; assert agent_config.load(sys.argv[1])["peer_tls_mode"] == sys.argv[2]' \
+        "$ARTDIR/staging/iris-agent-router-1-$TEST_CAP.conf" "$mode"
+      [ "$status" -eq 0 ] || return 1
+    done
+  done
+}
+
+@test "router peer TLS defaults to disabled when unset" {
+  run env -u IRIS_PEER_TLS_MODE bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"peer_tls_mode = disabled"* ]]
+}
+
+@test "router rejects invalid peer TLS before contacting the device or publishing credentials" {
+  _router_install_stub_setup
+  for mode in optional REQUIRED $'required\npeer_tls_mode = disabled'; do
+    IRIS_PEER_TLS_MODE="$mode" run _router_install_run_live
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"invalid IRIS_PEER_TLS_MODE"* ]] || return 1
+    [ ! -s "$FAKE_COMMAND_LOG" ] || return 1
+    [ ! -e "$ARTDIR/staging/iris-agent-router-1-$TEST_CAP.conf" ] || return 1
+  done
 }
 
 @test "router rejects an echoed writable-stage command without a success line" {

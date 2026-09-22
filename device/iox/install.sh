@@ -46,6 +46,11 @@
 #     (seconds; the app-hosting lifecycle polls -- see the note by their
 #     defaults below)
 set -euo pipefail
+case "${IRIS_PEER_TLS_MODE:-disabled}" in
+  disabled|required) ;;
+  *) echo "invalid IRIS_PEER_TLS_MODE" >&2; exit 1 ;;
+esac
+
 
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 
@@ -1056,6 +1061,7 @@ cat <<EOF
   run-opts 9 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
   run-opts 10 "-e IRIS_TELEMETRY_STREAM=$IRIS_TELEMETRY_STREAM"
   run-opts 11 "-e IRIS_LOG=$IRIS_LOG"
+  run-opts 15 "-e IRIS_PEER_TLS_MODE=${IRIS_PEER_TLS_MODE:-disabled}"
 EOF
 if [ -n "$SHARE_HOST_PATH" ]; then
 cat <<EOF

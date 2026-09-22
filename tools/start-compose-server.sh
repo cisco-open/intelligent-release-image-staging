@@ -12,12 +12,24 @@
 #
 # Everything a fresh clone is missing is checked BEFORE anything is built, and
 # reported as one list, so an install never fails ten minutes into a package
-# build on the next absent hand-in. The one input this script will never
+# build on the next absent hand-in. The pinned aria2c clients are committed to
+# this repository, so a normal clone already has them and nothing is fetched;
+# the one input this script supplies for itself is a client that has been
+# deleted from the working tree, which it replaces through tools/get-aria2c.sh
+# (checksum-verified against tools/aria2c.sha256, fail-closed) instead of
+# handing the operator a command to run. The one input this script will never
 # create is the instruction trust roots: those come from the custody ceremony
-# in docs/zensical/operations.md, and only their public halves are read here.
+# in docs/zensical/admin-guide/instruction-keys.md, and only their public
+# halves are read here.
 #
 # Usage: IRIS_INSTRUCTION_ROOTS_DIR=<dir with exactly two .pub> tools/start-compose-server.sh
 #        (the directory defaults to <repo>/instr-roots)
+#
+#   IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64  which aria2c clients to
+#                                                  install (default linux/amd64)
+#   ARIA2C_NO_DOWNLOAD=1                           forbid the fallback fetch;
+#                                                  restore or hand the clients
+#                                                  in instead
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,20 +37,44 @@ COMPOSE=(docker compose -f "$REPO/server/docker-compose.yml")
 IRIS_RUNTIME_UID=10001
 missing=()
 
-# server/Dockerfile COPYs bin/aria2c, the handed-in seeder client. That binary
-# is git-ignored on purpose -- only its checksum and provenance live in the
-# repository (tools/aria2c.sha256) -- so a fresh clone has none and the COPY
-# fails inside BuildKit with a cache-key error naming no remedy (issue #203).
-# Name the remedy here, before anything is built. The pin itself is still
-# enforced in the image build; this check is only about the file being present.
+# server/Dockerfile COPYs bin/aria2c, the seeder client. It is committed, as
+# is each deliverables/aria2c-<cpu> the device builders read, so a normal
+# clone has every client already and this block does nothing. It exists for
+# the working tree where one of them was deleted: without it the COPY fails
+# inside BuildKit with a cache-key error naming no remedy (issue #203). The
+# clients are prebuilt and tested per architecture, so replace a missing one
+# here rather than stopping to tell the operator to: tools/get-aria2c.sh
+# resolves it from a hand-in or this project's published release and refuses
+# anything that does not match tools/aria2c.sha256, so the fallback fetch is
+# never a trust decision. ARIA2C_NO_DOWNLOAD=1 forbids it, and the
+# missing-input report below then stands. The pin itself is still enforced
+# again in the image build; the checks after this are only about the files
+# being present.
+ARIA2C_PLATFORMS="${IRIS_DEVICE_PLATFORMS:-linux/amd64,linux/arm64}"
+aria2c_wanted=0
+[ -f "$REPO/bin/aria2c" ] || aria2c_wanted=1
+for platform in ${ARIA2C_PLATFORMS//,/ }; do
+  case "${platform##*/}" in
+    amd64|x86_64)  cpu=x86_64 ;;
+    arm64|aarch64) cpu=aarch64 ;;
+    *) continue ;;
+  esac
+  [ -f "$REPO/deliverables/aria2c-$cpu" ] || aria2c_wanted=1
+done
+if [ "$aria2c_wanted" -eq 1 ] && [ -z "${ARIA2C_NO_DOWNLOAD:-}" ]; then
+  "$REPO/tools/get-aria2c.sh" --for-platforms "$ARIA2C_PLATFORMS" \
+    || echo "!! could not install every pinned aria2c client for $ARIA2C_PLATFORMS" >&2
+fi
+
 if [ ! -f "$REPO/bin/aria2c" ]; then
-  missing+=("bin/aria2c (server seeder client) — run: tools/get-aria2c.sh amd64   [verifies against tools/aria2c.sha256; ARIA2C_DELIVERABLE points at a hand-in elsewhere]")
+  missing+=("bin/aria2c (server seeder client) — run: tools/get-aria2c.sh --for-platforms \"$ARIA2C_PLATFORMS\"   [verifies against tools/aria2c.sha256; ARIA2C_DELIVERABLE points at a hand-in elsewhere]")
 fi
 
 # The instruction trust roots. Every device package embeds them, and the build
 # fails closed without exactly two distinct public roots -- so check them
 # first, and NEVER create them: the private halves belong to two custodians at
-# separate sites (docs/zensical/operations.md, "Instruction-root ceremony").
+# separate sites (docs/zensical/admin-guide/instruction-keys.md,
+# "Instruction-root ceremony").
 # A disposable root is not a substitute for production trust. Only the .pub
 # halves are read, from a reviewed directory the operator points at.
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-$REPO/instr-roots}"
@@ -47,7 +83,7 @@ if [ -d "$ROOTS" ]; then
   pub_count="$(find "$ROOTS" -maxdepth 1 -type f -name '*.pub' | wc -l)"
 fi
 if [ "$pub_count" -ne 2 ]; then
-  missing+=("instruction trust roots — $ROOTS must hold exactly two public roots (*.pub), found $pub_count. Create them with the custody ceremony (docs/zensical/operations.md#instruction-root-ceremony-and-recovery), keep the private halves off this host, and point IRIS_INSTRUCTION_ROOTS_DIR at the directory holding only the two .pub files.")
+  missing+=("instruction trust roots — $ROOTS must hold exactly two public roots (*.pub), found $pub_count. Create them with the custody ceremony (docs/zensical/admin-guide/instruction-keys.md#instruction-root-ceremony-and-recovery), keep the private halves off this host, and point IRIS_INSTRUCTION_ROOTS_DIR at the directory holding only the two .pub files.")
 fi
 export IRIS_INSTRUCTION_ROOTS_DIR="$ROOTS"
 

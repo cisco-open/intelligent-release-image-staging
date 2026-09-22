@@ -61,8 +61,8 @@ on an unparseable state file (the pre-#51/#52/#53/#56/#58
 trips that same fail-closed path instead of reading an empty store. The
 placeholder carries the recovery instructions in the clear, so ``cat``-ing
 the file the error points at is enough to find them. See
-``docs/zensical/operations.md`` ("Rollback after the shard migration") for
-the full procedure.
+``docs/zensical/admin-guide/recovery.md`` ("Roll back the per-device state
+split") for the full procedure.
 """
 import contextlib
 import copy
@@ -196,6 +196,12 @@ class KeyedState:
         self._migrated = False
         self._snapshot_cache_lock = threading.Lock()
         self._snapshot_cache = {}
+        # Cached scans already serialize each shard's I/O. Serialize the scan
+        # instead of handing that lock between competing readers hundreds of
+        # times. Writers never acquire this process-local reader lock: every
+        # request still reopens current content and keeps the ordinary shard
+        # consistency contract, without a TTL or stale-result sharing.
+        self._snapshot_scan_lock = threading.Lock()
 
     # -- shard I/O ---------------------------------------------------------
 
@@ -422,8 +428,8 @@ class KeyedState:
             "\n"
             "    mv %s %s\n"
             "\n"
-            "See docs/zensical/operations.md, \"Rollback after the shard\n"
-            "migration\", for the full recovery procedure.\n"
+            "See docs/zensical/admin-guide/recovery.md, \"Roll back the\n"
+            "per-device state split\", for the full recovery procedure.\n"
             % (self.dir, migrated_path, self.legacy_path,
                migrated_path, self.legacy_path)
         )
@@ -560,12 +566,17 @@ class KeyedState:
         """Every row, as one ``{key: row}`` dict. O(fleet) — console listings,
         reconciler derivation and purge only, never a per-device request."""
         self._ensure_migrated()
+        if self.cache_snapshots:
+            with self._snapshot_scan_lock:
+                return self._cached_snapshot()
+        out = {}
+        for bucket in self._buckets():
+            out.update(self._read_shard(bucket))
+        return out
+
+    def _cached_snapshot(self):
         out = {}
         buckets = self._buckets()
-        if not self.cache_snapshots:
-            for bucket in buckets:
-                out.update(self._read_shard(bucket))
-            return out
         live = set(buckets)
         with self._snapshot_cache_lock:
             for bucket in set(self._snapshot_cache) - live:

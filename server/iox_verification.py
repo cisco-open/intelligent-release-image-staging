@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover - Python 2 is not supported in IRIS
     from urlparse import urlsplit
 
 import deployment_records
+import peer_tls_issuer
 
 
 _MAX_INT = (1 << 63) - 1
@@ -2068,13 +2069,13 @@ def _public_journal(journal):
 
 
 # The operator runbook for a journal the controller cannot resolve on its
-# own (docs/zensical/operations.md, "Recovering an IOx attempt cut off
-# mid-run"). Carried in the refusal's detail because a forced teardown's
+# own (docs/zensical/admin-guide/recovery.md, "Recovering an IOx attempt cut
+# off mid-run"). Carried in the refusal's detail because a forced teardown's
 # result reports the operation's own null binding, not the predecessor's,
 # so the log line is the only place the operator sees which record to
 # reconcile (issue #231).
 _RECONCILE_RUNBOOK = ("https://cisco-open.github.io/intelligent-release-image-staging/"
-                      "docs/operations/#recovering-an-iox-attempt-cut-off-mid-run")
+                      "docs/admin-guide/recovery/#recovering-an-iox-attempt-cut-off-mid-run")
 # gui_onboard refuses a controller detail longer than this.
 _DETAIL_LIMIT = 512
 
@@ -4244,8 +4245,14 @@ class IoxController(object):
                         "journal_durability",
                         "forced teardown record retirement failed", 5)
             if supervisor_reaped:
+                # Durable fence/record writes can wait behind other jobs after
+                # reap_all succeeds. Give the final release its own bounded
+                # wait, still capped by the original absolute session deadline.
+                release_deadline = min(
+                    self._monotonic() + _SUPERVISOR_REAP_SECONDS,
+                    attempt.session_deadline)
                 try:
-                    reaped = attempt.supervisor.release(deadline) and reaped
+                    reaped = attempt.supervisor.release(release_deadline) and reaped
                 except Exception:
                     reaped = False
             else:
@@ -4948,7 +4955,8 @@ class IoxController(object):
                 '  run-opts 9 "-e IRIS_TELEMETRY=%s"' % target["telemetry"],
                 '  run-opts 10 "-e IRIS_TELEMETRY_STREAM=%s"' %
                     target["telemetry_stream"],
-                '  run-opts 11 "-e IRIS_LOG=%s"' % target["log"]]
+                '  run-opts 11 "-e IRIS_LOG=%s"' % target["log"],
+                '  run-opts 15 "-e IRIS_PEER_TLS_MODE=%s"' % peer_tls_issuer.mode()]
             if share_host:
                 lines.extend([
                     '  run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"',

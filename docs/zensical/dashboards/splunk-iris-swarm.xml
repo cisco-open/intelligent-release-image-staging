@@ -10,9 +10,9 @@
   <!--
     Splunk is external to IRIS (spec §14): this board is a supported import
     for sites that already run Splunk, not a component IRIS installs or needs.
-    See docs/zensical/dashboards/README.md for the import procedure.
+    Import procedure: https://cisco-open.github.io/intelligent-release-image-staging/docs/dashboards/
 
-    WHY THIS BOARD EXISTS SEPARATELY FROM iris-telemetry-dashboard.xml:
+    WHY THIS BOARD EXISTS SEPARATELY FROM splunk-iris-rollout.xml:
     that board answers "is the pipeline alive and is the fleet busy". This one
     answers the distribution question, and only that. Overlap is one liveness
     tile, kept so an empty board reads as IDLE rather than BROKEN.

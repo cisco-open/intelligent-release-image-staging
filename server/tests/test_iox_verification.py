@@ -3179,7 +3179,7 @@ def test_indeterminate_predecessor_refusal_names_the_reconcile_binding(
     assert "is indeterminate" in detail
     assert "enable app signature verification on the device" in detail
     assert "iox_verification.py reconcile-enabled" in detail
-    assert ("docs/operations/#recovering-an-iox-attempt-cut-off-mid-run"
+    assert ("docs/admin-guide/recovery/#recovering-an-iox-attempt-cut-off-mid-run"
             in detail)
     _assert_console_safe_detail(detail)
     assert not [call for call in factory.calls if call[0] == "command" and
@@ -5215,3 +5215,47 @@ def test_command_failure_detail_names_a_timeout_instead_of_an_earlier_verdict():
     plain = {"timed_out": False, "returncode": 4,
              "stdout": b"app-hosting appid iris\r\n% node--1:dbm:IOxMan:Resource Profile-names is not specified\r\n"}
     assert "Resource Profile-names" in module._command_failure_detail("configure_app", plain)
+
+
+@pytest.mark.parametrize("mode", [None, "required"])
+def test_app_block_propagates_explicit_peer_tls_mode_with_default_off(
+        tmp_path, monkeypatch, mode):
+    if mode is None:
+        monkeypatch.delenv("IRIS_PEER_TLS_MODE", raising=False)
+    else:
+        monkeypatch.setenv("IRIS_PEER_TLS_MODE", mode)
+    app = _render_with_target(
+        tmp_path, "configure_app", _share_render_target(share=False, router=False))
+    assert '  run-opts 15 "-e IRIS_PEER_TLS_MODE=%s"' % (mode or "disabled") in app
+    assert '  run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"' in app
+
+
+@pytest.mark.parametrize('retirement_delay, expected_code', [(12.0, 0), (7201.0, 5)])
+def test_force_retirement_does_not_spend_supervisor_release_budget(
+        tmp_path, retirement_delay, expected_code):
+    """Store contention may exceed the reap budget, but never the session bound."""
+    clock = _Clock()
+
+    class DelayedRetirementStore(_StatefulStore):
+        def retire_device(self, device_id, reason):
+            result = super().retire_device(device_id, reason)
+            clock.offset += retirement_delay
+            return result
+
+    store = DelayedRetirementStore(tmp_path, records=[_record(record_id='old-r1')])
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, _TransportFactory(), clock=clock,
+        recipe_argv_by_action={'uninstall': ['/bin/bash', recipe]})
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    try:
+        result = controller.run_uninstall(
+            _request(action='uninstall', teardown_mode='force_agent_only', record_id=None),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result['iox_session']['state'] == 'reaped'
+    assert store.records['old-r1']['state'] == 'abandoned'
+    assert result['result_code'] == expected_code
+    if expected_code == 0:
+        assert result['error_category'] is None

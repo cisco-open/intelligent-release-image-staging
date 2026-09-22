@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
-
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
 
 # Reproducible static-musl build of aria2-next, published as `aria2c`.
-#
-# THIS IS THE CORRESPONDING SOURCE for the aria2c binaries IRIS redistributes
-# (GPLv2 section 3: the scripts used to control compilation). IRIS itself does
-# not run this file -- the binary is handed in and verified against
-# tools/aria2c.sha256 by tools/get-aria2c.sh. It is here so a recipient can
-# rebuild what we ship.
-#
-# The patch set has ONE home: ../aria2c-patches. This directory deliberately
-# holds no copy of it, because two copies drift.
 #
 #   ./build.sh x86_64     -> linux/amd64
 #   ./build.sh aarch64    -> linux/arm64
@@ -28,9 +18,17 @@ case "$ARCH" in
   *) echo "usage: $0 <x86_64|aarch64>" >&2; exit 2 ;;
 esac
 
+# One bound covers compiler jobs and GCC's separate LTO worker pool. Keep the
+# default modest for emulated ARM builders sharing a host with lab services.
+ARIA2C_BUILD_JOBS="${ARIA2C_BUILD_JOBS-2}"
+case "$ARIA2C_BUILD_JOBS" in
+  ''|0*|*[!0-9]*)
+    echo "FAIL: ARIA2C_BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$REPO_ROOT/vendor/aria2-next"
-OUT="$REPO_ROOT/out/$ARCH"
+OUT="${ARIA2_OUTPUT_DIR:-$REPO_ROOT/out/$ARCH}"
 
 # The pin is the approved release tag, not a moving branch.
 PIN_TAG="v2.5.6"
@@ -55,17 +53,21 @@ if [ "$actual_sha" != "$PIN_SHA" ]; then
   exit 1
 fi
 
-# Reset every tracked file to the pin, not just src/ - a future patch touching
-# cmake/ or CMakeLists.txt would otherwise leave stale edits behind and the
-# build would silently not correspond to patches/.
-git -C "$SRC" checkout -- .
-# Upstream ships its own AGENTS.md of agent instructions. It is third-party
-# input, not our configuration, and tooling auto-loads it. Removed after the
-# reset restores it.
+# Build an archive of the approved LOCAL pin. Never reset the working source:
+# vendor/ may contain another investigation or operator changes.
+mkdir -p "$REPO_ROOT/agentinfo"
+BUILD_CONTEXT="$(mktemp -d "$REPO_ROOT/agentinfo/aria2-build.XXXXXX")"
+trap 'rm -rf -- "$BUILD_CONTEXT"' EXIT
+mkdir "$BUILD_CONTEXT/aria2-next"
+git -C "$SRC" archive "$PIN_SHA" | tar -x -C "$BUILD_CONTEXT/aria2-next"
+SOURCE_DATE_EPOCH="$(git -C "$SRC" log -1 --format=%ct)"
+SRC="$BUILD_CONTEXT/aria2-next"
 rm -f "$SRC/AGENTS.md"
+# An independent repository prevents git apply from silently skipping files
+# inside the parent repository's ignored agentinfo directory.
+git -C "$SRC" init -q
 
-# The patch set lives in ../aria2c-patches, the single tracked record of our
-# changes to upstream. PATCH_DIR overrides it only for testing a candidate set.
+# vendor/ is gitignored, so patches/ is the only tracked record of our changes.
 PATCH_DIR="${PATCH_DIR:-$REPO_ROOT/../aria2c-patches}"
 if compgen -G "$PATCH_DIR/*.patch" >/dev/null; then
   for pf in "$PATCH_DIR"/*.patch; do
@@ -85,8 +87,6 @@ VERSION="$(sed -n 's/^[[:space:]]*VERSION \([0-9][0-9.]*\)$/\1/p' "$SRC/CMakeLis
 [ -n "$VERSION" ] || { echo "FAIL: could not read VERSION from CMakeLists.txt" >&2; exit 1; }
 
 # Time-invariant build: derive the timestamp from the pinned commit.
-SOURCE_DATE_EPOCH="$(git -C "$SRC" log -1 --format=%ct)"
-
 ARTIFACT="$OUT/$BIN_NAME"
 RELEASE_NAME="$BIN_NAME-$VERSION-linux-$ARCH-static"
 
@@ -102,16 +102,17 @@ mkdir -p "$OUT"
 # vendor/ is gitignored so this cannot be a committed file; generate it here to
 # keep the repo self-contained. Excluding .git is also why SOURCE_DATE_EPOCH is
 # passed in as a build-arg rather than derived inside the container.
-printf '%s\n' 'aria2-next/.git' 'aria2-next/docs/media' > "$REPO_ROOT/vendor/.dockerignore"
+printf '%s\n' 'aria2-next/.git' 'aria2-next/docs/media' > "$BUILD_CONTEXT/.dockerignore"
 
 docker buildx build \
   --platform "$PLATFORM" \
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+  --build-arg "ARIA2C_BUILD_JOBS=$ARIA2C_BUILD_JOBS" \
   --target artifact \
   --output "type=local,dest=$OUT" \
   --progress plain \
   -f "$REPO_ROOT/Dockerfile" \
-  "$REPO_ROOT/vendor"
+  "$BUILD_CONTEXT"
 
 mv "$OUT/aria2-next" "$ARTIFACT"
 chmod +x "$ARTIFACT"
@@ -122,12 +123,6 @@ cat "$OUT/verification.txt"
 
 echo
 echo "=== size gate ==="
-# GNU stat first, BSD/macOS second. The other order is a trap: on GNU coreutils
-# `stat -f` means --file-system, so it SUCCEEDS and prints a block of
-# filesystem stats, the `||` fallback never runs, and $bytes becomes multi-line
-# text. Every comparison below then dies with "integer expression expected",
-# which is not fatal inside an `if`, so the size gate silently passed anything
-# -- including a binary over the hard-fail ceiling it exists to catch.
 bytes="$(stat -c %s "$ARTIFACT" 2>/dev/null || stat -f %z "$ARTIFACT")"
 printf 'stripped size: %s bytes (%.2f MB)\n' "$bytes" "$(echo "scale=4; $bytes/1048576" | bc)"
 if [ "$bytes" -gt "$SIZE_HARD_FAIL" ]; then

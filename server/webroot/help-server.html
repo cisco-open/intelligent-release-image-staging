@@ -22,7 +22,7 @@
     <h2>First run</h2>
     <p>Open the Console on HTTPS port 8080, or the port set by
     <code>IRIS_GUI_PUBLISH</code>. Before an administrator exists, the
-    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/getting-started/#create-the-console-admin" target="_blank" rel="noopener">documented first-run login</a>
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/first-sign-in/" target="_blank" rel="noopener">documented first-run login</a>
     opens account setup. Complete setup from a trusted management network.
     To create or reset the administrator from the server host, run:</p>
     <pre class="log">docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin</pre>
@@ -77,7 +77,7 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     <p>For separate hosts, use <code>server/docker-compose.server.yml</code>
     on the server and <code>server/docker-compose.console.yml</code> on the
     Console host, together with each host's <code>--env-file</code>. The
-    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/docker-hosts/" target="_blank" rel="noopener">separate-host setup guide</a>
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/separate-docker-hosts/" target="_blank" rel="noopener">separate-host setup guide</a>
     covers certificates, credentials, and commands.</p>
     <ol>
       <li>If the Console cannot load, check the <code>console</code> logs,
@@ -115,7 +115,7 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     <p>After shared-agent changes, rebuild the server to refresh the Guest
     Shell bundle, then rebuild both IOx packages and the XR RPM on the
     Docker host. See the
-    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/development/#embedded-agent-packages" target="_blank" rel="noopener">package rebuild instructions</a>.
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/device-packages/#embedded-agent-packages" target="_blank" rel="noopener">package rebuild instructions</a>.
     Settings → Device packages checks wrapper bytes against their build
     manifests. A ready result does not prove the packages contain the latest
     source or validate a native signature.</p>
@@ -141,12 +141,12 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
 
     <h2>More detail</h2>
     <ul>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/server/" target="_blank" rel="noopener">Server</a> — services, state, bootstrap, certificates, chown rules</li>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/docker-hosts/" target="_blank" rel="noopener">Docker on separate hosts</a> — deployment, private management connection, credential rotation</li>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/operations/" target="_blank" rel="noopener">Operations</a> — daily commands, backups, recovery checklist</li>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/observability/" target="_blank" rel="noopener">Observability</a> — metrics, telemetry export health, failure interpretation</li>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/console/" target="_blank" rel="noopener">Web console</a> — the admin browser workflow end to end</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/one-docker-host/" target="_blank" rel="noopener">Install on one Docker host</a> — server and Console bring-up, signing roots, first administrator</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/separate-docker-hosts/" target="_blank" rel="noopener">Docker on separate hosts</a> — deployment, private management connection, credential rotation</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/" target="_blank" rel="noopener">User Guide: everyday tasks, maintenance, troubleshooting</a></li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/architecture/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/monitoring/" target="_blank" rel="noopener">Monitor transfers and device reports</a> — progress, swarm membership, transfer speed</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/console/" target="_blank" rel="noopener">Find your way around the Console</a> — screens, badges, settings you own</li>
     </ul>
   </main>
 </body>
