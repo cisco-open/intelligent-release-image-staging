@@ -4322,9 +4322,15 @@ class IoxController(object):
                     instruction_value = self.config[
                         "instruction_bootstrap_materializer"](
                             _get(request, "device_id"))
-                except Exception:
+                except Exception as exc:
+                    from catalog import InstructionSigningNotInitialized
+                    detail = ("instruction signing is not initialized; complete "
+                              "Install > Turn on instruction signing"
+                              if isinstance(exc, InstructionSigningNotInitialized)
+                              else "instruction bootstrap unavailable; check "
+                              "instruction signing status and producer health")
                     raise _ControllerFailure(
-                        "rejected", "IOx install controller failed", 2)
+                        "rejected", detail, 2)
                 with _admit_instruction_bootstrap(
                         instruction_value, self.snapshot_dir,
                         min(self._monotonic() + 120,

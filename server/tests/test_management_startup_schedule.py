@@ -107,7 +107,18 @@ def test_management_schedule_admission_and_startup_cleanup(
                         SimpleNamespace(forget_device=lambda *_: None))
     monkeypatch.setattr(catalog, "Catalog", lambda *a, **k:
                         SimpleNamespace(materialize_bootstrap_instruction=lambda *_: None))
-    monkeypatch.setattr(gui_images, "ImageService", lambda *a, **k: object())
+    refresh_calls = []
+
+    def refresh(*args, **kwargs):
+        refresh_calls.append((args, kwargs))
+        return {"outcome": "ok"}
+
+    def image_service(*args, **kwargs):
+        kwargs["verification_fn"]({"id": "new-image"})
+        return object()
+
+    monkeypatch.setattr(management_api.bulkhash_refresh, "run_refresh", refresh)
+    monkeypatch.setattr(gui_images, "ImageService", image_service)
     monkeypatch.setattr(management_api.deployment_records, "DeploymentRecordStore",
                         lambda *_: SimpleNamespace(path=str(tmp_path / "records"),
                         recover_interrupted=lambda: lifecycle.append("recover")))
@@ -138,6 +149,9 @@ def test_management_schedule_admission_and_startup_cleanup(
     else:
         management_api.main()
 
+    assert len(refresh_calls) == 1
+    assert refresh_calls[0][1]["wait"] is True
+    assert refresh_calls[0][1]["use_offline_cache"] is True
     terminated = startup in ("pending-term", "admission-term")
     assert admitted == ([] if terminated else ["edge-1"])
     assert len(schedules.OccurrenceStore(str(tmp_path)).list()) == \

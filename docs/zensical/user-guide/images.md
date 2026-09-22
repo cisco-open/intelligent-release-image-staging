@@ -147,6 +147,16 @@ A server with no internet access uploads the feed archive instead. The same
 pane takes a raw `.tar` of up to 256 MiB and runs the identical signature check
 and parse.
 
+The server retains a successfully verified offline archive for seven days
+after upload. Images published during that window automatically use it, even
+if the archive was uploaded before any images. Every use rechecks the signature;
+the status records the source as `offline`. Upload a fresh signed archive when
+the cache expires. This upload-age limit does not establish the age of Cisco's
+feed contents. **Refresh now** and scheduled runs still fetch the online feed;
+they do not silently fall back to the offline archive.
+Successful online refreshes replace an existing cached archive so subsequent
+imports do not revert to the older uploaded feed.
+
 The status line shows the last run's time, source, outcome, and its matched,
 mismatched and not-in-feed counts. Every run is audited as `bulkhash-refresh`,
 with the operator as the actor for a manual refresh or an offline upload.

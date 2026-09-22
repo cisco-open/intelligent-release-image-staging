@@ -201,6 +201,14 @@ class InstructionBootstrapUnavailable(RuntimeError):
         super().__init__("instruction bootstrap unavailable")
 
 
+class InstructionSigningNotInitialized(InstructionBootstrapUnavailable):
+    """A public setup precondition, with no private signing details."""
+
+    def __init__(self):
+        RuntimeError.__init__(self, "instruction signing is not initialized; "
+                             "complete Install > Turn on instruction signing")
+
+
 def _audit_id(value):
     """Derive a short, non-secret correlation id from a token value.
 
@@ -2409,6 +2417,8 @@ class Catalog:
             except stamper.StamperError as exc:
                 if exc.code == "key_superseded" and attempt == 0:
                     continue
+                if exc.code == "uninitialized":
+                    raise InstructionSigningNotInitialized() from exc
                 raise InstructionBootstrapUnavailable() from exc
             except Exception as exc:
                 raise InstructionBootstrapUnavailable() from exc

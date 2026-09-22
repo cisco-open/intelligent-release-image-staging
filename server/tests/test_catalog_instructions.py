@@ -1230,6 +1230,13 @@ def _bootstrap_catalog(outcomes, timeline):
     return instance
 
 
+def test_bootstrap_materializer_identifies_uninitialized_signing():
+    instance = _bootstrap_catalog([_BootstrapStamperError("uninitialized")], [])
+    with pytest.raises(catalog.InstructionSigningNotInitialized,
+                       match="instruction signing is not initialized"):
+        instance.materialize_bootstrap_instruction("device-a")
+
+
 def test_bootstrap_materializer_stamps_then_reuses_catalog_envelope():
     timeline = []
     instance = _bootstrap_catalog(["updated"], timeline)

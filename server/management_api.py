@@ -7832,7 +7832,8 @@ def main():
     images = gui_images.ImageService(
         state_dir, images_dir, audit_fn=_bg_audit,
         verification_fn=lambda _entry: bulkhash_refresh.run_refresh(
-            "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True))
+            "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True,
+            use_offline_cache=True))
     term_latch = _SigtermLatch()
     term_latch.install()
     iox_controller = None

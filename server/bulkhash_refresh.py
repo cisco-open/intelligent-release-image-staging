@@ -43,6 +43,7 @@ import calendar
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -67,7 +68,44 @@ _CERT_PATH = os.path.join(
 # bounded" precedent in the same feature area.
 _FETCH_TIMEOUT = 60
 _DETAIL_MAX = 200        # bounded failure-detail length (audit_export.py's
-                         # _stderr_snippet / _FAIL_DETAIL_MAX precedent)
+                        # _stderr_snippet / _FAIL_DETAIL_MAX precedent)
+OFFLINE_CACHE = "bulkhash-offline.tar"
+OFFLINE_CACHE_MAX_AGE = 7 * 24 * 3600
+_MAX_FEED_BYTES = 256 * 1024 * 1024
+
+
+def _copy_feed(source, destination):
+    """Bounded snapshot; never follow a cache symlink or open a FIFO."""
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as src, open(destination, "wb") as dst:
+        info = os.fstat(src.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= _MAX_FEED_BYTES:
+            raise ValueError("offline hash feed is not a bounded regular file")
+        remaining = _MAX_FEED_BYTES + 1
+        while remaining:
+            chunk = src.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            dst.write(chunk)
+            remaining -= len(chunk)
+        if remaining == 0:
+            raise ValueError("offline hash feed exceeds 256 MiB")
+        dst.flush()
+        os.fsync(dst.fileno())
+        return info
+
+
+def _retain_offline_feed(path, state_dir, now):
+    os.makedirs(state_dir, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".bulkhash-offline-", dir=state_dir)
+    os.close(fd)
+    try:
+        _copy_feed(path, temporary)
+        os.utime(temporary, (now, now))
+        os.replace(temporary, os.path.join(state_dir, OFFLINE_CACHE))
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +320,8 @@ def _failure_detail(exc):
 
 def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
                 cert_path=_CERT_PATH, timeout=_FETCH_TIMEOUT, audit_fn=None,
-                wait=False, now_fn=time.time, _fetch_fn=bulkhash.fetch,
+                wait=False, now_fn=time.time, use_offline_cache=False,
+                _fetch_fn=bulkhash.fetch,
                 _verify_fn=bulkhash.verify_tar, _parse_fn=bulkhash.parse,
                 _reconcile_fn=bulkhash.reconcile):
     """The single entry point for every Cisco Bulk Hash reconciliation run:
@@ -291,6 +330,12 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
     offline (an uploaded tar, source="offline" -- a later task supplies
     `tar_path` so the fetch step is skipped and this exact same pipeline
     runs against the uploaded file instead).
+
+    Successful offline uploads retain a private archive for seven days. Image
+    publishers opt into reuse with use_offline_cache=True; cached archives are
+    snapshotted and signature-verified again. Explicit online refreshes never
+    silently fall back to a cache. The age limit measures upload time, not the
+    publication age of individual Cisco feed entries.
 
     Guarded by a process-wide lock: at most one run in flight at a time. By
     default, a call that arrives while another is already running does
@@ -364,7 +409,7 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
             cert_path=cert_path, timeout=timeout, audit_fn=audit_fn,
             now_fn=now_fn, fetch_fn=_fetch_fn, verify_fn=_verify_fn,
             parse_fn=_parse_fn, reconcile_fn=_reconcile_fn,
-            snapshot_fn=mark_snapshot)
+            snapshot_fn=mark_snapshot, use_offline_cache=use_offline_cache)
     finally:
         with _RUN_CONDITION:
             if result is not None and result.get("outcome") == "ok" \
@@ -378,15 +423,30 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
 
 def _run_refresh_locked(source, state_dir, catalog, tar_path, feed_url,
                         cert_path, timeout, audit_fn, now_fn, fetch_fn,
-                        verify_fn, parse_fn, reconcile_fn, snapshot_fn):
+                        verify_fn, parse_fn, reconcile_fn, snapshot_fn,
+                        use_offline_cache=False):
     spath = settings_path(state_dir)
     tmp_dir = None
     try:
-        fetched_path = tar_path
-        if fetched_path is None:
-            tmp_dir = tempfile.mkdtemp(prefix="bulkhash-refresh-")
-            fetched_path = os.path.join(tmp_dir, "feed.tar")
+        tmp_dir = tempfile.mkdtemp(prefix="bulkhash-refresh-")
+        fetched_path = os.path.join(tmp_dir, "feed.tar")
+        cache = os.path.join(state_dir, OFFLINE_CACHE)
+        retain = source == "offline" and tar_path is not None
+        if tar_path is not None:
+            _copy_feed(tar_path, fetched_path)
+        elif use_offline_cache and os.path.lexists(cache):
+            source = "offline"
+            info = _copy_feed(cache, fetched_path)
+            age = now_fn() - info.st_mtime
+            if not 0 <= age <= OFFLINE_CACHE_MAX_AGE:
+                raise ValueError("offline hash feed expired or has a future timestamp; "
+                                 "upload a fresh signed feed (cache limit: 7 days)")
+        else:
             fetch_fn(feed_url, timeout, fetched_path)
+            # Once offline reuse is enabled by an upload, a newer successful
+            # online refresh must replace it, not leave later imports using
+            # an older feed than the operator just fetched.
+            retain = os.path.lexists(cache)
         verify_fn(fetched_path, cert_path)     # raises before parse ever runs
         rows = parse_fn(fetched_path)
         # This stamp MUST precede list_images().  A wait=True import registers
@@ -396,6 +456,8 @@ def _run_refresh_locked(source, state_dir, catalog, tar_path, feed_url,
         snapshot_fn()
         images = _reconcile_input(catalog.list_images())
         verdicts = reconcile_fn(rows, images)
+        if retain:
+            _retain_offline_feed(fetched_path, state_dir, now_fn())
         matched = sum(1 for v in verdicts.values()
                      if v["state"] == bulkhash.STATE_VERIFIED)
         mismatched = sum(1 for v in verdicts.values()

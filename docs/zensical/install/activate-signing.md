@@ -8,8 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 
 An instruction is the signed message the server sends a device saying which
 images to stage and how. This page gives the server the key that signs them. Do
-it before you onboard a device: until it is done, onboarding fails with
-`ERROR: instruction bootstrap unavailable`.
+it before you onboard a device: until it is done, IOx onboarding reports
+`instruction signing is not initialized`. Other instruction-production failures
+report `instruction bootstrap unavailable`; check signing status and producer
+health before retrying.
 
 ## Before you start
 

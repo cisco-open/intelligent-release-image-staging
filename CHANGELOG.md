@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Retain signature-verified offline hash feeds for later image imports for seven
+  days, rechecking signatures on every use. Explain uninitialized instruction
+  signing in IOx onboarding failures instead of reporting a generic rejection.
+
 - Preserve required peer TLS in Catalyst 8000 Guest Shell onboarding, reject
   invalid modes before contacting a device, separate signing-root commands by
   key holder, and correct the distributed aria2c license reference to GPLv3.
