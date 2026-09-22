@@ -1,0 +1,3984 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+        <link rel="canonical" href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/device-packages/">
+      
+      
+        <link rel="prev" href="../certificates-and-tokens/">
+      
+      
+        <link rel="next" href="../verify/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Build and publish the device packages - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#build-and-publish-the-device-packages" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Build and publish the device packages
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  Overview
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/" class="md-tabs__link">
+          
+  
+  Architecture Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  Installation Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../admin-guide/" class="md-tabs__link">
+          
+  
+  Administration Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../user-guide/" class="md-tabs__link">
+          
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Architecture Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/data-path/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How an image reaches a device
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/security-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network ports and flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/limitations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Limits
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Installation Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Before you start
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Before you start
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../check-the-host/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Check the host
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../supported-devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Supported devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../open-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Open the ports
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get the tools and keys
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get the tools and keys
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../build-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download the build tools
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../build-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build the images
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../signing-roots/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Create the signing keys
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../one-docker-host/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  One Docker host
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../separate-docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Separate Docker hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finish the server setup
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Finish the server setup
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-sign-in/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Sign in for the first time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activate-signing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Turn on instruction signing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../certificates-and-tokens/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Certificates and tokens
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device packages
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device packages
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Before you start
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-to-build-and-publish" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Where to build and publish
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Where to build and publish">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-one-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on one host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-separate-hosts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on separate hosts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-and-publish-the-arm64-iox-package" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Build the packages
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Build the packages">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#publish-to-either-docker-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Publish to either Docker layout
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#publish-to-kubernetes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Publish to Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verify
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#embedded-agent-packages" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When to rebuild the packages
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#if-a-build-or-publish-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If a build or publish fails
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Next steps
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../verify/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Verify the installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_6" id="__nav_3_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Prepare devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Prepare devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device requirements
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management-types/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management types
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guest-shell/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guest Shell devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ios-xr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOS-XR routers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../admin-guide/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Administration Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Administration Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/upgrade/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Upgrade to a new release
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/backups/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Back up and restore
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Routine maintenance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/rotations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Rotate credentials and certificates
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/instruction-keys/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Replace or recover signing keys
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Recover from damage
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../user-guide/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  User Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  User Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Find your way around the Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/first-image/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stage your first image
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Everyday tasks
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Everyday tasks
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Publish and verify images
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/onboarding/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Add and onboard devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Work with many devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/undeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Undeploy and retire devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/assignments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Assign images and check status
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/scheduling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schedule maintenance windows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/roles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Control peer sharing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Automate with the API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_5" id="__nav_5_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Monitoring
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitor transfers and reports
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Export telemetry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/dashboards/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Import the dashboards
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Send telemetry to Splunk
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/splunk-searches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Search IRIS data in Splunk
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshoot
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_2" id="__nav_6_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Configuration
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/server-configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/device-configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device agent configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_3" id="__nav_6_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  APIs
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  APIs
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/console-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Console API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/peer-policy-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roles and sharing-policy API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/device-apis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  APIs the device agent uses
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API error codes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browse the API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_4" id="__nav_6_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data and telemetry
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Data and telemetry
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/state-and-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data formats and states
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/telemetry-signals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry signals
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_5" id="__nav_6_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Lookup
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Lookup
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Helper commands
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Glossary
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/external-references/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Cisco and third-party references
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Before you start
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-to-build-and-publish" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Where to build and publish
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Where to build and publish">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-one-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on one host
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-on-separate-hosts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Docker on separate hosts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#kubernetes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-and-publish-the-arm64-iox-package" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Build the packages
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Build the packages">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#publish-to-either-docker-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Publish to either Docker layout
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#publish-to-kubernetes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Publish to Kubernetes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verify
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#embedded-agent-packages" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When to rebuild the packages
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#if-a-build-or-publish-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If a build or publish fails
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Next steps
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  
+  <span class="md-ellipsis">
+    Overview
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-path__item">
+        <a href="../" class="md-path__link">
+          
+  
+  <span class="md-ellipsis">
+    Installation Guide
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-path__item">
+        <a href="../first-sign-in/" class="md-path__link">
+          
+  
+  <span class="md-ellipsis">
+    Finish the server setup
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="build-and-publish-the-device-packages">Build and publish the device packages</h1>
+<p>Build the three packages that IOx and IOS-XR devices install, and publish them
+where the server serves them: <code>iris-arm64.tar</code>, <code>iris-amd64.tar</code> and
+<code>iris-xr.rpm</code>, each beside its provenance manifest.</p>
+<p>Skip this page if you onboard only through Guest Shell. On Catalyst 9000 series
+switches the agent runs in Guest Shell, and the server rebuilds that bundle
+every time it starts. The IOx app is the alternative on switches with
+app-hosting storage.</p>
+<h2 id="before-you-start">Before you start</h2>
+<ul>
+<li>Finish <a href="../check-the-host/">Check the host before you install</a>.</li>
+<li>Install the build tools: the two pinned <code>aria2c</code> binaries, <code>ioxclient</code>, arm64
+  emulation and the appmgr builder. See
+  <a href="../build-tools/">Download the tools that build device packages</a>.</li>
+<li>Have the two public root files ready. See
+  <a href="../signing-roots/">Create the two offline signing keys</a>.</li>
+<li>Point <code>IRIS_INSTRUCTION_ROOTS_DIR</code> at the reviewed directory holding exactly
+  two distinct public <code>.pub</code> files. Every package embeds these public roots.</li>
+<li>Have the server healthy, with no onboarding job fetching a package right now.</li>
+</ul>
+<h2 id="where-to-build-and-publish">Where to build and publish</h2>
+<table>
+<thead>
+<tr>
+<th>Layout</th>
+<th>Build here</th>
+<th>Publish here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single Docker host</td>
+<td>Server host checkout</td>
+<td>That Compose project's server container, <code>/srv/artifacts</code></td>
+</tr>
+<tr>
+<td>Separate Docker hosts</td>
+<td>Server host checkout, never the Console host</td>
+<td>Server container's <code>/srv/artifacts</code> bind mount</td>
+</tr>
+<tr>
+<td>Kubernetes</td>
+<td>Approved amd64 Docker build host, outside the pods</td>
+<td>Server pod's PVC at <code>/data/artifacts</code>, never the Console pod</td>
+</tr>
+</tbody>
+</table>
+<h3 id="docker-on-one-host">Docker on one host</h3>
+<p>Build in the server host's checkout once the stack is healthy:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Build and stage both packages during server bring-up (recommended).</span>
+tools/provision-iox-packages.sh
+
+<span class="c1"># Industrial Ethernet switches with app hosting: arm64 package served as iris-arm64.tar</span>
+tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>arm64
+
+<span class="c1"># Catalyst 9000 series with app-hosting storage: amd64 package served as iris-amd64.tar</span>
+tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>amd64
+</code></pre></div>
+<p><code>tools/stage-iox-package.sh</code> rebuilds one package. On first use it downloads
+Cisco's pinned <code>ioxclient</code> release and checks it against
+<code>tools/ioxclient.sha256</code>. Set <code>IOXCLIENT</code> to use an installation you already
+have. For a full rebuild, or to publish <code>iris-xr.rpm</code>, follow
+<a href="#build-and-publish-the-arm64-iox-package">Build the packages</a>.</p>
+<p>The default browser identity is encrypted in <code>tls/console-fallback.pem.age</code> and
+reused on restart. See
+<a href="../certificates-and-tokens/">Set up certificates and tokens</a>.</p>
+<h3 id="docker-on-separate-hosts">Docker on separate hosts</h3>
+<p>Run these commands on the server host to build both IOx wrappers and the XR
+RPM and publish them:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-a
+.<span class="w"> </span>server/server.env
+<span class="nb">set</span><span class="w"> </span>+a
+<span class="nb">export</span><span class="w"> </span><span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span>
+tools/provision-iox-packages.sh
+tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>device/xr/out
+sudo<span class="w"> </span>install<span class="w"> </span>-o<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-g<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-m<span class="w"> </span><span class="m">444</span><span class="w"> </span>device/xr/out/iris-xr.rpm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.next"</span>
+sudo<span class="w"> </span>install<span class="w"> </span>-o<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-g<span class="w"> </span><span class="m">10001</span><span class="w"> </span>-m<span class="w"> </span><span class="m">444</span><span class="w"> </span>device/xr/out/iris-xr.rpm.manifest<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.manifest.next"</span>
+sudo<span class="w"> </span>rm<span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/iris-xr.rpm.manifest"</span>
+sudo<span class="w"> </span>mv<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.next"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/iris-xr.rpm"</span>
+sudo<span class="w"> </span>mv<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/.iris-xr.rpm.manifest.next"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARTIFACTS_HOST_DIR</span><span class="s2">/iris-xr.rpm.manifest"</span>
+</code></pre></div>
+<p>Sourcing <code>server/server.env</code> gives these helpers the same container name and
+artifact directory as Compose. For one wrapper only, follow
+<a href="#build-and-publish-the-arm64-iox-package">Build the packages</a>.</p>
+<h3 id="kubernetes">Kubernetes</h3>
+<p>Build outside the pods, then copy each package and its <code>.manifest</code> into the
+server pod's volume. Follow
+<a href="#build-and-publish-the-arm64-iox-package">Build the packages</a> and use the
+Kubernetes publishing commands.</p>
+<p>Put the two approved public root files under <code>/data/config/instr/roots.d</code>. See
+<a href="../signing-roots/">Create the two offline signing keys</a>.</p>
+<h2 id="build-and-publish-the-arm64-iox-package">Build the packages</h2>
+<p>Use this procedure for every layout. Only the destination changes.</p>
+<p><strong>1. Select both device architectures and prepare ioxclient</strong>, in the same shell:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">IRIS_DEVICE_PLATFORMS</span><span class="o">=</span>linux/amd64,linux/arm64
+tools/get-ioxclient.sh
+</code></pre></div>
+<p>IRIS includes the tested clients at <code>bin/aria2c</code> for amd64 and
+<code>deliverables/aria2c-aarch64</code> for ARM64. The package builders verify them
+against <code>tools/aria2c.sha256</code>. <code>get-ioxclient.sh</code> prepares Cisco's packaging
+tool, not the device clients.</p>
+<p><strong>2. Set the build environment and build the ARM wrapper</strong> into a private
+directory:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">IRIS_INSTRUCTION_ROOTS_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/iris-roots"</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ARIA2C_BIN_AMD64</span><span class="o">=</span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">/bin/aria2c"</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ARIA2C_BIN_ARM64</span><span class="o">=</span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">/deliverables/aria2c-aarch64"</span>
+<span class="nv">IRIS_ARM_BUILD_DIR</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>mktemp<span class="w"> </span>-d<span class="k">)</span><span class="s2">"</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">IRIS_DEVICE_IMAGE_OCI</span><span class="o">=</span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-device.oci.tar"</span>
+
+tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>arm64<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--artifacts-dir<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">"</span>
+</code></pre></div>
+<p>The command exits zero and writes <code>iris-arm64.tar</code> and its <code>.manifest</code> into
+<code>$IRIS_ARM_BUILD_DIR</code>. Keep the image archive and its provenance in approved
+build storage.</p>
+<p>This step rebuilds the canonical device image with <code>--pull</code>, so it always
+starts from a fresh base. Set <code>IRIS_NO_PULL=1</code> to keep the cached base instead,
+for an A/B build that isolates an unrelated source change.</p>
+<p><strong>3. Check the wrapper against its manifest:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nv">PYTHONPATH</span><span class="o">=</span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">/server"</span><span class="w"> </span>python3<span class="w"> </span>-<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">"</span><span class="w"> </span><span class="s">&lt;&lt;'PY'</span>
+<span class="s">import json, os, sys</span>
+<span class="s">from setup_status import package_readiness</span>
+<span class="s">name = "iris-arm64.tar"</span>
+<span class="s">result = package_readiness(os.path.join(sys.argv[1], name), name,</span>
+<span class="s">                           "iox", "linux/arm64", "rebuild ARM64 IOx")</span>
+<span class="s">print(json.dumps(result))</span>
+<span class="s">sys.exit(0 if result["state"] == "ok" else 1)</span>
+<span class="s">PY</span>
+sha256sum<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-arm64.tar"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-arm64.tar.manifest"</span>
+</code></pre></div>
+<p>The state is <code>ok</code>. On failure, read
+<a href="#if-a-build-or-publish-fails">If a build or publish fails</a>.</p>
+<p><strong>4. Build the other two packages</strong> in the same shell, with the same roots,
+platform list and <code>IRIS_DEVICE_IMAGE_OCI</code>:</p>
+<div class="highlight"><pre><span></span><code>tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>amd64<span class="w"> </span>--artifacts-dir<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">"</span>
+tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">"</span>
+</code></pre></div>
+<p><strong>5. Publish each package with its matching <code>.manifest</code></strong>, using the section for
+your layout and the filename substituted.</p>
+<h3 id="publish-to-either-docker-layout">Publish to either Docker layout</h3>
+<p>Publish when the stack is healthy and no onboarding is fetching this package.
+Resolve the <strong>server</strong> container, keeping any <code>-p</code> or <code>--project-name</code> option
+you use. Run only the matching line:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># One host, from that host's checkout:</span>
+<span class="nv">IRIS_CONTAINER</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/.env<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>ps<span class="w"> </span>-q<span class="w"> </span>iris<span class="k">)</span><span class="s2">"</span>
+<span class="c1"># Separate hosts, from the SERVER host's checkout:</span>
+<span class="nv">IRIS_CONTAINER</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>docker<span class="w"> </span>compose<span class="w"> </span>--env-file<span class="w"> </span>server/server.env<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.server.yml<span class="w"> </span>ps<span class="w"> </span>-q<span class="w"> </span>iris<span class="k">)</span><span class="s2">"</span>
+</code></pre></div>
+<p>Then confirm the container and the bind mount, and copy the pair in:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">test</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_CONTAINER</span><span class="s2">"</span>
+docker<span class="w"> </span>inspect<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_CONTAINER</span><span class="s2">"</span><span class="w"> </span>--format<span class="w"> </span><span class="s1">'{{range .Mounts}}{{if eq .Destination "/srv/artifacts"}}{{.Source}}{{end}}{{end}}'</span>
+docker<span class="w"> </span>cp<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-arm64.tar"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_CONTAINER</span><span class="s2">:/srv/artifacts/.iris-arm64.tar.tmp"</span>
+docker<span class="w"> </span>cp<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-arm64.tar.manifest"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_CONTAINER</span><span class="s2">:/srv/artifacts/.iris-arm64.tar.manifest.tmp"</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_CONTAINER</span><span class="s2">"</span><span class="w"> </span>sh<span class="w"> </span>-ec<span class="w"> </span><span class="s1">'</span>
+<span class="s1">  cd /srv/artifacts</span>
+<span class="s1">  test -r .iris-arm64.tar.tmp &amp;&amp; test -r .iris-arm64.tar.manifest.tmp</span>
+<span class="s1">  rm -f iris-arm64.tar.manifest</span>
+<span class="s1">  mv -f .iris-arm64.tar.tmp iris-arm64.tar</span>
+<span class="s1">  mv -f .iris-arm64.tar.manifest.tmp iris-arm64.tar.manifest</span>
+<span class="s1">  sha256sum iris-arm64.tar iris-arm64.tar.manifest'</span>
+</code></pre></div>
+<p>The printed hashes equal the build-host hashes. Uid 10001 must be able to read
+the files and write the destination directory. If the readability check fails,
+fix the mode of the two source files on the build host and copy them again.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Do not run <code>chown</code> inside the container, and do not widen the modes of
+state or secret files.</p>
+</div>
+<h3 id="publish-to-kubernetes">Publish to Kubernetes</h3>
+<p>Apply your manifests and wait for the server Deployment. The example uses
+namespace <code>iris</code>.</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/iris-seed-server
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>get<span class="w"> </span>pods<span class="w"> </span>-l<span class="w"> </span>app.kubernetes.io/name<span class="o">=</span>iris-seed-server
+<span class="nv">IRIS_SERVER_POD</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>get<span class="w"> </span>pods<span class="w"> </span>-l<span class="w"> </span>app.kubernetes.io/name<span class="o">=</span>iris-seed-server<span class="w"> </span>-o<span class="w"> </span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">'{.items[0].metadata.name}'</span><span class="k">)</span><span class="s2">"</span>
+<span class="nb">test</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_SERVER_POD</span><span class="s2">"</span>
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_SERVER_POD</span><span class="s2">"</span><span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-w<span class="w"> </span>/data/artifacts
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>cp<span class="w"> </span>--no-preserve<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-arm64.tar"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_SERVER_POD</span><span class="s2">:/data/artifacts/.iris-arm64.tar.tmp"</span><span class="w"> </span>-c<span class="w"> </span>iris
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span>cp<span class="w"> </span>--no-preserve<span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_ARM_BUILD_DIR</span><span class="s2">/iris-arm64.tar.manifest"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_SERVER_POD</span><span class="s2">:/data/artifacts/.iris-arm64.tar.manifest.tmp"</span><span class="w"> </span>-c<span class="w"> </span>iris
+kubectl<span class="w"> </span>-n<span class="w"> </span>iris<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="s2">"</span><span class="nv">$IRIS_SERVER_POD</span><span class="s2">"</span><span class="w"> </span>-c<span class="w"> </span>iris<span class="w"> </span>--<span class="w"> </span>sh<span class="w"> </span>-ec<span class="w"> </span><span class="s1">'</span>
+<span class="s1">  cd /data/artifacts</span>
+<span class="s1">  rm -f iris-arm64.tar.manifest</span>
+<span class="s1">  mv -f .iris-arm64.tar.tmp iris-arm64.tar</span>
+<span class="s1">  mv -f .iris-arm64.tar.manifest.tmp iris-arm64.tar.manifest</span>
+<span class="s1">  sha256sum iris-arm64.tar iris-arm64.tar.manifest'</span>
+</code></pre></div>
+<p>Match both hashes against the build host.
+<a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cp/"><code>kubectl cp --no-preserve</code></a>
+keeps host ownership off the non-root pod, and needs <code>tar</code> in the container.</p>
+<h2 id="verify">Verify</h2>
+<p>Run <code>tools/check-package-freshness.sh</code> on the server host, or open
+<strong>Settings → Device packages</strong> in the Console. Both print one row per package
+family, and the Console prints the full build command for any family that is
+missing, stale or unverifiable.</p>
+<p>A row is ready when the readable wrapper bytes match the adjacent provenance
+manifest, so keep each <code>.manifest</code> beside its package.</p>
+<p>The same status compares the certificate the live services present with the
+public copy onboarding distributes.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>A mismatch blocks new onboarding. Rebuilding the packages does not fix it.</p>
+</div>
+<h2 id="embedded-agent-packages">When to rebuild the packages</h2>
+<p>Every Python source file under <code>device/agent/</code> goes into the Guest Shell bundle,
+both IOx packages and the IOS-XR RPM. After a change to shared agent source or
+to the common device image, rebuild, republish, and redeploy each affected
+device:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>--build
+tools/provision-iox-packages.sh
+tools/build-xr-package.sh<span class="w"> </span>--out<span class="w"> </span>artifacts/
+tools/check-package-freshness.sh
+</code></pre></div>
+<p>On Kubernetes, rebuild the server image as well, then copy every package again.</p>
+<p>When the <code>aria2c</code> pin in <code>tools/aria2c.sha256</code> changes, refresh both handed-in
+binaries, rebuild both images and every device package from them, and copy the
+packages again. The agents must be file-identical across packages.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>A certificate rotation needs no rebuild. Re-onboard the affected devices so
+each one receives the current public certificate. See
+<a href="../../admin-guide/rotations/">Rotate credentials and certificates</a>.</p>
+</div>
+<p>If native signing changes the wrapper bytes, publish the signed output with a
+manifest recording that output's SHA-256.</p>
+<h2 id="if-a-build-or-publish-fails">If a build or publish fails</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bin/aria2c</code> is not the amd64 client, or a client does not match <code>tools/aria2c.sha256</code></td>
+<td>A committed client was replaced or deleted by hand</td>
+<td>Restore it with <code>git checkout -- bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64</code>. The build scripts check every client against the checksum file and stop on a mismatch.</td>
+</tr>
+<tr>
+<td><code>exec format error</code>, a missing handler, or a request for a binfmt digest</td>
+<td>The amd64 build host has no arm64 emulation</td>
+<td>Set emulation up as <a href="../build-tools/">Download the tools that build device packages</a> describes. Do not pull an unpinned privileged image.</td>
+</tr>
+<tr>
+<td>No OCI exporter, or the ARM manifest is missing</td>
+<td>The Buildx builder cannot write the archive, or only amd64 was built</td>
+<td>Inspect the builder and set <code>IRIS_DEVICE_PLATFORMS=linux/amd64,linux/arm64</code>. Do not reuse an amd64-only archive.</td>
+</tr>
+<tr>
+<td>The builder refuses to replace the existing image archive</td>
+<td>The archive on disk came from different source</td>
+<td>Build into the private build directory and keep the previous archive.</td>
+</tr>
+<tr>
+<td>The two public roots are not available</td>
+<td>The reviewed roots directory is missing or holds the wrong files</td>
+<td>Get the two approved public roots the deployment already uses. Do not generate replacements.</td>
+</tr>
+<tr>
+<td>The artifact directory is not writable, or the package never appears in the Console</td>
+<td>The build wrote straight into the server-owned directory</td>
+<td>Build into the private output directory, then publish to the server mount or volume.</td>
+</tr>
+<tr>
+<td>The package row is still not ready</td>
+<td>One of the two files, a hash, the platform or the provenance is wrong</td>
+<td>Check both published files and their hashes, check the platform, and read the reported provenance reason.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="next-steps">Next steps</h2>
+<ul>
+<li><a href="../verify/">Verify the installation</a></li>
+<li><a href="../iox/">Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 series devices for the IOx app</a></li>
+<li><a href="../ios-xr/">Prepare Cisco 8000 and NCS routers for IOS-XR appmgr</a></li>
+<li><a href="../../user-guide/onboarding/">Add and onboard devices</a></li>
+<li><a href="../../admin-guide/upgrade/">Upgrade to a new release</a></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../certificates-and-tokens/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Certificates and tokens">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Certificates and tokens
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../verify/" class="md-footer__link md-footer__link--next" aria-label="Next: Verify the installation">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Verify the installation
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["navigation.tabs","navigation.tabs.sticky","navigation.indexes","navigation.path","navigation.footer","navigation.top","navigation.tracking","toc.follow","content.code.copy","content.tabs.link","search.highlight"],"search":"../../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,4520 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+        <link rel="canonical" href="https://cisco-open.github.io/intelligent-release-image-staging/docs/reference/telemetry-signals/">
+      
+      
+        <link rel="prev" href="../state-and-data/">
+      
+      
+        <link rel="next" href="../tools/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Telemetry signals - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#telemetry-signals" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Telemetry signals
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  Overview
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/" class="md-tabs__link">
+          
+  
+  Architecture Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  Installation Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../admin-guide/" class="md-tabs__link">
+          
+  
+  Administration Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../user-guide/" class="md-tabs__link">
+          
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Architecture Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/data-path/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How an image reaches a device
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/security-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network ports and flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/limitations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Limits
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../install/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Installation Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Before you start
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Before you start
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/check-the-host/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Check the host
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/supported-devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Supported devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/open-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Open the ports
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get the tools and keys
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get the tools and keys
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/build-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download the build tools
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/build-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build the images
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/signing-roots/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Create the signing keys
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/one-docker-host/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  One Docker host
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/separate-docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Separate Docker hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finish the server setup
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Finish the server setup
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/first-sign-in/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Sign in for the first time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/activate-signing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Turn on instruction signing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/certificates-and-tokens/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Certificates and tokens
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/device-packages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device packages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/verify/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Verify the installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_6" id="__nav_3_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Prepare devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Prepare devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/device-requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device requirements
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/management-types/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management types
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/guest-shell/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guest Shell devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/ios-xr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOS-XR routers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../admin-guide/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Administration Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Administration Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/upgrade/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Upgrade to a new release
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/backups/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Back up and restore
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Routine maintenance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/rotations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Rotate credentials and certificates
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/instruction-keys/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Replace or recover signing keys
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../admin-guide/recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Recover from damage
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../user-guide/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  User Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  User Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Find your way around the Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/first-image/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stage your first image
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Everyday tasks
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Everyday tasks
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Publish and verify images
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/onboarding/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Add and onboard devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Work with many devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/undeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Undeploy and retire devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/assignments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Assign images and check status
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/scheduling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schedule maintenance windows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/roles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Control peer sharing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Automate with the API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_5" id="__nav_5_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Monitoring
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitor transfers and reports
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Export telemetry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/dashboards/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Import the dashboards
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Send telemetry to Splunk
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/splunk-searches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Search IRIS data in Splunk
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user-guide/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshoot
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_2" id="__nav_6_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Configuration
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server-configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device agent configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_3" id="__nav_6_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  APIs
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  APIs
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Console API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../peer-policy-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roles and sharing-policy API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-apis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  APIs the device agent uses
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API error codes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browse the API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6_4" id="__nav_6_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data and telemetry
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Data and telemetry
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../state-and-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data formats and states
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry signals
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry signals
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prometheus-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Prometheus metrics
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prometheus metrics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#traced-and-untraced-origin-bytes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Traced and untraced origin bytes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#otlp-log-records" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        OTLP log records
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OTLP log records">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#irisdevicetransferreport" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.device.transfer.report</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iristrackerpeer" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.tracker.peer</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irispeerpolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.peer.policy</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irisswarmpeer_rate" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.swarm.peer_rate</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iristransferlifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.transfer.lifecycle</code>
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="iris.transfer.lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-planned-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>planned</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-seeding_started-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>seeding_started</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irisswarmpeer_bytes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.swarm.peer_bytes</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irisdevicepeer_transfer_record" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.device.peer_transfer_record</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-telemetry_observation-payload" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The telemetry_observation payload
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#announce-counters-are-the-devices-own" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Announce counters are the device's own
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#event-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Event identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-iris_legacy_announce_participants" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading <code>iris_legacy_announce_participants</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_5" id="__nav_6_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Lookup
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Lookup
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Helper commands
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Glossary
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../external-references/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Cisco and third-party references
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prometheus-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Prometheus metrics
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prometheus metrics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#traced-and-untraced-origin-bytes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Traced and untraced origin bytes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#otlp-log-records" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        OTLP log records
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OTLP log records">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#irisdevicetransferreport" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.device.transfer.report</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iristrackerpeer" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.tracker.peer</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irispeerpolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.peer.policy</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irisswarmpeer_rate" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.swarm.peer_rate</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iristransferlifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.transfer.lifecycle</code>
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="iris.transfer.lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-planned-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>planned</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-seeding_started-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A <code>seeding_started</code> event
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irisswarmpeer_bytes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.swarm.peer_bytes</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#irisdevicepeer_transfer_record" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        <code>iris.device.peer_transfer_record</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-telemetry_observation-payload" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The telemetry_observation payload
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#announce-counters-are-the-devices-own" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Announce counters are the device's own
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#event-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Event identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-iris_legacy_announce_participants" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading <code>iris_legacy_announce_participants</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  
+  <span class="md-ellipsis">
+    Overview
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-path__item">
+        <a href="../" class="md-path__link">
+          
+  
+  <span class="md-ellipsis">
+    Reference
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-path__item">
+        <a href="../state-and-data/" class="md-path__link">
+          
+  
+  <span class="md-ellipsis">
+    Data and telemetry
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="telemetry-signals">Telemetry signals</h1>
+<p>Prometheus series, OTLP log records and their attributes, and example records. See <a href="../../user-guide/monitoring/">Monitor transfers and device reports</a> for how to read them.</p>
+<h2 id="prometheus-metrics">Prometheus metrics</h2>
+<p>IRIS serves Prometheus on <code>:9101 /metrics</code> and exports the same values as OTLP metrics. Every family carries <code>{image, info_hash}</code> labels only; per-device and per-peer detail is in <a href="#otlp-log-records">OTLP log records</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Prometheus family</th>
+<th>OTLP metric</th>
+<th>Unit</th>
+<th>Attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris_transfer_devices</code></td>
+<td><code>iris.transfer.devices</code></td>
+<td><code>{device}</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_transfer_throughput_bytes_per_second</code></td>
+<td><code>iris.transfer.throughput</code></td>
+<td><code>By/s</code></td>
+<td>image attrs + <code>network.io.direction</code> = <code>receive</code> | <code>transmit</code></td>
+</tr>
+<tr>
+<td><code>iris_transfer_progress_ratio</code></td>
+<td><code>iris.transfer.progress</code></td>
+<td><code>1</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_transfer_zero_receive_devices</code></td>
+<td><code>iris.transfer.zero_receive_devices</code></td>
+<td><code>{device}</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_transfer_freshness_age_seconds</code></td>
+<td><code>iris.transfer.freshness_age</code></td>
+<td><code>s</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_stream_devices</code></td>
+<td><code>iris.stream.devices</code></td>
+<td><code>{device}</code></td>
+<td>image attrs + <code>sampling_class</code> = <code>good</code> | <code>constrained</code></td>
+</tr>
+<tr>
+<td><code>iris_seeder_torrent_upload_length_bytes</code></td>
+<td><code>iris.seeder.torrent.upload_length</code></td>
+<td><code>By</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_seeder_torrent_upload_bytes_per_second</code></td>
+<td><code>iris.seeder.torrent.upload_rate</code></td>
+<td><code>By/s</code></td>
+<td>image attrs</td>
+</tr>
+<tr>
+<td><code>iris_legacy_announce_participants</code></td>
+<td><code>iris.legacy.announce_participants</code></td>
+<td><code>{participant}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_telemetry_samples_rejected_total</code></td>
+<td><code>iris.telemetry.samples.rejected</code></td>
+<td><code>{sample}</code></td>
+<td>(counter; no <code>_total</code> on the OTLP wire)</td>
+</tr>
+<tr>
+<td><code>iris_telemetry_export_failures_total</code></td>
+<td><code>iris.telemetry.export.failures</code></td>
+<td><code>{error}</code></td>
+<td><code>signal</code> = <code>logs</code> | <code>metrics</code></td>
+</tr>
+<tr>
+<td><code>iris_telemetry_export_dropped_total</code></td>
+<td><code>iris.telemetry.export.dropped</code></td>
+<td><code>{record}</code></td>
+<td><code>signal</code> = <code>logs</code> | <code>metrics</code></td>
+</tr>
+<tr>
+<td><code>iris_telemetry_export_last_success_seconds</code></td>
+<td>Prometheus only</td>
+<td></td>
+<td>export health also on authenticated <code>/status</code></td>
+</tr>
+<tr>
+<td><code>iris_peer_policy_revision</code></td>
+<td><code>iris.peer.policy.revision</code></td>
+<td><code>1</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_peer_enforcement_applied_revision</code></td>
+<td><code>iris.peer.enforcement.applied_revision</code></td>
+<td><code>1</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_peer_enforcement_desired_ips</code></td>
+<td><code>iris.peer.enforcement.desired_ips</code></td>
+<td><code>{ip}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_peer_enforcement_health</code></td>
+<td><code>iris.peer.enforcement.health</code></td>
+<td><code>1</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_plans</code></td>
+<td><code>iris.transfer.lifecycle.plans</code></td>
+<td><code>{plan}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_plan_cap</code></td>
+<td><code>iris.transfer.lifecycle.plan_cap</code></td>
+<td><code>{plan}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_awaiting_report</code></td>
+<td><code>iris.transfer.lifecycle.awaiting_report</code></td>
+<td><code>{plan}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_unconfirmed</code></td>
+<td><code>iris.transfer.lifecycle.unconfirmed</code></td>
+<td><code>{event}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_dropped_unemitted_total</code></td>
+<td><code>iris.transfer.lifecycle.dropped_unemitted</code></td>
+<td><code>{plan}</code></td>
+<td>(counter)</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_live_evicted_total</code></td>
+<td><code>iris.transfer.lifecycle.live_evicted</code></td>
+<td><code>{plan}</code></td>
+<td>(counter)</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_retired_undelivered_total</code></td>
+<td><code>iris.transfer.lifecycle.retired_undelivered</code></td>
+<td><code>{event}</code></td>
+<td>(counter)</td>
+</tr>
+<tr>
+<td><code>iris_transfer_lifecycle_promoted_recovered_total</code></td>
+<td><code>iris.transfer.lifecycle.promoted_recovered</code></td>
+<td><code>{plan}</code></td>
+<td>(counter)</td>
+</tr>
+<tr>
+<td><code>iris_origin_sent_bytes_total</code></td>
+<td>(Prometheus only)</td>
+<td><code>By</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_peer_attributed_bytes_total</code></td>
+<td>(Prometheus only)</td>
+<td><code>By</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_peer_unattributed_bytes_total</code></td>
+<td>(Prometheus only)</td>
+<td><code>By</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_attributed</code></td>
+<td>(Prometheus only)</td>
+<td><code>{peer}</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_saturated</code></td>
+<td>(Prometheus only)</td>
+<td><code>1</code></td>
+<td><code>image</code>, <code>info_hash</code></td>
+</tr>
+<tr>
+<td><code>iris_instruction_certificate_days_to_expiry</code>, <code>iris_instruction_keylist_age_days</code></td>
+<td>(Prometheus only)</td>
+<td><code>d</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_instruction_roots_attested_180d</code></td>
+<td>(Prometheus only)</td>
+<td><code>{root}</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_instruction_root_ceremony_overdue</code></td>
+<td>(Prometheus only)</td>
+<td><code>1</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>iris_instruction_root_quorum_degraded</code></td>
+<td>(Prometheus only)</td>
+<td><code>1</code></td>
+<td>none</td>
+</tr>
+</tbody>
+</table>
+<p>Throughput and progress are omitted for an image with no fresh device, rather than published as zero; freshness age is exported alongside. The <code>iris_transfer_lifecycle_*</code> family is omitted whole when the plan store is unreadable. The five <code>iris_instruction_*</code> families report on the two offline root keys: certificate and keylist age in days, roots attested within 180 days, and two status gauges (<code>root_ceremony_overdue</code> reads <code>0</code> on schedule, <code>1</code> due, <code>2</code> overdue). A field the server cannot read is omitted.</p>
+<h3 id="traced-and-untraced-origin-bytes">Traced and untraced origin bytes</h3>
+<p>The origin seeder knows exactly how many bytes it sent; which device received them is sampled from aria2's per-connection counters.</p>
+<table>
+<thead>
+<tr>
+<th>Series</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris_origin_sent_bytes_total</code></td>
+<td>counter</td>
+<td>Bytes the origin seeder uploaded for this torrent.</td>
+</tr>
+<tr>
+<td><code>iris_peer_attributed_bytes_total</code></td>
+<td>counter</td>
+<td>Of those, bytes traced to a device.</td>
+</tr>
+<tr>
+<td><code>iris_peer_unattributed_bytes_total</code></td>
+<td>gauge</td>
+<td>The untraced residue: <code>max(0, origin - traced)</code>. Graph the value; never apply <code>rate()</code> to it.</td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_attributed</code></td>
+<td>gauge</td>
+<td>Peer edges with a nonzero traced total right now, not an accumulation.</td>
+</tr>
+<tr>
+<td><code>iris_swarm_peers_saturated</code></td>
+<td>gauge</td>
+<td><code>1</code> when the per-torrent peer cap refused new peers.</td>
+</tr>
+</tbody>
+</table>
+<p>A peer that connects, takes bytes and disconnects between two samples is counted as untraced, not lost. Metric names use <code>attributed</code>; the matching OTLP attribute is <code>iris.peer.attribution</code>, covered under <code>iris.device.peer_transfer_record</code> below.</p>
+<p>Prometheus labels never carry per-peer or per-device identity, because that
+would put unbounded peer identity into label cardinality. That detail is
+available only in the OTLP log records below.</p>
+<h2 id="otlp-log-records">OTLP log records</h2>
+<p>Terminal per-device reports, tracker lifecycle events, peer-policy operations, and measured peer rates and byte totals flow as OTLP logs. Event identity is the top-level <code>eventName</code> field. These are the <code>otel.log.name</code> values IRIS emits:</p>
+<table>
+<thead>
+<tr>
+<th>Record name</th>
+<th>Source</th>
+<th>Nature</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.device.transfer.report</code></td>
+<td>Device agent</td>
+<td>Terminal per-device transfer report.</td>
+</tr>
+<tr>
+<td><code>iris.device.report</code></td>
+<td>Device agent</td>
+<td>Reduced projection of the report.</td>
+</tr>
+<tr>
+<td><code>iris.tracker.peer</code></td>
+<td>Tracker</td>
+<td>Tracker peer lifecycle: announce, join, leave.</td>
+</tr>
+<tr>
+<td><code>iris.peer.policy</code></td>
+<td>Tracker</td>
+<td>Peer-policy revision applied and enforcement outcome.</td>
+</tr>
+<tr>
+<td><code>iris.swarm.peer_rate</code></td>
+<td>Server-side peer ledger</td>
+<td>Sampled per-connection send rate.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.lifecycle</code></td>
+<td>Tracker</td>
+<td>Plan lifecycle: assignment recorded, seeding confirmed.</td>
+</tr>
+<tr>
+<td><code>iris.swarm.peer_bytes</code></td>
+<td>Server-side peer ledger</td>
+<td>Sampled estimate of one edge's bytes.</td>
+</tr>
+<tr>
+<td><code>iris.device.peer_transfer_record</code></td>
+<td>Device-side completion hook</td>
+<td>Device-measured exact bytes received from one peer.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition warning">
+<p class="admonition-title">Int64 attributes ride the wire as strings</p>
+<p>Byte attributes are int64 and travel as JSON strings in OTLP. A query that sums them must coerce to a number first.</p>
+</div>
+<div class="admonition danger">
+<p class="admonition-title">Never sum the two peer record names together</p>
+<p><code>iris.swarm.peer_bytes</code> and <code>iris.device.peer_transfer_record</code> describe the same bytes from opposite ends of the wire, one sampled, one exact. A query that sums both counts every transfer twice. Pick one name per panel; prefer <code>iris.device.peer_transfer_record</code> where you need a number you can defend.</p>
+</div>
+<h3 id="irisdevicetransferreport"><code>iris.device.transfer.report</code></h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>device.id</code></td>
+<td>The reporting device.</td>
+</tr>
+<tr>
+<td><code>iris.image.id</code></td>
+<td>The image the report is about.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.id</code></td>
+<td>The transfer this report describes.</td>
+</tr>
+<tr>
+<td><code>iris.report.event</code></td>
+<td>The report's terminal outcome.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.content_sha256.state</code></td>
+<td>The device's own hash check result.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.ios_copy_verify.state</code></td>
+<td>The result of copying the file into place.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.completed_content_bytes</code></td>
+<td>Bytes present in the staged file.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.peers_total</code></td>
+<td>Distinct peer count, saturating at the device's 512-IP tracking cap.</td>
+</tr>
+<tr>
+<td><code>iris.device.observed_at</code></td>
+<td>Device-side observation time; use this for when the measurement was made.</td>
+</tr>
+<tr>
+<td><code>network.peer.address</code></td>
+<td>A flat string array of the observed peer addresses.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.bytes_from_all_senders_total</code></td>
+<td>The device's own total, including the origin.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.bytes_from_origin_total</code>, <code>iris.transfer.bytes_from_devices_total</code>, <code>iris.transfer.bytes_from_unknown_total</code></td>
+<td>The classified parts: from the origin seeder, from other devices, unattributable.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.bytes_unattributed_omitted</code></td>
+<td>Bytes dropped with the peer rows capped by <code>iris.transfer.peer_records.rows_omitted</code>. Keep it in its own bucket; never redistribute it among the origin, device, or unknown totals above.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.peer_records.rows_omitted</code>, <code>iris.transfer.bytes_from_all_senders_omitted</code></td>
+<td>Peer rows dropped at a cap, and the bytes dropped with them.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.peer_records.capture_complete</code></td>
+<td><code>false</code> when the peer capture itself was lossy.</td>
+</tr>
+<tr>
+<td><code>iris.download.started_at</code>, <code>iris.download.completed_at</code>, <code>iris.download.duration_seconds</code></td>
+<td>Elapsed download time, from the optional v2 report <code>download</code> block. A resume retains the original start when known. Already-present images, missing hooks, and a transfer whose start was not recorded are excluded from the average rather than reported as zero.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition warning">
+<p class="admonition-title">The transfer record is a floor, not a census</p>
+<p>The device only counts peers aria2 still has an open connection to when the last piece lands. <code>bytes_from_all_senders_total</code> is a lower bound, not an exact match for <code>completed_content_bytes</code>. A transfer with no usable snapshot carries no peer-transfer-record attributes at all.</p>
+</div>
+<p>The <code>iris.device.report</code> record is a reduced projection: <code>device.id</code>, <code>iris.image.id</code>, <code>iris.report.event</code>, <code>iris.transfer.peers_total</code>, <code>network.peer.address</code>. Use <code>iris.device.transfer.report</code> for completed bytes and verification fields; counting both counts one delivery twice.</p>
+<h3 id="iristrackerpeer"><code>iris.tracker.peer</code></h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.principal</code></td>
+<td>Who the record is from: a device, the server's seeder, or a legacy device.</td>
+</tr>
+<tr>
+<td><code>iris.torrent.info_hash</code></td>
+<td>The torrent the peer joined.</td>
+</tr>
+<tr>
+<td><code>iris.peer.role</code></td>
+<td>The BitTorrent role: <code>seeder</code> or <code>leecher</code>.</td>
+</tr>
+<tr>
+<td><code>network.peer.address</code></td>
+<td>The peer's address.</td>
+</tr>
+<tr>
+<td><code>iris.device.role</code></td>
+<td>The peer's role membership from the loaded policy, present only for an authenticated device. Not the same vocabulary as <code>iris.peer.role</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="irispeerpolicy"><code>iris.peer.policy</code></h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.policy.revision</code></td>
+<td>The policy revision the operation concerns.</td>
+</tr>
+<tr>
+<td><code>iris.policy.action</code></td>
+<td>The action taken.</td>
+</tr>
+<tr>
+<td><code>iris.enforcement.state</code></td>
+<td>The enforcement outcome.</td>
+</tr>
+<tr>
+<td><code>iris.enforcement.applied_revision</code></td>
+<td>The revision actually applied.</td>
+</tr>
+<tr>
+<td><code>iris.enforcement.desired_ip_count</code></td>
+<td>How many addresses the desired state names.</td>
+</tr>
+</tbody>
+</table>
+<p>This record is count-only: it never carries role membership lists, raw
+rules, addresses, or origin-QoS option values.</p>
+<p>See <a href="../peer-policy-api/">Roles and sharing-policy API</a> for the fields behind these attributes.</p>
+<h3 id="irisswarmpeer_rate"><code>iris.swarm.peer_rate</code></h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.principal</code></td>
+<td>Who the sending peer is: a device, the server's seeder, or a legacy device.</td>
+</tr>
+<tr>
+<td><code>iris.image.id</code></td>
+<td>The image being transferred.</td>
+</tr>
+<tr>
+<td><code>iris.torrent.info_hash</code></td>
+<td>The torrent.</td>
+</tr>
+<tr>
+<td><code>network.peer.address</code>, <code>network.peer.port</code></td>
+<td>The peer's address and port.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.peer_send_bps</code></td>
+<td>Sampled per-connection send rate.</td>
+</tr>
+<tr>
+<td><code>iris.torrent.left</code></td>
+<td>Bytes the peer still needs.</td>
+</tr>
+<tr>
+<td><code>iris.peer.role</code></td>
+<td><code>seeder</code> or <code>leecher</code>.</td>
+</tr>
+<tr>
+<td><code>iris.device.role</code></td>
+<td>The peer's role membership, present only for an authenticated device.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="iristransferlifecycle"><code>iris.transfer.lifecycle</code></h3>
+<p>A plan is the decision that one device should hold one image. It carries two ids for the life of that transfer:</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.plan.id</code></td>
+<td>Identifies the decision. Stable across both events of one plan. Group on this id.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.id</code></td>
+<td>Identifies the transfer the device performs for that plan; the device stamps the same value on its own <code>iris.device.transfer.report</code>. Join the two record families on this id.</td>
+</tr>
+</tbody>
+</table>
+<p>Two <code>event</code> values, in the order they occur:</p>
+<table>
+<thead>
+<tr>
+<th><code>event</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>planned</code></td>
+<td>The assignment was recorded. Emitted once per plan.</td>
+</tr>
+<tr>
+<td><code>seeding_started</code></td>
+<td>The server confirmed the device holds verified content and is seeding it. Emitted at most once per plan.</td>
+</tr>
+</tbody>
+</table>
+<p>A <code>planned</code> record carries: <code>event</code>, <code>iris.transfer.id</code>, <code>iris.plan.id</code>, <code>iris.device.id</code>, <code>device.id</code> (both spellings, so either join works), <code>iris.image.id</code>, <code>iris.torrent.info_hash</code>, <code>iris.transfer.planned_at</code>. A <code>seeding_started</code> record repeats every <code>planned</code> attribute and adds <code>iris.transfer.seeding_started_at</code>, <code>iris.transfer.checksum_verified_at</code>, <code>iris.transfer.report_received_at</code>, <code>iris.transfer.tracker_seeder_at</code>, <code>iris.device.observed_at</code>, <code>iris.device.report_created_at</code> and, on a recovered promotion only, <code>iris.transfer.recovered_promotion</code>. See <a href="../../user-guide/monitoring/">Monitor transfers and device reports</a> for what these events prove.</p>
+<p>A missing value is absent, never an empty string or a default: a plan minted before its torrent existed carries no <code>iris.torrent.info_hash</code>.</p>
+<h4 id="a-planned-event">A <code>planned</code> event</h4>
+<p>The attributes array of a <code>planned</code> record (<code>eventName</code> is <code>iris.transfer.lifecycle</code>, <code>severityText</code> is <code>INFO</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"otel.log.name"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.lifecycle"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.telemetry.schema.version"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"intValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"planned"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"4d1a6e0c73b94f2ea85d10c6b7f3928a"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.plan.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.3"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"device.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.3"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.image.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"cat9k_iosxe.26.01.01"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.torrent.info_hash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"c8f4e2a1b09d7635fe1428a0d5c93b7614e0af82"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.planned_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:43:11.482Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412.planned"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<h4 id="a-seeding_started-event">A <code>seeding_started</code> event</h4>
+<p>The same plan, ten minutes later. It repeats every <code>planned</code> attribute, including <code>iris.transfer.planned_at</code>, and adds:</p>
+<div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"seeding_started"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.seeding_started_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:53:44.117Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.checksum_verified_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:53:44.117Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.report_received_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:53:44.117Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.transfer.tracker_seeder_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-02T12:48:30.905Z"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.observed_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"doubleValue"</span><span class="p">:</span><span class="w"> </span><span class="mf">1788353602.0</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"iris.device.report_created_at"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"doubleValue"</span><span class="p">:</span><span class="w"> </span><span class="mf">1788353604.4</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="nt">"key"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event.id"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"stringValue"</span><span class="p">:</span><span class="w"> </span><span class="s2">"9f2c4b7a1d8e4f60b3a25c9107de4412.seeding_started"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<p><code>iris.transfer.planned_at</code>, <code>iris.transfer.seeding_started_at</code>, <code>iris.transfer.checksum_verified_at</code>, <code>iris.transfer.report_received_at</code> and <code>iris.transfer.tracker_seeder_at</code> are RFC 3339 strings with a fixed shape:</p>
+<div class="highlight"><pre><span></span><code>2026-09-02T12:43:11.482Z
+</code></pre></div>
+<p>UTC, always; exactly three fractional digits (<code>...:11.000Z</code>, never <code>...:11Z</code>); a literal <code>Z</code>, never <code>+00:00</code>. The matching Splunk pattern is <code>%Y-%m-%dT%H:%M:%S.%N%Z</code>; these are string attributes, not int64. <code>iris.device.observed_at</code> and <code>iris.device.report_created_at</code> are float epochs on the device's own clock, not RFC 3339 strings. Show them, but never subtract a server instant from one as though the clocks agreed.</p>
+<h3 id="irisswarmpeer_bytes"><code>iris.swarm.peer_bytes</code></h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iris.image.id</code>, <code>iris.image.name</code></td>
+<td>The image and its catalog filename at export time.</td>
+</tr>
+<tr>
+<td><code>iris.torrent.info_hash</code></td>
+<td>The torrent.</td>
+</tr>
+<tr>
+<td><code>network.peer.address</code></td>
+<td>The peer edge this row measures.</td>
+</tr>
+<tr>
+<td><code>device.id</code>, <code>iris.peer.device.id</code>, <code>iris.peer.device_id</code></td>
+<td>The receiving device, and the sending device, when known.</td>
+</tr>
+<tr>
+<td><code>iris.peer.attribution</code></td>
+<td><code>origin</code>, <code>device</code>, or <code>unknown</code>.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.session_bytes_from_peer</code></td>
+<td>The sampled estimate of bytes this edge carried.</td>
+</tr>
+<tr>
+<td><code>iris.transfer_record.capture_complete</code></td>
+<td><code>false</code> when the sampled capture was incomplete.</td>
+</tr>
+<tr>
+<td><code>iris.device.role</code></td>
+<td>The peer's role membership, present only for an authenticated device.</td>
+</tr>
+<tr>
+<td><code>iris.peer.tls.configured_mode</code>, <code>iris.peer.tls.runtime_mode</code>, <code>iris.peer.tls.runtime_source</code>, <code>iris.peer.tls.reported_at</code></td>
+<td>An authenticated device's own reported TLS policy, not proof of one connection's negotiated cipher.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="irisdevicepeer_transfer_record"><code>iris.device.peer_transfer_record</code></h3>
+<p>Emitted once per peer per completed transfer, from a device-side completion hook reading aria2's per-peer counters when the last piece lands.</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>device.id</code></td>
+<td>The receiving device.</td>
+</tr>
+<tr>
+<td><code>iris.image.id</code>, <code>iris.image.name</code></td>
+<td>The image and its catalog filename.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.id</code></td>
+<td>The transfer this row belongs to.</td>
+</tr>
+<tr>
+<td><code>network.peer.address</code>, <code>network.peer.port</code></td>
+<td>The peer's address and port.</td>
+</tr>
+<tr>
+<td><code>iris.transfer.session_bytes_from_peer</code>, <code>iris.transfer.session_bytes_to_peer</code></td>
+<td>Bytes received from, and sent to, that peer in this session.</td>
+</tr>
+<tr>
+<td><code>iris.peer.attribution</code></td>
+<td><code>origin</code>, <code>device</code>, or <code>unknown</code>.</td>
+</tr>
+<tr>
+<td><code>iris.peer.device.id</code>, <code>iris.peer.device_id</code></td>
+<td>The sender: a device id, <code>origin</code>, or absent for an unknown sender.</td>
+</tr>
+<tr>
+<td><code>iris.peer.has_complete_file</code>, <code>iris.transfer_record.capture_complete</code></td>
+<td>Whether that peer already held the whole file, and whether the capture itself was lossy. <code>has_complete_file</code> does not identify the origin: it is aria2's seeder flag, true for any peer holding the complete file, including every device that finished early in a multi-device wave. It answers complete-vs-partial, not origin identity.</td>
+</tr>
+</tbody>
+</table>
+<p>The server classifies and pins each row's attribution once, at first export; see <a href="../state-and-data/">Data formats and states</a>. A row the server did not resolve stays <code>unknown</code> rather than being folded into <code>device</code>.</p>
+<h2 id="the-telemetry_observation-payload">The telemetry_observation payload</h2>
+<p>While a transfer is active, a device with streaming enabled embeds one <code>telemetry_observation</code> payload in its heartbeat, bounded at 8 KB. Only schema <code>v == 2</code> is accepted; a malformed field is dropped without failing the heartbeat.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>v</code></td>
+<td>Payload schema version (currently <code>2</code>).</td>
+</tr>
+<tr>
+<td><code>obs_state</code></td>
+<td><code>observed</code>, <code>not_due</code>, <code>paused</code>, <code>disabled</code>, <code>not_active</code>, or <code>rpc_unavailable</code>. Only <code>observed</code> carries transfer fields.</td>
+</tr>
+<tr>
+<td><code>observed_at</code></td>
+<td>Device-side observation time.</td>
+</tr>
+<tr>
+<td><code>transfer_id</code> / <code>image_id</code></td>
+<td>The transfer and the device's policy-assigned image, validated server-side.</td>
+</tr>
+<tr>
+<td><code>sample_seq</code></td>
+<td>Monotonic per-transfer sequence, checkpointed before the POST.</td>
+</tr>
+<tr>
+<td><code>sampling_class</code></td>
+<td><code>good</code> or <code>constrained</code>.</td>
+</tr>
+<tr>
+<td><code>aria</code></td>
+<td><code>receive_bps</code>, <code>send_bps</code>, <code>completed_content_bytes</code>, <code>total_content_bytes</code>, <code>connections</code>, <code>status</code>.</td>
+</tr>
+<tr>
+<td><code>peer_connections</code></td>
+<td>Up to 32 rows: <code>ip</code>, <code>port</code>, <code>send_bps</code>, <code>receive_bps</code>, <code>peer_client_name</code>, <code>progress</code>. Extra rows are truncated and flagged, not rejected.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="announce-counters-are-the-devices-own">Announce counters are the device's own</h2>
+<p>The announce counters, including bytes uploaded and bytes downloaded, are device-authored: the device reports them and the tracker records what it was told.</p>
+<h2 id="event-identity">Event identity</h2>
+<p>The device creates a <code>report_id</code>, frozen before its first POST. A retry after a crash sends the same report bytes and identifier, so the server stores it once. The exported <code>event.id</code> preserves that identity for downstream deduplication. Use the device observation timestamp for when the measurement was made, not the record's ingest timestamp. See <a href="../../user-guide/monitoring/">Monitor transfers and device reports</a> for how delivery stays consistent across a restart.</p>
+<h2 id="reading-iris_legacy_announce_participants">Reading <code>iris_legacy_announce_participants</code></h2>
+<p><code>iris_legacy_announce_participants</code> counts authenticated peers with no attributed device or seeder identity. A rotated-out seeder credential stays valid for <code>IRIS_SEEDER_PREV_TTL</code>; after that, its peer drops out of this gauge. Check <code>iris_tracker_announces_refused_total</code> and <code>iris_tracker_announces_refused_expired_total</code> alongside it, comparing changes over the same window.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../state-and-data/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Data formats and states">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Data formats and states
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../tools/" class="md-footer__link md-footer__link--next" aria-label="Next: Helper commands">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Helper commands
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["navigation.tabs","navigation.tabs.sticky","navigation.indexes","navigation.path","navigation.footer","navigation.top","navigation.tracking","toc.follow","content.code.copy","content.tabs.link","search.highlight"],"search":"../../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,5449 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+        <link rel="canonical" href="https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/">
+      
+      
+        <link rel="prev" href="../reference/device-apis/">
+      
+      
+        <link rel="next" href="../swagger/index.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>API error codes (problem types) - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#api-error-codes-problem-types" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              API error codes (problem types)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="./.." class="md-tabs__link">
+        
+  
+  Overview
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../architecture/" class="md-tabs__link">
+          
+  
+  Architecture Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../install/" class="md-tabs__link">
+          
+  
+  Installation Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../admin-guide/" class="md-tabs__link">
+          
+  
+  Administration Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../user-guide/" class="md-tabs__link">
+          
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../reference/" class="md-tabs__link">
+          
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Architecture Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/data-path/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How an image reaches a device
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/security-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network ports and flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/limitations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Limits
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../install/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Installation Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Before you start
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Before you start
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/check-the-host/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Check the host
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/supported-devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Supported devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/open-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Open the ports
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get the tools and keys
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get the tools and keys
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/build-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download the build tools
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/build-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build the images
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/signing-roots/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Create the signing keys
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/one-docker-host/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  One Docker host
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/separate-docker-hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Separate Docker hosts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finish the server setup
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Finish the server setup
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/first-sign-in/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Sign in for the first time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/activate-signing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Turn on instruction signing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/certificates-and-tokens/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Certificates and tokens
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/device-packages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device packages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/verify/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Verify the installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_6" id="__nav_3_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Prepare devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Prepare devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/device-requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device requirements
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/management-types/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management types
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/guest-shell/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guest Shell devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/ios-xr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOS-XR routers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../admin-guide/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Administration Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Administration Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin-guide/upgrade/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Upgrade to a new release
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin-guide/backups/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Back up and restore
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin-guide/maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Routine maintenance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin-guide/rotations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Rotate credentials and certificates
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin-guide/instruction-keys/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Replace or recover signing keys
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin-guide/recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Recover from damage
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../user-guide/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  User Guide
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  User Guide
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Find your way around the Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/first-image/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stage your first image
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Everyday tasks
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Everyday tasks
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Publish and verify images
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/onboarding/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Add and onboard devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Work with many devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/undeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Undeploy and retire devices
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/assignments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Assign images and check status
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/scheduling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schedule maintenance windows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/roles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Control peer sharing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Automate with the API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_5" id="__nav_5_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Monitoring
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitor transfers and reports
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/telemetry-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Export telemetry
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/dashboards/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Import the dashboards
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/splunk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Send telemetry to Splunk
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/splunk-searches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Search IRIS data in Splunk
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshoot
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../reference/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_2" id="__nav_6_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Configuration
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/server-configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/device-configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device agent configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6_3" id="__nav_6_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  APIs
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  APIs
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/console-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Console API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/peer-policy-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roles and sharing-policy API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/device-apis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  APIs the device agent uses
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API error codes
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API error codes
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#acl_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        acl_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-not-found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-not-found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-request-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-request-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-resource-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-resource-forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#asymmetric_peers" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        asymmetric_peers
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_acl" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_acl
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_device_id" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_device_id
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_quarantine" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_quarantine
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_role" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_role
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_role_mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_role_mapping
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#catalog-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        catalog-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#confirmation_required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        confirmation_required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-certificate-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        console-certificate-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-session-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        console-session-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#content-length-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        content-length-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credential-store-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        credential-store-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#csrf-validation-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        csrf-validation-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        device_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fleet_write_failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        fleet_write_failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#incomparable_role_change" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        incomparable_role_change
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-device-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-device-forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-keylist-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-keylist-missing
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-keylist-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-keylist-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-rate-limit-exceeded" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-rate-limit-exceeded
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-stamp-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-stamp-missing
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-state-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-state-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#internal-error" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        internal-error
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-authorization-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-authorization-request
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-content-length" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-content-length
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-request
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-request-body" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-request-body
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-tracker-auth-selector" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-tracker-auth-selector
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_policy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_policy_request" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_policy_request
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_roles_csv" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_roles_csv
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_schedule" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_schedule
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-api-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        management-api-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        management-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#method-not-allowed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        method-not-allowed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mixed_role_direction" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        mixed_role_direction
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#observability-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        observability-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#operation_backlog_full" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        operation_backlog_full
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#payload-too-large" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        payload-too-large
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy_error" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        policy_error
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy_fail_closed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        policy_fail_closed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        policy_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precondition-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        precondition-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precondition_failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        precondition_failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precondition_required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        precondition_required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#principal_unresolvable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        principal_unresolvable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#range-not-satisfiable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        range-not-satisfiable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rate-limit-exceeded" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        rate-limit-exceeded
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconciliation_required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        reconciliation_required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#request-body-not-supported" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        request-body-not-supported
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#request-timeout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        request-timeout
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resource-conflict" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        resource-conflict
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resource-not-found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        resource-not-found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#revision_conflict" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        revision_conflict
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_in_use" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_in_use
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_isolated" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_isolated
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_management_error" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_management_error
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_reserved_name" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_reserved_name
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_shadowed_by_assignment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_shadowed_by_assignment
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#route-not-found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        route-not-found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_conflict" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_conflict
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_state_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_state_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_heartbeat_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_heartbeat_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_policy_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_policy_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_status_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_status_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#service-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        service-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stale_pointer" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        stale_pointer
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetry-status-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        telemetry-status-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unknown_device" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        unknown_device
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unprocessable-content" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        unprocessable-content
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unsupported-media-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        unsupported-media-type
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upstream-operation-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        upstream-operation-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swagger/index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Browse the API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_4" id="__nav_6_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data and telemetry
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Data and telemetry
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/state-and-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data formats and states
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/telemetry-signals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Telemetry signals
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_5" id="__nav_6_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Lookup
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Lookup
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Helper commands
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Glossary
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/external-references/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Cisco and third-party references
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#acl_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        acl_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-not-found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-not-found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-request-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-request-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-resource-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        artifact-resource-forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#asymmetric_peers" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        asymmetric_peers
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_acl" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_acl
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_device_id" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_device_id
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_quarantine" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_quarantine
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_role" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_role
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bad_role_mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        bad_role_mapping
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#catalog-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        catalog-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#confirmation_required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        confirmation_required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-certificate-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        console-certificate-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-session-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        console-session-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#content-length-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        content-length-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credential-store-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        credential-store-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#csrf-validation-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        csrf-validation-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        device_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fleet_write_failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        fleet_write_failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#incomparable_role_change" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        incomparable_role_change
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-device-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-device-forbidden
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-keylist-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-keylist-missing
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-keylist-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-keylist-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-rate-limit-exceeded" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-rate-limit-exceeded
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-stamp-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-stamp-missing
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instruction-state-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        instruction-state-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#internal-error" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        internal-error
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-authorization-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-authorization-request
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-content-length" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-content-length
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-request
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-request-body" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-request-body
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid-tracker-auth-selector" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid-tracker-auth-selector
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_policy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_policy_request" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_policy_request
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_roles_csv" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_roles_csv
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalid_schedule" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        invalid_schedule
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-api-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        management-api-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        management-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#method-not-allowed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        method-not-allowed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mixed_role_direction" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        mixed_role_direction
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#observability-authentication-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        observability-authentication-required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#operation_backlog_full" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        operation_backlog_full
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#payload-too-large" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        payload-too-large
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy_error" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        policy_error
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy_fail_closed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        policy_fail_closed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        policy_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precondition-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        precondition-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precondition_failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        precondition_failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precondition_required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        precondition_required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#principal_unresolvable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        principal_unresolvable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#range-not-satisfiable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        range-not-satisfiable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rate-limit-exceeded" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        rate-limit-exceeded
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconciliation_required" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        reconciliation_required
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#request-body-not-supported" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        request-body-not-supported
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#request-timeout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        request-timeout
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resource-conflict" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        resource-conflict
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resource-not-found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        resource-not-found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#revision_conflict" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        revision_conflict
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_in_use" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_in_use
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_isolated" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_isolated
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_management_error" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_management_error
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_reserved_name" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_reserved_name
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role_shadowed_by_assignment" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        role_shadowed_by_assignment
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#route-not-found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        route-not-found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_conflict" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_conflict
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_not_found" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_not_found
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_state_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_state_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_heartbeat_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_heartbeat_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_policy_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_policy_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_status_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_status_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schedule_target_unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        schedule_target_unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#service-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        service-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stale_pointer" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        stale_pointer
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetry-status-unavailable" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        telemetry-status-unavailable
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unknown_device" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        unknown_device
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unprocessable-content" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        unprocessable-content
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unsupported-media-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        unsupported-media-type
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upstream-operation-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        upstream-operation-failed
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="./.." class="md-path__link">
+        
+  
+  <span class="md-ellipsis">
+    Overview
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-path__item">
+        <a href="../reference/" class="md-path__link">
+          
+  
+  <span class="md-ellipsis">
+    Reference
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-path__item">
+        <a href="../reference/console-api/" class="md-path__link">
+          
+  
+  <span class="md-ellipsis">
+    APIs
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="api-error-codes-problem-types">API error codes (problem types)</h1>
+<p>IRIS API errors follow <a href="https://www.rfc-editor.org/rfc/rfc9457.html">RFC 9457 Problem Details</a>. Match on the <code>type</code> or <code>code</code> field, not on <code>title</code> or <code>detail</code>, which can change.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>The BitTorrent tracker is the exception: its errors stay bencoded BEP failure dictionaries, not Problem Details.</p>
+</div>
+<p>Codes appear in alphabetical order below, grouped here by the part of IRIS that returns them.</p>
+<table>
+<thead>
+<tr>
+<th>Group</th>
+<th>Codes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HTTP</td>
+<td><a href="#authentication-required"><code>authentication-required</code></a> · <a href="#content-length-required"><code>content-length-required</code></a> · <a href="#credential-store-unavailable"><code>credential-store-unavailable</code></a> · <a href="#csrf-validation-failed"><code>csrf-validation-failed</code></a> · <a href="#forbidden"><code>forbidden</code></a> · <a href="#internal-error"><code>internal-error</code></a> · <a href="#invalid-content-length"><code>invalid-content-length</code></a> · <a href="#invalid-request"><code>invalid-request</code></a> · <a href="#invalid-request-body"><code>invalid-request-body</code></a> · <a href="#method-not-allowed"><code>method-not-allowed</code></a> · <a href="#payload-too-large"><code>payload-too-large</code></a> · <a href="#precondition-failed"><code>precondition-failed</code></a> · <a href="#rate-limit-exceeded"><code>rate-limit-exceeded</code></a> · <a href="#request-body-not-supported"><code>request-body-not-supported</code></a> · <a href="#request-timeout"><code>request-timeout</code></a> · <a href="#resource-conflict"><code>resource-conflict</code></a> · <a href="#resource-not-found"><code>resource-not-found</code></a> · <a href="#route-not-found"><code>route-not-found</code></a> · <a href="#service-unavailable"><code>service-unavailable</code></a> · <a href="#unprocessable-content"><code>unprocessable-content</code></a> · <a href="#unsupported-media-type"><code>unsupported-media-type</code></a> · <a href="#upstream-operation-failed"><code>upstream-operation-failed</code></a></td>
+</tr>
+<tr>
+<td>Console and management</td>
+<td><a href="#console-certificate-unavailable"><code>console-certificate-unavailable</code></a> · <a href="#console-session-required"><code>console-session-required</code></a> · <a href="#invalid-authorization-request"><code>invalid-authorization-request</code></a> · <a href="#management-api-unavailable"><code>management-api-unavailable</code></a> · <a href="#management-authentication-required"><code>management-authentication-required</code></a> · <a href="#reconciliation_required"><code>reconciliation_required</code></a></td>
+</tr>
+<tr>
+<td>Artifact server</td>
+<td><a href="#artifact-authentication-required"><code>artifact-authentication-required</code></a> · <a href="#artifact-forbidden"><code>artifact-forbidden</code></a> · <a href="#artifact-not-found"><code>artifact-not-found</code></a> · <a href="#artifact-request-failed"><code>artifact-request-failed</code></a> · <a href="#artifact-resource-forbidden"><code>artifact-resource-forbidden</code></a> · <a href="#range-not-satisfiable"><code>range-not-satisfiable</code></a></td>
+</tr>
+<tr>
+<td>Catalog and device instructions</td>
+<td><a href="#catalog-authentication-required"><code>catalog-authentication-required</code></a> · <a href="#instruction-device-forbidden"><code>instruction-device-forbidden</code></a> · <a href="#instruction-keylist-missing"><code>instruction-keylist-missing</code></a> · <a href="#instruction-keylist-unavailable"><code>instruction-keylist-unavailable</code></a> · <a href="#instruction-rate-limit-exceeded"><code>instruction-rate-limit-exceeded</code></a> · <a href="#instruction-state-unavailable"><code>instruction-state-unavailable</code></a> · <a href="#instruction-stamp-missing"><code>instruction-stamp-missing</code></a> · <a href="#invalid-tracker-auth-selector"><code>invalid-tracker-auth-selector</code></a> · <a href="#stale_pointer"><code>stale_pointer</code></a></td>
+</tr>
+<tr>
+<td>Roles and sharing policy</td>
+<td><a href="#acl_not_found"><code>acl_not_found</code></a> · <a href="#asymmetric_peers"><code>asymmetric_peers</code></a> · <a href="#bad_acl"><code>bad_acl</code></a> · <a href="#bad_device_id"><code>bad_device_id</code></a> · <a href="#bad_quarantine"><code>bad_quarantine</code></a> · <a href="#bad_role"><code>bad_role</code></a> · <a href="#bad_role_mapping"><code>bad_role_mapping</code></a> · <a href="#confirmation_required"><code>confirmation_required</code></a> · <a href="#device_not_found"><code>device_not_found</code></a> · <a href="#fleet_write_failed"><code>fleet_write_failed</code></a> · <a href="#incomparable_role_change"><code>incomparable_role_change</code></a> · <a href="#invalid_policy"><code>invalid_policy</code></a> · <a href="#invalid_policy_request"><code>invalid_policy_request</code></a> · <a href="#invalid_roles_csv"><code>invalid_roles_csv</code></a> · <a href="#mixed_role_direction"><code>mixed_role_direction</code></a> · <a href="#operation_backlog_full"><code>operation_backlog_full</code></a> · <a href="#policy_error"><code>policy_error</code></a> · <a href="#policy_fail_closed"><code>policy_fail_closed</code></a> · <a href="#policy_unavailable"><code>policy_unavailable</code></a> · <a href="#precondition_failed"><code>precondition_failed</code></a> · <a href="#precondition_required"><code>precondition_required</code></a> · <a href="#principal_unresolvable"><code>principal_unresolvable</code></a> · <a href="#revision_conflict"><code>revision_conflict</code></a> · <a href="#role_in_use"><code>role_in_use</code></a> · <a href="#role_isolated"><code>role_isolated</code></a> · <a href="#role_management_error"><code>role_management_error</code></a> · <a href="#role_not_found"><code>role_not_found</code></a> · <a href="#role_reserved_name"><code>role_reserved_name</code></a> · <a href="#role_shadowed_by_assignment"><code>role_shadowed_by_assignment</code></a> · <a href="#unknown_device"><code>unknown_device</code></a></td>
+</tr>
+<tr>
+<td>Schedules</td>
+<td><a href="#invalid_schedule"><code>invalid_schedule</code></a> · <a href="#schedule_conflict"><code>schedule_conflict</code></a> · <a href="#schedule_not_found"><code>schedule_not_found</code></a> · <a href="#schedule_state_unavailable"><code>schedule_state_unavailable</code></a> · <a href="#schedule_target_heartbeat_unavailable"><code>schedule_target_heartbeat_unavailable</code></a> · <a href="#schedule_target_policy_unavailable"><code>schedule_target_policy_unavailable</code></a> · <a href="#schedule_target_status_unavailable"><code>schedule_target_status_unavailable</code></a> · <a href="#schedule_target_unavailable"><code>schedule_target_unavailable</code></a></td>
+</tr>
+<tr>
+<td>Observability</td>
+<td><a href="#observability-authentication-required"><code>observability-authentication-required</code></a> · <a href="#telemetry-status-unavailable"><code>telemetry-status-unavailable</code></a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="acl_not_found">acl_not_found</h2>
+<p>404: the ACL named for migration does not exist in current policy.</p>
+<h2 id="artifact-authentication-required">artifact-authentication-required</h2>
+<p>The artifact server operation needs valid HTTP Basic device credentials.</p>
+<h2 id="artifact-forbidden">artifact-forbidden</h2>
+<p>Access to the requested staging artifact is not allowed.</p>
+<h2 id="artifact-not-found">artifact-not-found</h2>
+<p>The requested staging artifact does not exist.</p>
+<h2 id="artifact-request-failed">artifact-request-failed</h2>
+<p>The artifact server could not complete an otherwise valid request.</p>
+<h2 id="artifact-resource-forbidden">artifact-resource-forbidden</h2>
+<p>The device credential does not grant access to the requested artifact.</p>
+<h2 id="asymmetric_peers">asymmetric_peers</h2>
+<p>A role is a named group of devices that share with each other. This code means raw policy input, or an <code>iris-role import</code> file, gives two restricted roles an asymmetric relationship: one permits the other but not back. Fix the whole role graph and validate or import it again.</p>
+<h2 id="authentication-required">authentication-required</h2>
+<p>The request needs a credential, and none was given, or the one given is invalid.</p>
+<h2 id="bad_acl">bad_acl</h2>
+<p>400: the ACL name given for migration is missing, invalid, or reserved.</p>
+<h2 id="bad_device_id">bad_device_id</h2>
+<p>400: a role membership mapping contains an empty device ID.</p>
+<h2 id="bad_quarantine">bad_quarantine</h2>
+<p>Quarantine, applied to a device, tells it to stop sharing with every peer. 400: the quarantine value in the request must be a JSON boolean (<code>true</code> or <code>false</code>).</p>
+<h2 id="bad_role">bad_role</h2>
+<p>A device role change did not give a valid role name or an explicit <code>null</code> to clear the role. Use a known, non-reserved role name, or <code>null</code> to clear membership, then preview the change again.</p>
+<h2 id="bad_role_mapping">bad_role_mapping</h2>
+<p>400: the role membership input must be a nonempty mapping from device to role.</p>
+<h2 id="catalog-authentication-required">catalog-authentication-required</h2>
+<p>The catalog operation needs a valid device bearer credential. See <a href="../user-guide/troubleshooting/">Troubleshoot: symptoms and first steps</a> for how to read the refusal line the server logs for this error.</p>
+<h2 id="confirmation_required">confirmation_required</h2>
+<p>The candidate role or QoS change affects a large number of devices, or changes a QoS value. Preview that exact candidate with <code>dry_run=1</code>, then send its <code>confirm_token</code> with the same current ETag.</p>
+<h2 id="console-certificate-unavailable">console-certificate-unavailable</h2>
+<p>No usable Console certificate is available for the browser to check.</p>
+<h2 id="console-session-required">console-session-required</h2>
+<p>The browser request needs a valid Console session cookie.</p>
+<h2 id="content-length-required">content-length-required</h2>
+<p>The request must include a valid <code>Content-Length</code> header. This operation does not accept chunked transfer encoding.</p>
+<h2 id="credential-store-unavailable">credential-store-unavailable</h2>
+<p>The credential store could not be read or checked, so the request is refused rather than allowed by default.</p>
+<h2 id="csrf-validation-failed">csrf-validation-failed</h2>
+<p>The browser request changes state but does not carry the session's valid CSRF token.</p>
+<h2 id="device_not_found">device_not_found</h2>
+<p>The device-role or effective-QoS route names a device that is not in current inventory. Refresh the inventory and use its exact device ID.</p>
+<h2 id="fleet_write_failed">fleet_write_failed</h2>
+<p>A coordinated role-membership change could not finish writing to inventory. Policy may have already committed a relaxation. Check the <code>partial</code>, <code>applied</code>, <code>failed</code>, revision, and <code>role_drift</code> fields, and refresh both stores before you decide whether to retry.</p>
+<h2 id="forbidden">forbidden</h2>
+<p>A principal is who a request comes from: a device, the server's seeder, or a legacy device. This code means the authenticated principal is not allowed to do this operation.</p>
+<h2 id="incomparable_role_change">incomparable_role_change</h2>
+<p>The server cannot safely tell whether the requested role change is a tightening or a relaxation of access. Split the change into separate, individually previewed steps. See <a href="../user-guide/roles/">Control which devices share with each other</a> for how role changes are classified.</p>
+<h2 id="instruction-device-forbidden">instruction-device-forbidden</h2>
+<p>An instruction is the signed message the server sends a device saying which images to stage and how. 403: a valid, current catalog token belongs to a different device than the one in the request path. An invalid, revoked, out-of-date, or unsupported credential instead returns 401 <a href="#catalog-authentication-required"><code>catalog-authentication-required</code></a>. On a 401 or 403 for an instruction, the device agent tries one refresh and reports <code>instr_forbidden</code>. If the server has revoked the device, rotating its key does not fix this.</p>
+<h2 id="instruction-keylist-missing">instruction-keylist-missing</h2>
+<p>404: no published instruction key list exists yet. Complete the root-signed key list setup; the device agent keeps its last usable evidence and retries at the next check.</p>
+<h2 id="instruction-keylist-unavailable">instruction-keylist-unavailable</h2>
+<p>503: the root-signed key list needed to trust an instruction cannot be read or checked. Fix the problem with who holds the private keys, or with server state, and retry at the next check; the retry hint is 10 seconds. The device keeps using its last usable cached key list until then.</p>
+<h2 id="instruction-rate-limit-exceeded">instruction-rate-limit-exceeded</h2>
+<p>429: the shared per-device bucket for instruction and key-list requests is empty. It allows a burst of 2 requests and refills one every 10 seconds. Wait for the <code>Retry-After</code> hint before the next check; do not add your own retry loop.</p>
+<p>For how the device agent behaves after an instruction failure, see <a href="../reference/state-and-data/">Data formats and states</a>. To replace or recover the signing keys, see <a href="../admin-guide/instruction-keys/#instruction-root-ceremony-and-recovery">Replace or recover signing keys</a>.</p>
+<h2 id="instruction-stamp-missing">instruction-stamp-missing</h2>
+<p>404: the device has no instruction stamp, or its fixed role file is missing. Check the state of whatever produces the stamp, fix the source, then run <code>iris-instr-key restamp &lt;device_id&gt;</code>.</p>
+<h2 id="instruction-state-unavailable">instruction-state-unavailable</h2>
+<p>503: the policy stamp, role file, key, or the record of who holds the private keys cannot be safely read or checked. Look at the status of whichever part produced it and repair the source; do not send an empty stamp instead. The retry hint is 10 seconds.</p>
+<h2 id="internal-error">internal-error</h2>
+<p>The server hit an internal failure. The response never includes exception text or file paths.</p>
+<h2 id="invalid-authorization-request">invalid-authorization-request</h2>
+<p>The Console container's header-only authorization check found the request malformed.</p>
+<h2 id="invalid-content-length">invalid-content-length</h2>
+<p>The <code>Content-Length</code> header is not a valid non-negative integer.</p>
+<h2 id="invalid-request">invalid-request</h2>
+<p>The request syntax or parameters are invalid.</p>
+<h2 id="invalid-request-body">invalid-request-body</h2>
+<p>The request body does not match the schema the operation requires.</p>
+<h2 id="invalid-tracker-auth-selector">invalid-tracker-auth-selector</h2>
+<p>The catalog torrent request asked for a tracker authentication mode IRIS does not support.</p>
+<h2 id="invalid_policy">invalid_policy</h2>
+<p>A role definition, role graph, network value, or QoS value breaks the fixed policy schema. Fix the named field and validate the whole candidate again.</p>
+<h2 id="invalid_policy_request">invalid_policy_request</h2>
+<p>A role or QoS route received an unknown query parameter, an unknown body field, a malformed JSON shape, or a value of the wrong type. Send only the fields the route documents.</p>
+<h2 id="invalid_roles_csv">invalid_roles_csv</h2>
+<p>A roles CSV file sent to <code>POST /api/v1/peer-policy/roles/import-csv</code> does not follow the required format. The file might have a missing <code>role</code> header, an unknown column, a row with no role, a duplicate role, a non-integer QoS cell, or a malformed network value. The <code>detail</code> field names the row or field. Nothing is written; fix the file and preview again. A well-formed file can still fail for a policy reason, such as an unknown peer, a reserved name, or an isolated role; those keep their own codes.</p>
+<h2 id="invalid_schedule">invalid_schedule</h2>
+<p>A schedule definition, patch, or CSV row failed validation. The schema is fixed and rejects these before anything is written: an unknown field, an unknown verb, a payload that does not match the verb, an out-of-range window, or an unrecognized time zone. Nothing changed.</p>
+<h2 id="management-api-unavailable">management-api-unavailable</h2>
+<p>The Console container cannot open its authenticated, CA-verified connection to the management API.</p>
+<h2 id="management-authentication-required">management-authentication-required</h2>
+<p>The internal operation needs the current management bearer credential, or one still inside its short overlap window after a rotation.</p>
+<h2 id="method-not-allowed">method-not-allowed</h2>
+<p>The resource exists but does not support this HTTP method. Check the response's <code>Allow</code> header for the methods it does support.</p>
+<h2 id="mixed_role_direction">mixed_role_direction</h2>
+<p>One bulk role request mixes devices whose change tightens access with devices whose change relaxes it. Split it into two requests, one for each direction, so the writes stay safe.</p>
+<h2 id="observability-authentication-required">observability-authentication-required</h2>
+<p>The observability operation needs its own, separately scoped bearer credential.</p>
+<h2 id="operation_backlog_full">operation_backlog_full</h2>
+<p>Peer policy, also called sharing policy, is the rules that say which devices may share pieces with which. The tracker has not confirmed 256 peer-policy operations yet. When the normal preflight check sees this backlog, it refuses the request before writing anything. A write already in flight can still finish with a partial outcome. Check the partial and drift fields, then let the tracker catch up before you retry.</p>
+<h2 id="payload-too-large">payload-too-large</h2>
+<p>The request body, declared or received, is larger than this operation's documented limit.</p>
+<h2 id="policy_error">policy_error</h2>
+<p>503: role, QoS, or schedule coordination cannot safely use policy that is out of date. The legacy quarantine check keeps its own 422 response for the same condition. Repair the current policy before you retry; an old cached copy does not authorize new changes.</p>
+<h2 id="policy_fail_closed">policy_fail_closed</h2>
+<p>503: no trustworthy peer policy is available, so the change is refused. Restore the current policy and check that it is healthy before you retry.</p>
+<h2 id="policy_unavailable">policy_unavailable</h2>
+<p>The role or QoS interface cannot use the current policy, or a policy store it needs is unavailable. This can be a refusal before any write happens, or it can follow a successful inventory write whose policy write then failed. Check the partial outcome, revision, and drift fields, then refresh both stores before you retry.</p>
+<h2 id="precondition-failed">precondition-failed</h2>
+<p>An HTTP precondition such as <code>If-Match</code> did not match current state.</p>
+<h2 id="precondition_failed">precondition_failed</h2>
+<p>The role or QoS route's compare-and-swap check did not receive exactly the current, strong peer-policy ETag in <code>If-Match</code>. A weak, wildcard, duplicate, missing-current, or stale value fails. Read the current policy again and preview your change again.</p>
+<h2 id="precondition_required">precondition_required</h2>
+<p>The role or QoS change left out the required <code>If-Match</code> header carrying the current, strong peer-policy ETag.</p>
+<h2 id="principal_unresolvable">principal_unresolvable</h2>
+<p>The pair-explanation lookup could not resolve one requested principal to exactly one fresh, unambiguous address. Wait for a fresh announce, or fix shared attribution; this route never guesses an address from inventory.</p>
+<h2 id="range-not-satisfiable">range-not-satisfiable</h2>
+<p>The requested byte range cannot be served.</p>
+<h2 id="rate-limit-exceeded">rate-limit-exceeded</h2>
+<p>The caller exceeded an operation's rate limit. Retry only after the duration in <code>Retry-After</code>.</p>
+<h2 id="reconciliation_required">reconciliation_required</h2>
+<p>This is not an HTTP problem type. It is the <code>error_category</code> an IOx onboard, undeploy, or forced undeploy job ends with when an earlier attempt was cut off partway through changing device-global app signature verification. IRIS cannot safely guess the device's state, and no retry clears it, including a forced one.</p>
+<p>A verification journal stuck in phase <code>indeterminate</code>, and two unresolved journals claiming the same device, are different conditions with different fixes. See <a href="../admin-guide/recovery/">Recover from an interrupted job or damaged state</a> for both.</p>
+<h2 id="request-body-not-supported">request-body-not-supported</h2>
+<p>This operation does not accept a request body.</p>
+<h2 id="request-timeout">request-timeout</h2>
+<p>The client did not finish sending the request within the server's deadline.</p>
+<h2 id="resource-conflict">resource-conflict</h2>
+<p>The request conflicts with the resource's current state, or reuses an idempotency key for a different operation.</p>
+<h2 id="resource-not-found">resource-not-found</h2>
+<p>The authenticated resource does not exist.</p>
+<h2 id="revision_conflict">revision_conflict</h2>
+<p>Another policy writer committed a change after this request passed its first ETag check but before the final, locked revision check. Use the revision and ETag the response returns to reread and preview again; do not resend the old candidate token.</p>
+<h2 id="role_in_use">role_in_use</h2>
+<p>The requested role still has members, or another role refers to it. The response gives the member count and the referring role names; remove those uses before you delete it.</p>
+<h2 id="role_isolated">role_isolated</h2>
+<p>A role's peer list left out the role itself. Every role must permit its own members, even when it permits no other role.</p>
+<h2 id="role_management_error">role_management_error</h2>
+<p>422: the role coordinator rejected the request without a more specific code. Check the response's partial-result fields before you refresh and retry.</p>
+<h2 id="role_not_found">role_not_found</h2>
+<p>The requested definition, QoS target, or membership role does not exist. Refresh the role list, create the role first if you meant to, and preview again.</p>
+<h2 id="role_reserved_name">role_reserved_name</h2>
+<p>The requested role name is reserved by the policy model: <code>default</code>, <code>quarantine</code>, <code>origin</code>, <code>seeder</code>, or <code>legacy</code>.</p>
+<h2 id="role_shadowed_by_assignment">role_shadowed_by_assignment</h2>
+<p>The device has an explicit stored-ACL assignment that would override its role silently. Use the audited ACL-to-role migration instead of creating a role membership that would have no effect.</p>
+<h2 id="route-not-found">route-not-found</h2>
+<p>No registered API route matches the request. The server checks authentication before it discloses this.</p>
+<h2 id="schedule_conflict">schedule_conflict</h2>
+<p>The schedule could not be changed as asked because it moved under you. The id already exists, the definition changed while the request was in flight, or an occurrence and its evidence no longer match the definition you are writing. Read the schedule again and reapply the same change.</p>
+<h2 id="schedule_not_found">schedule_not_found</h2>
+<p>No schedule with that id exists. Occurrence and outcome history stay readable after a definition is deleted, so a history read can still succeed where this does not.</p>
+<h2 id="schedule_state_unavailable">schedule_state_unavailable</h2>
+<p>The durable schedule store could not be read, or a write could not be confirmed. A failed write may already be visible elsewhere; this response does not promise a rollback. Fix the storage problem, then reread the definition, ETag, and occurrence evidence before you retry. An unreadable store never authorizes new scheduled work.</p>
+<h2 id="schedule_target_heartbeat_unavailable">schedule_target_heartbeat_unavailable</h2>
+<p>The schedule's target filter (<code>q</code>, <code>telemetry</code>, or <code>status</code>) can only be resolved from device heartbeat data, and that data could not be read. IRIS refuses the target rather than resolve it against a partial inventory.</p>
+<h2 id="schedule_target_policy_unavailable">schedule_target_policy_unavailable</h2>
+<p>Peer policy is unavailable or out of date, so a role-aware schedule target cannot be resolved. Roles are enforced from that policy, so resolving the target without it would silently ignore role membership.</p>
+<h2 id="schedule_target_status_unavailable">schedule_target_status_unavailable</h2>
+<p>A <code>status</code> filter needs live management-job data that is not available here. Use a filter that does not depend on live job state.</p>
+<h2 id="schedule_target_unavailable">schedule_target_unavailable</h2>
+<p>503: the service that resolves a schedule's target devices is unavailable. Restore inventory and policy access, then retry the preview. Do not substitute an empty target set.</p>
+<h2 id="service-unavailable">service-unavailable</h2>
+<p>A required service or state store is temporarily unavailable. Retry only after the duration in <code>Retry-After</code>.</p>
+<h2 id="stale_pointer">stale_pointer</h2>
+<p>409: the key named in the stamp is no longer current or still valid. Finish or redo the committed key rotation and retry later; the retry hint is 10 seconds. The device agent reports <code>instr_pending</code> while it keeps using its last usable policy.</p>
+<h2 id="telemetry-status-unavailable">telemetry-status-unavailable</h2>
+<p>The authenticated telemetry status view could not be produced.</p>
+<h2 id="unknown_device">unknown_device</h2>
+<p>422: the legacy quarantine request names a device that is not in inventory.</p>
+<h2 id="unprocessable-content">unprocessable-content</h2>
+<p>The body is syntactically valid but violates the operation's semantic rules.</p>
+<h2 id="unsupported-media-type">unsupported-media-type</h2>
+<p>The operation does not support the request's media type.</p>
+<h2 id="upstream-operation-failed">upstream-operation-failed</h2>
+<p>An authenticated operation could not be completed by its upstream dependency.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../reference/device-apis/" class="md-footer__link md-footer__link--prev" aria-label="Previous: APIs the device agent uses">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                APIs the device agent uses
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../swagger/index.html" class="md-footer__link md-footer__link--next" aria-label="Next: Browse the API">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Browse the API
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["navigation.tabs","navigation.tabs.sticky","navigation.indexes","navigation.path","navigation.footer","navigation.top","navigation.tracking","toc.follow","content.code.copy","content.tabs.link","search.highlight"],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>
