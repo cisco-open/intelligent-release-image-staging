@@ -125,7 +125,7 @@ def validate_report(report, *, optional_xr):
         raise ValueError("inconsistent check result")
 
 
-def diagnose(args):
+def diagnose(args, *, env=None):
     failure = {"schema_version": 1, "scope": SCOPE, "state": "checks-failed"}
     try:
         source = Path(__file__).with_name("probe.py").read_text(encoding="utf-8")
@@ -134,6 +134,7 @@ def diagnose(args):
     try:
         result = subprocess.run(runtime_command(args), input=source, text=True,
                                 encoding="utf-8", errors="replace",
+                                env=env,
                                 capture_output=True, timeout=args.timeout, check=False)
     except subprocess.TimeoutExpired:
         return dict(failure, reason="runtime-probe-timeout")

@@ -40,6 +40,7 @@ def clean_env():
     # an operator's SSH agent into privileged deployment/build commands.
     return {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG": "C.UTF-8", "DEBIAN_FRONTEND": "noninteractive",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "DOCKER_HOST": "unix:///var/run/docker.sock"}
 
 
@@ -293,7 +294,7 @@ class DockerInstall:
                 raise InstallError("Published package changed; refusing to report installation complete")
         from .cli import parser, diagnose
         args = parser().parse_args(["doctor", "--target", "docker", "--container", self.config["instance"] + "-server"])
-        report = diagnose(args)
+        report = diagnose(args, env=self.env)
         if report["state"] != "checks-passed":
             raise InstallError("Runtime package verification failed; inspect irisctl doctor output")
 
