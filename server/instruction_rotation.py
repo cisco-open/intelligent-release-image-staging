@@ -101,7 +101,7 @@ def _load(paths):
     if value['state'] in ('retiring', 'completed') and value['retirement_payload'] is None:
         raise keys.InstructionKeyError('rotation retirement request is missing')
     if (value['state'] == 'completed') != (value['retired_seq'] is not None):
-        raise keys.InstructionKeyError('rotation retirement receipt is inconsistent')
+        raise keys.InstructionKeyError('rotation retirement record is inconsistent')
     return value
 
 
@@ -348,7 +348,7 @@ def retire(request_id, artifact, *, paths=None, now=None):
         _require(record, request_id)
         # Publication uses the existing public installer, which takes its own
         # custody lock. Another operator can prepare a different retirement in
-        # that gap; never attach our receipt to their newer request.
+        # that gap; never attach our completion record to their newer request.
         if (record['state'] not in ('retiring', 'completed')
                 or _decode(record['retirement_payload'], keys.MAX_KEYLIST_PAYLOAD_BYTES) != parsed['payload']
                 or _file(paths.public_key).decode('ascii') != record['new_public']):

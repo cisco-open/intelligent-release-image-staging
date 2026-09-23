@@ -92,17 +92,17 @@ def test_real_rotation_retry_and_root_approved_retirement(custody, tmp_path):
                                       krl=krl, verify_time=NOW)
 
 
-@pytest.mark.parametrize('boundary', ['encrypted_key', 'public_key', 'certificate', 'runtime_key', 'runtime_certificate', 'receipt'])
+@pytest.mark.parametrize('boundary', ['encrypted_key', 'public_key', 'certificate', 'runtime_key', 'runtime_certificate', 'completion'])
 def test_interrupted_commit_recovers_before_signing(custody, tmp_path, monkeypatch, boundary):
     paths, roots = custody
     result, certificate = prepare(custody, tmp_path)
     original = keys._atomic_write
     failed = []
-    target = str(rotation._path(paths)) if boundary == 'receipt' else str(getattr(paths, boundary))
+    target = str(rotation._path(paths)) if boundary == 'completion' else str(getattr(paths, boundary))
     def fail_after(path, data, mode=0o600):
         original(path, data, mode=mode)
         if (str(path) == target and not failed
-                and (boundary != 'receipt' or b'retirement-pending' in data)):
+                and (boundary != 'completion' or b'retirement-pending' in data)):
             failed.append(True)
             raise OSError('simulated durability boundary')
     monkeypatch.setattr(keys, '_atomic_write', fail_after)
@@ -307,7 +307,7 @@ def test_real_producer_reissues_after_rotation_without_reset(custody, tmp_path):
     assert all(Path(path).read_bytes() == value for path, value in state_before.items())
 
 
-def test_changed_retirement_request_cannot_receive_another_requests_receipt(custody, tmp_path, monkeypatch):
+def test_changed_retirement_request_cannot_receive_another_requests_completion(custody, tmp_path, monkeypatch):
     paths, roots = custody
     result, certificate = prepare(custody, tmp_path)
     rotation.activate(result['request_id'], certificate, paths=paths, now=NOW)
