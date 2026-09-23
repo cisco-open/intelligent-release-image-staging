@@ -68,6 +68,8 @@ reconciling it. Automated crash recovery for this state is not yet implemented.
 There is no web API to delete backups or acknowledge an unresolved failure.
 The worker bounds history at 100 operations and 20 capture requests, and refuses
 more rather than silently deleting a backup. This is not a retention policy.
+Host diagnostics retain safe refusal reasons; browser history never receives
+subprocess output or raw exception text.
 
 ## Cold capture
 
@@ -98,6 +100,8 @@ modes; public manifests contain ciphertext hashes, not secret payload bytes.
 Stop other host-side writers as well. File-change detection is a safeguard, not
 a substitute for quiescing external import/build processes. Capture refuses
 symlinks, hard-linked files and special files rather than silently omitting them.
+Capacity estimation tolerates only the known live IOx control socket; graceful
+shutdown must remove it before the actual capture, which still rejects sockets.
 Budget temporary space for exported service images and the encrypted archives.
 Preflight estimates these together on shared filesystems and requires one GiB
 of extra headroom. External writers still need to respect that capacity reserve.

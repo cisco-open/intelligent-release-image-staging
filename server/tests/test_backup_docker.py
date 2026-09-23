@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import socket
 import sys
 import threading
 from types import SimpleNamespace
@@ -148,6 +149,34 @@ def test_low_space_refused_before_downtime(deployment, monkeypatch):
     assert not (deployment.state / 'backup-operation.json').exists()
     for container in deployment.containers:
         assert json.loads(docker('container', 'inspect', container))[0]['State']['Running']
+
+
+def test_live_iox_socket_estimated_but_never_archived(deployment):
+    mount = Path(json.loads(docker('volume', 'inspect', deployment.volumes[0]))[0]['Mountpoint'])
+    directory = mount / 'iox'
+    directory.mkdir(mode=0o700)
+    os.chown(directory, 10001, 10001)
+    endpoint = directory / 'control.sock'
+    with socket.socket(socket.AF_UNIX) as control:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            control.bind('/proc/self/fd/' + str(descriptor) + '/control.sock')
+        finally:
+            os.close(descriptor)
+        os.chmod(endpoint, 0o600)
+        os.chown(endpoint, 10001, 10001)
+        with Journal(deployment.state).locked() as journal:
+            installation = DockerInstall(journal)
+            sources, _, _ = backup.capture_plan(installation)
+            backup.capacity_preflight(installation, sources, deployment.data, deployment.recovery)
+        # The fixture process does not own/remove this socket at shutdown.
+        # A leftover must fail actual capture, not be silently omitted.
+        with pytest.raises(backup.InstallError, match='link or special'):
+            backup.create(SimpleNamespace(state_dir=deployment.state, output=deployment.data,
+                recovery_output=deployment.recovery, allow_downtime=True))
+        assert not deployment.data.exists()
+        for container in deployment.containers:
+            assert json.loads(docker('container', 'inspect', container))[0]['State']['Running']
 
 
 def test_external_writable_bind_of_volume_refused(deployment):

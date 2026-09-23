@@ -63,13 +63,15 @@ def test_worker_one_operation_and_durable_result(worker, monkeypatch):
     assert len(recovered.jobs) == 1
 
 
-def test_worker_redacts_exceptions_and_blocks_interrupted_recovery(worker, monkeypatch):
+def test_worker_redacts_exceptions_and_blocks_interrupted_recovery(worker, monkeypatch, capsys):
     def fail(args):
         raise RuntimeError('PRIVATE KEY sentinel')
     monkeypatch.setattr(worker_module.backup, 'create', fail)
     worker.submit({'action': 'backup', 'allow_downtime': True, 'request_id': str(uuid.uuid4())})
     worker.thread.join(3)
     assert 'sentinel' not in worker.record.read_text()
+    diagnostic = capsys.readouterr().err
+    assert 'RuntimeError' in diagnostic and 'sentinel' not in diagnostic
     assert worker.status()['jobs'][0]['state'] == 'failed'
     worker.jobs[0]['state'] = 'running'
     worker.save()

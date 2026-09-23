@@ -19,6 +19,7 @@ import socket
 import socketserver
 import stat
 import struct
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -131,7 +132,7 @@ class Worker:
                     raise InstallError("Data and recovery identity sets do not match")
                 result = 'verified-isolated-files' if destination else 'verified-files'
             detail = 'No service cutover performed.' if job['action'] != 'backup' else 'Capture complete; verify recovery separately.'
-        except Exception:
+        except Exception as exc:
             if destination_created:
                 # Only this operation's freshly created private UUID directory;
                 # never remove a caller's pre-existing extraction or backup.
@@ -141,6 +142,10 @@ class Worker:
                     pass
             # Never serialize subprocess output, decrypted files or exception
             # representations into the browser-facing journal.
+            # InstallError text is deliberately operator-safe; keep useful
+            # diagnostics on the host without exposing raw command output.
+            reason = str(exc) if isinstance(exc, InstallError) else type(exc).__name__
+            print('Lifecycle operation failed: ' + reason, file=sys.stderr, flush=True)
             result, detail = 'failed', 'Operation failed. Inspect the protected host state; no reset was performed.'
             if job['action'] == 'backup':
                 try:

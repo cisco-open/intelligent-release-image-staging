@@ -179,7 +179,13 @@ def create(sources, output, recipient, signing_key, *, metadata=None):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
-                process.stdin.close()
+                try:
+                    process.stdin.close()
+                except OSError:
+                    # Aborted capture can leave buffered plaintext destined for
+                    # the now-terminated age process. Preserve the real capture
+                    # error rather than replacing it with a broken-pipe error.
+                    pass
         envelope = {'schema': SCHEMA, 'created_at': int(time.time()),
                     'payload_sha256': _digest(encrypted), 'payload_bytes': encrypted.stat().st_size,
                     'recipient': recipient}

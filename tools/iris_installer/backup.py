@@ -116,6 +116,8 @@ def capture_plan(installation):
 def capacity_preflight(installation, sources, output, recovery):
     """Reserve an estimate plus headroom BEFORE exporting images or stopping IRIS."""
     size, count = 0, 0
+    state_root = sources.get('volume-iris-state')
+    live_control = Path(state_root) / 'iox/control.sock' if state_root is not None else None
     for source in sources.values():
         source = Path(source)
         paths = itertools.chain((source,), source.rglob('*') if source.is_dir() else ())
@@ -128,6 +130,13 @@ def capacity_preflight(installation, sources, output, recovery):
                 if info.st_nlink != 1:
                     raise InstallError("Backup source contains hard-linked files")
                 size += info.st_size
+            elif (path == live_control and stat.S_ISSOCK(info.st_mode)
+                  and info.st_uid == 10001 and stat.S_IMODE(info.st_mode) == 0o600):
+                # The live IOx controller owns this ephemeral socket and removes
+                # it during graceful shutdown. It has no payload to reserve.
+                # Actual post-stop capture still rejects EVERY special file,
+                # including this socket if shutdown failed to remove it.
+                continue
             elif not stat.S_ISDIR(info.st_mode):
                 raise InstallError("Backup source contains links or special files")
     image_bytes = 0
