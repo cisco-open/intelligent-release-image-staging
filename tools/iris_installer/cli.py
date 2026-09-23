@@ -31,8 +31,28 @@ def positive_timeout(value):
 
 def parser():
     result = argparse.ArgumentParser(
-        description="IRIS installer foundation. Deployment/lifecycle commands are not implemented yet.")
+        description="IRIS Ubuntu installer candidate. Single-host source installation; broader qualification in progress.")
     commands = result.add_subparsers(dest="command", required=True)
+    install = commands.add_parser("install", help="install a new single-host deployment on Ubuntu 24.04")
+    install.add_argument("--target", choices=("docker", "kubernetes"), default="docker")
+    install.add_argument("--source", type=Path,
+                         default=Path(__file__).resolve().parent.parent / "source")
+    install.add_argument("--state-dir", type=Path, required=True)
+    install.add_argument("--instance", default="iris")
+    install.add_argument("--host", required=True, help="device-facing IPv4 address on this host")
+    install.add_argument("--roots-dir", type=Path, required=True, help="exactly two approved PUBLIC roots")
+    install.add_argument("--recovery-recipient", required=True, help="separately held age PUBLIC recovery recipient")
+    install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
+    install.add_argument("--console-port", type=int, default=8080)
+    install.add_argument("--peer-tls", choices=("required", "disabled"), default="required")
+    install.add_argument("--accept-changes", action="store_true", help="approve Ubuntu dependency installation, source builds and new services")
+    resume = commands.add_parser("resume", help="resume without regenerating identity or resetting state")
+    resume.add_argument("--state-dir", type=Path, required=True)
+    resume.add_argument("--certificate", type=Path)
+    approve = commands.add_parser("approve-signing", help="run ONLY on the offline custodian machine")
+    approve.add_argument("--public-key", type=Path, required=True)
+    approve.add_argument("--root-key", type=Path, required=True)
+    approve.add_argument("--output", type=Path, default=Path("online-cert.pub"))
     doctor = commands.add_parser(
         "doctor", help="read-only native package checks; not whole-installation readiness")
     doctor.add_argument("--target", choices=("docker", "kubernetes"), required=True)
@@ -133,6 +153,19 @@ def diagnose(args):
 def main(argv=None):
     command_parser = parser()
     args = command_parser.parse_args(argv)
+    if args.command != "doctor":
+        from .state import InstallError
+        try:
+            if args.command == "approve-signing":
+                from .custody import approve
+                return approve(args)
+            from .deploy import start, resume
+            return start(args) if args.command == "install" else resume(args)
+        except (InstallError, OSError, ValueError) as exc:
+            # Known validation errors do not contain private key contents.
+            print("Installation stopped: " + (str(exc) if isinstance(exc, InstallError)
+                                             else "input or filesystem error; state retained"))
+            return 1
     if args.target == "kubernetes" and not all((args.context, args.namespace, args.pod)):
         command_parser.error("Kubernetes requires --context, --namespace and an exact --pod")
     if args.target == "docker" and (args.namespace or args.pod):

@@ -6,10 +6,76 @@ SPDX-License-Identifier: Apache-2.0
 
 # Production installer development
 
-The production installer is under development. It is not yet an alternative
-to the published installation guide. This first slice provides read-only
-runtime diagnostics; it does not install services, provision signing, compile
-packages, create accounts or implement lifecycle operations.
+The production installer is under development. An Ubuntu 24.04 amd64 `.deb`
+candidate now contains the source-build installation engine as well as runtime
+diagnostics. It is not yet the qualified all-topology production release.
+
+## Ubuntu installation candidate
+
+Build from a reviewed commit (uncommitted working-tree changes are NOT included):
+
+```bash
+python3 tools/build-installer-package.py --out /path/to/candidate-output
+```
+
+The package includes only allowlisted committed source, both committed aria2c
+architectures, notices and a file inventory. It has no maintainer hooks that
+deploy services, generate keys or create accounts. The adjacent checksum is
+local corruption detection, NOT a release signature. An approved release
+signing/distribution process is still required before public production use.
+
+On an isolated Ubuntu 24.04 amd64 test host, install the reviewed package with
+`sudo apt install ./iris-installer_<version>_amd64.deb`. Then:
+
+```bash
+sudo irisctl install --state-dir /var/lib/iris-installer/my-instance \
+  --instance my-instance --host <device-facing-ipv4> \
+  --roots-dir /path/to/two-reviewed-public-roots \
+  --recovery-recipient <separately-held-age-public-recipient> \
+  --accept-changes
+```
+
+Dependencies are installer-managed: Ubuntu tools, missing engine/plugins and
+ARM64 emulation. An existing engine is not replaced. Host time must already be
+synchronized with the organization's approved source; the installer does not
+select an NTP source or rewrite firewall policy. This source-build candidate
+needs network access for dependency/image/tool downloads. It is NOT an offline
+kit. Source manifests detect later drift but do not authenticate a publisher.
+
+The default peer TLS policy is required. The Console binds loopback by default;
+set `--console-bind` and `--console-port` explicitly for approved management
+network exposure. Restrict first-claim access before deployment. A named,
+installer-owned Compose project isolates containers, images, volumes and state.
+Existing instances are refused, not adopted. Private offline roots stay with
+their custodians; the installer generates only the server's age and online keys.
+
+The engine pauses with exit 20 and exports `requests/online.pub` below its state
+directory. Take that public file to the offline custodian machine and run:
+
+```bash
+irisctl approve-signing --public-key online.pub --root-key /offline/root-a
+```
+
+The holder enters the passphrase directly into OpenSSH. Return only
+`online-cert.pub`, then run on the server:
+
+```bash
+sudo irisctl resume --state-dir /var/lib/iris-installer/my-instance \
+  --certificate /path/to/online-cert.pub
+```
+
+Resume validates the saved source, roots, configuration and built image IDs.
+It does not regenerate an existing online key or reinitialize an activated
+producer. It builds both IOx packages and the XR RPM, checks runtime readability,
+and starts the Console. Exit 21 means owner claim is still required. No account
+is created or logged in automatically. Exit 22 means deployed services await
+production review: root attestations/keylist, renewal and backup arrangements
+are not yet orchestrated. Neither status is a production READY declaration.
+
+Kubernetes deployment, split Docker, a prebuilt/offline kit, guided root creation,
+fully recoverable initial reservation, and upgrade/backup/restore/uninstall remain
+unfinished. The Kubernetes doctor below is diagnostic support, not deployment
+support. Do not use this candidate as evidence that those release gates passed.
 
 ## Implemented: native-package runtime checks
 
@@ -58,9 +124,8 @@ resumable operations, upgrades, renewal, backup/restore and failure recovery.
 The server remains single-replica; multi-node scheduling is not multi-writer HA.
 Optional demo mode cannot satisfy production acceptance gates.
 
-Next work is the authenticated release/build kit and resumable transaction
-engine, followed by production custody and artifact finalization, deployment
-adapters and lifecycle qualification. Existing crypto operations remain the
+Next work is completion of the authenticated release/build kit and transaction
+recovery, deployment adapters and lifecycle qualification. Existing crypto operations remain the
 authority; builders receive public roots only. No install command is exposed
 until it performs a real supported workflow with truthful readiness results.
 

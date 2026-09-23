@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add an Ubuntu 24.04 installer `.deb` candidate with managed host dependencies,
+  isolated single-host source builds, an installation journal, offline signing
+  approval/resume, required peer TLS by default and automatic IOx/ARM64/XR
+  package builds. Keep account claim explicit. All-topology deployment,
+  authenticated offline delivery and lifecycle qualification remain unfinished.
+
 - Start the production installer foundation with scoped runtime package checks
   for Docker and Kubernetes. Check package/certificate readability as the server
   identity instead of accepting host-root reads, and publish public IOx artifacts

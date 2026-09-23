@@ -1,0 +1,38 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Offline custodian companion; private roots never travel to the server."""
+
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+from .state import InstallError, regular_bytes
+
+
+def approve(args):
+    public = regular_bytes(args.public_key, 16384)
+    if not public.startswith(b"ssh-ed25519 ") or b"PRIVATE" in public:
+        raise InstallError("Expected the online Ed25519 PUBLIC key")
+    root = Path(args.root_key).resolve(strict=True)
+    output = Path(args.output).absolute()
+    if output.exists() or output.is_symlink():
+        raise InstallError("Certificate destination already exists; choose a new path")
+    # Prompt belongs to ssh-keygen and its controlling terminal. Neither the
+    # passphrase nor private key bytes are read by the installer.
+    with tempfile.TemporaryDirectory(prefix="iris-approval-") as directory:
+        request = Path(directory) / "online.pub"
+        request.write_bytes(public)
+        result = subprocess.run(["ssh-keygen", "-s", str(root), "-I", "iris-online",
+                                 "-n", "iris-server", "-V", "+0s:+30d", str(request)], check=False)
+        if result.returncode:
+            raise InstallError("Custodian signing failed; no certificate was published")
+        data = regular_bytes(Path(directory) / "online-cert.pub", 65536)
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            stream.write(data)
+    print("Return only this public certificate to the installer: " + str(output))
+    return 0

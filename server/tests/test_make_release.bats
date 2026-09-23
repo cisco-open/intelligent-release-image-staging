@@ -139,6 +139,7 @@ _make_release_fixture() {
   done
   cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
   cp "$repo/tools/irisctl" "$FIX/tools/irisctl"
+  cp "$repo/tools/build-installer-package.py" "$FIX/tools/build-installer-package.py"
   mkdir -p "$FIX/tools/iris_installer"
   cp "$repo/tools/iris_installer/"*.py "$FIX/tools/iris_installer/"
   cp "$repo/tools/licenses/musl-COPYRIGHT" "$FIX/tools/licenses/musl-COPYRIGHT"
