@@ -30,6 +30,8 @@ attested roots; the terms it uses are in the next section.
 
 ## Renew the instruction signing certificate
 
+To change the key itself, use [Rotate the online signer](signer-rotation.md).
+
 1. Open **Settings → Certificates & keys**. Check the renewal date and the
    **Signing stops** deadline, which is seven days before expiry.
 2. Select **Download public renewal request**. Send `iris-online.pub` to the

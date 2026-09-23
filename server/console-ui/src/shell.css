@@ -141,6 +141,11 @@
 .iris-react-shell #certificate-rows small.machine { display: block; max-width: 32ch; overflow-wrap: anywhere; white-space: normal; margin-top: 6px; }
 .iris-react-shell :is(#settings-pane-certificates,#settings-pane-backups) button:disabled { opacity: .55; cursor: not-allowed; }
 .iris-react-shell #backup-selected { max-width: 100%; }
+.iris-react-shell .rotation-identities { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; padding: 16px 0; border-block: 1px solid var(--iris-rule); }
+.iris-react-shell .rotation-identities .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell #signer-rotation :is(input,select) { max-width: 100%; }
+.iris-react-shell #signer-rotation label { display: block; margin-top: 16px; }
+@media (max-width: 800px) { .iris-react-shell .rotation-identities { grid-template-columns: minmax(0,1fr); } }
 .iris-react-shell #view-settings .card { box-shadow: none; padding: 24px; min-width: 0; }
 .iris-react-shell #view-settings .card > h3 { margin: 0 0 16px; font-size: 16px; line-height: 24px; }
 .iris-react-shell #view-settings .card > .muted { max-width: 80ch; }

@@ -69,7 +69,9 @@ sudo irisctl resume --state-dir /var/lib/iris-installer/my-instance \
 Resume validates the saved source, roots, configuration and built image IDs.
 It does not regenerate an existing online key or reinitialize an activated
 producer. It builds both IOx packages and the XR RPM, checks runtime readability,
-and starts the Console. Exit 21 means owner claim is still required. No account
+then provisions and verifies the Guest Shell bundle, exact digest sidecar,
+bootstrap and embedded public trust as the server user. It starts the Console
+only after those checks pass. Exit 21 means owner claim is still required. No account
 is created or logged in automatically. Exit 22 means deployed services await
 production review: root attestations/keylist, renewal and backup arrangements
 are not yet orchestrated. Neither status is a production READY declaration.
@@ -115,6 +117,8 @@ The probe reads complete wrapper bytes and their provenance sidecars, and
 fingerprints the distributed catalog certificate. It does not authenticate the
 sidecar, inspect package contents/native signatures, check live TLS endpoints,
 qualify Guest Shell, test instruction signing or establish Console ownership.
+The installation engine separately requires fresh Guest Shell publication
+evidence; the standalone native-package doctor's scope is unchanged.
 The existing Docker freshness helper still performs its separate live versus
 distributed certificate comparison. Errors from transport clients are not
 echoed because they can contain authentication material.

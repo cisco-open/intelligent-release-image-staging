@@ -50,6 +50,7 @@ import gui_fleet
 import gui_onboard
 import gui_tls
 import certificate_lifecycle
+import instruction_rotation
 import lifecycle_client
 import instruction_keys
 import instruction_stamper
@@ -4934,6 +4935,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(401, {"error": "unauthorized"}); return
                 self._json(200, certificate_lifecycle.inventory())
                 return
+            if path == "/api/settings/certificates/instruction/rotation":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    self._json(200, instruction_rotation.status())
+                except instruction_keys.InstructionKeyError as exc:
+                    self._json(409, {"error": str(exc)})
+                except (OSError, ValueError):
+                    self._json(503, {"error": "rotation status unavailable; inspect custody before retrying"})
+                return
             if path == "/api/settings/backups":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -6394,6 +6405,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._audit('deployment_maintenance', 'security', action=data['action'],
                             actor=actor, target='deployment-backup',
                             detail='maintenance request accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path == "/api/settings/certificates/instruction/rotation":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = instruction_rotation.operate(data)
+                except instruction_keys.InstructionKeyError as exc:
+                    self._audit('instruction_signer_rotation', 'security', action='rotation',
+                        actor=actor, result='fail', target='online-signer',
+                        detail='rotation request rejected', src_ip=self._client_ip())
+                    self._json(409, {"error": str(exc)}); return
+                except (OSError, ValueError):
+                    self._json(503, {"error": "rotation outcome unavailable; refresh and retry the same request"}); return
+                self._audit('instruction_signer_rotation', 'security', action=data['action'],
+                    actor=actor, target='online-signer', detail='rotation operation accepted',
+                    src_ip=self._client_ip())
                 self._json(200, result); return
             if path in ("/api/settings/certificates/instruction/request",
                         "/api/settings/certificates/instruction/renew"):

@@ -205,6 +205,10 @@ def _custody_lock(paths):
         0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # Finish an approved interrupted key replacement before any reader or
+        # signer observes a mixed durable/runtime authority tuple.
+        import instruction_rotation
+        instruction_rotation.recover_locked(paths)
         yield
     finally:
         try:

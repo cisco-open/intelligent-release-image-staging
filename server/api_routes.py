@@ -109,6 +109,8 @@ _CONSOLE_RESOURCES = (
     ("POST", "/settings/backups", "Request a scoped backup, verification or isolated extraction"),
     ("POST", "/settings/certificates/instruction/request", "Prepare public instruction certificate renewal"),
     ("POST", "/settings/certificates/instruction/renew", "Renew the existing instruction signing certificate"),
+    ("GET", "/settings/certificates/instruction/rotation", "Inspect online signer rotation"),
+    ("POST", "/settings/certificates/instruction/rotation", "Prepare, activate or retire an online signer"),
     ("GET", "/settings/image-verification", "Read verification settings"),
     ("POST", "/settings/image-verification", "Update verification settings"),
     ("POST", "/settings/audit-export", "Update audit export settings"),

@@ -31,7 +31,7 @@ tracked `docs/` tree, so a recipient unpacking a release gets this folder too.
 | [ai-assisted-deployment.md](ai-assisted-deployment.md) | Assistant runbook for deployment and validation. |
 | [device-packages.md](device-packages.md) | Building and validating device packages. |
 | [installer.md](installer.md) | Production installer implementation status and runtime checks. |
-| [lifecycle.md](lifecycle.md) | Certificate renewal, scoped backup worker and isolated recovery qualification. |
+| [lifecycle.md](lifecycle.md) | Certificate renewal, signer rotation, scoped backup worker and isolated recovery qualification. |
 | [device-agent-internals.md](device-agent-internals.md) | Agent runtime, file placement, and verification. |
 | [server-internals.md](server-internals.md) | Server services and persistent state. |
 | [telemetry-internals.md](telemetry-internals.md) | Sampling, reports, and peer accounting. |

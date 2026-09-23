@@ -6192,6 +6192,101 @@
   });
   // ---- End certificate lifecycle ----
 
+  // ---- Journalled online signer rotation ----
+  function maintenanceRequestId() {
+    var bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    var hex = Array.from(bytes).map(function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
+    return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+  }
+  var rotationStatus = null, rotationBusy = false, rotationNonce = null, rotationRead = 0;
+  var rotationUrl = '/api/v1/settings/certificates/instruction/rotation';
+  function validRotationStatus(data) {
+    return data && ['idle', 'awaiting-approval', 'committing', 'retirement-pending', 'retiring', 'completed', 'cancelled'].includes(data.state) &&
+      Array.isArray(data.root_ids) && data.root_ids.every(function (id) { return typeof id === 'string'; });
+  }
+  function renderRotation() {
+    var state = rotationStatus ? rotationStatus.state : 'unknown';
+    document.getElementById('rotation-state').textContent = 'Rotation: ' + state.replaceAll('-', ' ') +
+      (state === 'completed' ? '. Previous key revoked at keylist sequence ' + rotationStatus.retired_keylist_seq + '. Verify fleet acceptance.' : '.');
+    document.getElementById('rotation-previous').textContent = rotationStatus && rotationStatus.previous_sha256 || 'No rotation evidence';
+    document.getElementById('rotation-replacement').textContent = rotationStatus && rotationStatus.replacement_sha256 || 'No rotation evidence';
+    document.getElementById('rotation-prepare').disabled = rotationBusy || !['idle', 'completed', 'cancelled'].includes(state);
+    document.getElementById('rotation-approval').hidden = state !== 'awaiting-approval';
+    document.getElementById('rotation-retirement').hidden = !['retirement-pending', 'retiring'].includes(state);
+    document.querySelectorAll('#rotation-approval button,#rotation-approval input,#rotation-retirement button,#rotation-retirement input,#rotation-retirement select').forEach(function (el) { el.disabled = rotationBusy || !rotationStatus; });
+    var root = document.getElementById('rotation-root'), selected = root.value;
+    root.replaceChildren();
+    (rotationStatus && rotationStatus.root_ids || []).forEach(function (id) {
+      var option = document.createElement('option'); option.value = id; option.textContent = id; root.appendChild(option);
+    });
+    if (Array.from(root.options).some(function (option) { return option.value === selected; })) root.value = selected;
+  }
+  function rotationDownload(name, bytes) {
+    var url = URL.createObjectURL(new Blob([bytes], {type: 'application/octet-stream'}));
+    var link = document.createElement('a'); link.href = url; link.download = name; link.click();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  async function refreshRotation() {
+    if (rotationBusy) return;
+    var generation = ++rotationRead;
+    rotationStatus = null; renderRotation();
+    try {
+      var response = await fetch(rotationUrl), data = await response.json();
+      if (generation !== rotationRead) return;
+      if (!response.ok || !validRotationStatus(data)) throw new Error(data.error || 'Rotation status unavailable. Check custody before retrying.');
+      rotationStatus = data; renderRotation();
+    } catch (error) {
+      if (generation !== rotationRead) return;
+      rotationStatus = null; renderRotation();
+      document.getElementById('rotation-result').textContent = error.message;
+    }
+  }
+  async function rotateSigner(action) {
+    if (rotationBusy || !rotationStatus) return;
+    var result = document.getElementById('rotation-result');
+    var payload = {action: action, request_id: rotationStatus.request_id};
+    try {
+      if (action === 'prepare') {
+        if (!confirm('Prepare a new online signing key for offline approval? The current signer keeps working until you apply approval.')) return;
+        rotationNonce = rotationNonce || maintenanceRequestId(); payload.request_id = rotationNonce;
+      } else if (action === 'activate' || action === 'retire') {
+        var file = document.getElementById(action === 'activate' ? 'rotation-certificate' : 'rotation-keylist').files[0];
+        if (!file || file.size > (action === 'activate' ? 65536 : 131072)) throw new Error('Choose the bounded public approval file returned by your custodian.');
+        var raw = await file.text();
+        if (raw.includes('PRIVATE KEY') || !raw.startsWith(action === 'activate' ? 'ssh-ed25519-cert-v01@openssh.com ' : 'IRIS-KEYLIST/1\n')) throw new Error('Upload the public approval, never a private key.');
+        if (!confirm(action === 'activate' ? 'Switch to the approved replacement signer? This cannot be cancelled afterward. Device roots and counters stay unchanged.' : 'Publish the approved revocation of the previous signer? Devices must fetch current instructions and the new keylist. Verify fleet acceptance afterward.')) return;
+        payload.confirm = true;
+        if (action === 'activate') payload.certificate = raw;
+        else payload.artifact = btoa(raw);
+      } else if (action === 'retirement-request') payload.root_id = document.getElementById('rotation-root').value;
+      else if (action === 'cancel' && !confirm('Discard the pending replacement? The current signer will be kept.')) return;
+      rotationBusy = true; ++rotationRead; renderRotation(); result.textContent = 'Validating rotation request…';
+      var response = await fetch(rotationUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Rotation outcome unknown. Refresh and retry the same request.');
+      if (action === 'retirement-request') {
+        rotationDownload('keylist.payload', Uint8Array.from(atob(data.payload), function (c) { return c.charCodeAt(0); }));
+        result.textContent = 'Retirement request downloaded. Obtain approval from ' + data.root_id + ' on its offline station.';
+      } else {
+        if (!validRotationStatus(data)) throw new Error('Rotation outcome unknown. Refresh before continuing.');
+        rotationStatus = data; rotationNonce = null;
+        result.textContent = action === 'activate' ? 'Replacement signer active. Complete offline retirement approval next.' :
+          action === 'retire' ? 'Previous signer revoked on the server. Verify current instructions and keylist acceptance across the fleet.' :
+          action === 'cancel' ? 'Pending replacement cancelled; active signer unchanged.' : 'Replacement prepared. Download its public key for offline approval.';
+      }
+    } catch (error) { result.textContent = error.message || 'Rotation outcome unknown. Refresh and retry the same request.'; }
+    finally { rotationBusy = false; renderRotation(); }
+  }
+  document.getElementById('rotation-refresh').addEventListener('click', refreshRotation);
+  document.getElementById('rotation-download').addEventListener('click', function () {
+    if (rotationStatus && rotationStatus.public_key) rotationDownload('iris-replacement.pub', rotationStatus.public_key);
+  });
+  ['prepare', 'activate', 'cancel', 'retirement-request', 'retire'].forEach(function (action) {
+    document.getElementById('rotation-' + action).addEventListener('click', function () { rotateSigner(action); });
+  });
+  // ---- End signer rotation ----
+
   // ---- Deployment backup workflow ----
   var backupStatus = null, backupBusy = false, backupRead = 0, backupPending = null;
   function backupControls() {
@@ -6241,10 +6336,7 @@
     if (action === 'extract' && !confirm('Extract both sets into a new protected recovery directory? This includes secret recovery material. No services will be started.')) return;
     var selectedBackup = document.getElementById('backup-selected').value;
     if (!backupPending || backupPending.action !== action || (action !== 'backup' && backupPending.backup_id !== selectedBackup)) {
-      var hex = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (byte) {
-        return byte.toString(16).padStart(2, '0');
-      }).join('');
-      var requestId = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+      var requestId = maintenanceRequestId();
       backupPending = action === 'backup' ? {action: action, allow_downtime: true, request_id: requestId}
         : {action: action, backup_id: selectedBackup, request_id: requestId};
     }
@@ -6304,7 +6396,7 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
-    if (sub === 'certificates') refreshCertificates();
+    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); }
     if (sub === 'backups') refreshBackups();
     refreshSettings();
   }

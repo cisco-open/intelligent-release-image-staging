@@ -155,6 +155,23 @@ def test_resume_refuses_source_or_root_changes(installation):
         installation.verify_inputs()
 
 
+@pytest.mark.parametrize('state', ['ok', 'unknown', 'stale'])
+def test_package_gate_includes_fresh_guestshell_evidence(installation, monkeypatch, state):
+    installation.journal.document['completed']['packages'] = {}
+    monkeypatch.setattr(cli, 'diagnose', lambda *a, **kw: {'state': 'checks-passed'})
+    calls = []
+    monkeypatch.setattr(installation, 'execute', lambda *a, **kw: calls.append(a))
+    monkeypatch.setattr(installation, 'python', lambda code: json.dumps({'state': state}).encode())
+    if state == 'ok':
+        installation.packages()
+        assert installation.journal.document['completed']['guestshell']['state'] == 'ok'
+    else:
+        with pytest.raises(InstallError, match='Guest Shell'):
+            installation.packages()
+        assert 'guestshell' not in installation.journal.document['completed']
+    assert calls == [('/opt/iris/server/provision-served.sh',)]
+
+
 def test_prepare_uses_scoped_names_and_does_not_publish_management(installation):
     calls = []
 

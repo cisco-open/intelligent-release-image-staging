@@ -26,6 +26,7 @@ try {
   let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
   let certificateAvailable = true, renewalAccepted = false;
+  let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b']};
   let backupFixture = {available: false, target: 'unavailable', can_verify: false, can_extract: false,
     jobs: [], note: 'Configure the lifecycle worker on the installer host.'};
   const backupId = '11111111-1111-1111-1111-111111111111';
@@ -44,6 +45,7 @@ try {
     assert.equal(url.origin, 'http://iris.test', 'No external requests allowed');
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/certificates/instruction/rotation' && route.request().method() === 'GET') return route.fulfill({json: rotationFixture});
       if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
         status: certificateAvailable ? 200 : 503,
         json: certificateAvailable ? {observed_at: 1790160000, custody: {state: 'renewal_due'}, items: [
@@ -71,6 +73,17 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/certificates/instruction/rotation') {
+          assert.match(body.request_id, /^[0-9a-f-]{36}$/);
+          if (body.action === 'retirement-request') return route.fulfill({json: {
+            request_id: body.request_id, root_id: body.root_id, payload: Buffer.from('public fixture').toString('base64')}});
+          if (body.action === 'activate' || body.action === 'retire') assert.equal(body.confirm, true);
+          rotationFixture = {...rotationFixture, request_id: body.request_id,
+            state: {prepare: 'awaiting-approval', activate: 'retirement-pending', retire: 'completed', cancel: 'cancelled'}[body.action],
+            previous_sha256: 'aa'.repeat(32), replacement_sha256: 'bb'.repeat(32),
+            public_key: 'ssh-ed25519 fixture-public-only\n', retired_keylist_seq: body.action === 'retire' ? 8 : null};
+          return route.fulfill({json: rotationFixture});
+        }
         if (url.pathname === '/api/v1/settings/certificates/instruction/request') return route.fulfill({json: {
           public_key: 'ssh-ed25519 fixture-public-only\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
         if (url.pathname === '/api/v1/settings/certificates/instruction/renew') return route.fulfill({
@@ -343,6 +356,42 @@ try {
   certificateAvailable = true;
   await page.locator('#certificate-refresh').click();
   await page.locator('#certificate-rows tr').first().waitFor();
+  await page.locator('#rotation-state').getByText('Rotation: idle.', {exact: true}).waitFor();
+  const beforeRotation = settingsWrites.length;
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.locator('#rotation-prepare').click();
+  assert.equal(settingsWrites.length, beforeRotation);
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#rotation-prepare').click();
+  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  const publicDownload = page.waitForEvent('download');
+  await page.locator('#rotation-download').click();
+  assert.equal((await publicDownload).suggestedFilename(), 'iris-replacement.pub');
+  const beforeRotationPrivate = settingsWrites.length;
+  await page.locator('#rotation-certificate').setInputFiles({name: 'private', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN OPENSSH PRIVATE KEY-----')});
+  await page.locator('#rotation-activate').click();
+  await page.locator('#rotation-result').getByText('Upload the public approval, never a private key.', {exact: true}).waitFor();
+  assert.equal(settingsWrites.length, beforeRotationPrivate);
+  await page.locator('#rotation-refresh').click();
+  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#rotation-certificate').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#rotation-activate').click();
+  await page.locator('#rotation-state').getByText('Rotation: retirement pending.', {exact: true}).waitFor();
+  const retirementDownload = page.waitForEvent('download');
+  await page.locator('#rotation-retirement-request').click();
+  assert.equal((await retirementDownload).suggestedFilename(), 'keylist.payload');
+  await page.locator('#rotation-keylist').setInputFiles({name: 'keylist.envelope', mimeType: 'text/plain', buffer: Buffer.from('IRIS-KEYLIST/1\npublic fixture')});
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#rotation-retire').click();
+  await page.locator('#rotation-state').getByText(/Previous key revoked at keylist sequence 8/).waitFor();
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  if (process.env.IRIS_UI_SCREENSHOTS) {
+    await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+    await page.locator('#signer-rotation').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'rotation-mobile.png')});
+  }
+  await page.setViewportSize({width: 1440, height: 1000});
   if (process.env.IRIS_UI_SCREENSHOTS) {
     await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
     await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'certificates-desktop.png')});

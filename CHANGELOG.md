@@ -17,11 +17,17 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add guided online instruction-signing key rotation in the Console, with
+  offline public approvals, crash-safe activation and signed retirement of the
+  previous key. Preserve device roots and replay state. Include fresh Guest
+  Shell publication verification alongside both IOx packages and the XR RPM
+  in the Ubuntu installer candidate.
+
 - Add Console certificate/key inventory and guarded same-key instruction
   certificate renewal. Add candidate single-host Docker encrypted cold backups,
   signed manifests, isolated file recovery and scoped Console worker controls.
-  Automated cutover, scheduled retention, other deployment layouts and key
-  rotation remain under development.
+  Automated cutover, scheduled retention and other deployment layouts remain
+  under development.
 
 - Add an Ubuntu 24.04 installer `.deb` candidate with managed host dependencies,
   isolated single-host source builds, an installation journal, offline signing

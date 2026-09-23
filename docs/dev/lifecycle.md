@@ -6,11 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Installer lifecycle development
 
-The current candidate implements same-key instruction certificate renewal in
-the Console, and a single-host Docker cold-backup worker with file verification
-and isolated extraction. It does not yet implement production recovery cutover,
-scheduled retention, split-host/Kubernetes backup adapters or automated key
-rotation. These are still release gates, not optional production follow-ups.
+The current candidate implements same-key instruction certificate renewal and
+guided online signer rotation in the Console, and a single-host Docker
+cold-backup worker with file verification and isolated extraction. It does not
+yet implement production recovery cutover,
+scheduled retention or split-host/Kubernetes backup adapters. These are still
+release gates, not optional production follow-ups. Scheduled rotation and other
+key classes are not implemented.
 
 ## Certificate maintenance
 
@@ -26,6 +28,24 @@ key. The root private key stays offline; only the public approval is uploaded.
 Browser TLS replacement remains in TLS & trust. Management/device-facing trust
 changes still follow the manual rotation guide. No background automatic renewal
 or new reminder delivery service is supplied by this slice.
+
+## Online signer rotation
+
+The [operator workflow](../zensical/admin-guide/signer-rotation.md) uses
+`server/instruction_rotation.py` and the existing custody lock. Only encrypted
+candidate material and public approvals persist in `instr/online-rotation.json`.
+Plaintext candidates use the runtime directory. An approved `committing` intent
+is rolled forward before any subsequent custody operation; each published file
+must still match its old or approved replacement digest. No producer reset or
+per-device encryption-key changes occur.
+
+Retirement extends the installed KRL and requires a separate offline signature.
+The public `irisctl approve-keylist` companion uses the existing keylist format.
+Exact approval retries repair interrupted metadata publication. Tests cover real
+age/OpenSSH, all signer publication boundaries, prior revocation preservation,
+authenticated Console-to-management requests and both native SSHSIG helpers
+(ARM64 under emulation when available). Browser tests intercept APIs; these
+tests do not claim inventory-device acceptance.
 
 ## Deployment-side worker
 

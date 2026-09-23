@@ -61,6 +61,7 @@ nav = [
     { "Routine maintenance" = "admin-guide/maintenance.md" },
     { "Rotate credentials and certificates" = "admin-guide/rotations.md" },
     { "Replace or recover signing keys" = "admin-guide/instruction-keys.md" },
+    { "Rotate the online signer" = "admin-guide/signer-rotation.md" },
     { "Recover from damage" = "admin-guide/recovery.md" },
   ] },
   { "User Guide" = [

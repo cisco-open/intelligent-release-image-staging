@@ -1769,6 +1769,9 @@ _JSON_REQUESTS = {
          "confirm": "new-password"}, ("current", "new", "confirm"), True),
     "/settings/sessions/revoke-others": ({}, (), False),
     "/settings/certificates/instruction/request": ({}, (), False),
+    "/settings/certificates/instruction/rotation": (
+        {"action": "prepare", "request_id": "00000000-0000-0000-0000-000000000001"},
+        ("action", "request_id"), True),
     "/settings/backups": ({"action": "backup", "allow_downtime": True,
                             "request_id": "00000000-0000-0000-0000-000000000001"},
                            ("action", "allow_downtime", "request_id"), True),
@@ -1847,6 +1850,17 @@ def _request_body(route):
             schema["properties"]["certificate"]["maxLength"] = 65536
             for field in ("public_key_sha256", "certificate_sha256"):
                 schema["properties"][field]["pattern"] = "^[0-9a-f]{64}$"
+    if suffix == "/settings/certificates/instruction/rotation":
+        variants = []
+        for action, extra in (
+                ('prepare', {}), ('cancel', {}),
+                ('activate', {'certificate': {'type': 'string', 'maxLength': 65536}, 'confirm': {'const': True}}),
+                ('retirement-request', {'root_id': {'type': 'string', 'maxLength': 64}}),
+                ('retire', {'artifact': {'type': 'string', 'maxLength': 174764}, 'confirm': {'const': True}})):
+            properties = {'action': {'const': action}, 'request_id': {'type': 'string', 'format': 'uuid'}, **extra}
+            variants.append({'type': 'object', 'additionalProperties': False,
+                             'properties': properties, 'required': list(properties)})
+        schema = {'oneOf': variants}
     if suffix == "/settings/backups":
         schema = {'oneOf': [
             {'type': 'object', 'additionalProperties': False,
@@ -2163,6 +2177,12 @@ def _json_success_example(route):
         "/settings/certificates/instruction/renew": {
             "applied": True, "expires_at": 1789592000, "refuse_at": 1788987200,
             "status_refreshed": True},
+        "/settings/certificates/instruction/rotation": {
+            "state": "idle", "request_id": None, "previous_public_key": None,
+            "public_key": None, "previous_sha256": None, "replacement_sha256": None,
+            "created_at": None, "activated_at": None, "retired_keylist_seq": None,
+            "root_ids": ["root-a", "root-b"],
+            "note": "Server-side evidence; confirm device acceptance separately."},
         "/settings/backups": {
             "available": False, "target": "unavailable", "storage": "unavailable",
             "can_verify": False, "can_extract": False, "jobs": [],
@@ -2653,6 +2673,19 @@ def _success(route):
             "off", "daily", "weekly"]
         schema["properties"]["hour_utc"].update(
             {"minimum": 0, "maximum": 23})
+    elif suffix == "/settings/certificates/instruction/rotation":
+        schema['additionalProperties'] = False
+        schema['properties']['state'] = {'enum': ['idle', 'awaiting-approval', 'committing',
+            'retirement-pending', 'retiring', 'completed', 'cancelled']}
+        for name in ('request_id', 'previous_public_key', 'public_key', 'previous_sha256', 'replacement_sha256'):
+            schema['properties'][name] = {'type': ['string', 'null']}
+        for name in ('created_at', 'activated_at', 'retired_keylist_seq'):
+            schema['properties'][name] = {'type': ['integer', 'null']}
+        if route.method == 'POST':
+            schema = {'oneOf': [schema, {'type': 'object', 'additionalProperties': False,
+                'required': ['request_id', 'payload', 'root_id'], 'properties': {
+                    'request_id': {'type': 'string', 'format': 'uuid'}, 'payload': {'type': 'string'},
+                    'root_id': {'type': 'string'}}}]}
     elif suffix == "/settings/backups" and route.method == "GET":
         schema["properties"]["jobs"]["items"] = {
             "type": "object", "additionalProperties": False,

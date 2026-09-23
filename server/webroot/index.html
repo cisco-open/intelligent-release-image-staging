@@ -1008,6 +1008,37 @@
             </form>
             <p id="certificate-renew-result" role="status" aria-live="polite"></p>
           </div>
+          <div class="card" id="signer-rotation">
+            <h3>Rotate the instruction signing key</h3>
+            <p>Prepare a replacement, obtain its public certificate from an offline custodian, then switch signers. Device roots and instruction counters stay unchanged.</p>
+            <p id="rotation-state" role="status" aria-live="polite">Checking rotation state…</p>
+            <div class="rotation-identities" aria-label="Signer comparison">
+              <div><strong>Previous key SHA256</strong><p class="machine" id="rotation-previous">Unknown</p></div>
+              <div><strong>Replacement key SHA256</strong><p class="machine" id="rotation-replacement">Unknown</p></div>
+            </div>
+            <p><button class="btn ghost" id="rotation-refresh">Refresh rotation</button>
+              <button class="btn" id="rotation-prepare" disabled>Prepare replacement key</button></p>
+            <div id="rotation-approval" hidden>
+              <p><button class="btn ghost" id="rotation-download">Download replacement public key</button>
+                <button class="btn ghost" id="rotation-cancel">Cancel pending replacement</button></p>
+              <p class="muted">The current signer remains active until you apply approval. On the offline station, run <code>irisctl approve-signing --public-key iris-replacement.pub --root-key /offline/root-a --output replacement-cert.pub</code>.</p>
+              <label for="rotation-certificate">Approved replacement certificate (.pub)</label>
+              <input id="rotation-certificate" type="file" accept=".pub">
+              <button class="btn" id="rotation-activate">Validate and switch signer</button>
+            </div>
+            <div id="rotation-retirement" hidden>
+              <p>The replacement is active. The former key can still verify until its certificates expire or its revocation reaches devices. Publish a root-approved retirement list, retaining all existing revocations.</p>
+              <label for="rotation-root">Offline approving root</label>
+              <select id="rotation-root"></select>
+              <button class="btn ghost" id="rotation-retirement-request">Download retirement request</button>
+              <p class="muted">On that root's offline station, run <code>irisctl approve-keylist --payload keylist.payload --root-key /offline/root-a --output keylist.envelope</code>. Use the selected root's private-key path. Return only the public approval.</p>
+              <label for="rotation-keylist">Approved retirement list (.envelope)</label>
+              <input id="rotation-keylist" type="file" accept=".envelope">
+              <button class="btn" id="rotation-retire">Validate and retire previous key</button>
+            </div>
+            <p id="rotation-result" role="status" aria-live="polite"></p>
+            <p class="muted">Server-side completion does not prove device acceptance. Confirm Guest Shell, both IOx architectures and IOS-XR devices fetch the new signer and keylist. Private roots stay offline.</p>
+          </div>
         </div>
         <div id="settings-pane-setup" hidden>
           <p class="muted">Four things to complete after installing a server.

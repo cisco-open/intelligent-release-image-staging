@@ -54,6 +54,10 @@ def parser():
     approve.add_argument("--public-key", type=Path, required=True)
     approve.add_argument("--root-key", type=Path, required=True)
     approve.add_argument("--output", type=Path, default=Path("online-cert.pub"))
+    retire = commands.add_parser("approve-keylist", help="approve a public retirement payload ONLY on the offline custodian machine")
+    retire.add_argument("--payload", type=Path, required=True)
+    retire.add_argument("--root-key", type=Path, required=True)
+    retire.add_argument("--output", type=Path, default=Path("keylist.envelope"))
     backup = commands.add_parser("backup", help="cold encrypted backup of an installer-owned single-host Docker deployment")
     backup.add_argument("--state-dir", type=Path, required=True)
     backup.add_argument("--output", type=Path, required=True, help="new backup set under a private 0700 parent")
@@ -219,6 +223,9 @@ def main(argv=None):
             if args.command == "approve-signing":
                 from .custody import approve
                 return approve(args)
+            if args.command == "approve-keylist":
+                from .custody import approve_keylist
+                return approve_keylist(args)
             from .deploy import start, resume
             return start(args) if args.command == "install" else resume(args)
         except (InstallError, OSError, ValueError) as exc:

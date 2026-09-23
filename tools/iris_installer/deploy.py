@@ -325,6 +325,19 @@ class DockerInstall:
         report = diagnose(args, env=self.env)
         if report["state"] != "checks-passed":
             raise InstallError("Runtime package verification failed; inspect irisctl doctor output")
+        # Provision and verify Guest Shell under the same uid that serves it.
+        # docker exec does not inherit startup-only supervisor environment, so
+        # establish this attempt's success directly before checking its record.
+        self.execute("/opt/iris/server/provision-served.sh")
+        guest = json.loads(self.python(
+            "import setup_status,os,json; "
+            "print(json.dumps(setup_status.served_bundle_readiness("
+            "os.environ.get('IRIS_ARTIFACTS_DIR','/srv/artifacts'),"
+            "os.path.join(os.environ.get('IRIS_RUN','/run/iris'),'served-bundle.json'),"
+            "startup_state='ok')))"))
+        if guest.get("state") != "ok":
+            raise InstallError("Guest Shell bundle verification failed; installation remains incomplete")
+        self.journal.checkpoint("guestshell", guest)
 
     def finish(self):
         self.compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "180", "console")
