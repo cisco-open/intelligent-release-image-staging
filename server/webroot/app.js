@@ -6208,7 +6208,7 @@
   function renderRotation() {
     var state = rotationStatus ? rotationStatus.state : 'unknown';
     document.getElementById('rotation-state').textContent = 'Rotation: ' + state.replaceAll('-', ' ') +
-      (state === 'completed' ? '. Previous key revoked at keylist sequence ' + rotationStatus.retired_keylist_seq + '. Verify fleet acceptance.' : '.');
+      (state === 'completed' ? '. Previous key revoked at keylist sequence ' + rotationStatus.retired_keylist_seq + '.' : '.');
     document.getElementById('rotation-previous').textContent = rotationStatus && rotationStatus.previous_sha256 || 'No rotation evidence';
     document.getElementById('rotation-replacement').textContent = rotationStatus && rotationStatus.replacement_sha256 || 'No rotation evidence';
     document.getElementById('rotation-prepare').disabled = rotationBusy || !['idle', 'completed', 'cancelled'].includes(state);
@@ -6272,7 +6272,7 @@
         if (!validRotationStatus(data)) throw new Error('Rotation outcome unknown. Refresh before continuing.');
         rotationStatus = data; rotationNonce = null;
         result.textContent = action === 'activate' ? 'Replacement signer active. Complete offline retirement approval next.' :
-          action === 'retire' ? 'Previous signer revoked on the server. Verify current instructions and keylist acceptance across the fleet.' :
+          action === 'retire' ? 'Retirement approval validated and published.' :
           action === 'cancel' ? 'Pending replacement cancelled; active signer unchanged.' : 'Replacement prepared. Download its public key for offline approval.';
       }
     } catch (error) { result.textContent = error.message || 'Rotation outcome unknown. Refresh and retry the same request.'; }

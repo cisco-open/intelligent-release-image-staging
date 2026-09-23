@@ -272,3 +272,54 @@ def test_shared_device_verifier_accepts_replacement_rejects_retired(custody, tmp
     assert verifier.verify(parsed['payload'], parsed['signature'], keys.KEYLIST_NAMESPACE, 'iris-root:root-a', NOW)
     assert verifier.verify(b'rotation proof', new, keys.INSTRUCTION_NAMESPACE, 'iris-server', NOW, krl=parsed['krl'])
     assert not verifier.verify(b'rotation proof', old, keys.INSTRUCTION_NAMESPACE, 'iris-server', NOW, krl=parsed['krl'])
+
+
+def test_real_producer_reissues_after_rotation_without_reset(custody, tmp_path):
+    import catalog
+    import instruction_stamper as stamper
+    import peer_policy
+    import secrets_store
+    from test_instruction_stamper import Fleet, _record
+
+    paths, roots = custody
+    # This test establishes an actual producer in place of the sentinel epoch.
+    Path(paths.epoch).unlink()
+    producer_paths = stamper.StamperPaths(paths.state_dir, paths.config_dir, paths.run_dir, str(tmp_path / 'secrets.json'))
+    secrets_store.save({'devices': {'rotation-device': {'instr_key': _record()}}, 'seeder': {}}, producer_paths.secrets)
+    fleet = Fleet([{'device_id': 'rotation-device', 'platform': 'guestshell', 'registered_at': NOW - 20}])
+    cat = catalog.CatalogStore(paths.state_dir)
+    peer_policy.initialize(producer_paths.policy_authoritative, producer_paths.policy_lkg)
+    marker = stamper.initialize_producer('initialize', paths=producer_paths, fleet=fleet, now=lambda: NOW)
+    producer = stamper.InstructionStamper(paths=producer_paths, fleet=fleet, catalog_store=cat, now=lambda: NOW)
+    assert producer.stamp_device('rotation-device') == 'updated'
+    previous = dict(cat._policies.get('rotation-device')['instr'])
+    state_before = {path: Path(path).read_bytes() for path in (paths.epoch, producer_paths.activation, producer_paths.secrets)}
+    result, certificate = prepare(custody, tmp_path)
+    rotation.activate(result['request_id'], certificate, paths=paths, now=NOW)
+    rotation.retire(result['request_id'], retirement(custody, result), paths=paths, now=NOW)
+    assert producer.stamp_device('rotation-device') == 'updated'
+    current = cat._policies.get('rotation-device')['instr']
+    assert current['epoch'] == previous['epoch'] == marker['epoch']
+    assert current['instr_serial'] > previous['instr_serial']
+    assert current['key_id'] == previous['key_id']
+    assert current['role_gen'] != previous['role_gen']
+    assert producer.stamp_device('rotation-device') == 'unchanged'
+    assert all(Path(path).read_bytes() == value for path, value in state_before.items())
+
+
+def test_changed_retirement_request_cannot_receive_another_requests_receipt(custody, tmp_path, monkeypatch):
+    paths, roots = custody
+    result, certificate = prepare(custody, tmp_path)
+    rotation.activate(result['request_id'], certificate, paths=paths, now=NOW)
+    approved = retirement(custody, result)
+    original = keys.install_keylist
+    def concurrent(*args, **kwargs):
+        rotation.retirement_request(result['request_id'], 'root-b', paths=paths, now=NOW)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(keys, 'install_keylist', concurrent)
+    with pytest.raises(keys.InstructionKeyError, match='request changed during publication'):
+        rotation.retire(result['request_id'], approved, paths=paths, now=NOW)
+    assert rotation.status(paths)['state'] == 'retirement-pending'
+    monkeypatch.setattr(keys, 'install_keylist', original)
+    fresh = retirement(custody, result)
+    assert rotation.retire(result['request_id'], fresh, paths=paths, now=NOW)['retired_keylist_seq'] == 2

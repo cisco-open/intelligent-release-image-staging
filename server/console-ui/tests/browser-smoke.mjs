@@ -364,6 +364,13 @@ try {
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-prepare').click();
   await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  if (process.env.IRIS_UI_SCREENSHOTS) {
+    await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+    await page.locator('#signer-rotation').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'rotation-approval-mobile.png')});
+  }
+  await page.setViewportSize({width: 1440, height: 1000});
   const publicDownload = page.waitForEvent('download');
   await page.locator('#rotation-download').click();
   assert.equal((await publicDownload).suggestedFilename(), 'iris-replacement.pub');

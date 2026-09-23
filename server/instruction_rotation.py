@@ -346,6 +346,13 @@ def retire(request_id, artifact, *, paths=None, now=None):
     with keys._custody_lock(paths):
         record = _load(paths)
         _require(record, request_id)
+        # Publication uses the existing public installer, which takes its own
+        # custody lock. Another operator can prepare a different retirement in
+        # that gap; never attach our receipt to their newer request.
+        if (record['state'] not in ('retiring', 'completed')
+                or _decode(record['retirement_payload'], keys.MAX_KEYLIST_PAYLOAD_BYTES) != parsed['payload']
+                or _file(paths.public_key).decode('ascii') != record['new_public']):
+            raise keys.InstructionKeyError('retirement request changed during publication; refresh and prepare retirement again')
         snapshot = keys._load_keylist_snapshot_locked(paths)
         if not snapshot or not snapshot['metadata_consistent'] or snapshot['bytes'] != artifact:
             raise keys.InstructionKeyError('keylist changed during retirement; verify and retry')
