@@ -173,7 +173,17 @@ def make_server(path, worker, *, allowed_uids=(0, 10001)):
                 response = {'ok': False, 'error': str(exc) if isinstance(exc, InstallError) else 'Invalid maintenance request'}
             self.wfile.write(json.dumps(response).encode() + b'\n')
 
-    server = socketserver.UnixStreamServer(str(path), Handler)
+    # Linux sockaddr_un limits the address, not the filesystem pathname. Bind
+    # through a pinned directory descriptor so a valid long installation path
+    # does not fail after its services and packages have already been built.
+    # Containers still connect through their short /run/iris-lifecycle mount.
+    path = Path(path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        server = socketserver.UnixStreamServer(
+            '/proc/self/fd/' + str(directory) + '/' + path.name, Handler)
+    finally:
+        os.close(directory)
     os.chmod(path, 0o660)
     return server
 

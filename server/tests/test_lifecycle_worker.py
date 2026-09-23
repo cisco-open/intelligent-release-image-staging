@@ -113,6 +113,26 @@ def test_peer_uid_rejected(worker, tmp_path, monkeypatch):
         thread.join(2)
 
 
+def test_long_installation_path_binds_through_pinned_directory(worker, tmp_path, monkeypatch):
+    directory = tmp_path / ('deep-installation-' * 8)
+    directory.mkdir(mode=0o700)
+    endpoint = directory / 'control.sock'
+    assert len(os.fsencode(endpoint)) >= 108
+    server = worker_module.make_server(endpoint, worker, allowed_uids=(os.geteuid(),))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert endpoint.is_socket()
+        monkeypatch.setenv('IRIS_LIFECYCLE_SOCKET', '/proc/self/fd/' + str(descriptor) + '/control.sock')
+        assert lifecycle_client.status()['available'] is True
+    finally:
+        os.close(descriptor)
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+
+
 def test_backups_http_requires_session_csrf_and_closed_request(tmp_path, monkeypatch):
     monkeypatch.setenv('IRIS_LIFECYCLE_SOCKET', str(tmp_path / 'absent.sock'))
     host, port, ctx, stop = _serve_full(tmp_path)
