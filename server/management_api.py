@@ -49,6 +49,8 @@ import gui_auth
 import gui_fleet
 import gui_onboard
 import gui_tls
+import certificate_lifecycle
+import lifecycle_client
 import instruction_keys
 import instruction_stamper
 import instructions
@@ -4927,6 +4929,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, job) if job else self._json(
                     404, {"error": "no such job"})
                 return
+            if path == "/api/settings/certificates":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                self._json(200, certificate_lifecycle.inventory())
+                return
+            if path == "/api/settings/backups":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                self._json(200, lifecycle_client.status())
+                return
             if path == "/api/settings/setup-status":
                 info = app.session_info(self._sid())
                 if info is None:
@@ -6367,6 +6379,50 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="publishing in place from %s" % src,
                            src_ip=self._client_ip())
                 self._json(200, {"job_id": images.start_publish(src)}); return
+            if path == "/api/settings/backups":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if data.get('action') not in ('backup', 'verify', 'extract'):
+                    self._json(400, {"error": "Choose backup, verify or isolated extraction"}); return
+                try:
+                    result = lifecycle_client.call(data)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                except lifecycle_client.LifecycleUnavailable as exc:
+                    self._json(503, {"error": str(exc)}); return
+                self._audit('deployment_maintenance', 'security', action=data['action'],
+                            actor=actor, target='deployment-backup',
+                            detail='maintenance request accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path in ("/api/settings/certificates/instruction/request",
+                        "/api/settings/certificates/instruction/renew"):
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                operation = "request" if path.endswith("/request") else "renew"
+                try:
+                    if operation == "request":
+                        if data != {}:
+                            raise instruction_keys.InstructionKeyError("request takes no fields")
+                        result = instruction_keys.online_renewal_request(
+                            instruction_keys.InstructionPaths.from_env())
+                    else:
+                        result = certificate_lifecycle.renew(data)
+                except instruction_keys.InstructionKeyError as exc:
+                    self._audit("instruction_certificate_" + operation, "security",
+                               action=operation, actor=actor, result="fail",
+                               target="instruction-certificate", detail="certificate operation rejected",
+                               src_ip=self._client_ip())
+                    self._json(409, {"error": str(exc)}); return
+                except (OSError, ValueError):
+                    self._json(503, {"error": "certificate operation unavailable; recheck before retrying"}); return
+                self._audit("instruction_certificate_" + operation, "security",
+                           action=operation, actor=actor, target="instruction-certificate",
+                           detail="public renewal request prepared" if operation == "request"
+                           else "same-key certificate renewal applied",
+                           src_ip=self._client_ip())
+                self._json(200, result); return
             if path == "/api/settings/password":
                 data = self._json_body(raw)
                 if data is None:

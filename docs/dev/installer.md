@@ -75,8 +75,10 @@ production review: root attestations/keylist, renewal and backup arrangements
 are not yet orchestrated. Neither status is a production READY declaration.
 
 Kubernetes deployment, split Docker, a prebuilt/offline kit, guided root creation,
-fully recoverable initial reservation, and upgrade/backup/restore/uninstall remain
-unfinished. The Kubernetes doctor below is diagnostic support, not deployment
+fully recoverable initial reservation, upgrade/uninstall and automated recovery
+cutover remain unfinished. Single-host cold backup, verification and isolated
+extraction are implemented as described in [Lifecycle development](lifecycle.md).
+The Kubernetes doctor below is diagnostic support, not deployment
 support. Do not use this candidate as evidence that those release gates passed.
 
 ## Implemented: native-package runtime checks
@@ -129,7 +131,7 @@ Optional demo mode cannot satisfy production acceptance gates.
 Next work is completion of the authenticated release/build kit and transaction
 recovery, deployment adapters and lifecycle qualification. Existing crypto operations remain the
 authority; builders receive public roots only. No install command is exposed
-until it performs a real supported workflow with truthful readiness results.
+as production-complete until the required qualification gates pass.
 
 ## Tests
 

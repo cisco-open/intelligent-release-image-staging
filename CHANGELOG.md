@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add Console certificate/key inventory and guarded same-key instruction
+  certificate renewal. Add candidate single-host Docker encrypted cold backups,
+  signed manifests, isolated file recovery and scoped Console worker controls.
+  Automated cutover, scheduled retention, other deployment layouts and key
+  rotation remain under development.
+
 - Add an Ubuntu 24.04 installer `.deb` candidate with managed host dependencies,
   isolated single-host source builds, an installation journal, offline signing
   approval/resume, required peer TLS by default and automatic IOx/ARM64/XR

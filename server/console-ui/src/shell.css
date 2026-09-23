@@ -134,6 +134,13 @@
 .iris-react-shell .iris-settings-tabs a[aria-current="page"] { color: var(--action-active); border-bottom-color: var(--iris-action); }
 .iris-react-shell .iris-settings-tabs a:focus-visible { outline: 2px solid var(--iris-action); outline-offset: -2px; }
 .iris-react-shell .iris-settings-description { margin: 20px 0 24px; color: var(--iris-muted); }
+/* Maintenance evidence stays readable without letting fingerprints dictate
+   the table width. Status is text, not only a color. */
+.iris-react-shell #settings-pane-certificates :is(th,td) { text-align: left; vertical-align: top; }
+.iris-react-shell #certificate-rows td:first-child { min-width: 200px; max-width: 280px; }
+.iris-react-shell #certificate-rows small.machine { display: block; max-width: 32ch; overflow-wrap: anywhere; white-space: normal; margin-top: 6px; }
+.iris-react-shell :is(#settings-pane-certificates,#settings-pane-backups) button:disabled { opacity: .55; cursor: not-allowed; }
+.iris-react-shell #backup-selected { max-width: 100%; }
 .iris-react-shell #view-settings .card { box-shadow: none; padding: 24px; min-width: 0; }
 .iris-react-shell #view-settings .card > h3 { margin: 0 0 16px; font-size: 16px; line-height: 24px; }
 .iris-react-shell #view-settings .card > .muted { max-width: 80ch; }

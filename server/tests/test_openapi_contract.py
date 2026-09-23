@@ -96,7 +96,7 @@ def test_devices_target_expression_and_projection_are_public_contracts():
 
 def test_instruction_resources_are_exact_registered_device_routes():
     routes = [route for route in api_routes.ROUTES
-              if "instruction" in route.path]
+              if route.service == "catalog" and "instruction" in route.path]
     assert {(route.service, route.method, route.path, route.security)
             for route in routes} == {
         ("catalog", "GET", path, "deviceBearer")
@@ -114,7 +114,7 @@ def test_instruction_resources_are_exact_registered_device_routes():
 
     document = _load()
     documented = {path for path in document["paths"]
-                  if "instruction" in path}
+                  if path.startswith("/v1/") and "instruction" in path}
     assert documented == set(INSTRUCTION_RESOURCES)
     for path in INSTRUCTION_RESOURCES:
         operation = document["paths"][path]["get"]

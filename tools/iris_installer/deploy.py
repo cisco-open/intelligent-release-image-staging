@@ -180,6 +180,11 @@ class DockerInstall:
             return
         for directory in ("build-home", "build-home/.docker", "cache", "bin", "requests", "images", "artifacts"):
             (self.base / directory).mkdir(mode=0o755, exist_ok=True)
+        (self.base / 'control').mkdir(mode=0o750, exist_ok=True)
+        if (self.base / 'control').is_symlink():
+            raise InstallError("Lifecycle control directory must not be a symlink")
+        (self.base / 'control').chmod(0o750)
+        os.chown(self.base / 'control', 0, 10001)
         os.chown(self.base / "artifacts", 10001, 10001)
         identity = self.base / "age.txt"
         if not identity.exists():
@@ -208,6 +213,11 @@ class DockerInstall:
                             "config", "--format", "json"], env=dict(self.env, **settings), capture=True)
         compose = json.loads(data)
         compose["name"] = self.config["instance"]
+        # A narrowly scoped Unix socket, NOT the Docker socket. The worker runs
+        # on the host and continues while these two containers are stopped.
+        compose['services']['iris']['volumes'].append({
+            'type': 'bind', 'source': str(self.base / 'control'),
+            'target': '/run/iris-lifecycle', 'read_only': True})
         for service, suffix in (("iris", "server"), ("console", "console")):
             spec = compose["services"][service]
             spec["container_name"] = self.config["instance"] + "-" + suffix

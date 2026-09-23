@@ -16,6 +16,10 @@ Run one rotation at a time.
 | --- | --- |
 | **TLS & trust** | Installs the browser certificate this Console serves and the certificate authorities it trusts. |
 | **Device packages** | Compares the certificate the live services present with the public `iris-catalog.pem` copy that onboarding hands to devices. |
+| **Certificates & keys** | Shows server certificate dates and public-key fingerprints, and renews the existing instruction signing certificate. |
+
+For the guided online-certificate workflow, see
+[Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate).
 
 ## Rotate the management credential
 

@@ -54,6 +54,28 @@ def parser():
     approve.add_argument("--public-key", type=Path, required=True)
     approve.add_argument("--root-key", type=Path, required=True)
     approve.add_argument("--output", type=Path, default=Path("online-cert.pub"))
+    backup = commands.add_parser("backup", help="cold encrypted backup of an installer-owned single-host Docker deployment")
+    backup.add_argument("--state-dir", type=Path, required=True)
+    backup.add_argument("--output", type=Path, required=True, help="new backup set under a private 0700 parent")
+    backup.add_argument("--recovery-output", type=Path, required=True, help="separate new identity set under a different private 0700 parent")
+    backup.add_argument("--allow-downtime", action="store_true")
+    worker = commands.add_parser("lifecycle-worker", help="serve scoped Console backup requests outside the containers")
+    worker.add_argument("--state-dir", type=Path, required=True)
+    worker.add_argument("--backup-dir", type=Path, required=True)
+    worker.add_argument("--recovery-dir", type=Path, required=True)
+    worker.add_argument("--recovery-identity", type=Path, help="optional temporary operator-provisioned age identity for verification")
+    worker.add_argument("--extract-dir", type=Path, help="optional private isolated recovery workspace")
+    for command, help_text in (
+        ("verify-backup", "authenticate and decrypt all backup files without restoring services"),
+        ("extract-backup", "extract verified files into a NEW isolated directory; no service startup or cutover"),
+    ):
+        check = commands.add_parser(command, help=help_text)
+        check.add_argument("--backup", type=Path, required=True)
+        check.add_argument("--identity", type=Path, required=True, help="independently held age recovery identity")
+        check.add_argument("--trusted-signer", type=Path, required=True, help="independently pinned backup PUBLIC key, not archive-supplied trust")
+        check.add_argument("--max-bytes", type=int, default=1024 ** 4)
+        if command == "extract-backup":
+            check.add_argument("--destination", type=Path, required=True)
     doctor = commands.add_parser(
         "doctor", help="read-only native package checks; not whole-installation readiness")
     doctor.add_argument("--target", choices=("docker", "kubernetes"), required=True)
@@ -188,6 +210,12 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == "lifecycle-worker":
+                from .lifecycle_worker import serve
+                return serve(args)
+            if args.command in ("backup", "verify-backup", "extract-backup"):
+                from .backup import create, verify
+                return create(args) if args.command == "backup" else verify(args)
             if args.command == "approve-signing":
                 from .custody import approve
                 return approve(args)

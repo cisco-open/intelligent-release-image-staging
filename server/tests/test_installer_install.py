@@ -167,7 +167,7 @@ def test_prepare_uses_scoped_names_and_does_not_publish_management(installation)
         if "config" in command:
             assert kwargs["env"]["IRIS_PEER_TLS_MODE"] == "required"
             return json.dumps({"services": {
-                "iris": {"ports": [{"target": 8443, "published": "8443"}]},
+                "iris": {"ports": [{"target": 8443, "published": "8443"}], "volumes": []},
                 "console": {"ports": [{"target": 8080, "published": "18080"}]},
             }, "volumes": {"data": {}}, "networks": {"default": {}}}).encode()
         return b""

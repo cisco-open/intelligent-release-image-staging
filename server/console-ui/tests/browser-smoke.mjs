@@ -25,6 +25,10 @@ try {
     telemetry_destination: {source: 'environment', effective_endpoint: '', effective_enabled: false}};
   let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
+  let certificateAvailable = true, renewalAccepted = false;
+  let backupFixture = {available: false, target: 'unavailable', can_verify: false, can_extract: false,
+    jobs: [], note: 'Configure the lifecycle worker on the installer host.'};
+  const backupId = '11111111-1111-1111-1111-111111111111';
   await page.addInitScript(() => {
     window.addEventListener('iris:policy-state', event => { window.testPolicyState = event.detail; });
     window.testStreams = [];
@@ -40,6 +44,18 @@ try {
     assert.equal(url.origin, 'http://iris.test', 'No external requests allowed');
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
+        status: certificateAvailable ? 200 : 503,
+        json: certificateAvailable ? {observed_at: 1790160000, custody: {state: 'renewal_due'}, items: [
+          {id: 'instruction-signer', kind: 'certificate', label: 'Instruction signing certificate', state: 'renewal-due',
+            fingerprint_sha256: 'ab'.repeat(32), renew_at: 1790060000, expires_at: 1791360000,
+            refuse_at: 1790755200, impact: 'Renew with the existing key and offline root approval.'},
+          {id: 'management-tls', kind: 'certificate', label: 'Console-to-server TLS', state: 'unknown',
+            impact: 'Coordinate server identity and Console trust before restart.'},
+          {id: 'root-a', kind: 'public-key', label: 'Offline root A', state: 'public-key-present',
+            fingerprint_sha256: 'SHA256:fixturePublicOnly', impact: 'Confirm private custody with the holder.'},
+        ]} : {error: 'unavailable'}});
+      if (url.pathname === '/api/v1/settings/backups' && route.request().method() === 'GET') return route.fulfill({json: backupFixture});
       if (url.pathname === '/api/v1/settings/peer-tls' && route.request().method() === 'GET') return route.fulfill({json: peerTlsState});
       if (url.pathname === '/api/v1/logout') {
         assert.equal(route.request().method(), 'POST');
@@ -55,6 +71,17 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/certificates/instruction/request') return route.fulfill({json: {
+          public_key: 'ssh-ed25519 fixture-public-only\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
+        if (url.pathname === '/api/v1/settings/certificates/instruction/renew') return route.fulfill({
+          status: renewalAccepted ? 200 : 409,
+          json: renewalAccepted ? {applied: true, expires_at: 1793360000, refuse_at: 1792755200, status_refreshed: true}
+            : {error: 'online certificate changed; prepare renewal again'}});
+        if (url.pathname === '/api/v1/settings/backups') {
+          backupFixture = {...backupFixture, jobs: [{id: 'job-fixture', action: body.action,
+            backup_id: backupId, started_at: 1790160000, state: 'running', detail: ''}]};
+          return route.fulfill({json: {job_id: 'job-fixture'}});
+        }
         if (url.pathname === '/api/v1/settings/peer-tls') {
           assert.equal(body.expected_mode, peerTlsState.mode);
           peerTlsState = {...peerTlsState, mode: body.mode, origin: {active_mode: body.mode, state: 'running'}};
@@ -288,6 +315,71 @@ try {
   await page.locator('#iv-schedule-form button[type="submit"]').click();
   await page.locator('#iv-schedule-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
   settingsFailure = '';
+  await settingsTab('Certificates & keys');
+  await page.locator('#certificate-rows').getByText('renewal due', {exact: true}).waitFor();
+  await page.locator('#certificate-rows').getByText('No expiry', {exact: true}).waitFor();
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
+  const download = page.waitForEvent('download');
+  await page.locator('#certificate-request').click();
+  assert.equal((await download).suggestedFilename(), 'iris-online.pub');
+  await page.waitForFunction(() => !document.getElementById('certificate-renew').disabled);
+  const beforePrivate = settingsWrites.length;
+  await page.locator('#certificate-approved').setInputFiles({name: 'wrong.pub', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN OPENSSH PRIVATE KEY-----')});
+  await page.locator('#certificate-renew').click();
+  await page.locator('#certificate-renew-result').getByText('Choose the public certificate returned by your custodian, not a private key.', {exact: true}).waitFor();
+  assert.equal(settingsWrites.length, beforePrivate, 'Private key must not be uploaded');
+  await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
+  await page.locator('#certificate-renew').click();
+  await page.locator('#certificate-renew-result').getByText('online certificate changed; prepare renewal again', {exact: true}).waitFor();
+  assert.equal(settingsWrites.at(-1).body.public_key_sha256, 'ab'.repeat(32));
+  renewalAccepted = true;
+  await page.locator('#certificate-renew').click();
+  await page.locator('#certificate-renew-result').getByText(/Renewal applied/).waitFor();
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
+  certificateAvailable = false;
+  await page.locator('#certificate-refresh').click();
+  await page.locator('#certificate-observed').getByText(/Certificate inventory unavailable/).waitFor();
+  assert.equal(await page.locator('#certificate-rows tr').count(), 0, 'Missing evidence clears stale dates');
+  certificateAvailable = true;
+  await page.locator('#certificate-refresh').click();
+  await page.locator('#certificate-rows tr').first().waitFor();
+  if (process.env.IRIS_UI_SCREENSHOTS) {
+    await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+    await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'certificates-desktop.png')});
+  }
+  await settingsTab('Backup & restore');
+  assert.equal(await page.locator('#backup-create').isDisabled(), true);
+  backupFixture = {...backupFixture, available: true, target: 'single-docker', note: 'Keep encrypted copies off this host.'};
+  await page.locator('#backup-refresh').click();
+  await page.waitForFunction(() => !document.getElementById('backup-create').disabled);
+  const beforeCancelled = settingsWrites.length;
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.locator('#backup-create').click();
+  assert.equal(settingsWrites.length, beforeCancelled);
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#backup-create').click();
+  await page.locator('#backup-job-rows').getByText('running', {exact: true}).waitFor();
+  assert.match(settingsWrites.at(-1).body.request_id, /^[0-9a-f-]{36}$/);
+  assert.equal(settingsWrites.at(-1).body.action, 'backup');
+  assert.equal(settingsWrites.at(-1).body.allow_downtime, true);
+  assert.equal(await page.locator('#backup-create').isDisabled(), true);
+  backupFixture.jobs[0].state = 'captured';
+  await page.locator('#backup-refresh').click();
+  await page.locator('#backup-job-rows').getByText('captured', {exact: true}).waitFor();
+  await page.locator('#backup-selected').selectOption(backupId);
+  assert.equal(await page.locator('#backup-verify').isDisabled(), true, 'Recovery access must be provisioned separately');
+  backupFixture.can_verify = true;
+  await page.locator('#backup-refresh').click();
+  await page.waitForFunction(() => !document.getElementById('backup-verify').disabled);
+  await page.locator('#backup-verify').click();
+  await page.locator('#backup-job-rows').getByText('verify', {exact: true}).waitFor();
+  assert.match(settingsWrites.at(-1).body.request_id, /^[0-9a-f-]{36}$/);
+  assert.equal(settingsWrites.at(-1).body.action, 'verify');
+  assert.equal(settingsWrites.at(-1).body.backup_id, backupId);
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  if (process.env.IRIS_UI_SCREENSHOTS) await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'backups-mobile.png')});
+  await page.setViewportSize({width: 1440, height: 1000});
   await settingsTab('General');
   const screenshots = process.env.IRIS_UI_SCREENSHOTS;
   if (screenshots) { await fs.mkdir(screenshots, { recursive: true }); await page.screenshot({ path: path.join(screenshots, 'settings-desktop.png') }); }

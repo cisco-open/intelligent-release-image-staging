@@ -28,6 +28,32 @@ Open **Policies → Advanced → Instruction delivery and key custody**. The pan
 shows signing status, certificate and keylist age, ceremony status, and
 attested roots; the terms it uses are in the next section.
 
+## Renew the instruction signing certificate
+
+1. Open **Settings → Certificates & keys**. Check the renewal date and the
+   **Signing stops** deadline, which is seven days before expiry.
+2. Select **Download public renewal request**. Send `iris-online.pub` to the
+   offline custodian, who runs the installer helper on their own machine:
+
+   ```bash
+   irisctl approve-signing --public-key iris-online.pub \
+     --root-key /offline/root-a --output online-cert.pub
+   ```
+
+3. Return only `online-cert.pub`. Select it in the Console and choose
+   **Validate and apply renewal**.
+4. Check the new expiry and signing cutoff. A changed online key or certificate
+   invalidates a pending request; prepare it again before importing.
+
+Renewal keeps the online key, device trust and instruction counters. It checks
+the configured root, principal, key match and validity before publication.
+Private roots remain with their custodians. Bare public keys have no expiry;
+their certificates and custody records have separate deadlines.
+
+The inventory reads server files. Its dates alone do not prove which certificate
+a listener is serving or whether signing custody is healthy. The panel reports
+the existing custody status separately.
+
 ## What you see
 
 | Term | What it is |

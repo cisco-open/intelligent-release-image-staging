@@ -6099,6 +6099,179 @@
     refreshSettings();
   });
 
+  // ---- Certificate lifecycle ----
+  var certificateRequest = null, certificateBusy = false, certificateRead = 0;
+  function certificateControls() {
+    document.getElementById('certificate-request').disabled = certificateBusy;
+    document.getElementById('certificate-approved').disabled = certificateBusy || !certificateRequest;
+    document.getElementById('certificate-renew').disabled = certificateBusy || !certificateRequest;
+  }
+  async function refreshCertificates() {
+    var generation = ++certificateRead;
+    var rows = document.getElementById('certificate-rows');
+    var observed = document.getElementById('certificate-observed');
+    rows.textContent = '';
+    observed.textContent = 'Checking certificate files…';
+    try {
+      var r = await fetch('/api/v1/settings/certificates');
+      if (!r.ok) throw new Error('Certificate inventory unavailable. Retry after checking the server connection.');
+      var data = await r.json();
+      if (generation !== certificateRead) return;
+      if (!Array.isArray(data.items)) throw new Error('Certificate inventory is incomplete.');
+      rows.innerHTML = data.items.map(function (item) {
+        function date(value) { return value == null ? 'Unknown' : fmtDate(value); }
+        return '<tr><td>' + esc(item.label) + '<br><small class="machine">' +
+          esc(item.fingerprint_sha256 || 'Fingerprint unavailable') + '</small></td><td>' +
+          esc(item.state.replaceAll('-', ' ')) + '</td><td>' + esc(item.kind === 'public-key' ? 'Policy / custody review' : date(item.renew_at)) + '</td><td>' +
+          esc(item.kind === 'public-key' ? 'No expiry' : date(item.expires_at)) + '</td><td>' + esc(item.impact) +
+          (item.refuse_at == null ? '' : '<br>Signing stops: ' + esc(date(item.refuse_at))) + '</td></tr>';
+      }).join('');
+      observed.textContent = 'Observed ' + fmtDate(data.observed_at) +
+        '. Signing custody: ' + (data.custody ? data.custody.state : 'unknown; status evidence unavailable') + '.';
+    } catch (error) {
+      if (generation !== certificateRead) return;
+      rows.textContent = '';
+      observed.textContent = error.message || 'Certificate inventory unavailable.';
+    }
+  }
+  document.getElementById('certificate-refresh').addEventListener('click', refreshCertificates);
+  document.getElementById('certificate-request').addEventListener('click', async function () {
+    if (certificateBusy) return;
+    certificateBusy = true; certificateRequest = null; certificateControls();
+    var result = document.getElementById('certificate-renew-result');
+    document.getElementById('certificate-approved').value = '';
+    result.textContent = 'Preparing public renewal request…';
+    try {
+      var r = await fetch('/api/v1/settings/certificates/instruction/request', {
+        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: '{}'
+      });
+      var data = await r.json();
+      if (!r.ok) throw new Error(data.error || data.detail || 'Could not prepare renewal.');
+      if (typeof data.public_key !== 'string' || !data.public_key.startsWith('ssh-ed25519 ') ||
+          !/^[0-9a-f]{64}$/.test(data.public_key_sha256) || !/^[0-9a-f]{64}$/.test(data.certificate_sha256)) {
+        throw new Error('Public renewal request is incomplete.');
+      }
+      certificateRequest = data;
+      var url = URL.createObjectURL(new Blob([data.public_key], {type: 'text/plain'}));
+      var link = document.createElement('a');
+      link.href = url; link.download = 'iris-online.pub'; link.click();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      result.textContent = 'Send iris-online.pub to your offline custodian. Return the approved certificate, never the private root key. If you reopen this page, prepare the request again before importing.';
+    } catch (error) { certificateRequest = null; result.textContent = error.message || 'Could not prepare renewal.'; }
+    finally { certificateBusy = false; certificateControls(); }
+  });
+  document.getElementById('certificate-renew-form').addEventListener('submit', async function (event) {
+    event.preventDefault();
+    if (certificateBusy || !certificateRequest) return;
+    var file = document.getElementById('certificate-approved').files[0];
+    var result = document.getElementById('certificate-renew-result');
+    if (!file || file.size > 16384) { result.textContent = 'Choose a public OpenSSH certificate smaller than 16 KiB.'; return; }
+    certificateBusy = true; certificateControls();
+    result.textContent = 'Validating and applying the approved certificate…';
+    try {
+      var certificate = await file.text();
+      if (!certificate.startsWith('ssh-ed25519-cert-v01@openssh.com ') || certificate.includes('PRIVATE KEY')) {
+        throw new Error('Choose the public certificate returned by your custodian, not a private key.');
+      }
+      var r = await fetch('/api/v1/settings/certificates/instruction/renew', {
+        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}),
+        body: JSON.stringify({certificate: certificate,
+          public_key_sha256: certificateRequest.public_key_sha256,
+          certificate_sha256: certificateRequest.certificate_sha256})
+      });
+      var data = await r.json();
+      if (!r.ok || !data.applied) throw new Error(data.error || data.detail || 'Renewal was not confirmed. Refresh before retrying.');
+      result.textContent = 'Renewal applied. Expires ' + fmtDate(data.expires_at) +
+        '; signing stops ' + fmtDate(data.refuse_at) + '. The signing key and device trust are unchanged.' +
+        (data.status_refreshed ? '' : ' Custody status refresh is pending; check again shortly.');
+      certificateRequest = null;
+      document.getElementById('certificate-approved').value = '';
+      await refreshCertificates();
+    } catch (error) { result.textContent = error.message || 'Renewal was not confirmed. Refresh before retrying.'; }
+    finally { certificateBusy = false; certificateControls(); }
+  });
+  // ---- End certificate lifecycle ----
+
+  // ---- Deployment backup workflow ----
+  var backupStatus = null, backupBusy = false, backupRead = 0, backupPending = null;
+  function backupControls() {
+    var active = backupStatus && backupStatus.available;
+    var blocked = !active || backupBusy || backupStatus.jobs.some(function (job) {
+      return job.state === 'running' || job.state === 'recovery-required';
+    });
+    document.getElementById('backup-create').disabled = blocked;
+    document.getElementById('backup-selected').disabled = blocked;
+    var chosen = Boolean(document.getElementById('backup-selected').value);
+    document.getElementById('backup-verify').disabled = blocked || !chosen || !backupStatus.can_verify;
+    document.getElementById('backup-extract').disabled = blocked || !chosen || !backupStatus.can_extract;
+  }
+  async function refreshBackups() {
+    var generation = ++backupRead;
+    backupStatus = null; backupControls();
+    var note = document.getElementById('backup-worker-note');
+    try {
+      var r = await fetch('/api/v1/settings/backups');
+      if (!r.ok) throw new Error('Backup worker status unavailable. During capture the Console may be temporarily offline; refresh after it returns.');
+      var data = await r.json();
+      if (generation !== backupRead) return;
+      if (!Array.isArray(data.jobs) || typeof data.available !== 'boolean') throw new Error('Backup worker response is incomplete.');
+      backupStatus = data;
+      note.textContent = data.note;
+      document.getElementById('backup-job-rows').innerHTML = data.jobs.slice().reverse().map(function (job) {
+        return '<tr><td>' + esc(fmtDate(job.started_at)) + '</td><td>' + esc(job.action) +
+          '</td><td class="machine">' + esc(job.backup_id) + '</td><td>' + esc(job.state) +
+          '<br><small>' + esc(job.detail) + '</small></td></tr>';
+      }).join('');
+      var select = document.getElementById('backup-selected'), previous = select.value;
+      select.innerHTML = '<option value="">Choose a backup</option>' + data.jobs.filter(function (job) {
+        return job.action === 'backup' && job.state === 'captured';
+      }).map(function (job) { return '<option value="' + esc(job.backup_id) + '">' + esc(fmtDate(job.started_at) + ' · ' + job.backup_id) + '</option>'; }).join('');
+      select.value = previous;
+    } catch (error) {
+      if (generation !== backupRead) return;
+      backupStatus = null;
+      document.getElementById('backup-job-rows').textContent = '';
+      note.textContent = error.message || 'Backup status unavailable.';
+    }
+    backupControls();
+  }
+  async function requestBackupAction(action) {
+    if (backupBusy || !backupStatus || !backupStatus.available) return;
+    if (action === 'backup' && !confirm('Stop IRIS and the Console briefly to capture a consistent encrypted backup? Active transfers and management requests will be interrupted.')) return;
+    if (action === 'extract' && !confirm('Extract both sets into a new protected recovery directory? This includes secret recovery material. No services will be started.')) return;
+    var selectedBackup = document.getElementById('backup-selected').value;
+    if (!backupPending || backupPending.action !== action || (action !== 'backup' && backupPending.backup_id !== selectedBackup)) {
+      var hex = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (byte) {
+        return byte.toString(16).padStart(2, '0');
+      }).join('');
+      var requestId = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+      backupPending = action === 'backup' ? {action: action, allow_downtime: true, request_id: requestId}
+        : {action: action, backup_id: selectedBackup, request_id: requestId};
+    }
+    backupBusy = true; backupControls();
+    var result = document.getElementById('backup-operation-result');
+    result.textContent = 'Submitting maintenance request…';
+    try {
+      var r = await fetch('/api/v1/settings/backups', {
+        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(backupPending)
+      });
+      var data = await r.json();
+      if (!r.ok || typeof data.job_id !== 'string') throw new Error(data.error || data.detail || 'Request was not confirmed. Refresh history before retrying.');
+      backupPending = null;
+      result.textContent = 'Accepted. Refresh history to check the result. Capture temporarily takes the Console offline; the host worker continues running.';
+      await refreshBackups();
+    } catch (error) { result.textContent = error.message || 'Request was not confirmed. Refresh history before retrying.'; }
+    finally { backupBusy = false; backupControls(); }
+  }
+  document.getElementById('backup-refresh').addEventListener('click', refreshBackups);
+  document.getElementById('backup-selected').addEventListener('change', backupControls);
+  ['create', 'verify', 'extract'].forEach(function (name) {
+    document.getElementById('backup-' + name).addEventListener('click', function () {
+      requestBackupAction(name === 'create' ? 'backup' : name);
+    });
+  });
+  // ---- End deployment backup workflow ----
+
   // ---- Settings section routes (React renders the tab navigation) ----
   // refreshSettings() above always populates all panes' ids regardless of
   // which is visible, so switching sub-pages is pure class/hidden toggling.
@@ -6117,6 +6290,8 @@
   // The Image verification (KGV / Cisco Bulk Hash reconciler) pane rides the
   // same pane/nav id pattern; appended for the same reason.
   SETTINGS_SUBS.push('bulkhash');
+  SETTINGS_SUBS.push('certificates');
+  SETTINGS_SUBS.push('backups');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {
@@ -6129,6 +6304,8 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
+    if (sub === 'certificates') refreshCertificates();
+    if (sub === 'backups') refreshBackups();
     refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):

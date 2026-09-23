@@ -6,6 +6,28 @@ SPDX-License-Identifier: Apache-2.0
 
 # Back up and restore
 
+## Console backup controls
+
+**Settings → Backup & restore** connects to the installer host's lifecycle
+worker. For an installer-owned single-host Docker deployment, **Back up now**
+stops the server and Console, captures encrypted data and a separate identity
+recovery set, then starts the services that were running. Confirm the downtime
+before proceeding. The host worker continues while the Console is unavailable.
+
+**Verify backup** checks the signature, decryption and every captured file in
+both sets. **Extract for isolated recovery** writes to a new protected directory.
+The operator must provision recovery access on the worker first. Keep encrypted
+copies and the trusted backup public key off the deployment host.
+
+!!! warning "Installer candidate scope"
+
+    These controls currently support installer-owned single-host Docker only.
+    Isolated extraction does not start a restored deployment or authorize
+    cutover. Split-host Docker, Kubernetes, scheduled retention and automated
+    recovery cutover remain under development. Use the layout-specific manual
+    procedure below for existing installations. Worker setup and qualification
+    are documented in the [installer lifecycle development guide](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md).
+
 ## What to back up
 
 Back up before an upgrade, a key rotation, a move, or a reset.

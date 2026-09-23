@@ -191,6 +191,18 @@ as for a cut-off IOx attempt above.
 `POST /api/v1/devices/<id>/undeploy` runs a teardown; send `{"force": true}`
 for Force. Both are described in [Console API](../reference/console-api.md).
 
+## Certificate renewal and backup jobs
+
+| Result | Next step |
+| --- | --- |
+| Online key or certificate changed | Prepare a new request in **Settings → Certificates & keys**, then obtain approval for the current key. |
+| Renewed certificate must extend the existing expiry | Check the file returned by the custodian; an older approval cannot replace a newer certificate. |
+| Lifecycle worker unavailable | Check the worker on the installer host and its dedicated control mount. See [Back up and restore](backups.md#console-backup-controls). |
+| Backup refused for storage sharing, space or an unclean stop | Correct the reported host condition before retrying. Check that the original services recovered. |
+| `recovery-required` | Preserve `backup-operation.json` and `lifecycle-jobs.json` in the installer's private state directory. Review service state and unfinished files with the deployment maintainer; clearing the record does not repair an interrupted capture. |
+| Backup signature rejected | Compare the signer with the independently recorded public key. Do not replace trusted signer material with a key supplied beside an unverified archive. |
+| `verified-isolated-files` | File extraction passed. Keep the target isolated until former-primary fencing, instruction history and revocations have been reconciled. |
+
 ## Related
 
 - [Troubleshoot: symptoms and first steps](../user-guide/troubleshooting.md)

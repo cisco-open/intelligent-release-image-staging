@@ -16,7 +16,7 @@ APP = (SERVER / "webroot/app.js").read_text()
 NAV = (UI / "src/settings-navigation.jsx").read_text()
 SHELL = (UI / "src/main.jsx").read_text()
 CSS = (UI / "src/shell.css").read_text()
-SECTIONS = {"general", "tls", "telemetry", "bulkhash", "packages", "audit", "setup"}
+SECTIONS = {"general", "tls", "certificates", "backups", "telemetry", "bulkhash", "packages", "audit", "setup"}
 
 
 def test_settings_navigation_targets_all_existing_panes():

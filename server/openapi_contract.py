@@ -1768,6 +1768,14 @@ _JSON_REQUESTS = {
         {"current": "current-password", "new": "new-password",
          "confirm": "new-password"}, ("current", "new", "confirm"), True),
     "/settings/sessions/revoke-others": ({}, (), False),
+    "/settings/certificates/instruction/request": ({}, (), False),
+    "/settings/backups": ({"action": "backup", "allow_downtime": True,
+                            "request_id": "00000000-0000-0000-0000-000000000001"},
+                           ("action", "allow_downtime", "request_id"), True),
+    "/settings/certificates/instruction/renew": (
+        {"certificate": "ssh-ed25519-cert-v01@openssh.com ...",
+         "public_key_sha256": "00" * 32, "certificate_sha256": "11" * 32},
+        ("certificate", "public_key_sha256", "certificate_sha256"), True),
     "/settings/peer-tls": ({"mode": "required", "expected_mode": "disabled"},
                            ("mode", "expected_mode"), True),
     "/settings/image-verification": ({"mode": "daily", "hour_utc": 3},
@@ -1833,6 +1841,23 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix.startswith("/settings/certificates/instruction/"):
+        schema["additionalProperties"] = False
+        if suffix.endswith("/renew"):
+            schema["properties"]["certificate"]["maxLength"] = 65536
+            for field in ("public_key_sha256", "certificate_sha256"):
+                schema["properties"][field]["pattern"] = "^[0-9a-f]{64}$"
+    if suffix == "/settings/backups":
+        schema = {'oneOf': [
+            {'type': 'object', 'additionalProperties': False,
+             'required': ['action', 'allow_downtime', 'request_id'],
+             'properties': {'action': {'const': 'backup'}, 'allow_downtime': {'const': True},
+                            'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}},
+            {'type': 'object', 'additionalProperties': False,
+             'required': ['action', 'backup_id', 'request_id'],
+             'properties': {'action': {'enum': ['verify', 'extract']},
+                            'backup_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'},
+                            'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}}]}
     if suffix == "/settings/peer-tls":
         schema["additionalProperties"] = False
         for field in ("mode", "expected_mode"):
@@ -1938,6 +1963,8 @@ def _request_body(route):
 def _json_success_example(route):
     """Return the actual stable fields for a JSON success response."""
     suffix = _resource_suffix(route)
+    if suffix == "/settings/backups" and route.method == "POST":
+        return {"job_id": "00000000-0000-0000-0000-000000000001"}
 
     exact = {
         "/peer-policy/roles": {"revision": 4, "degraded": False, "fail_closed": False,
@@ -2120,6 +2147,26 @@ def _json_success_example(route):
                             "effective_enabled": True}},
         "/settings/password": {"ok": True},
         "/settings/sessions/revoke-others": {"revoked": 2},
+        "/settings/certificates": {
+            "observed_at": 1788470400, "scope": "server-certificate-files",
+            "items": [{"id": "instruction-signer", "label": "Instruction signing certificate",
+                       "kind": "certificate",
+                       "state": "renewal-due", "source": "server-file",
+                       "fingerprint_sha256": "00" * 32, "valid_from": 1787000000,
+                       "expires_at": 1789592000, "renew_at": 1788296000,
+                       "refuse_at": 1788987200, "impact": "Renew with offline root approval."}],
+            "custody": None,
+            "note": "Validity dates do not prove trust, key availability or the certificate loaded by a listener."},
+        "/settings/certificates/instruction/request": {
+            "public_key": "ssh-ed25519 ...", "public_key_sha256": "00" * 32,
+            "certificate_sha256": "11" * 32},
+        "/settings/certificates/instruction/renew": {
+            "applied": True, "expires_at": 1789592000, "refuse_at": 1788987200,
+            "status_refreshed": True},
+        "/settings/backups": {
+            "available": False, "target": "unavailable", "storage": "unavailable",
+            "can_verify": False, "can_extract": False, "jobs": [],
+            "note": "Configure the lifecycle worker on the installer host."},
         "/settings/setup-status": {
             "admin": {"state": "ok", "username": "admin"},
             "telemetry": {"state": "ok", "endpoint":
@@ -2606,6 +2653,26 @@ def _success(route):
             "off", "daily", "weekly"]
         schema["properties"]["hour_utc"].update(
             {"minimum": 0, "maximum": 23})
+    elif suffix == "/settings/backups" and route.method == "GET":
+        schema["properties"]["jobs"]["items"] = {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "action", "backup_id", "state", "started_at", "detail"],
+            "properties": {
+                "id": {"type": "string"}, "backup_id": {"type": "string"},
+                "action": {"enum": ["backup", "verify", "extract"]},
+                "state": {"enum": ["running", "recovery-required", "captured", "failed",
+                                   "verified-files", "verified-isolated-files"]},
+                "started_at": {"type": "integer"}, "finished_at": {"type": "integer"},
+                "detail": {"type": "string"}}}
+    elif suffix == "/settings/certificates":
+        item = schema["properties"]["items"]["items"]
+        for field in ("valid_from", "expires_at", "renew_at", "refuse_at"):
+            item["properties"][field] = {"type": ["integer", "null"]}
+        item["properties"]["fingerprint_sha256"] = {"type": ["string", "null"]}
+        item["properties"]["state"]["enum"] = [
+            "unknown", "within-validity", "not-yet-valid", "expired", "signing-refused", "renewal-due", "public-key-present"]
+        item["properties"]["kind"]["enum"] = ["certificate", "public-key"]
+        schema["properties"]["custody"] = {"type": ["object", "null"], "additionalProperties": True}
     elif suffix == "/settings/setup-status":
         packages = schema["properties"]["packages"]
         packages["properties"]["reference_fingerprint"] = {

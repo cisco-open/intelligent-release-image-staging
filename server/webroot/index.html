@@ -961,6 +961,54 @@
           <h2 class="page-title">Settings</h2>
         </div>
         <div id="iris-settings-navigation-root"></div>
+        <div id="settings-pane-backups" hidden>
+          <div class="card">
+            <h3>Deployment backups</h3>
+            <p id="backup-worker-note" class="muted">Checking the deployment worker…</p>
+            <p>Capture includes managed Docker volumes, imported images, device packages, deployment files and container images. The service identity has a separate encrypted recovery set.</p>
+            <p><button class="btn" id="backup-create" disabled>Back up now</button>
+              <button class="btn ghost" id="backup-refresh">Refresh backup history</button></p>
+            <p id="backup-operation-result" role="status" aria-live="polite"></p>
+            <div class="table-scroll"><table class="tbl">
+              <thead><tr><th>Started</th><th>Operation</th><th>Backup set</th><th>Result</th></tr></thead>
+              <tbody id="backup-job-rows"></tbody>
+            </table></div>
+          </div>
+          <div class="card">
+            <h3>Verify recovery</h3>
+            <p>Verify decrypts and checks both sets. Isolated extraction writes to a new protected host directory. It does not start IRIS or contact devices.</p>
+            <label for="backup-selected">Captured backup</label>
+            <select id="backup-selected" disabled><option value="">Choose a backup</option></select>
+            <p><button class="btn ghost" id="backup-verify" disabled>Verify backup</button>
+              <button class="btn ghost" id="backup-extract" disabled>Extract for isolated recovery</button></p>
+            <p class="muted">The operator provisions recovery access on the host worker. Service cutover requires fencing the former primary and reconciling instruction history and revocations; automated cutover is pending.</p>
+          </div>
+        </div>
+        <div id="settings-pane-certificates" hidden>
+          <div class="card">
+            <h3>Certificate deadlines</h3>
+            <p class="muted">Server file observations, with dates in your browser's timezone. A valid date alone does not prove trust or the identity currently served by a listener.</p>
+            <div class="table-scroll"><table class="tbl">
+              <thead><tr><th>Purpose</th><th>State</th><th>Renew from</th><th>Expires</th><th>Operational impact</th></tr></thead>
+              <tbody id="certificate-rows"></tbody>
+            </table></div>
+            <p id="certificate-observed" class="muted" role="status" aria-live="polite"></p>
+            <p><button class="btn ghost" id="certificate-refresh">Refresh certificates</button>
+              <a class="btn ghost" href="#settings/tls">Replace browser certificate</a></p>
+          </div>
+          <div class="card">
+            <h3>Renew instruction signing</h3>
+            <p>Keep the existing signing key. Download its public request, have an offline custodian issue the 30-day certificate, then import the approved public certificate here.</p>
+            <p class="muted">Signing stops seven days before expiry. Renew from the midpoint of the current certificate's validity. Private root keys stay with their custodians.</p>
+            <p><button class="btn" id="certificate-request">Download public renewal request</button></p>
+            <form id="certificate-renew-form" class="inline-form">
+              <label for="certificate-approved">Approved OpenSSH certificate (.pub)</label>
+              <input id="certificate-approved" type="file" accept=".pub" required disabled>
+              <button class="btn" id="certificate-renew" type="submit" disabled>Validate and apply renewal</button>
+            </form>
+            <p id="certificate-renew-result" role="status" aria-live="polite"></p>
+          </div>
+        </div>
         <div id="settings-pane-setup" hidden>
           <p class="muted">Four things to complete after installing a server.
             They can be done in any order, and this page keeps reporting their
