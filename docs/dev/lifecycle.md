@@ -131,7 +131,9 @@ must not exist. `--max-bytes` bounds the plaintext payload (default one TiB).
 Verification checks the independent signature before decryption, authenticates
 the final encrypted chunk and compares every file against the encrypted
 inventory. Traversal, links, special members, duplicate names and excess sizes
-fail closed. Incomplete temporary extractions are removed.
+fail closed. Extension metadata is bounded before tar parsing expands it;
+global, chained and sparse extensions are refused. Normal long/Unicode paths
+remain supported. Incomplete temporary extractions are removed.
 
 Extracted files remain private, with original ownership/modes recorded in
 `RESTORE-INVENTORY.json`; the engine does not chown them, load container images,

@@ -30,6 +30,31 @@ SCHEMA = "iris-encrypted-files/v1"
 MAX_MANIFEST = 16 * 1024 * 1024
 MAX_FILES = 100000
 CHUNK = 1024 * 1024
+MAX_EXTENSION = 16 * 1024
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Bound metadata BEFORE tarfile allocates/expands it, not after yielding."""
+
+    def _proc_member(self, archive):
+        if self.type == tarfile.XHDTYPE:
+            if (not 0 <= self.size <= MAX_EXTENSION
+                    or getattr(archive, '_iris_extension_pending', False)):
+                raise InstallError("Excessive or chained archive extension")
+            archive._iris_extension_pending = True
+            try:
+                return super()._proc_member(archive)
+            finally:
+                archive._iris_extension_pending = False
+        if self.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE):
+            raise InstallError("Unsupported archive header type")
+        return super()._proc_member(archive)
+
+    def _proc_gnusparse_00(self, *args):
+        raise InstallError("Sparse archive extensions are not supported")
+
+    _proc_gnusparse_01 = _proc_gnusparse_00
+    _proc_gnusparse_10 = _proc_gnusparse_00
 
 
 def _sync_directory(path):
@@ -297,7 +322,7 @@ def read(backup, identity, trusted_public_key, *, destination=None, max_bytes=10
             feeder.start()
             try:
                 names, directories = set(), set()
-                with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
+                with tarfile.open(fileobj=process.stdout, mode='r|', tarinfo=_BoundedTarInfo) as archive:
                     for header in archive:
                         name = _name(header.name)
                         if name == 'RESTORE-INVENTORY.json':

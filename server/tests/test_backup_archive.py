@@ -60,6 +60,15 @@ def test_signed_encrypted_roundtrip_and_restrictive_restore(recovery):
     assert (restored / 'RESTORE-INVENTORY.json').exists()
 
 
+def test_bounded_pax_preserves_long_unicode_paths(recovery):
+    name = 'long-' + 'image-' * 20 + 'å.bin'
+    (recovery['source'] / name).write_bytes(b'long unicode name')
+    backup = capture(recovery)
+    destination = recovery['directory'] / 'restore'
+    archive.read(backup, recovery['identity'], recovery['public'], destination=destination)
+    assert (destination / 'state' / name).read_bytes() == b'long unicode name'
+
+
 @pytest.mark.parametrize('kind', ['symlink', 'hardlink', 'fifo'])
 def test_capture_rejects_links_and_special_files(recovery, kind):
     path = recovery['source'] / 'unsafe'
@@ -134,6 +143,16 @@ def test_ciphertext_replacement_after_authentication_is_rejected(recovery, monke
     assert not destination.exists()
 
 
+@pytest.mark.parametrize('fields', [{'GNU.sparse.map': ''}, {'GNU.sparse.size': '0'},
+                                   {'GNU.sparse.major': '1', 'GNU.sparse.minor': '0'}])
+def test_pax_sparse_maps_rejected_before_expansion(recovery, fields):
+    header = tarfile.TarInfo('sparse')
+    header.pax_headers = fields
+    backup = forged_archive(recovery, [(header, b'')])
+    with pytest.raises(InstallError, match='Sparse archive extensions'):
+        archive.read(backup, recovery['identity'], recovery['public'], max_bytes=1)
+
+
 def forged_archive(recovery, members):
     """A validly signed but structurally malicious fixture."""
     backup = recovery['directory'] / 'crafted'
@@ -165,4 +184,23 @@ def test_malicious_signed_archive_cannot_escape(recovery, name, type_):
     destination = recovery['directory'] / 'restore'
     with pytest.raises(InstallError):
         archive.read(backup, recovery['identity'], recovery['public'], destination=destination)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize('kind', ['oversized', 'chained', 'global', 'gnu-longname', 'sparse'])
+def test_metadata_is_bounded_before_tarfile_expansion(recovery, kind):
+    header = tarfile.TarInfo('extension')
+    header.type = {'global': tarfile.XGLTYPE, 'gnu-longname': tarfile.GNUTYPE_LONGNAME,
+                   'sparse': tarfile.GNUTYPE_SPARSE}.get(kind, tarfile.XHDTYPE)
+    body = b'\x00' * (archive.MAX_EXTENSION + 1) if kind == 'oversized' else b''
+    header.size = len(body)
+    members = [(header, body)]
+    if kind == 'chained':
+        members.append((header, b''))
+    members.append((tarfile.TarInfo('empty'), b''))
+    backup = forged_archive(recovery, members)
+    destination = recovery['directory'] / 'restore'
+    with pytest.raises(InstallError, match='archive extension|header type'):
+        archive.read(backup, recovery['identity'], recovery['public'],
+                     destination=destination, max_bytes=1)
     assert not destination.exists()
