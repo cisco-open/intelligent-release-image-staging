@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 from .probe import PACKAGES, SCOPE
 
@@ -37,11 +38,11 @@ def parser():
     install.add_argument("--target", choices=("docker", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
                          default=Path(__file__).resolve().parent.parent / "source")
-    install.add_argument("--state-dir", type=Path, required=True)
+    install.add_argument("--state-dir", type=Path)
     install.add_argument("--instance", default="iris")
-    install.add_argument("--host", required=True, help="device-facing IPv4 address on this host")
-    install.add_argument("--roots-dir", type=Path, required=True, help="exactly two approved PUBLIC roots")
-    install.add_argument("--recovery-recipient", required=True, help="separately held age PUBLIC recovery recipient")
+    install.add_argument("--host", help="device-facing IPv4 address on this host")
+    install.add_argument("--roots-dir", type=Path, help="exactly two approved PUBLIC roots")
+    install.add_argument("--recovery-recipient", help="separately held age PUBLIC recovery recipient")
     install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
     install.add_argument("--console-port", type=int, default=8080)
     install.add_argument("--peer-tls", choices=("required", "disabled"), default="required")
@@ -67,6 +68,34 @@ def parser():
     doctor.add_argument("--optional-xr", action="store_true",
                         help="allow an absent XR RPM for IOx-only deployments; never ignore an invalid RPM")
     return result
+
+
+def install_questions(args, command_parser):
+    """Prompt only for public deployment inputs; never request a private root."""
+    missing = not all((args.host, args.roots_dir, args.recovery_recipient))
+    if missing and not sys.stdin.isatty():
+        command_parser.error("interactive installation needs a terminal; otherwise supply --host, --roots-dir and --recovery-recipient")
+    if missing:
+        print("Ubuntu installation: dependencies, builds and a new isolated Docker stack.")
+        print("Private signing roots stay on the custodians' machines. This candidate is not a qualified production release.")
+        args.host = args.host or input("Device-facing IPv4 address: ").strip()
+        args.roots_dir = args.roots_dir or Path(input("Directory containing the two approved PUBLIC roots: ").strip())
+        args.recovery_recipient = args.recovery_recipient or input("Separately held age recovery PUBLIC recipient: ").strip()
+        console = input("Console bind address [127.0.0.1; remote exposure requires access restrictions]: ").strip()
+        if console:
+            args.console_bind = console
+        port = input("Console port [" + str(args.console_port) + "]: ").strip()
+        if port:
+            try:
+                args.console_port = int(port)
+            except ValueError:
+                command_parser.error("Console port must be an integer")
+    args.state_dir = args.state_dir or Path("/var/lib/iris-installer") / args.instance
+    if not args.accept_changes and sys.stdin.isatty():
+        print("Instance: " + args.instance + "; state: " + str(args.state_dir))
+        print("Peer TLS: " + args.peer_tls + "; Console: " + args.console_bind + ":" + str(args.console_port))
+        args.accept_changes = input("Allow Ubuntu dependency setup, builds and new services? Type INSTALL: ") == "INSTALL"
+    return args
 
 
 def runtime_command(args):
@@ -155,6 +184,8 @@ def main(argv=None):
     command_parser = parser()
     args = command_parser.parse_args(argv)
     if args.command != "doctor":
+        if args.command == "install":
+            args = install_questions(args, command_parser)
         from .state import InstallError
         try:
             if args.command == "approve-signing":

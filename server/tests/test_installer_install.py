@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ from iris_installer.state import InstallError, Journal, atomic_write, regular_by
 
 
 def config():
-    return dict(target="docker", instance="iris-test", host="127.0.0.2",
+    return dict(target="docker", instance="iris-test", host="192.0.2.10",
                 console_bind="127.0.0.1", console_port=18080,
                 recovery_recipient="age1" + "q" * 58, peer_tls="required")
 
@@ -70,6 +71,7 @@ def test_oversized_and_symlink_input_rejected(tmp_path):
 
 @pytest.mark.parametrize("change", [
     {"target": "kubernetes"}, {"host": "0.0.0.0"}, {"host": "bad\nENV=1"},
+    {"host": "127.0.0.2"}, {"host": "169.254.1.2"},
     {"instance": "../../owner"}, {"instance": "--flag"}, {"console_port": 8443},
     {"console_port": 65536}, {"recovery_recipient": "PRIVATE KEY"}, {"peer_tls": "auto"},
 ])
@@ -77,6 +79,12 @@ def test_invalid_configuration_fails_before_mutation(change):
     value = config()
     value.update(change)
     with pytest.raises(InstallError):
+        deploy.validate_config(value)
+
+
+@pytest.mark.parametrize("value", [{}, {"target": "docker"}, None, []])
+def test_incomplete_journal_config_is_a_controlled_failure(value):
+    with pytest.raises(InstallError, match="incomplete"):
         deploy.validate_config(value)
 
 
@@ -241,6 +249,16 @@ def test_resume_phase_order_and_approval_pause(installation, monkeypatch):
     assert phases == ["verify_inputs", "verify_resource_ownership", "prepare", "build", "bootstrap"]
 
 
+def test_bootstrap_compares_existing_roots_and_never_force_resets(installation):
+    commands = []
+    installation.runner = lambda command, **kw: commands.append(command) or b""
+    installation.bootstrap()
+    assert all("--force" not in command for command in commands)
+    assert any('cmp "$existing"' in part for command in commands for part in command)
+    assert commands[-1][-1] == "iris"
+    assert not any(command[-1] == "console" for command in commands)
+
+
 def test_existing_resource_not_owned_is_refused(installation):
     def runner(command, **kwargs):
         if "ls" in command:
@@ -280,6 +298,26 @@ def test_cli_install_defaults_require_peer_tls_and_local_console():
     assert not args.accept_changes
 
 
+def test_install_wizard_collects_public_inputs_and_approval(monkeypatch):
+    answers = iter(["127.0.0.2", "/public-roots", "age1" + "q" * 58, "", "18080", "INSTALL"])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    parser = cli.parser()
+    args = cli.install_questions(parser.parse_args(["install"]), parser)
+    assert args.state_dir == Path("/var/lib/iris-installer/iris")
+    assert args.host == "127.0.0.2"
+    assert args.console_bind == "127.0.0.1"
+    assert args.console_port == 18080
+    assert args.accept_changes
+
+
+def test_noninteractive_install_refuses_to_guess_inputs(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["install"])
+    assert error.value.code == 2
+
+
 def test_package_allowlist_excludes_agent_notes_and_credentials():
     spec = importlib.util.spec_from_file_location("installer_package", REPO / "tools/build-installer-package.py")
     module = importlib.util.module_from_spec(spec)
@@ -288,3 +326,86 @@ def test_package_allowlist_excludes_agent_notes_and_credentials():
         assert not module.selected(path)
     assert module.selected("fleet/devices.csv.example")
     assert module.selected("tools/iris_installer/deploy.py")
+
+
+def test_finish_exports_public_browser_certificate_and_leaves_owner_unclaimed(installation):
+    (installation.base / "requests").mkdir()
+    commands = []
+    certificate = b"-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n"
+    def runner(command, **kwargs):
+        commands.append(command)
+        if "openssl" in command:
+            return certificate
+        if any("get_admin" in arg for arg in command):
+            return b"False\n"
+        return b""
+    installation.runner = runner
+    assert installation.finish() == deploy.OWNER_CLAIM
+    assert installation.journal.document["state"] == "OWNER_CLAIM_REQUIRED"
+    assert (installation.base / "requests/console-cert.pem").read_bytes() == certificate
+    assert not any("set_admin" in arg or "iris-gui-admin" in arg for command in commands for arg in command)
+
+
+def test_actual_offline_custody_approval_with_disposable_test_key(tmp_path):
+    from iris_installer.custody import approve
+    for name in ("root", "online"):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / name)], check=True)
+    args = SimpleNamespace(public_key=tmp_path / "online.pub", root_key=tmp_path / "root",
+                           output=tmp_path / "issued.pub")
+    assert approve(args) == 0
+    assert args.output.stat().st_mode & 0o777 == 0o644
+    fields = subprocess.check_output(["ssh-keygen", "-Lf", str(args.output)], text=True)
+    assert "iris-server" in fields
+    with pytest.raises(InstallError, match="already exists"):
+        approve(args)
+
+
+def test_custody_refuses_world_readable_private_root(tmp_path):
+    from iris_installer.custody import approve
+    root = tmp_path / "root"
+    root.write_text("private fixture")
+    root.chmod(0o644)
+    public = tmp_path / "online.pub"
+    public.write_bytes(b"ssh-ed25519 AAAA online\n")
+    with pytest.raises(InstallError, match="private permissions"):
+        approve(SimpleNamespace(public_key=public, root_key=root, output=tmp_path / "issued.pub"))
+
+
+@pytest.mark.skipif(shutil.which("dpkg-deb") is None, reason="Debian package tool required")
+def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
+    spec = importlib.util.spec_from_file_location("installer_package", REPO / "tools/build-installer-package.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tools").mkdir()
+    shutil.copytree(REPO / "tools/iris_installer", repo / "tools/iris_installer",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy2(REPO / "tools/irisctl", repo / "tools/irisctl")
+    (repo / "docs/dev").mkdir(parents=True)
+    (repo / "docs/dev/installer.md").write_text("Candidate installer\n")
+    for name, content in (("VERSION", "2026.09.23"), ("LICENSE", "Apache-2.0"), ("NOTICE", "Notices")):
+        (repo / name).write_text(content + "\n")
+    for args in (["init", "-q"], ["add", "."],
+                 ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Fixture"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+    (repo / "server").mkdir()
+    (repo / "server/.env").write_text("secret must not ship")
+    previous = os.umask(0o077)
+    try:
+        artifact = module.build(repo, tmp_path / "output")
+    finally:
+        os.umask(previous)
+    extracted = tmp_path / "extracted"
+    subprocess.run(["dpkg-deb", "--extract", str(artifact), str(extracted)], check=True)
+    assert not (extracted / "usr/lib/iris-installer/source/server/.env").exists()
+    assert (extracted / "usr/lib/iris-installer/iris_installer/cli.py").stat().st_mode & 0o777 == 0o644
+    assert (extracted / "usr/lib/iris-installer").stat().st_mode & 0o777 == 0o755
+    result = subprocess.run([str(extracted / "usr/bin/irisctl"), "install", "--help"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "--recovery-recipient" in result.stdout
+    control = subprocess.check_output(["dpkg-deb", "--ctrl-tarfile", str(artifact)])
+    import io, tarfile
+    with tarfile.open(fileobj=io.BytesIO(control)) as archive:
+        assert not any(Path(member.name).name in ("postinst", "preinst", "postrm", "prerm") for member in archive)

@@ -7,6 +7,7 @@
 import os
 from pathlib import Path
 import subprocess
+import stat
 import tempfile
 
 from .state import InstallError, regular_bytes
@@ -17,6 +18,10 @@ def approve(args):
     if not public.startswith(b"ssh-ed25519 ") or b"PRIVATE" in public:
         raise InstallError("Expected the online Ed25519 PUBLIC key")
     root = Path(args.root_key).resolve(strict=True)
+    info = root.stat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077):
+        raise InstallError("Root private key must be a caller-owned regular file with private permissions")
     output = Path(args.output).absolute()
     if output.exists() or output.is_symlink():
         raise InstallError("Certificate destination already exists; choose a new path")

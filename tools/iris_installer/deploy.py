@@ -45,7 +45,13 @@ def clean_env():
 
 
 def run(command, *, env=None, input=None, timeout=7200, capture=False):
-    print(">> " + command[0] + " " + command[1] if len(command) > 1 else ">> " + command[0], flush=True)
+    label = Path(command[0]).name
+    if label == "docker":
+        actions = ("compose", "container", "volume", "network", "image", "build", "run", "up", "exec", "inspect", "ls", "config")
+        label += " " + " ".join(part for part in command[1:] if part in actions)
+    elif label == "bash" and len(command) > 1:
+        label += " " + Path(command[1]).name
+    print(">> " + label, flush=True)
     try:
         result = subprocess.run(command, input=input, env=env or clean_env(),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -57,11 +63,16 @@ def run(command, *, env=None, input=None, timeout=7200, capture=False):
     if result.returncode:
         # Bootstrap/build tools can print tokens and private paths. Do not copy
         # their unrestricted output into a journal or terminal support log.
-        raise InstallError("Command failed: " + command[0] + "; state retained, no reset performed")
+        raise InstallError("Command failed: " + label + " (exit " + str(result.returncode) + "); state retained, no reset performed")
     return result.stdout if capture else b""
 
 
 def validate_config(config):
+    required = {"target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls"}
+    if (not isinstance(config, dict) or set(config) != required
+            or type(config.get("console_port")) is not int
+            or any(not isinstance(config.get(key), str) for key in required - {"console_port"})):
+        raise InstallError("Installation configuration is incomplete or invalid")
     if config["target"] != "docker":
         raise InstallError("Kubernetes deployment is not implemented in this candidate; no changes made")
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", config["instance"]):
@@ -73,6 +84,8 @@ def validate_config(config):
             raise InstallError(key + " must be a concrete IPv4 address") from exc
         if address.is_unspecified or address.is_multicast:
             raise InstallError(key + " must be a concrete unicast address")
+        if key == "host" and (address.is_loopback or address.is_link_local or address.is_reserved):
+            raise InstallError("Device-facing host must be a routable address, not loopback/link-local/reserved")
     if not 1024 <= config["console_port"] <= 65535:
         raise InstallError("Console port must be between 1024 and 65535")
     if config["console_port"] in (6969, 8443, 8000, 6881, 9101):
@@ -240,7 +253,12 @@ class DockerInstall:
         self.compose("run", "--rm", "--no-deps", "iris", "iris-bootstrap")
         self.compose("run", "--rm", "--no-deps", "-v", str(self.base / "roots") + ":/pub:ro",
                      "--entrypoint", "sh", "iris", "-c",
-                     'install -d -m 0755 "$IRIS_CONFIG/instr/roots.d" && '
+                     'set -eu; destination="$IRIS_CONFIG/instr/roots.d"; '
+                     '[ ! -L "$destination" ]; '
+                     'for existing in "$destination"/*.pub; do '
+                     '[ -e "$existing" ] || continue; [ ! -L "$existing" ]; '
+                     'cmp "$existing" "/pub/$(basename "$existing")" >/dev/null; done; '
+                     'install -d -m 0755 "$destination" && '
                      'install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"')
         self.compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "180", "iris")
         self.journal.checkpoint("server", True)
@@ -300,6 +318,12 @@ class DockerInstall:
 
     def finish(self):
         self.compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "180", "console")
+        public_certificate = self.execute("openssl", "x509", "-in", "/run/iris/tls/console-fallback.pem",
+                                          "-outform", "PEM", capture=True)
+        if not public_certificate.startswith(b"-----BEGIN CERTIFICATE-----"):
+            raise InstallError("Console public certificate export failed")
+        atomic_write(self.base / "requests/console-cert.pem", public_certificate, 0o644)
+        print("Verify and trust the Console public certificate before sign-in: " + str(self.base / "requests/console-cert.pem"))
         claimed = self.python("import gui_auth,secrets_store,os; print(bool(gui_auth.get_admin(secrets_store.load(os.environ['IRIS_SECRETS']))))").strip()
         if claimed not in (b"True", b"False"):
             raise InstallError("Cannot determine Console ownership; no account was changed")

@@ -27,6 +27,8 @@ signing/distribution process is still required before public production use.
 On an isolated Ubuntu 24.04 amd64 test host, install the reviewed package with
 `sudo apt install ./iris-installer_<version>_amd64.deb`. Then:
 
+Run `sudo irisctl install` for prompts, or supply the same public inputs explicitly:
+
 ```bash
 sudo irisctl install --state-dir /var/lib/iris-installer/my-instance \
   --instance my-instance --host <device-facing-ipv4> \

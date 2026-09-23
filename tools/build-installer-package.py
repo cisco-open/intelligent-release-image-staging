@@ -39,9 +39,10 @@ def selected(name):
 def build(repo, output):
     repo = repo.resolve()
     commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    epoch = int(subprocess.check_output(["git", "-C", str(repo), "show", "-s", "--format=%ct", commit], text=True).strip())
     output.mkdir(parents=True, exist_ok=True)
     archive_bytes = subprocess.check_output(["git", "-C", str(repo), "archive", "--format=tar", commit])
-    with tempfile.TemporaryDirectory(prefix="iris-installer-build-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=".iris-installer-build-", dir=output) as temporary:
         root = Path(temporary) / "package"
         lib = root / "usr/lib/iris-installer"
         source = lib / "source"
@@ -83,7 +84,16 @@ def build(repo, output):
         artifact = output / ("iris-installer_" + version + "_amd64.deb")
         if artifact.exists():
             raise FileExistsError("Refusing to replace existing installer package")
-        subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(root), str(artifact)], check=True)
+        # Package permissions must not depend on the release builder's umask.
+        for path in [root, *root.rglob("*")]:
+            if not path.is_symlink():
+                path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)
+                os.utime(path, (epoch, epoch))
+        staged = Path(temporary) / "installer.deb"
+        subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(root), str(staged)],
+                       env=dict(os.environ, SOURCE_DATE_EPOCH=str(epoch)), check=True)
+        os.link(staged, artifact)  # atomic exclusive publication; no overwrite race
+        artifact.chmod(0o644)
         # A local integrity checksum is not a release signature or trust root.
         checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
         artifact.with_suffix(".deb.sha256").write_text(checksum + "  " + artifact.name + "\n")
