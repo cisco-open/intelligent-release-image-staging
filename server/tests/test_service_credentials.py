@@ -103,6 +103,28 @@ def test_revert_before_retirement_restores_deployment_authority(store, environme
         credentials.operate(payload)
 
 
+def test_default_null_mount_allows_first_metrics_adoption(store, monkeypatch):
+    monkeypatch.setenv('IRIS_OBSERVABILITY_TOKEN_FILE', '/dev/null')
+    monkeypatch.setenv('IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE', '/dev/null')
+    payload = replace()
+    result = credentials.operate(payload)
+    assert result['items'][0]['state'] == 'awaiting-verification'
+    assert not result['items'][0]['previous_retained']
+    assert credentials.metrics_authorized({'Authorization': 'Bearer ' + payload['token']}, '/dev/null', '/dev/null')
+
+
+@pytest.mark.parametrize('unsafe', ['device', 'permissions', 'scope'])
+def test_adoption_does_not_ignore_unsafe_existing_credentials(store, environment, monkeypatch, unsafe):
+    token = environment / 'unsafe-token'
+    token.write_text('x' * 64 if unsafe != 'scope' else json.dumps({'scope': 'management', 'token': 'x' * 64}))
+    token.chmod(0o644 if unsafe == 'permissions' else 0o600)
+    monkeypatch.setenv('IRIS_OBSERVABILITY_TOKEN_FILE', '/dev/zero' if unsafe == 'device' else str(token))
+    before = store[1].read_bytes()
+    with pytest.raises(credentials.tier_auth.CredentialUnavailable):
+        credentials.operate(replace())
+    assert store[1].read_bytes() == before
+
+
 def test_collector_bound_to_exact_destination_and_current_delivery(store):
     payload = replace('collector-headers')
     credentials.operate(payload)

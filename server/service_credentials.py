@@ -13,6 +13,7 @@ import hmac
 import os
 from pathlib import Path
 import re
+import stat
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -47,6 +48,20 @@ def _token(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9._~+/-]{32,256}', value):
         raise CredentialError('Use a 32–256 character credential without spaces')
     return value
+
+
+def _deployment_token(path):
+    # Docker's optional credential mounts use the null device when unset.
+    # Recognize only that exact device as an empty source, never arbitrary
+    # unreadable files, permissive regular files or other character devices.
+    if path:
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISCHR(info.st_mode) and info.st_rdev == os.makedev(1, 3):
+            return None
+    return tier_auth._read(path, required=False, scope='observability')
 
 
 def _headers(value):
@@ -184,9 +199,9 @@ def operate(payload):
             previous = record['current'] if record else None
             if family == 'metrics-token' and (record is None or record['current'] is None):
                 initial = os.environ.get('IRIS_OBSERVABILITY_TOKEN_FILE')
-                old = tier_auth._read(initial, required=False, scope='observability')
+                old = _deployment_token(initial)
                 previous = old.decode('utf-8') if old is not None else None
-                overlap = tier_auth._read(os.environ.get('IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE'), required=False, scope='observability')
+                overlap = _deployment_token(os.environ.get('IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE'))
                 if overlap is not None and overlap != old:
                     raise CredentialError('Retire the deployment-managed scrape overlap before adopting Console management')
             if previous == current:
