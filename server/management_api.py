@@ -25,6 +25,7 @@ import shutil
 import signal
 import ssl
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -6448,7 +6449,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(200, result)
                 except service_credentials.CredentialError as exc:
                     self._json(409, {'error': str(exc)})
-                except (OSError, ValueError, tier_auth.CredentialUnavailable):
+                except (OSError, ValueError, subprocess.SubprocessError, tier_auth.CredentialUnavailable):
                     self._json(503, {'error': 'Credential operation incomplete; refresh before retrying'})
                 return
             if path == '/api/settings/certificates/browser/rotation':
@@ -6464,7 +6465,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(200, result)
                 except (tls_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
                     self._json(409, {'error': str(exc)})
-                except (OSError, ValueError, KeyError):
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError):
                     self._json(503, {'error': 'TLS operation incomplete; refresh and preserve the request for recovery'})
                 return
             if path == "/api/settings/key-maintenance":

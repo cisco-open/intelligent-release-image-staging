@@ -202,3 +202,24 @@ def test_http_authorization_and_no_secret_return(store, environment):
         assert code == 200 and b'new-fixture-value' not in body
     finally:
         stop()
+
+
+@pytest.mark.parametrize('family', ['browser', 'service'])
+@pytest.mark.parametrize('failure', [subprocess.CalledProcessError(1, ['age'], stderr=b'PRIVATE FIXTURE'),
+                                    subprocess.TimeoutExpired(['age'], 30, output=b'PRIVATE FIXTURE')])
+def test_custody_tool_failure_is_a_redacted_http_error(store, environment, monkeypatch, family, failure):
+    import tls_rotation
+    module = tls_rotation if family == 'browser' else credentials
+    endpoint = '/api/settings/certificates/browser/rotation' if family == 'browser' else '/api/settings/service-credentials'
+    def fail(_payload):
+        raise failure
+    monkeypatch.setattr(module, 'operate', fail)
+    host, port, _, stop = _serve_full(environment)
+    try:
+        cookie, csrf = _auth(host, port)
+        code, _, body = _req(host, port, 'POST', endpoint, body={},
+            headers={'Cookie': cookie, 'X-CSRF-Token': csrf})
+        assert code == 503 and b'PRIVATE FIXTURE' not in body
+        assert 'error' in json.loads(body)
+    finally:
+        stop()
