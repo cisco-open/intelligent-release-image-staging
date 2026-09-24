@@ -54,6 +54,8 @@ if the cache entry may be gone. Schedule writes use `ETag` and `If-Match`.
 | `POST /api/v1/settings/sessions/revoke-others` | Signs out every session except yours. |
 | `GET`, `POST /api/v1/settings/peer-tls` | Reads or sets whether peer transfers require TLS. |
 | `POST`, `DELETE /api/v1/settings/gui-cert` | Sets or removes the Console's certificate override. |
+| `GET`, `POST /api/v1/settings/certificates/browser/rotation` | Reads public request state or prepares, approves, applies or cancels browser TLS replacement. |
+| `GET`, `POST /api/v1/settings/service-credentials` | Reads non-secret status or replaces, verifies retirement of, or reverts pending metrics/collector credentials. |
 | `POST`, `DELETE /api/v1/settings/trust/<name>` | Adds or removes one trusted CA certificate. |
 | `POST /api/v1/settings/ca-trust`, `.../ca-trust/refresh` | Configures, and runs, the public CA bundle download. |
 | `POST`, `DELETE /api/v1/settings/telemetry-destination` | Overrides, or clears, where telemetry is sent. |

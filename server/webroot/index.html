@@ -997,6 +997,56 @@
               <a class="btn ghost" href="#settings/tls">Replace browser certificate</a></p>
           </div>
           <div class="card">
+            <h3>Replace the Console browser certificate</h3>
+            <p>Create the replacement key here, then download its public request for your CA. Import only the approved certificate. The private key stays encrypted on the server.</p>
+            <div id="browser-tls-workflow">
+              <p id="browser-tls-state" role="status">Checking certificate request…</p>
+              <form id="browser-tls-prepare-form" class="maintenance-form">
+                <label>Exact DNS names or IP addresses, comma-separated<input id="browser-tls-names" type="text" required placeholder="console.example.com, 192.0.2.10"></label>
+                <label>Approval method<select id="browser-tls-mode"><option value="ca">Request approval from my CA</option><option value="self-signed">Create a self-signed certificate (90 days)</option></select></label>
+                <button class="btn" id="browser-tls-prepare" type="submit" disabled>Create replacement request</button>
+              </form>
+              <p class="muted">Self-signed replacements change browser trust. Download and approve the public certificate on each client before applying it. Management and device-facing certificates are unchanged.</p>
+              <p class="machine" id="browser-tls-identity"></p>
+              <p><button class="btn ghost" id="browser-tls-refresh">Refresh request</button>
+                <button class="btn ghost" id="browser-tls-csr" disabled>Download public request</button>
+                <button class="btn ghost" id="browser-tls-certificate" disabled>Download approved certificate</button>
+                <button class="btn ghost" id="browser-tls-cancel" disabled>Cancel replacement</button></p>
+              <form id="browser-tls-approve-form" class="inline-form" hidden>
+                <label for="browser-tls-approved">Approved public PEM chain, leaf first</label>
+                <input id="browser-tls-approved" type="file" accept=".pem,.crt,.cer" required>
+                <button class="btn" id="browser-tls-approve" type="submit">Validate approval</button>
+              </form>
+              <p><button class="btn" id="browser-tls-apply" disabled>Apply approved certificate</button></p>
+              <p id="browser-tls-result" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Rotate telemetry credentials</h3>
+            <p>Keep deployment-mounted files intact. Console-managed replacements use the server's encrypted credential storage across restarts.</p>
+            <div id="service-credential-workflow">
+              <label>Credential<select id="service-credential-family"><option value="metrics-token">Metrics scraping token</option><option value="collector-headers">Outbound collector authentication</option></select></label>
+              <p id="service-credential-state" role="status">Checking credential state…</p>
+              <div id="service-credential-metrics">
+                <label>Replacement token<input id="service-credential-token" type="password" autocomplete="new-password" spellcheck="false"></label>
+                <p><button class="btn ghost" id="service-credential-generate">Generate token in this browser</button>
+                  <button class="btn ghost" id="service-credential-download">Download private token file</button></p>
+                <p class="muted">Download the replacement before applying it, then configure every scraper to use that file. The old token remains accepted until retirement.</p>
+              </div>
+              <div id="service-credential-collector" hidden>
+                <label>Exact HTTPS collector base URL<input id="service-credential-endpoint" type="url" placeholder="https://collector.example:4318"></label>
+                <div id="service-credential-headers"></div>
+                <p><button class="btn ghost" id="service-credential-add-header">Add authentication header</button></p>
+                <p class="muted">Obtain the replacement from your collector's administrator. IRIS binds it to this URL and waits for a successful export. Keep the old credential valid there until all senders have moved.</p>
+              </div>
+              <p><button class="btn" id="service-credential-replace" disabled>Apply replacement credential</button>
+                <button class="btn ghost" id="service-credential-refresh">Refresh evidence</button></p>
+              <p><button class="btn" id="service-credential-retire" disabled>Finish verified rotation</button>
+                <button class="btn ghost" id="service-credential-revert" disabled>Restore previous setting</button></p>
+              <p id="service-credential-result" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+          <div class="card">
             <h3>Renew instruction signing</h3>
             <p>Keep the existing signing key. Download its public request, have an offline custodian issue the 30-day certificate, then import the approved public certificate here.</p>
             <p class="muted">Signing stops seven days before expiry. Renew from the midpoint of the current certificate's validity. Private root keys stay with their custodians.</p>

@@ -9720,8 +9720,8 @@
                       "id": "browser-tls",
                       "label": "Console browser TLS",
                       "action": "review",
-                      "requirement": "Approved certificate and private-key pair in TLS & trust",
-                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                      "requirement": "Public request, approval and listener verification in Certificates & keys",
+                      "guide": "admin-guide/console-credentials/#replace-the-browser-certificate"
                     },
                     {
                       "id": "management-tls",
@@ -9769,15 +9769,15 @@
                       "id": "metrics-token",
                       "label": "Metrics scrape credential",
                       "action": "review",
-                      "requirement": "Collector update and successful scrape before retirement",
-                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                      "requirement": "Console replacement, scraper migration and verified retirement",
+                      "guide": "admin-guide/console-credentials/#replace-the-metrics-scraping-token"
                     },
                     {
                       "id": "collector-headers",
                       "label": "Outbound telemetry credentials",
                       "action": "review",
-                      "requirement": "Collector authority approval and delivery proof",
-                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                      "requirement": "Console replacement, collector approval and delivery proof",
+                      "guide": "admin-guide/console-credentials/#replace-outbound-collector-authentication"
                     }
                   ],
                   "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
@@ -10297,8 +10297,8 @@
                       "id": "browser-tls",
                       "label": "Console browser TLS",
                       "action": "review",
-                      "requirement": "Approved certificate and private-key pair in TLS & trust",
-                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                      "requirement": "Public request, approval and listener verification in Certificates & keys",
+                      "guide": "admin-guide/console-credentials/#replace-the-browser-certificate"
                     },
                     {
                       "id": "management-tls",
@@ -10346,15 +10346,15 @@
                       "id": "metrics-token",
                       "label": "Metrics scrape credential",
                       "action": "review",
-                      "requirement": "Collector update and successful scrape before retirement",
-                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                      "requirement": "Console replacement, scraper migration and verified retirement",
+                      "guide": "admin-guide/console-credentials/#replace-the-metrics-scraping-token"
                     },
                     {
                       "id": "collector-headers",
                       "label": "Outbound telemetry credentials",
                       "action": "review",
-                      "requirement": "Collector authority approval and delivery proof",
-                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                      "requirement": "Console replacement, collector approval and delivery proof",
+                      "guide": "admin-guide/console-credentials/#replace-outbound-collector-authentication"
                     }
                   ],
                   "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
@@ -29989,6 +29989,1640 @@
         }
       }
     },
+    "/api/v1/settings/service-credentials": {
+      "get": {
+        "operationId": "console_get_api_v1_settings_service_credentials",
+        "summary": "Read metrics and collector credential rotation",
+        "description": "Read metrics and collector credential rotation. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read metrics and collector credential rotation response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "family": {
+                            "enum": [
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "request_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid"
+                          },
+                          "state": {
+                            "enum": [
+                              "deployment-managed",
+                              "awaiting-verification",
+                              "completed",
+                              "reverted"
+                            ]
+                          },
+                          "previous_retained": {
+                            "type": "boolean"
+                          },
+                          "started_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "observed_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "family",
+                          "request_id",
+                          "state",
+                          "previous_retained",
+                          "started_at",
+                          "observed_at",
+                          "endpoint"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "items": [
+                    {
+                      "family": "metrics-token",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    },
+                    {
+                      "family": "collector-headers",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "console_post_api_v1_settings_service_credentials",
+        "summary": "Replace or retire metrics and collector credentials",
+        "description": "Replace or retire metrics and collector credentials. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Replace or retire metrics and collector credentials response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "family": {
+                            "enum": [
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "request_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid"
+                          },
+                          "state": {
+                            "enum": [
+                              "deployment-managed",
+                              "awaiting-verification",
+                              "completed",
+                              "reverted"
+                            ]
+                          },
+                          "previous_retained": {
+                            "type": "boolean"
+                          },
+                          "started_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "observed_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "family",
+                          "request_id",
+                          "state",
+                          "previous_retained",
+                          "started_at",
+                          "observed_at",
+                          "endpoint"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "items": [
+                    {
+                      "family": "metrics-token",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    },
+                    {
+                      "family": "collector-headers",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "replace"
+                      },
+                      "family": {
+                        "const": "metrics-token"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      },
+                      "token": {
+                        "type": "string",
+                        "minLength": 32,
+                        "maxLength": 256,
+                        "writeOnly": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "family",
+                      "request_id",
+                      "confirm",
+                      "token"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "replace"
+                      },
+                      "family": {
+                        "const": "collector-headers"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      },
+                      "headers": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": 16,
+                        "writeOnly": true,
+                        "additionalProperties": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        }
+                      },
+                      "endpoint": {
+                        "type": "string",
+                        "maxLength": 2048,
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "family",
+                      "request_id",
+                      "confirm",
+                      "headers",
+                      "endpoint"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "retire",
+                          "revert"
+                        ]
+                      },
+                      "family": {
+                        "enum": [
+                          "metrics-token",
+                          "collector-headers"
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "family",
+                      "request_id",
+                      "confirm"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "example": {
+                "action": "replace",
+                "family": "metrics-token",
+                "request_id": "00000000-0000-0000-0000-000000000001",
+                "confirm": true,
+                "token": "example-new-scrape-token-0123456789"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/certificates/browser/rotation": {
+      "get": {
+        "operationId": "console_get_api_v1_settings_certificates_browser_rotation",
+        "summary": "Read browser TLS rotation",
+        "description": "Read browser TLS rotation. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read browser TLS rotation response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "state": {
+                      "enum": [
+                        "idle",
+                        "awaiting-approval",
+                        "approved",
+                        "committing",
+                        "published",
+                        "cancelled"
+                      ]
+                    },
+                    "names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mode": {
+                      "enum": [
+                        null,
+                        "ca",
+                        "self-signed"
+                      ]
+                    },
+                    "csr": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "certificate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "fingerprint_sha256": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request_id",
+                    "state",
+                    "names",
+                    "mode",
+                    "csr",
+                    "certificate",
+                    "created_at",
+                    "fingerprint_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "request_id": null,
+                  "state": "idle",
+                  "names": [],
+                  "mode": null,
+                  "csr": null,
+                  "certificate": null,
+                  "created_at": null,
+                  "fingerprint_sha256": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "console_post_api_v1_settings_certificates_browser_rotation",
+        "summary": "Prepare, approve or apply browser TLS rotation",
+        "description": "Prepare, approve or apply browser TLS rotation. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prepare, approve or apply browser TLS rotation response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "state": {
+                      "enum": [
+                        "idle",
+                        "awaiting-approval",
+                        "approved",
+                        "committing",
+                        "published",
+                        "cancelled"
+                      ]
+                    },
+                    "names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mode": {
+                      "enum": [
+                        null,
+                        "ca",
+                        "self-signed"
+                      ]
+                    },
+                    "csr": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "certificate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "fingerprint_sha256": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "applied": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "gui_cert": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "issuer": {
+                          "type": "string"
+                        },
+                        "not_after": {
+                          "type": "string"
+                        },
+                        "fingerprint_sha256": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "subject",
+                        "issuer",
+                        "not_after",
+                        "fingerprint_sha256"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "request_id",
+                    "state",
+                    "names",
+                    "mode",
+                    "csr",
+                    "certificate",
+                    "created_at",
+                    "fingerprint_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "request_id": null,
+                  "state": "idle",
+                  "names": [],
+                  "mode": null,
+                  "csr": null,
+                  "certificate": null,
+                  "created_at": null,
+                  "fingerprint_sha256": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "prepare"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "names": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253
+                        }
+                      },
+                      "mode": {
+                        "enum": [
+                          "ca",
+                          "self-signed"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "names",
+                      "mode"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "approve"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "certificate": {
+                        "type": "string",
+                        "maxLength": 65536
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "certificate"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "apply"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "confirm"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "cancel"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "example": {
+                "action": "prepare",
+                "request_id": "00000000-0000-0000-0000-000000000001",
+                "names": [
+                  "console.example.com"
+                ],
+                "mode": "ca"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/settings/backups": {
       "get": {
         "operationId": "console_get_api_v1_settings_backups",
@@ -46785,8 +48419,8 @@
                       "id": "browser-tls",
                       "label": "Console browser TLS",
                       "action": "review",
-                      "requirement": "Approved certificate and private-key pair in TLS & trust",
-                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                      "requirement": "Public request, approval and listener verification in Certificates & keys",
+                      "guide": "admin-guide/console-credentials/#replace-the-browser-certificate"
                     },
                     {
                       "id": "management-tls",
@@ -46834,15 +48468,15 @@
                       "id": "metrics-token",
                       "label": "Metrics scrape credential",
                       "action": "review",
-                      "requirement": "Collector update and successful scrape before retirement",
-                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                      "requirement": "Console replacement, scraper migration and verified retirement",
+                      "guide": "admin-guide/console-credentials/#replace-the-metrics-scraping-token"
                     },
                     {
                       "id": "collector-headers",
                       "label": "Outbound telemetry credentials",
                       "action": "review",
-                      "requirement": "Collector authority approval and delivery proof",
-                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                      "requirement": "Console replacement, collector approval and delivery proof",
+                      "guide": "admin-guide/console-credentials/#replace-outbound-collector-authentication"
                     }
                   ],
                   "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
@@ -47293,8 +48927,8 @@
                       "id": "browser-tls",
                       "label": "Console browser TLS",
                       "action": "review",
-                      "requirement": "Approved certificate and private-key pair in TLS & trust",
-                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                      "requirement": "Public request, approval and listener verification in Certificates & keys",
+                      "guide": "admin-guide/console-credentials/#replace-the-browser-certificate"
                     },
                     {
                       "id": "management-tls",
@@ -47342,15 +48976,15 @@
                       "id": "metrics-token",
                       "label": "Metrics scrape credential",
                       "action": "review",
-                      "requirement": "Collector update and successful scrape before retirement",
-                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                      "requirement": "Console replacement, scraper migration and verified retirement",
+                      "guide": "admin-guide/console-credentials/#replace-the-metrics-scraping-token"
                     },
                     {
                       "id": "collector-headers",
                       "label": "Outbound telemetry credentials",
                       "action": "review",
-                      "requirement": "Collector authority approval and delivery proof",
-                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                      "requirement": "Console replacement, collector approval and delivery proof",
+                      "guide": "admin-guide/console-credentials/#replace-outbound-collector-authentication"
                     }
                   ],
                   "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
@@ -64474,6 +66108,1440 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/settings/service-credentials": {
+      "get": {
+        "operationId": "management_get_internal_v1_settings_service_credentials",
+        "summary": "Read metrics and collector credential rotation",
+        "description": "Read metrics and collector credential rotation. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read metrics and collector credential rotation response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "family": {
+                            "enum": [
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "request_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid"
+                          },
+                          "state": {
+                            "enum": [
+                              "deployment-managed",
+                              "awaiting-verification",
+                              "completed",
+                              "reverted"
+                            ]
+                          },
+                          "previous_retained": {
+                            "type": "boolean"
+                          },
+                          "started_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "observed_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "family",
+                          "request_id",
+                          "state",
+                          "previous_retained",
+                          "started_at",
+                          "observed_at",
+                          "endpoint"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "items": [
+                    {
+                      "family": "metrics-token",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    },
+                    {
+                      "family": "collector-headers",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "management_post_internal_v1_settings_service_credentials",
+        "summary": "Replace or retire metrics and collector credentials",
+        "description": "Replace or retire metrics and collector credentials. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Replace or retire metrics and collector credentials response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "family": {
+                            "enum": [
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "request_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid"
+                          },
+                          "state": {
+                            "enum": [
+                              "deployment-managed",
+                              "awaiting-verification",
+                              "completed",
+                              "reverted"
+                            ]
+                          },
+                          "previous_retained": {
+                            "type": "boolean"
+                          },
+                          "started_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "observed_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "family",
+                          "request_id",
+                          "state",
+                          "previous_retained",
+                          "started_at",
+                          "observed_at",
+                          "endpoint"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "items": [
+                    {
+                      "family": "metrics-token",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    },
+                    {
+                      "family": "collector-headers",
+                      "request_id": null,
+                      "state": "deployment-managed",
+                      "previous_retained": false,
+                      "started_at": null,
+                      "observed_at": null,
+                      "endpoint": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "replace"
+                      },
+                      "family": {
+                        "const": "metrics-token"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      },
+                      "token": {
+                        "type": "string",
+                        "minLength": 32,
+                        "maxLength": 256,
+                        "writeOnly": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "family",
+                      "request_id",
+                      "confirm",
+                      "token"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "replace"
+                      },
+                      "family": {
+                        "const": "collector-headers"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      },
+                      "headers": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": 16,
+                        "writeOnly": true,
+                        "additionalProperties": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        }
+                      },
+                      "endpoint": {
+                        "type": "string",
+                        "maxLength": 2048,
+                        "pattern": "^https://"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "family",
+                      "request_id",
+                      "confirm",
+                      "headers",
+                      "endpoint"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "retire",
+                          "revert"
+                        ]
+                      },
+                      "family": {
+                        "enum": [
+                          "metrics-token",
+                          "collector-headers"
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "family",
+                      "request_id",
+                      "confirm"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "example": {
+                "action": "replace",
+                "family": "metrics-token",
+                "request_id": "00000000-0000-0000-0000-000000000001",
+                "confirm": true,
+                "token": "example-new-scrape-token-0123456789"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/settings/certificates/browser/rotation": {
+      "get": {
+        "operationId": "management_get_internal_v1_settings_certificates_browser_rotation",
+        "summary": "Read browser TLS rotation",
+        "description": "Read browser TLS rotation. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read browser TLS rotation response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "state": {
+                      "enum": [
+                        "idle",
+                        "awaiting-approval",
+                        "approved",
+                        "committing",
+                        "published",
+                        "cancelled"
+                      ]
+                    },
+                    "names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mode": {
+                      "enum": [
+                        null,
+                        "ca",
+                        "self-signed"
+                      ]
+                    },
+                    "csr": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "certificate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "fingerprint_sha256": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request_id",
+                    "state",
+                    "names",
+                    "mode",
+                    "csr",
+                    "certificate",
+                    "created_at",
+                    "fingerprint_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "request_id": null,
+                  "state": "idle",
+                  "names": [],
+                  "mode": null,
+                  "csr": null,
+                  "certificate": null,
+                  "created_at": null,
+                  "fingerprint_sha256": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "management_post_internal_v1_settings_certificates_browser_rotation",
+        "summary": "Prepare, approve or apply browser TLS rotation",
+        "description": "Prepare, approve or apply browser TLS rotation. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prepare, approve or apply browser TLS rotation response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "state": {
+                      "enum": [
+                        "idle",
+                        "awaiting-approval",
+                        "approved",
+                        "committing",
+                        "published",
+                        "cancelled"
+                      ]
+                    },
+                    "names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mode": {
+                      "enum": [
+                        null,
+                        "ca",
+                        "self-signed"
+                      ]
+                    },
+                    "csr": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "certificate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "fingerprint_sha256": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "applied": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "gui_cert": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "issuer": {
+                          "type": "string"
+                        },
+                        "not_after": {
+                          "type": "string"
+                        },
+                        "fingerprint_sha256": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "subject",
+                        "issuer",
+                        "not_after",
+                        "fingerprint_sha256"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "request_id",
+                    "state",
+                    "names",
+                    "mode",
+                    "csr",
+                    "certificate",
+                    "created_at",
+                    "fingerprint_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "request_id": null,
+                  "state": "idle",
+                  "names": [],
+                  "mode": null,
+                  "csr": null,
+                  "certificate": null,
+                  "created_at": null,
+                  "fingerprint_sha256": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "prepare"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "names": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253
+                        }
+                      },
+                      "mode": {
+                        "enum": [
+                          "ca",
+                          "self-signed"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "names",
+                      "mode"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "approve"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "certificate": {
+                        "type": "string",
+                        "maxLength": 65536
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "certificate"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "apply"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "confirm"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "cancel"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "example": {
+                "action": "prepare",
+                "request_id": "00000000-0000-0000-0000-000000000001",
+                "names": [
+                  "console.example.com"
+                ],
+                "mode": "ca"
               }
             }
           }

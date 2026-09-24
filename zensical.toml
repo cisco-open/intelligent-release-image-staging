@@ -60,6 +60,7 @@ nav = [
     { "Back up and restore" = "admin-guide/backups.md" },
     { "Routine maintenance" = "admin-guide/maintenance.md" },
     { "Rotate credentials and certificates" = "admin-guide/rotations.md" },
+    { "Rotate browser and telemetry credentials in the Console" = "admin-guide/console-credentials.md" },
     { "Replace or recover signing keys" = "admin-guide/instruction-keys.md" },
     { "Rotate the online signer" = "admin-guide/signer-rotation.md" },
     { "Schedule key maintenance" = "admin-guide/key-maintenance.md" },

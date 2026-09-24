@@ -195,12 +195,16 @@ if [ "$REKEY" -eq 1 ]; then
   # A pending replacement also contains age ciphertext inside its journal.
   # Finish/cancel that transaction before changing recipient custody. Never
   # silently leave a candidate encrypted only to an identity being retired.
-  PYTHONPATH="$SCRIPT_DIR" python3 - <<'PY' || die "--rekey: resolve the pending signer rotation before changing recipients"
+  PYTHONPATH="$SCRIPT_DIR" python3 - <<'PY' || die "--rekey: resolve the pending signer or TLS rotation before changing recipients"
 import instruction_keys as keys
 import instruction_rotation
+import tls_rotation
 paths = keys.InstructionPaths.from_env()
 record = instruction_rotation._load(paths)
 if record and record['state'] in ('awaiting-approval', 'committing'):
+    raise SystemExit(1)
+tls_record = tls_rotation._load()
+if tls_record and tls_record['state'] in ('awaiting-approval', 'approved', 'committing'):
     raise SystemExit(1)
 PY
   umask 077

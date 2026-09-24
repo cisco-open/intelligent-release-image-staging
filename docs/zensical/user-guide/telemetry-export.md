@@ -56,7 +56,10 @@ replace it, see [Rotate credentials and certificates](../admin-guide/rotations.m
 
 ## Authenticate the push to a collector
 
-Put the header in a private host file and give Compose its host path.
+Use **Settings > Certificates & keys > Service credentials** for an encrypted,
+destination-bound override and delivery verification. See
+[Rotate collector authentication](../admin-guide/console-credentials.md#replace-outbound-collector-authentication).
+The deployment-file alternative below applies only when no Console override is active.
 
 ### On one Docker host
 

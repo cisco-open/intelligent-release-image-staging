@@ -13,8 +13,9 @@ yet implement production recovery cutover,
 scheduled retention or split-host/Kubernetes backup adapters. These are still
 release gates, not optional production follow-ups. Scheduled signer preparation,
 device instruction-key rotation and Docker management-token rotation now have
-opt-in adapters. Other key families have review reminders only, not automated
-replacement or consumer rollout.
+opt-in adapters. Browser TLS and telemetry credentials have operator-driven UI
+workflows; their schedules remain review reminders. Other trust families still
+lack complete rotation and consumer-rollout adapters.
 
 ## Certificate maintenance
 
@@ -27,9 +28,40 @@ expiry extension and more than seven days remaining, and never initializes the
 producer or replaces a key. An expired certificate can be renewed with the same
 key. The root private key stays offline; only the public approval is uploaded.
 
-Browser TLS replacement remains in TLS & trust. Management/device-facing trust
-changes still follow the manual rotation guide. No background automatic renewal
-or external reminder delivery service is supplied by this slice.
+Browser TLS now also has the public request/approval workflow below.
+Management/device-facing trust changes still follow the manual rotation guide.
+No background automatic renewal or external reminder delivery service is supplied.
+
+## Browser TLS and service credentials
+
+`server/tls_rotation.py` holds encrypted candidates and public approvals in
+`config/tls/rotation.json`, serialized with existing direct TLS uploads. Exact
+names, key binding, current validity and server purpose are checked before a
+publication is admitted. The durable intent records original file hashes;
+explicit recovery writes only original-or-approved bytes, tolerating loss of
+the derived runtime copy after restart. Recovery repairs an admitted transaction,
+not certificate expiry. The authenticated Console reloads its own listener;
+publication alone does not prove browser trust or every Console's adoption.
+
+`server/service_credentials.py` stores metrics and collector overrides inside
+the existing age-encrypted secrets store. Mounted deployment files stay unchanged.
+Metrics accepts the current and previous values during migration. Collector
+headers bind to an exact HTTPS destination; a changed destination disables
+export rather than leaking credentials or falling back to anonymous delivery.
+The telemetry worker reloads replacements and rollbacks between sample passes.
+
+Consumer-use evidence records only an operation ID and time under
+`state/credential-proof/`. Retirement requires matching evidence and owner
+confirmation. One observed scrape/delivery cannot prove all consumers migrated
+or that an external collector revoked its old credential. Pending rollback
+restores the preceding override or the deployment-file authority. No response
+returns stored tokens or headers. See the
+[operator workflow](../zensical/admin-guide/console-credentials.md).
+
+Tests exercise real OpenSSL/age, each publication boundary, temporary-file loss,
+stale approvals, split-tier TLS handshake/reload failure and retry, a real metrics
+listener, and a trusted HTTPS collector with live credential replacement/rollback.
+Browser workflow tests use intercepted APIs, not production account sessions.
 
 ## Online signer rotation
 
@@ -80,8 +112,8 @@ must never be interpreted as completed rotation. Private-swarm leaf renewal is
 already device-managed and distinct from CA replacement. No email/webhook
 delivery, enterprise-CA integration or automated trust rollout is included.
 
-Recipient rekey now includes the encrypted peer CA. It refuses a pending signer
-candidate because that journal embeds ciphertext under the existing recipients.
+Recipient rekey now includes the encrypted peer CA. It refuses pending signer
+or browser TLS candidates because their journals embed ciphertext under the existing recipients.
 Writers must be stopped for recipient rekey; changing the runtime age identity
 still requires the separate documented deployment procedure.
 

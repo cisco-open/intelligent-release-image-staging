@@ -17,6 +17,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add owner-only Console browser TLS request, public CA approval, explicit
+  self-signed replacement and recoverable publication with listener reload.
+  Add encrypted metrics-token and destination-bound collector credential
+  overrides, consumer-use evidence, confirmed retirement and pending rollback.
+  Keep deployment mounts unchanged; other trust-family UI adapters remain
+  unfinished.
+
 - Add opt-in UTC key maintenance schedules and Console controls for signer
   preparation, device instruction-key rotation and Docker management-token
   rotation. Preserve overlap, require offline approvals or consumer verification,

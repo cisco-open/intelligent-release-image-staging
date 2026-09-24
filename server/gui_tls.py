@@ -20,6 +20,9 @@ tests) there is no durable copy at all — only the runtime file is written,
 exactly persist_store's no-recipient degradation. Every path derives from
 the environment at call time. Never logs or returns key material."""
 import os
+from contextlib import contextmanager
+import fcntl
+import stat
 import shutil
 import ssl
 import subprocess
@@ -27,6 +30,32 @@ import tempfile
 
 import secretfs
 import trust
+
+
+@contextmanager
+def rotation_lock():
+    directory = _tls_config_dir()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if os.path.islink(directory):
+        raise ValueError('unsafe TLS configuration directory')
+    fd = os.open(os.path.join(directory, '.rotation.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('unsafe TLS rotation lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('TLS maintenance is busy; refresh shortly') from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _guard_pending_commit():
+    import tls_rotation
+    record = tls_rotation._load()
+    if record and record['state'] == 'committing':
+        raise ValueError('Complete the admitted TLS rotation before replacing its files')
 
 
 def combined_path():
@@ -195,6 +224,12 @@ def _put_back(path, data):
 
 
 def persist_override(cert_pem, key_pem):
+    with rotation_lock():
+        _guard_pending_commit()
+        return _persist_override_locked(cert_pem, key_pem)
+
+
+def _persist_override_locked(cert_pem, key_pem):
     """Persist a VALIDATED cert/key upload, durable-FIRST with rollback
     (mirrors secretfs.persist_store's durable-ciphertext-first idiom):
 
@@ -267,6 +302,12 @@ def override_active():
 
 
 def remove_override():
+    with rotation_lock():
+        _guard_pending_commit()
+        return _remove_override_locked()
+
+
+def _remove_override_locked():
     """Remove ALL THREE gui-* files (durable crt, durable key.age, runtime
     combined) — the "Use built-in certificate" revert. Idempotent; missing
     files are fine, and a half pair left by an env change is cleaned too."""

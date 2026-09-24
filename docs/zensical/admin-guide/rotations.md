@@ -16,10 +16,12 @@ Run one rotation at a time.
 | --- | --- |
 | **TLS & trust** | Installs the browser certificate this Console serves and the certificate authorities it trusts. |
 | **Device packages** | Compares the certificate the live services present with the public `iris-catalog.pem` copy that onboarding hands to devices. |
-| **Certificates & keys** | Shows server certificate dates and public-key fingerprints, and renews the existing instruction signing certificate. |
+| **Certificates & keys** | Shows public identities, renews instruction certificates, and guides browser TLS and telemetry credential replacement. |
 
 For the guided online-certificate workflow, see
 [Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate).
+For browser TLS and telemetry credentials, use the
+[guided Console workflows](console-credentials.md).
 
 ## Rotate the management credential
 
@@ -209,8 +211,9 @@ most two rotations per window unless every device has a fresh torrent.
 
 ## Rotate the metrics scrape token
 
-The token is a raw value in a private file that the server rereads on each
-request.
+Use the [Console workflow](console-credentials.md#replace-the-metrics-scraping-token)
+for encrypted overrides and verified retirement. The following procedure applies
+only while credentials remain deployment-managed, without a Console override.
 
 1. Write the new raw value to a new private file. On Docker, give Compose its
    path; on Kubernetes, put it in `current` in the `iris-observability-auth`
@@ -225,8 +228,9 @@ credentials file. See [Set up certificates and tokens](../install/certificates-a
 
 ## Rotate the collector headers
 
-The headers that authenticate the server's outbound telemetry push live in
-their own private file. Write the new value to that file. On Kubernetes,
+Use the [Console workflow](console-credentials.md#replace-outbound-collector-authentication)
+for destination-bound overrides. Without an override, headers live in
+their own private file. Write the new value there and restart the server. On Kubernetes,
 re-apply the `iris-otlp-headers` Secret and restart the server Deployment. See
 [Export telemetry](../user-guide/telemetry-export.md).
 

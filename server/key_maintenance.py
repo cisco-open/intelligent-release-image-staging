@@ -34,15 +34,15 @@ FAMILIES = {
     'online-signer': ('Online instruction signer', 'prepare', 'Offline certificate and retirement approvals', 'admin-guide/signer-rotation/'),
     'device-instruction': ('Device instruction encryption key', 'rotate', 'Seven-day overlap; verify device acceptance', 'admin-guide/rotations/#rotate-one-devices-instruction-key'),
     'management-token': ('Console management credential', 'rotate', 'Verify all Console instances before retiring overlap', 'admin-guide/rotations/#rotate-the-management-credential'),
-    'browser-tls': ('Console browser TLS', 'review', 'Approved certificate and private-key pair in TLS & trust', 'admin-guide/rotations/#rotate-the-console-browser-certificate'),
+    'browser-tls': ('Console browser TLS', 'review', 'Public request, approval and listener verification in Certificates & keys', 'admin-guide/console-credentials/#replace-the-browser-certificate'),
     'management-tls': ('Management TLS', 'review', 'Stage Console trust, replace server pair, verify listeners', 'admin-guide/rotations/#rotate-the-management-certificate'),
     'device-tls': ('Device-pinned TLS', 'review', 'Device trust rollout and re-onboarding', 'admin-guide/rotations/#rotate-the-certificate-that-devices-trust'),
     'peer-ca': ('Private swarm issuing CA', 'review', 'Coordinated trust rollout; distinct from automatic leaf renewal', 'admin-guide/rotations/'),
     'offline-roots': ('Offline signing roots', 'review', 'Independent custodians and device trust rollout', 'admin-guide/instruction-keys/'),
     'age-identity': ('Encryption-at-rest identity and recipients', 'review', 'Protected backup, stopped writers and decryption proof', 'admin-guide/rotations/#rotate-the-age-recipients'),
     'seeder-token': ('Seeder announce credential', 'review', 'Maintenance freeze and tracker serving proof', 'admin-guide/rotations/#rotate-the-seeder-announce-credential'),
-    'metrics-token': ('Metrics scrape credential', 'review', 'Collector update and successful scrape before retirement', 'admin-guide/rotations/#rotate-the-metrics-scrape-token'),
-    'collector-headers': ('Outbound telemetry credentials', 'review', 'Collector authority approval and delivery proof', 'admin-guide/rotations/#rotate-the-collector-headers'),
+    'metrics-token': ('Metrics scrape credential', 'review', 'Console replacement, scraper migration and verified retirement', 'admin-guide/console-credentials/#replace-the-metrics-scraping-token'),
+    'collector-headers': ('Outbound telemetry credentials', 'review', 'Console replacement, collector approval and delivery proof', 'admin-guide/console-credentials/#replace-outbound-collector-authentication'),
 }
 ACTIVE = {'running', 'approval-required', 'verification-required', 'review-required', 'intervention-required'}
 STATES = ACTIVE | {'completed', 'reviewed', 'missed', 'cancelled'}

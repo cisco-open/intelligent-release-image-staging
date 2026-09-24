@@ -27,6 +27,8 @@ try {
   let settingsFailure = '';
   let certificateAvailable = true, renewalAccepted = false;
   let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b']};
+  let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null};
+  let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null}))};
   let maintenanceFixture = {schema: 1, revision: 0, observed_at: null, worker: 'not-observed', policies: [], jobs: [], families: [
     {id: 'online-signer', label: 'Online instruction signer', action: 'prepare', requirement: 'Offline approval'},
     {id: 'device-instruction', label: 'Device instruction encryption key', action: 'rotate', requirement: 'Verify device acceptance'},
@@ -49,6 +51,8 @@ try {
     assert.equal(url.origin, 'http://iris.test', 'No external requests allowed');
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/certificates/browser/rotation' && route.request().method() === 'GET') return route.fulfill({json: browserTlsFixture});
+      if (url.pathname === '/api/v1/settings/service-credentials' && route.request().method() === 'GET') return route.fulfill({json: serviceCredentialFixture});
       if (url.pathname === '/api/v1/settings/key-maintenance' && route.request().method() === 'GET') return route.fulfill({json: maintenanceFixture});
       if (url.pathname === '/api/v1/settings/certificates/instruction/rotation' && route.request().method() === 'GET') return route.fulfill({json: rotationFixture});
       if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
@@ -78,6 +82,21 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/certificates/browser/rotation') {
+          if (body.action === 'prepare') browserTlsFixture = {...browserTlsFixture, request_id: body.request_id,
+            names: body.names, mode: body.mode, state: 'awaiting-approval', csr: 'PUBLIC CSR FIXTURE'};
+          if (body.action === 'approve') browserTlsFixture = {...browserTlsFixture, state: 'approved', certificate: body.certificate, fingerprint_sha256: 'ab'.repeat(32)};
+          if (body.action === 'apply') browserTlsFixture = {...browserTlsFixture, state: 'published', applied: true};
+          if (body.action === 'cancel') browserTlsFixture = {...browserTlsFixture, state: 'cancelled'};
+          return route.fulfill({json: browserTlsFixture});
+        }
+        if (url.pathname === '/api/v1/settings/service-credentials') {
+          assert.equal(body.confirm, true);
+          const row = serviceCredentialFixture.items.find(item => item.family === body.family);
+          row.request_id = body.request_id;
+          row.state = body.action === 'replace' ? 'awaiting-verification' : body.action === 'revert' ? 'reverted' : 'completed';
+          return route.fulfill({json: serviceCredentialFixture});
+        }
         if (url.pathname === '/api/v1/settings/key-maintenance') {
           assert.equal(body.action, 'save-policy');
           assert.equal(body.revision, maintenanceFixture.revision);
@@ -341,6 +360,42 @@ try {
   await page.locator('#iv-schedule-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
   settingsFailure = '';
   await settingsTab('Certificates & keys');
+  await page.locator('#browser-tls-state').getByText('Browser certificate: idle.', {exact: true}).waitFor();
+  await page.locator('#browser-tls-names').fill('console.example.com, 192.0.2.10');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#browser-tls-prepare').click();
+  await page.locator('#browser-tls-state').getByText('Browser certificate: awaiting approval.', {exact: true}).waitFor();
+  const csrDownload = page.waitForEvent('download');
+  await page.locator('#browser-tls-csr').click();
+  assert.equal((await csrDownload).suggestedFilename(), 'iris-console.csr');
+  const beforeTlsPrivate = settingsWrites.length;
+  await page.locator('#browser-tls-approved').setInputFiles({name: 'bad.pem', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN PRIVATE KEY-----')});
+  await page.locator('#browser-tls-approve').click();
+  await page.locator('#browser-tls-result').getByText('Upload the public certificate chain, never a private key.', {exact: true}).waitFor();
+  assert.equal(settingsWrites.length, beforeTlsPrivate);
+  await page.locator('#browser-tls-approved').setInputFiles({name: 'cert.pem', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\npublic fixture')});
+  await page.locator('#browser-tls-approve').click();
+  await page.locator('#browser-tls-state').getByText('Browser certificate: approved.', {exact: true}).waitFor();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#browser-tls-apply').click();
+  await page.locator('#browser-tls-result').getByText(/this Console listener reloaded/).waitFor();
+  await page.locator('#service-credential-generate').click();
+  const token = await page.locator('#service-credential-token').inputValue();
+  assert.match(token, /^[0-9a-f]{64}$/);
+  const tokenDownload = page.waitForEvent('download');
+  await page.locator('#service-credential-download').click();
+  assert.equal((await tokenDownload).suggestedFilename(), 'iris-metrics-token');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#service-credential-replace').click();
+  await page.locator('#service-credential-state').getByText(/awaiting verification/).waitFor();
+  assert.equal(await page.locator('#service-credential-token').inputValue(), '', 'Clear the browser secret after successful publication');
+  assert.equal(await page.locator('#service-credential-retire').isDisabled(), true, 'No proof, no retirement');
+  serviceCredentialFixture.items[0].observed_at = 1790230000;
+  await page.locator('#service-credential-refresh').click();
+  await page.waitForFunction(() => !document.getElementById('service-credential-retire').disabled);
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#service-credential-retire').click();
+  await page.locator('#service-credential-result').getByText(/Previous scrape token retired/).waitFor();
   await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
   assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
   await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).waitFor();
@@ -411,7 +466,10 @@ try {
   await page.locator('#rotation-prepare').click();
   await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 844});
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false,
+    JSON.stringify(await page.evaluate(() => Array.from(document.querySelectorAll('body *'))
+      .filter(el => el.getBoundingClientRect().right > innerWidth)
+      .map(el => ({tag: el.tagName, id: el.id, class: el.className})).slice(-20))));
   if (process.env.IRIS_UI_SCREENSHOTS) {
     await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
     await page.locator('#signer-rotation').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'rotation-approval-mobile.png')});

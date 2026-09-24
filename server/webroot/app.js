@@ -6287,7 +6287,183 @@
   });
   // ---- End signer rotation ----
 
+  // ---- Browser TLS public request and approval ----
+  var browserTls = null, browserTlsBusy = false, browserTlsRead = 0, browserTlsPending = null;
+  var browserTlsUrl = '/api/v1/settings/certificates/browser/rotation';
+  function browserTlsField(name) { return document.getElementById('browser-tls-' + name); }
+  function validBrowserTls(data) {
+    return data && ['idle', 'awaiting-approval', 'approved', 'committing', 'published', 'cancelled'].includes(data.state) &&
+      Array.isArray(data.names) && (data.request_id === null || typeof data.request_id === 'string');
+  }
+  function renderBrowserTls() {
+    var state = browserTls ? browserTls.state : 'unknown';
+    browserTlsField('state').textContent = 'Browser certificate: ' + state.replaceAll('-', ' ') + '.';
+    browserTlsField('identity').textContent = browserTls && browserTls.fingerprint_sha256 ?
+      'Replacement SHA256: ' + browserTls.fingerprint_sha256 : '';
+    browserTlsField('prepare').disabled = browserTlsBusy || !['idle', 'published', 'cancelled'].includes(state);
+    browserTlsField('csr').disabled = browserTlsBusy || !browserTls || !browserTls.csr;
+    browserTlsField('certificate').disabled = browserTlsBusy || !browserTls || !browserTls.certificate;
+    browserTlsField('cancel').disabled = browserTlsBusy || !['awaiting-approval', 'approved'].includes(state);
+    browserTlsField('apply').disabled = browserTlsBusy || !['approved', 'committing', 'published'].includes(state);
+    browserTlsField('apply').textContent = state === 'committing' ? 'Recover approved publication' : state === 'published' ? 'Retry Console certificate reload' : 'Apply approved certificate';
+    browserTlsField('approve-form').hidden = !['awaiting-approval', 'approved'].includes(state) || !browserTls || browserTls.mode !== 'ca';
+    ['approve', 'approved', 'names', 'mode'].forEach(function (name) { browserTlsField(name).disabled = browserTlsBusy || !browserTls; });
+  }
+  async function refreshBrowserTls() {
+    if (browserTlsBusy) return;
+    var generation = ++browserTlsRead;
+    browserTls = null; renderBrowserTls();
+    try {
+      var response = await fetch(browserTlsUrl), data = await response.json();
+      if (generation !== browserTlsRead) return;
+      if (!response.ok || !validBrowserTls(data)) throw new Error(data.error || 'Certificate request unavailable.');
+      browserTls = data; renderBrowserTls();
+      browserTlsField('result').textContent = 'Request status refreshed. Publication and browser trust are separate checks.';
+    } catch (error) { if (generation === browserTlsRead) browserTlsField('result').textContent = error.message; }
+  }
+  async function browserTlsAction(action) {
+    if (browserTlsBusy || !browserTls) return;
+    var result = browserTlsField('result');
+    var payload = {action: action, request_id: browserTls.request_id};
+    try {
+      if (action === 'prepare') {
+        var names = browserTlsField('names').value.split(',').map(function (name) { return name.trim(); });
+        var mode = browserTlsField('mode').value;
+        if (!confirm(mode === 'self-signed' ? 'Generate a replacement key and self-signed certificate? Browser trust must be updated before applying it.' : 'Generate an encrypted replacement key and a public certificate request for CA approval?')) return;
+        var parameters = JSON.stringify({names: names, mode: mode});
+        if (!browserTlsPending || browserTlsPending.parameters !== parameters) browserTlsPending = {parameters: parameters, id: maintenanceRequestId()};
+        payload = {action: action, request_id: browserTlsPending.id, names: names, mode: mode};
+      } else if (action === 'approve') {
+        var file = browserTlsField('approved').files[0];
+        if (!file || file.size > 65536) throw new Error('Choose a public PEM certificate chain smaller than 64 KiB.');
+        payload.certificate = await file.text();
+        if (payload.certificate.includes('PRIVATE KEY') || !payload.certificate.includes('BEGIN CERTIFICATE')) throw new Error('Upload the public certificate chain, never a private key.');
+      } else if (action === 'apply') {
+        if (!confirm('Have you approved browser trust for this certificate and verified its names? Apply it to this Console now. Existing browser connections may need a reload; other Console instances must be updated and verified separately.')) return;
+        payload.confirm = true;
+      } else if (action === 'cancel' && !confirm('Discard this replacement request? The active certificate remains unchanged.')) return;
+      browserTlsBusy = true; ++browserTlsRead; renderBrowserTls();
+      var response = await fetch(browserTlsUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok || !validBrowserTls(data)) throw new Error(data.error || 'Outcome unknown. Refresh the same request before retrying.');
+      browserTls = data; browserTlsPending = null;
+      result.textContent = action === 'apply' ? (data.applied ? 'Certificate published and this Console listener reloaded. Verify a new trusted browser connection.' : 'Certificate published; this Console has not confirmed reload. Preserve this request and retry the reload.') :
+        action === 'prepare' ? 'Replacement prepared. Download the public request or approved certificate before continuing.' :
+        action === 'approve' ? 'Certificate matches the replacement key, requested names and validity window. Review trust before applying.' : 'Replacement cancelled; active certificate unchanged.';
+      if (action === 'approve') browserTlsField('approved').value = '';
+    } catch (error) { result.textContent = error.message || 'Outcome unknown. Refresh the request before continuing.'; }
+    finally { browserTlsBusy = false; renderBrowserTls(); }
+  }
+  browserTlsField('names').value = location.hostname;
+  browserTlsField('refresh').addEventListener('click', refreshBrowserTls);
+  ['prepare', 'approve'].forEach(function (action) {
+    browserTlsField(action + '-form').addEventListener('submit', function (event) { event.preventDefault(); browserTlsAction(action); });
+  });
+  ['apply', 'cancel'].forEach(function (action) { browserTlsField(action).addEventListener('click', function () { browserTlsAction(action); }); });
+  ['csr', 'certificate'].forEach(function (kind) {
+    browserTlsField(kind).addEventListener('click', function () {
+      if (browserTls && browserTls[kind]) rotationDownload(kind === 'csr' ? 'iris-console.csr' : 'iris-console.crt', browserTls[kind]);
+    });
+  });
+
   // ---- Opt-in key maintenance ----
+  var serviceCredentialState = null, serviceCredentialBusy = false, serviceCredentialRead = 0, serviceCredentialPending = null;
+  var serviceCredentialUrl = '/api/v1/settings/service-credentials';
+  function serviceCredentialField(name) { return document.getElementById('service-credential-' + name); }
+  function validServiceCredential(data) {
+    return data && Array.isArray(data.items) && data.items.length === 2 && data.items.every(function (item) {
+      return ['metrics-token', 'collector-headers'].includes(item.family) &&
+        ['deployment-managed', 'awaiting-verification', 'completed', 'reverted'].includes(item.state);
+    });
+  }
+  function renderServiceCredential() {
+    var family = serviceCredentialField('family').value;
+    var item = serviceCredentialState && serviceCredentialState.items.find(function (row) { return row.family === family; });
+    serviceCredentialField('metrics').hidden = family !== 'metrics-token';
+    serviceCredentialField('collector').hidden = family !== 'collector-headers';
+    serviceCredentialField('state').textContent = item ? item.state.replaceAll('-', ' ') +
+      (item.observed_at ? '. Successful use observed ' + new Date(item.observed_at * 1000).toISOString() + '.' : '. No replacement-use evidence recorded.') : 'Credential state unavailable. Refresh before changing credentials.';
+    serviceCredentialField('replace').disabled = serviceCredentialBusy || !item || item.state === 'awaiting-verification';
+    serviceCredentialField('retire').disabled = serviceCredentialBusy || !item || item.state !== 'awaiting-verification' || !item.observed_at;
+    serviceCredentialField('revert').disabled = serviceCredentialBusy || !item || item.state !== 'awaiting-verification';
+    document.querySelectorAll('#service-credential-workflow input,#service-credential-workflow select').forEach(function (el) { el.disabled = serviceCredentialBusy; });
+  }
+  function addServiceHeader() {
+    var container = serviceCredentialField('headers');
+    if (container.children.length >= 16) return;
+    var row = document.createElement('div'); row.className = 'maintenance-form';
+    var nameLabel = document.createElement('label'), valueLabel = document.createElement('label');
+    nameLabel.textContent = 'Header name'; valueLabel.textContent = 'Secret value';
+    var name = document.createElement('input'), value = document.createElement('input'), remove = document.createElement('button');
+    name.type = 'text'; name.value = container.children.length ? '' : 'Authorization'; name.dataset.field = 'name';
+    value.type = 'password'; value.autocomplete = 'new-password'; value.dataset.field = 'value';
+    remove.type = 'button'; remove.className = 'btn ghost'; remove.textContent = 'Remove header';
+    remove.addEventListener('click', function () { if (!serviceCredentialBusy) row.remove(); });
+    nameLabel.appendChild(name); valueLabel.appendChild(value); row.append(nameLabel, valueLabel, remove); container.appendChild(row);
+  }
+  async function refreshServiceCredential() {
+    if (serviceCredentialBusy) return;
+    var generation = ++serviceCredentialRead;
+    serviceCredentialState = null; renderServiceCredential();
+    try {
+      var response = await fetch(serviceCredentialUrl), data = await response.json();
+      if (generation !== serviceCredentialRead) return;
+      if (!response.ok || !validServiceCredential(data)) throw new Error(data.error || 'Credential state unavailable.');
+      serviceCredentialState = data; renderServiceCredential();
+    } catch (error) { if (generation === serviceCredentialRead) serviceCredentialField('result').textContent = error.message; }
+  }
+  async function changeServiceCredential(action) {
+    if (!serviceCredentialState || serviceCredentialBusy) return;
+    var family = serviceCredentialField('family').value;
+    var item = serviceCredentialState.items.find(function (row) { return row.family === family; });
+    var payload = {action: action, family: family, request_id: item.request_id, confirm: true};
+    try {
+      if (action === 'replace') {
+        if (family === 'metrics-token') payload.token = serviceCredentialField('token').value;
+        else {
+          payload.endpoint = serviceCredentialField('endpoint').value;
+          payload.headers = Object.create(null);
+          serviceCredentialField('headers').querySelectorAll('.maintenance-form').forEach(function (row) {
+            var name = row.querySelector('[data-field=name]').value.trim();
+            if (!name || Object.keys(payload.headers).some(function (known) { return known.toLowerCase() === name.toLowerCase(); })) throw new Error('Provide distinct authentication header names.');
+            payload.headers[name] = row.querySelector('[data-field=value]').value;
+          });
+        }
+        if (!confirm(family === 'metrics-token' ? 'Have you saved the replacement token for every scraper? Apply it while retaining the previous token?' : 'Use these new credentials only at the specified HTTPS collector? Keep the old credential valid there until verification.')) return;
+        var parameters = JSON.stringify(payload);
+        if (!serviceCredentialPending || serviceCredentialPending.parameters !== parameters) serviceCredentialPending = {parameters: parameters, id: maintenanceRequestId()};
+        payload.request_id = serviceCredentialPending.id;
+      } else if (!confirm(action === 'revert' ? 'Restore the previous IRIS credential setting? External scraper or collector changes will not be rolled back.' :
+        family === 'metrics-token' ? 'Have all scrapers moved to the replacement? At least one successful new-token scrape was observed. Remove the previous token now?' :
+        'Have you revoked the previous credential at the collector after moving every sender? Remove the stored previous value from IRIS now?')) return;
+      serviceCredentialBusy = true; ++serviceCredentialRead; renderServiceCredential();
+      var response = await fetch(serviceCredentialUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok || !validServiceCredential(data)) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
+      serviceCredentialState = data; serviceCredentialPending = null;
+      serviceCredentialField('token').value = '';
+      serviceCredentialField('headers').querySelectorAll('[data-field=value]').forEach(function (field) { field.value = ''; });
+      serviceCredentialField('result').textContent = action === 'replace' ? 'Replacement saved in encrypted storage. Update consumers and refresh evidence before finishing.' :
+        action === 'revert' ? 'Previous IRIS setting restored. Verify external consumers separately.' :
+        family === 'metrics-token' ? 'Previous scrape token retired. Verify every scraper continues working.' :
+        'Previous stored collector credentials removed after observed delivery and your retirement confirmation.';
+    } catch (error) { serviceCredentialField('result').textContent = error.message; }
+    finally { serviceCredentialBusy = false; renderServiceCredential(); }
+  }
+  serviceCredentialField('family').addEventListener('change', renderServiceCredential);
+  serviceCredentialField('refresh').addEventListener('click', refreshServiceCredential);
+  serviceCredentialField('add-header').addEventListener('click', addServiceHeader); addServiceHeader();
+  serviceCredentialField('generate').addEventListener('click', function () {
+    if (!serviceCredentialBusy) serviceCredentialField('token').value = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(function (v) { return v.toString(16).padStart(2, '0'); }).join('');
+  });
+  serviceCredentialField('download').addEventListener('click', function () {
+    var value = serviceCredentialField('token').value;
+    if (!/^[A-Za-z0-9._~+/-]{32,256}$/.test(value)) { serviceCredentialField('result').textContent = 'Generate or enter a valid replacement token first.'; return; }
+    rotationDownload('iris-metrics-token', value + '\n');
+    serviceCredentialField('result').textContent = 'Private credential downloaded. Store it securely and provision it only to authorized scrapers.';
+  });
+  ['replace', 'retire', 'revert'].forEach(function (action) { serviceCredentialField(action).addEventListener('click', function () { changeServiceCredential(action); }); });
+
   var maintenanceState = null, maintenanceBusy = false, maintenanceRead = 0;
   var maintenanceUrl = '/api/v1/settings/key-maintenance';
   function maintenanceField(name) { return document.getElementById('maintenance-' + name); }
@@ -6529,7 +6705,7 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
-    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); }
+    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); refreshBrowserTls(); refreshServiceCredential(); }
     if (sub === 'backups') refreshBackups();
     refreshSettings();
   }

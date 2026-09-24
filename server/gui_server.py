@@ -631,11 +631,13 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 refresh = (response.status < 300 and public_path ==
                            "/api/v1/settings/gui-cert" and
                            self.command in ("POST", "DELETE"))
+                rotation_response = (response.status < 300 and public_path ==
+                    '/api/v1/settings/certificates/browser/rotation' and self.command == 'POST')
                 local_settings = (response.status == 200 and
                                   self.command == "GET" and
                                   public_path == "/api/v1/settings")
                 body = None
-                if refresh or local_settings:
+                if refresh or local_settings or rotation_response:
                     raw = response.read(4 * 1024 * 1024 + 1)
                     if len(raw) > 4 * 1024 * 1024:
                         raise ConsoleConfigurationError("settings response is oversized")
@@ -645,6 +647,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                             raise ValueError()
                     except (ValueError, UnicodeError):
                         raise ConsoleConfigurationError("settings response is invalid") from None
+                    if rotation_response:
+                        refresh = payload.get('state') == 'published'
                     if refresh:
                         applied = False
                         with srv.certificate_lock:
@@ -664,7 +668,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                         payload["applied"] = applied
                         payload["note"] = (None if applied else
                             "saved; restart the Console to apply the certificate")
-                    payload["gui_cert"] = dict(srv.certificate_info)
+                    if refresh or local_settings:
+                        payload["gui_cert"] = dict(srv.certificate_info)
                     body = json.dumps(payload, separators=(",", ":")).encode()
                 self.send_response(response.status, response.reason)
                 has_cache = False

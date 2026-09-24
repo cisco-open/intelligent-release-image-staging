@@ -49,6 +49,8 @@ import gui_auth
 import gui_fleet
 import gui_onboard
 import gui_tls
+import tls_rotation
+import service_credentials
 import certificate_lifecycle
 import instruction_rotation
 import key_maintenance
@@ -4936,6 +4938,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(401, {"error": "unauthorized"}); return
                 self._json(200, certificate_lifecycle.inventory())
                 return
+            if path == '/api/settings/service-credentials':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                try:
+                    self._json(200, service_credentials.status())
+                except (OSError, ValueError):
+                    self._json(503, {'error': 'Service credential state unavailable'})
+                return
+            if path == '/api/settings/certificates/browser/rotation':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                try:
+                    self._json(200, tls_rotation.status())
+                except (ValueError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except OSError:
+                    self._json(503, {'error': 'TLS rotation status unavailable'})
+                return
             if path == "/api/settings/key-maintenance":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -6417,6 +6437,36 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             actor=actor, target='deployment-backup',
                             detail='maintenance request accepted', src_ip=self._client_ip())
                 self._json(200, result); return
+            if path == '/api/settings/service-credentials':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = service_credentials.operate(data)
+                    self._audit('service-credential-rotation', 'settings', action=data.get('action'),
+                        target=data.get('family'), actor=actor, detail='Service credential state updated', src_ip=self._client_ip())
+                    self._json(200, result)
+                except service_credentials.CredentialError as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, tier_auth.CredentialUnavailable):
+                    self._json(503, {'error': 'Credential operation incomplete; refresh before retrying'})
+                return
+            if path == '/api/settings/certificates/browser/rotation':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = tls_rotation.operate(data)
+                    if data.get('action') == 'apply':
+                        result['applied'] = reload_tls()
+                    self._audit('browser-tls-rotation', 'settings', action=data.get('action'),
+                        target='browser-tls', actor=actor, detail='TLS rotation state updated', src_ip=self._client_ip())
+                    self._json(200, result)
+                except (tls_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, KeyError):
+                    self._json(503, {'error': 'TLS operation incomplete; refresh and preserve the request for recovery'})
+                return
             if path == "/api/settings/key-maintenance":
                 data = self._json_body(raw)
                 if data is None:
@@ -7475,7 +7525,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, {"deleted": existed}); return
             if path == "/api/settings/gui-cert":
                 was_active = gui_tls.override_active()
-                gui_tls.remove_override()
+                try:
+                    gui_tls.remove_override()
+                except (ValueError, instruction_keys.InstructionKeyError):
+                    self._json(409, {'error': 'Resolve the pending TLS publication before clearing the certificate'}); return
                 reload_tls()  # fall back to the built-in IRIS_CERT chain
                 self._audit("gui-cert-revert", "settings", action="revert",
                            target="gui-cert", actor=actor,

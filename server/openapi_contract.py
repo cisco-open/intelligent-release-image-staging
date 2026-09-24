@@ -17,6 +17,7 @@ import api_problem
 import api_routes
 import instructions
 import key_maintenance
+import tls_rotation
 import peer_policy
 import schedules
 
@@ -1803,6 +1804,13 @@ _JSON_REQUESTS = {
          "confirm": "new-password"}, ("current", "new", "confirm"), True),
     "/settings/sessions/revoke-others": ({}, (), False),
     "/settings/certificates/instruction/request": ({}, (), False),
+    '/settings/certificates/browser/rotation': (
+        {'action': 'prepare', 'request_id': '00000000-0000-0000-0000-000000000001',
+         'names': ['console.example.com'], 'mode': 'ca'}, ('action', 'request_id', 'names', 'mode'), True),
+    '/settings/service-credentials': (
+        {'action': 'replace', 'family': 'metrics-token', 'request_id': '00000000-0000-0000-0000-000000000001',
+         'confirm': True, 'token': 'example-new-scrape-token-0123456789'},
+        ('action', 'family', 'request_id', 'confirm', 'token'), True),
     "/settings/key-maintenance": (
         {'action': 'save-policy', 'revision': 0, 'policy': {
             'id': '00000000-0000-0000-0000-000000000001', 'family': 'online-signer',
@@ -1889,6 +1897,28 @@ def _request_body(route):
             schema["properties"]["certificate"]["maxLength"] = 65536
             for field in ("public_key_sha256", "certificate_sha256"):
                 schema["properties"][field]["pattern"] = "^[0-9a-f]{64}$"
+    if suffix == '/settings/service-credentials':
+        variants = []
+        for family, extra in [('metrics-token', {'token': {'type': 'string', 'minLength': 32, 'maxLength': 256, 'writeOnly': True}}),
+                ('collector-headers', {'headers': {'type': 'object', 'minProperties': 1, 'maxProperties': 16, 'writeOnly': True,
+                    'additionalProperties': {'type': 'string', 'minLength': 1, 'maxLength': 4096}},
+                    'endpoint': {'type': 'string', 'maxLength': 2048, 'pattern': '^https://'}})]:
+            variants.append(_schedule_object({'action': {'const': 'replace'}, 'family': {'const': family},
+                'request_id': {'type': 'string', 'format': 'uuid'}, 'confirm': {'const': True}, **extra}))
+        variants.append(_schedule_object({'action': {'enum': ['retire', 'revert']},
+            'family': {'enum': ['metrics-token', 'collector-headers']},
+            'request_id': {'type': 'string', 'format': 'uuid'}, 'confirm': {'const': True}}))
+        schema = {'oneOf': variants}
+    if suffix == '/settings/certificates/browser/rotation':
+        variants = []
+        for action, extra in [('prepare', {'names': {'type': 'array', 'minItems': 1, 'maxItems': 16,
+                'uniqueItems': True, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 253}},
+                'mode': {'enum': ['ca', 'self-signed']}}),
+                ('approve', {'certificate': {'type': 'string', 'maxLength': 65536}}),
+                ('apply', {'confirm': {'const': True}}), ('cancel', {})]:
+            variants.append(_schedule_object({'action': {'const': action},
+                'request_id': {'type': 'string', 'format': 'uuid'}, **extra}))
+        schema = {'oneOf': variants}
     if suffix == '/settings/key-maintenance':
         schema = {'oneOf': [
             _schedule_object({'action': {'const': 'save-policy'}, 'revision': _schedule_integer(),
@@ -2222,6 +2252,12 @@ def _json_success_example(route):
         "/settings/certificates/instruction/renew": {
             "applied": True, "expires_at": 1789592000, "refuse_at": 1788987200,
             "status_refreshed": True},
+        '/settings/service-credentials': {'items': [dict(family=family, request_id=None,
+            state='deployment-managed', previous_retained=False, started_at=None, observed_at=None, endpoint=None)
+            for family in ('metrics-token', 'collector-headers')]},
+        '/settings/certificates/browser/rotation': {
+            'request_id': None, 'state': 'idle', 'names': [], 'mode': None,
+            'csr': None, 'certificate': None, 'created_at': None, 'fingerprint_sha256': None},
         '/settings/key-maintenance': {
             'schema': 1, 'revision': 0, 'policies': [], 'jobs': [], 'observed_at': None,
             'worker': 'not-observed', 'families': [dict(id=k, label=v[0], action=v[1], requirement=v[2], guide=v[3])
@@ -2723,6 +2759,23 @@ def _success(route):
             "off", "daily", "weekly"]
         schema["properties"]["hour_utc"].update(
             {"minimum": 0, "maximum": 23})
+    elif suffix == '/settings/service-credentials':
+        schema = _schedule_object({'items': {'type': 'array', 'minItems': 2, 'maxItems': 2, 'items': _schedule_object({
+            'family': {'enum': ['metrics-token', 'collector-headers']}, 'request_id': {'type': ['string', 'null'], 'format': 'uuid'},
+            'state': {'enum': ['deployment-managed', 'awaiting-verification', 'completed', 'reverted']},
+            'previous_retained': {'type': 'boolean'}, 'started_at': {'type': ['integer', 'null']},
+            'observed_at': {'type': ['integer', 'null']}, 'endpoint': {'type': ['string', 'null']}})}})
+    elif suffix == '/settings/certificates/browser/rotation':
+        properties = {
+            'request_id': {'type': ['string', 'null'], 'format': 'uuid'}, 'state': {'enum': list(tls_rotation.STATES)},
+            'names': {'type': 'array', 'items': {'type': 'string'}}, 'mode': {'enum': [None, 'ca', 'self-signed']},
+            'csr': {'type': ['string', 'null']}, 'certificate': {'type': ['string', 'null']},
+            'created_at': {'type': ['integer', 'null']}, 'fingerprint_sha256': {'type': ['string', 'null']}}
+        schema = _schedule_object(properties)
+        if route.method == 'POST':
+            schema['properties'] = {**properties, 'applied': {'type': 'boolean'}, 'note': {'type': ['string', 'null']},
+                'gui_cert': _schedule_object({field: {'type': 'string'} for field in
+                    ('source', 'subject', 'issuer', 'not_after', 'fingerprint_sha256')})}
     elif suffix == '/settings/key-maintenance':
         schema = _maintenance_schema()
     elif suffix == "/settings/certificates/instruction/rotation":
