@@ -51,6 +51,7 @@ import gui_onboard
 import gui_tls
 import certificate_lifecycle
 import instruction_rotation
+import key_maintenance
 import lifecycle_client
 import instruction_keys
 import instruction_stamper
@@ -4935,6 +4936,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(401, {"error": "unauthorized"}); return
                 self._json(200, certificate_lifecycle.inventory())
                 return
+            if path == "/api/settings/key-maintenance":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    self._json(200, key_maintenance.Maintenance().status())
+                except (key_maintenance.MaintenanceError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {"error": str(exc)})
+                except (OSError, ValueError):
+                    self._json(503, {"error": "key maintenance status unavailable"})
+                return
             if path == "/api/settings/certificates/instruction/rotation":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -6405,6 +6416,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._audit('deployment_maintenance', 'security', action=data['action'],
                             actor=actor, target='deployment-backup',
                             detail='maintenance request accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path == "/api/settings/key-maintenance":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    maintenance = key_maintenance.Maintenance()
+                    result = (maintenance.update(data) if data.get('action') == 'save-policy'
+                              else maintenance.act(data, presented=tier_auth.bearer(self.headers)))
+                except (key_maintenance.MaintenanceError, instruction_keys.InstructionKeyError, tier_auth.CredentialUnavailable) as exc:
+                    self._json(409, {"error": str(exc)}); return
+                except (OSError, ValueError):
+                    self._json(503, {"error": "maintenance outcome unavailable; refresh before retrying"}); return
+                self._audit('key_maintenance', 'security', action=data['action'], actor=actor,
+                            target='key-maintenance', detail='maintenance operation accepted', src_ip=self._client_ip())
                 self._json(200, result); return
             if path == "/api/settings/certificates/instruction/rotation":
                 data = self._json_body(raw)
@@ -8050,12 +8076,16 @@ def main():
     ca_stop = threading.Event()
     bulkhash_stop = threading.Event()
     export_stop = threading.Event()
+    maintenance_stop = threading.Event()
+    maintenance_thread = threading.Thread(
+        target=key_maintenance.Maintenance(state_dir).run, args=(maintenance_stop,), daemon=True)
 
     def start_management():
         # All admission starts under the termination latch. A signal during
         # construction skips this callback; a signal or failure within it
         # still enters the same cleanup path with any started work owned.
         schedule_thread.start()
+        maintenance_thread.start()
         # Maintenance stays in this process, sharing its trusted stores.
         threading.Thread(
             target=instruction_keys.status_loop,
@@ -8088,8 +8118,10 @@ def main():
           (scheme, host, port), flush=True)
     def shutdown_management():
         for stop in (schedule_stop, custody_stop, instruction_stop, ca_stop,
-                     bulkhash_stop, export_stop):
+                     bulkhash_stop, export_stop, maintenance_stop):
             stop.set()
+        if maintenance_thread.ident is not None:
+            maintenance_thread.join(timeout=10)
         schedule_service.stop()
         if schedule_thread.ident is not None:
             schedule_thread.join(timeout=10)

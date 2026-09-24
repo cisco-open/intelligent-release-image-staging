@@ -20,6 +20,7 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 | Rotate a credential or a certificate | [Rotate credentials and certificates](rotations.md) |
 | Replace or recover the signing keys | [Replace or recover signing keys](instruction-keys.md) |
 | Replace and revoke the online signing key | [Rotate the online signer](signer-rotation.md) |
+| Schedule rotations, approvals and credential reviews | [Schedule key maintenance](key-maintenance.md) |
 | Recover after an interrupted job or damaged state | [Recover from an interrupted job or damaged state](recovery.md) |
 
 ## Pages in this guide

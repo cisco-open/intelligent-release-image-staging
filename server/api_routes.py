@@ -52,6 +52,8 @@ _CONSOLE_RESOURCES = (
     ("GET", "/schedules/{id}/receipts", "List schedule receipts"),
     ("POST", "/schedules/{id}/reaffirm", "Reaffirm a schedule"),
     ("GET", "/session", "Read console session"),
+    ("GET", "/settings/key-maintenance", "Read key maintenance policies and operations"),
+    ("POST", "/settings/key-maintenance", "Configure or approve key maintenance"),
     ("POST", "/login", "Create console session"),
     ("POST", "/setup", "Create the first administrator"),
     ("POST", "/logout", "End console session"),

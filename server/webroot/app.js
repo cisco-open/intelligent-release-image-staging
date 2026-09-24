@@ -6287,6 +6287,139 @@
   });
   // ---- End signer rotation ----
 
+  // ---- Opt-in key maintenance ----
+  var maintenanceState = null, maintenanceBusy = false, maintenanceRead = 0;
+  var maintenanceUrl = '/api/v1/settings/key-maintenance';
+  function maintenanceField(name) { return document.getElementById('maintenance-' + name); }
+  function validMaintenance(data) {
+    return data && Number.isInteger(data.revision) && Array.isArray(data.policies) &&
+      Array.isArray(data.jobs) && Array.isArray(data.families) && typeof data.worker === 'string';
+  }
+  function maintenanceControls() {
+    document.querySelectorAll('#maintenance-form input,#maintenance-form select,#maintenance-form button,#maintenance-jobs button').forEach(function (el) {
+      el.disabled = maintenanceBusy || !maintenanceState;
+    });
+    var device = maintenanceField('family').value === 'device-instruction';
+    maintenanceField('target').disabled = maintenanceBusy || !maintenanceState || !device;
+    maintenanceField('target').required = device;
+    maintenanceField('interval').min = device ? '8' : '1';
+    maintenanceField('interval').max = device ? '21' : '365';
+  }
+  function maintenanceEdit() {
+    var policy = maintenanceState && maintenanceState.policies.find(function (p) { return p.id === maintenanceField('policy').value; });
+    maintenanceField('family').value = policy ? policy.family : 'online-signer';
+    maintenanceField('target').value = policy && policy.target !== 'deployment' ? policy.target : '';
+    maintenanceField('next').value = new Date(policy ? policy.next_at * 1000 : Date.now() + 3600000).toISOString().slice(0, 19);
+    maintenanceField('interval').value = policy ? policy.interval_days : 14;
+    maintenanceField('window').value = policy ? policy.window_minutes : 30;
+    maintenanceField('enabled').checked = Boolean(policy && policy.enabled);
+    maintenanceControls();
+  }
+  function renderMaintenance() {
+    maintenanceControls();
+    if (!maintenanceState) { maintenanceField('worker').textContent = 'Scheduler status unavailable. Refresh before changing a schedule.'; return; }
+    var data = maintenanceState;
+    maintenanceField('worker').textContent = 'Scheduler: ' + data.worker.replaceAll('-', ' ') +
+      (data.observed_at === null ? '.' : '. Last check ' + new Date(data.observed_at * 1000).toISOString() + '.');
+    var familySelect = maintenanceField('family'), selectedFamily = familySelect.value;
+    familySelect.replaceChildren(); maintenanceField('families').replaceChildren();
+    data.families.forEach(function (family) {
+      var option = document.createElement('option'); option.value = family.id; option.textContent = family.label; familySelect.appendChild(option);
+      var row = document.createElement('tr');
+      [family.label, {prepare: 'Prepare for approval', rotate: 'Rotate credential', review: 'Review reminder'}[family.action], family.requirement].forEach(function (value) {
+        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      });
+      maintenanceField('families').appendChild(row);
+    });
+    if (selectedFamily) familySelect.value = selectedFamily;
+    var chosen = maintenanceField('policy').value;
+    maintenanceField('policy').replaceChildren(new Option('New schedule', ''));
+    data.policies.forEach(function (p) {
+      maintenanceField('policy').appendChild(new Option(p.family + ' / ' + p.target + (p.enabled ? ' — enabled' : ' — disabled'), p.id));
+    });
+    maintenanceField('policy').value = chosen;
+    maintenanceField('jobs').replaceChildren();
+    data.jobs.slice().reverse().forEach(function (job) {
+      var row = document.createElement('tr');
+      [job.family + ' / ' + job.target, new Date(job.due_at * 1000).toISOString(), job.state.replaceAll('-', ' ') + ': ' + job.detail].forEach(function (value) {
+        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      });
+      var actions = document.createElement('td'); row.appendChild(actions);
+      var action = job.state === 'review-required' ? 'reviewed' :
+        job.state === 'verification-required' && job.family === 'management-token' ? 'retire-management' :
+        job.state === 'intervention-required' && job.family === 'management-token' ? 'reconcile-management' :
+        job.state === 'intervention-required' && ['online-signer', 'device-instruction'].includes(job.family) ? 'retry' : null;
+      if (action) {
+        var button = document.createElement('button'); button.className = 'btn ghost';
+        button.textContent = {reviewed: 'Acknowledge review', 'retire-management': 'Retire previous credential', 'reconcile-management': 'Check credential recovery', retry: 'Retry after custody review'}[action];
+        button.addEventListener('click', function () { maintenanceAction(action, job.id); }); actions.appendChild(button);
+      } else if (job.state === 'approval-required') {
+        var link = document.createElement('a'); link.href = '#signer-rotation'; link.textContent = 'Complete signer approval above';
+        link.addEventListener('click', function (event) { event.preventDefault(); document.getElementById('signer-rotation').scrollIntoView(); refreshRotation(); });
+        actions.appendChild(link);
+      }
+      maintenanceField('jobs').appendChild(row);
+    });
+    if (!data.jobs.length) {
+      var empty = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 4;
+      cell.textContent = 'No maintenance operations yet.'; empty.appendChild(cell); maintenanceField('jobs').appendChild(empty);
+    }
+    maintenanceControls();
+  }
+  async function refreshMaintenance() {
+    if (maintenanceBusy) return;
+    var generation = ++maintenanceRead;
+    maintenanceState = null; renderMaintenance();
+    try {
+      var response = await fetch(maintenanceUrl), data = await response.json();
+      if (generation !== maintenanceRead) return;
+      if (!response.ok || !validMaintenance(data)) throw new Error(data.error || 'Maintenance status unavailable.');
+      maintenanceState = data; renderMaintenance(); maintenanceEdit();
+      maintenanceField('result').textContent = 'Maintenance status refreshed.';
+    } catch (error) { if (generation === maintenanceRead) maintenanceField('result').textContent = error.message; }
+  }
+  async function sendMaintenance(payload) {
+    if (maintenanceBusy || !maintenanceState) return;
+    maintenanceBusy = true; ++maintenanceRead; maintenanceControls();
+    try {
+      var response = await fetch(maintenanceUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok || !validMaintenance(data)) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
+      maintenanceState = data;
+      renderMaintenance();
+      if (payload.action === 'save-policy') { maintenanceField('policy').value = payload.policy.id; maintenanceEdit(); }
+      maintenanceField('result').textContent = payload.action === 'save-policy' ? 'Schedule saved.' : 'Operation state updated; check the evidence below.';
+    } catch (error) {
+      maintenanceState = null; maintenanceField('result').textContent = error.message + ' Refresh maintenance before continuing.';
+    } finally { maintenanceBusy = false; renderMaintenance(); }
+  }
+  async function maintenanceAction(action, jobId) {
+    var message = action === 'retire-management' ? 'Have you updated and verified every Console instance with the replacement credential? Retire the previous credential now?' :
+      action === 'reviewed' ? 'Acknowledge that you reviewed the documented custody procedure? This does not record a completed rotation.' :
+      action === 'retry' ? 'Have you reviewed custody and the interrupted operation? Retry this operation now?' :
+      'Check the credential files against the interrupted operation? This does not retire either credential.';
+    if (confirm(message)) await sendMaintenance({action: action, job_id: jobId, confirm: true});
+  }
+  maintenanceField('refresh').addEventListener('click', refreshMaintenance);
+  maintenanceField('policy').addEventListener('change', maintenanceEdit);
+  maintenanceField('family').addEventListener('change', maintenanceControls);
+  maintenanceField('form').addEventListener('submit', async function (event) {
+    event.preventDefault();
+    if (!maintenanceState || maintenanceBusy) return;
+    var family = maintenanceField('family').value, enabled = maintenanceField('enabled').checked;
+    var next = Date.parse(maintenanceField('next').value + 'Z');
+    if (!Number.isFinite(next)) { maintenanceField('result').textContent = 'Choose a valid UTC start time.'; return; }
+    var capability = maintenanceState.families.find(function (item) { return item.id === family; });
+    if (enabled && !confirm('Enable ' + (capability.action === 'review' ? 'review reminders' : capability.action === 'prepare' ? 'signer preparation for offline approval' : 'credential rotation') + ' for this UTC schedule? ' + capability.requirement + '.')) return;
+    await sendMaintenance({action: 'save-policy', revision: maintenanceState.revision, policy: {
+      id: maintenanceField('policy').value || maintenanceRequestId(), family: family,
+      target: family === 'device-instruction' ? maintenanceField('target').value.trim() : 'deployment',
+      enabled: enabled, next_at: Math.floor(next / 1000), interval_days: Number(maintenanceField('interval').value),
+      window_minutes: Number(maintenanceField('window').value)
+    }});
+  });
+  // ---- End key maintenance ----
+
   // ---- Deployment backup workflow ----
   var backupStatus = null, backupBusy = false, backupRead = 0, backupPending = null;
   function backupControls() {
@@ -6396,7 +6529,7 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
-    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); }
+    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); }
     if (sub === 'backups') refreshBackups();
     refreshSettings();
   }

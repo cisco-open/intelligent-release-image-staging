@@ -11,8 +11,10 @@ guided online signer rotation in the Console, and a single-host Docker
 cold-backup worker with file verification and isolated extraction. It does not
 yet implement production recovery cutover,
 scheduled retention or split-host/Kubernetes backup adapters. These are still
-release gates, not optional production follow-ups. Scheduled rotation and other
-key classes are not implemented.
+release gates, not optional production follow-ups. Scheduled signer preparation,
+device instruction-key rotation and Docker management-token rotation now have
+opt-in adapters. Other key families have review reminders only, not automated
+replacement or consumer rollout.
 
 ## Certificate maintenance
 
@@ -27,7 +29,7 @@ key. The root private key stays offline; only the public approval is uploaded.
 
 Browser TLS replacement remains in TLS & trust. Management/device-facing trust
 changes still follow the manual rotation guide. No background automatic renewal
-or new reminder delivery service is supplied by this slice.
+or external reminder delivery service is supplied by this slice.
 
 ## Online signer rotation
 
@@ -46,6 +48,42 @@ age/OpenSSH, all signer publication boundaries, prior revocation preservation,
 authenticated Console-to-management requests and both native SSHSIG helpers
 (ARM64 under emulation when available). Browser tests intercept APIs; these
 tests do not claim inventory-device acceptance.
+
+## Scheduled key maintenance
+
+`server/key_maintenance.py` runs in the state-owning management process, never
+the Console or the server factory used by tests. Its public-only journal lives
+under `state/key-maintenance/`, protected by a nonblocking process lock and
+atomic fsynced writes. No private credentials enter API responses or exception
+details. Owner session and CSRF checks cover every mutation. Policy revision
+comparison rejects stale writes.
+
+Schedules use UTC epoch seconds, explicit windows and stable operation IDs.
+The worker checks every 30 seconds and skips elapsed windows without catch-up.
+An interrupted running intent becomes intervention-required, never a blind
+automatic retry. Only one credential transition is admitted at a time; review
+reminders do not block unrelated families. The last 256 public operations are
+retained, pruning only completed, cancelled, reviewed or missed records.
+
+The device adapter holds the producer/device locks across encrypted persistence
+and restamping. Recovery recognizes the committed replacement and republishes
+instructions without generating another key. Management-token rotation shares
+the CLI lock, retains previous credentials, and requires a request using the
+new credential plus operator confirmation before retirement. Interrupted
+management writes can be reconciled against recorded public fingerprints.
+Projected Kubernetes Secrets need the manual Kubernetes adapter.
+
+Signer preparation retains offline approval boundaries and polls the existing
+rotation journal for completion or cancellation. Review-only entries cover TLS,
+roots, age identity, seeder, metrics and collector headers; acknowledging them
+must never be interpreted as completed rotation. Private-swarm leaf renewal is
+already device-managed and distinct from CA replacement. No email/webhook
+delivery, enterprise-CA integration or automated trust rollout is included.
+
+Recipient rekey now includes the encrypted peer CA. It refuses a pending signer
+candidate because that journal embeds ciphertext under the existing recipients.
+Writers must be stopped for recipient rekey; changing the runtime age identity
+still requires the separate documented deployment procedure.
 
 ## Deployment-side worker
 

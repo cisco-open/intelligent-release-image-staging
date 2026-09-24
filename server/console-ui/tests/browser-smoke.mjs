@@ -27,6 +27,10 @@ try {
   let settingsFailure = '';
   let certificateAvailable = true, renewalAccepted = false;
   let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b']};
+  let maintenanceFixture = {schema: 1, revision: 0, observed_at: null, worker: 'not-observed', policies: [], jobs: [], families: [
+    {id: 'online-signer', label: 'Online instruction signer', action: 'prepare', requirement: 'Offline approval'},
+    {id: 'device-instruction', label: 'Device instruction encryption key', action: 'rotate', requirement: 'Verify device acceptance'},
+    {id: 'browser-tls', label: 'Console browser TLS', action: 'review', requirement: 'Operator certificate approval'}]};
   let backupFixture = {available: false, target: 'unavailable', can_verify: false, can_extract: false,
     jobs: [], note: 'Configure the lifecycle worker on the installer host.'};
   const backupId = '11111111-1111-1111-1111-111111111111';
@@ -45,6 +49,7 @@ try {
     assert.equal(url.origin, 'http://iris.test', 'No external requests allowed');
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/key-maintenance' && route.request().method() === 'GET') return route.fulfill({json: maintenanceFixture});
       if (url.pathname === '/api/v1/settings/certificates/instruction/rotation' && route.request().method() === 'GET') return route.fulfill({json: rotationFixture});
       if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
         status: certificateAvailable ? 200 : 503,
@@ -73,6 +78,13 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/key-maintenance') {
+          assert.equal(body.action, 'save-policy');
+          assert.equal(body.revision, maintenanceFixture.revision);
+          assert.match(body.policy.id, /^[0-9a-f-]{36}$/);
+          maintenanceFixture = {...maintenanceFixture, revision: body.revision + 1, policies: [body.policy]};
+          return route.fulfill({json: maintenanceFixture});
+        }
         if (url.pathname === '/api/v1/settings/certificates/instruction/rotation') {
           assert.match(body.request_id, /^[0-9a-f-]{36}$/);
           if (body.action === 'retirement-request') return route.fulfill({json: {
@@ -329,6 +341,40 @@ try {
   await page.locator('#iv-schedule-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
   settingsFailure = '';
   await settingsTab('Certificates & keys');
+  await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
+  assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
+  await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).waitFor();
+  await page.locator('#maintenance-family').selectOption('device-instruction');
+  assert.equal(await page.locator('#maintenance-target').isEnabled(), true);
+  assert.equal(await page.locator('#maintenance-interval').getAttribute('min'), '8');
+  await page.locator('#maintenance-family').selectOption('browser-tls');
+  assert.equal(await page.locator('#maintenance-target').isDisabled(), true);
+  await page.locator('#maintenance-next').fill('2027-01-01T03:00');
+  await page.locator('#maintenance-enabled').check();
+  const beforeSchedule = settingsWrites.length;
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.locator('#maintenance-save').click();
+  assert.equal(settingsWrites.length, beforeSchedule, 'Cancelled enable leaves policy unchanged');
+  page.once('dialog', dialog => { assert.match(dialog.message(), /review reminders/); dialog.accept(); });
+  await page.locator('#maintenance-save').click();
+  await page.locator('#maintenance-result').getByText('Schedule saved.', {exact: true}).waitFor();
+  assert.equal(settingsWrites.at(-1).body.policy.next_at, Date.parse('2027-01-01T03:00Z') / 1000);
+  assert.equal(settingsWrites.at(-1).body.policy.target, 'deployment');
+  settingsFailure = 'invalid-success';
+  await page.locator('#maintenance-enabled').uncheck();
+  await page.locator('#maintenance-save').click();
+  await page.locator('#maintenance-result').getByText(/Refresh maintenance before continuing/).waitFor();
+  assert.equal(await page.locator('#maintenance-save').isDisabled(), true);
+  settingsFailure = '';
+  await page.locator('#maintenance-refresh').click();
+  await page.waitForFunction(() => !document.getElementById('maintenance-save').disabled);
+  if (process.env.IRIS_UI_SCREENSHOTS) {
+    await page.setViewportSize({width: 390, height: 844});
+    await page.locator('#key-maintenance').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'key-maintenance-mobile.png')});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.setViewportSize({width: 1440, height: 1100});
+    await page.locator('#key-maintenance').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'key-maintenance-desktop.png')});
+  }
   await page.locator('#certificate-rows').getByText('renewal due', {exact: true}).waitFor();
   await page.locator('#certificate-rows').getByText('No expiry', {exact: true}).waitFor();
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);

@@ -1039,6 +1039,32 @@
             <p id="rotation-result" role="status" aria-live="polite"></p>
             <p class="muted">Server-side completion does not prove device acceptance. Confirm Guest Shell, both IOx architectures and IOS-XR devices fetch the new signer and keylist. Private roots stay offline.</p>
           </div>
+          <div class="card" id="key-maintenance">
+            <h3>Scheduled key maintenance</h3>
+            <p>Choose a UTC window and an action for each key family. No schedules are enabled initially. Review reminders leave credentials unchanged; signer preparation still needs offline approval.</p>
+            <p id="maintenance-worker" role="status">Checking scheduler…</p>
+            <p><button class="btn ghost" id="maintenance-refresh">Refresh maintenance</button></p>
+            <div class="table-scroll"><table class="tbl">
+              <thead><tr><th>Key family</th><th>Scheduled action</th><th>Approval or verification</th></tr></thead>
+              <tbody id="maintenance-families"></tbody>
+            </table></div>
+            <form id="maintenance-form" class="maintenance-form">
+              <label>Schedule<select id="maintenance-policy"><option value="">New schedule</option></select></label>
+              <label>Key family<select id="maintenance-family" required></select></label>
+              <label>Device ID<input id="maintenance-target" type="text" placeholder="Enrolled device ID" disabled></label>
+              <label>Next window starts (UTC)<input id="maintenance-next" type="datetime-local" step="1" required></label>
+              <label>Repeat every (days)<input id="maintenance-interval" type="number" min="1" max="365" value="14" required></label>
+              <label>Window length (minutes)<input id="maintenance-window" type="number" min="5" max="1440" value="30" required></label>
+              <label class="maintenance-enable"><input id="maintenance-enabled" type="checkbox"> Enable schedule</label>
+              <button class="btn" id="maintenance-save" type="submit" disabled>Save schedule</button>
+            </form>
+            <p class="muted">Missed windows are recorded, not replayed. Unfinished credential transitions pause further rotations. Device encryption keys require an 8–21 day interval and seven-day overlap. Kubernetes projected Secrets require operator-managed credential rotation.</p>
+            <div class="table-scroll"><table class="tbl">
+              <thead><tr><th>Operation</th><th>Due (UTC)</th><th>State and evidence</th><th>Next action</th></tr></thead>
+              <tbody id="maintenance-jobs"></tbody>
+            </table></div>
+            <p id="maintenance-result" role="status" aria-live="polite"></p>
+          </div>
         </div>
         <div id="settings-pane-setup" hidden>
           <p class="muted">Four things to complete after installing a server.

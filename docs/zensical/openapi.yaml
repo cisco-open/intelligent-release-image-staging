@@ -9420,6 +9420,1308 @@
         }
       }
     },
+    "/api/v1/settings/key-maintenance": {
+      "get": {
+        "operationId": "console_get_api_v1_settings_key_maintenance",
+        "summary": "Read key maintenance policies and operations",
+        "description": "Read key maintenance policies and operations. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read key maintenance policies and operations response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema": {
+                      "const": 1
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "observed_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "worker": {
+                      "enum": [
+                        "not-observed",
+                        "observed",
+                        "stale",
+                        "clock-error"
+                      ]
+                    },
+                    "policies": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "next_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "interval_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 365
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 1440
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "family",
+                          "target",
+                          "enabled",
+                          "next_at",
+                          "interval_days",
+                          "window_minutes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "jobs": {
+                      "type": "array",
+                      "maxItems": 256,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "policy_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "approval-required",
+                              "cancelled",
+                              "completed",
+                              "intervention-required",
+                              "missed",
+                              "review-required",
+                              "reviewed",
+                              "running",
+                              "verification-required"
+                            ]
+                          },
+                          "due_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "updated_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "before": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "after": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "policy_id",
+                          "family",
+                          "target",
+                          "state",
+                          "due_at",
+                          "updated_at",
+                          "detail",
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "families": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "action": {
+                            "enum": [
+                              "prepare",
+                              "rotate",
+                              "review"
+                            ]
+                          },
+                          "requirement": {
+                            "type": "string"
+                          },
+                          "guide": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "action",
+                          "requirement",
+                          "guide"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "peer_leaf_renewal": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "revision",
+                    "observed_at",
+                    "worker",
+                    "policies",
+                    "jobs",
+                    "families",
+                    "peer_leaf_renewal"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schema": 1,
+                  "revision": 0,
+                  "policies": [],
+                  "jobs": [],
+                  "observed_at": null,
+                  "worker": "not-observed",
+                  "families": [
+                    {
+                      "id": "online-signer",
+                      "label": "Online instruction signer",
+                      "action": "prepare",
+                      "requirement": "Offline certificate and retirement approvals",
+                      "guide": "admin-guide/signer-rotation/"
+                    },
+                    {
+                      "id": "device-instruction",
+                      "label": "Device instruction encryption key",
+                      "action": "rotate",
+                      "requirement": "Seven-day overlap; verify device acceptance",
+                      "guide": "admin-guide/rotations/#rotate-one-devices-instruction-key"
+                    },
+                    {
+                      "id": "management-token",
+                      "label": "Console management credential",
+                      "action": "rotate",
+                      "requirement": "Verify all Console instances before retiring overlap",
+                      "guide": "admin-guide/rotations/#rotate-the-management-credential"
+                    },
+                    {
+                      "id": "browser-tls",
+                      "label": "Console browser TLS",
+                      "action": "review",
+                      "requirement": "Approved certificate and private-key pair in TLS & trust",
+                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                    },
+                    {
+                      "id": "management-tls",
+                      "label": "Management TLS",
+                      "action": "review",
+                      "requirement": "Stage Console trust, replace server pair, verify listeners",
+                      "guide": "admin-guide/rotations/#rotate-the-management-certificate"
+                    },
+                    {
+                      "id": "device-tls",
+                      "label": "Device-pinned TLS",
+                      "action": "review",
+                      "requirement": "Device trust rollout and re-onboarding",
+                      "guide": "admin-guide/rotations/#rotate-the-certificate-that-devices-trust"
+                    },
+                    {
+                      "id": "peer-ca",
+                      "label": "Private swarm issuing CA",
+                      "action": "review",
+                      "requirement": "Coordinated trust rollout; distinct from automatic leaf renewal",
+                      "guide": "admin-guide/rotations/"
+                    },
+                    {
+                      "id": "offline-roots",
+                      "label": "Offline signing roots",
+                      "action": "review",
+                      "requirement": "Independent custodians and device trust rollout",
+                      "guide": "admin-guide/instruction-keys/"
+                    },
+                    {
+                      "id": "age-identity",
+                      "label": "Encryption-at-rest identity and recipients",
+                      "action": "review",
+                      "requirement": "Protected backup, stopped writers and decryption proof",
+                      "guide": "admin-guide/rotations/#rotate-the-age-recipients"
+                    },
+                    {
+                      "id": "seeder-token",
+                      "label": "Seeder announce credential",
+                      "action": "review",
+                      "requirement": "Maintenance freeze and tracker serving proof",
+                      "guide": "admin-guide/rotations/#rotate-the-seeder-announce-credential"
+                    },
+                    {
+                      "id": "metrics-token",
+                      "label": "Metrics scrape credential",
+                      "action": "review",
+                      "requirement": "Collector update and successful scrape before retirement",
+                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                    },
+                    {
+                      "id": "collector-headers",
+                      "label": "Outbound telemetry credentials",
+                      "action": "review",
+                      "requirement": "Collector authority approval and delivery proof",
+                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                    }
+                  ],
+                  "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "console_post_api_v1_settings_key_maintenance",
+        "summary": "Configure or approve key maintenance",
+        "description": "Configure or approve key maintenance. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configure or approve key maintenance response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema": {
+                      "const": 1
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "observed_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "worker": {
+                      "enum": [
+                        "not-observed",
+                        "observed",
+                        "stale",
+                        "clock-error"
+                      ]
+                    },
+                    "policies": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "next_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "interval_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 365
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 1440
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "family",
+                          "target",
+                          "enabled",
+                          "next_at",
+                          "interval_days",
+                          "window_minutes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "jobs": {
+                      "type": "array",
+                      "maxItems": 256,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "policy_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "approval-required",
+                              "cancelled",
+                              "completed",
+                              "intervention-required",
+                              "missed",
+                              "review-required",
+                              "reviewed",
+                              "running",
+                              "verification-required"
+                            ]
+                          },
+                          "due_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "updated_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "before": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "after": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "policy_id",
+                          "family",
+                          "target",
+                          "state",
+                          "due_at",
+                          "updated_at",
+                          "detail",
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "families": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "action": {
+                            "enum": [
+                              "prepare",
+                              "rotate",
+                              "review"
+                            ]
+                          },
+                          "requirement": {
+                            "type": "string"
+                          },
+                          "guide": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "action",
+                          "requirement",
+                          "guide"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "peer_leaf_renewal": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "revision",
+                    "observed_at",
+                    "worker",
+                    "policies",
+                    "jobs",
+                    "families",
+                    "peer_leaf_renewal"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schema": 1,
+                  "revision": 0,
+                  "policies": [],
+                  "jobs": [],
+                  "observed_at": null,
+                  "worker": "not-observed",
+                  "families": [
+                    {
+                      "id": "online-signer",
+                      "label": "Online instruction signer",
+                      "action": "prepare",
+                      "requirement": "Offline certificate and retirement approvals",
+                      "guide": "admin-guide/signer-rotation/"
+                    },
+                    {
+                      "id": "device-instruction",
+                      "label": "Device instruction encryption key",
+                      "action": "rotate",
+                      "requirement": "Seven-day overlap; verify device acceptance",
+                      "guide": "admin-guide/rotations/#rotate-one-devices-instruction-key"
+                    },
+                    {
+                      "id": "management-token",
+                      "label": "Console management credential",
+                      "action": "rotate",
+                      "requirement": "Verify all Console instances before retiring overlap",
+                      "guide": "admin-guide/rotations/#rotate-the-management-credential"
+                    },
+                    {
+                      "id": "browser-tls",
+                      "label": "Console browser TLS",
+                      "action": "review",
+                      "requirement": "Approved certificate and private-key pair in TLS & trust",
+                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                    },
+                    {
+                      "id": "management-tls",
+                      "label": "Management TLS",
+                      "action": "review",
+                      "requirement": "Stage Console trust, replace server pair, verify listeners",
+                      "guide": "admin-guide/rotations/#rotate-the-management-certificate"
+                    },
+                    {
+                      "id": "device-tls",
+                      "label": "Device-pinned TLS",
+                      "action": "review",
+                      "requirement": "Device trust rollout and re-onboarding",
+                      "guide": "admin-guide/rotations/#rotate-the-certificate-that-devices-trust"
+                    },
+                    {
+                      "id": "peer-ca",
+                      "label": "Private swarm issuing CA",
+                      "action": "review",
+                      "requirement": "Coordinated trust rollout; distinct from automatic leaf renewal",
+                      "guide": "admin-guide/rotations/"
+                    },
+                    {
+                      "id": "offline-roots",
+                      "label": "Offline signing roots",
+                      "action": "review",
+                      "requirement": "Independent custodians and device trust rollout",
+                      "guide": "admin-guide/instruction-keys/"
+                    },
+                    {
+                      "id": "age-identity",
+                      "label": "Encryption-at-rest identity and recipients",
+                      "action": "review",
+                      "requirement": "Protected backup, stopped writers and decryption proof",
+                      "guide": "admin-guide/rotations/#rotate-the-age-recipients"
+                    },
+                    {
+                      "id": "seeder-token",
+                      "label": "Seeder announce credential",
+                      "action": "review",
+                      "requirement": "Maintenance freeze and tracker serving proof",
+                      "guide": "admin-guide/rotations/#rotate-the-seeder-announce-credential"
+                    },
+                    {
+                      "id": "metrics-token",
+                      "label": "Metrics scrape credential",
+                      "action": "review",
+                      "requirement": "Collector update and successful scrape before retirement",
+                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                    },
+                    {
+                      "id": "collector-headers",
+                      "label": "Outbound telemetry credentials",
+                      "action": "review",
+                      "requirement": "Collector authority approval and delivery proof",
+                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                    }
+                  ],
+                  "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "save-policy"
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "policy": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "next_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "interval_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 365
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 1440
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "family",
+                          "target",
+                          "enabled",
+                          "next_at",
+                          "interval_days",
+                          "window_minutes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "revision",
+                      "policy"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "retry",
+                          "reviewed",
+                          "retire-management",
+                          "reconcile-management"
+                        ]
+                      },
+                      "job_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "job_id",
+                      "confirm"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "example": {
+                "action": "save-policy",
+                "revision": 0,
+                "policy": {
+                  "id": "00000000-0000-0000-0000-000000000001",
+                  "family": "online-signer",
+                  "target": "deployment",
+                  "enabled": false,
+                  "next_at": 1790294400,
+                  "interval_days": 14,
+                  "window_minutes": 30
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/login": {
       "post": {
         "operationId": "console_post_api_v1_login",
@@ -45175,6 +46477,1208 @@
                 "schema": {
                   "type": "integer",
                   "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/settings/key-maintenance": {
+      "get": {
+        "operationId": "management_get_internal_v1_settings_key_maintenance",
+        "summary": "Read key maintenance policies and operations",
+        "description": "Read key maintenance policies and operations. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read key maintenance policies and operations response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema": {
+                      "const": 1
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "observed_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "worker": {
+                      "enum": [
+                        "not-observed",
+                        "observed",
+                        "stale",
+                        "clock-error"
+                      ]
+                    },
+                    "policies": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "next_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "interval_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 365
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 1440
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "family",
+                          "target",
+                          "enabled",
+                          "next_at",
+                          "interval_days",
+                          "window_minutes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "jobs": {
+                      "type": "array",
+                      "maxItems": 256,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "policy_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "approval-required",
+                              "cancelled",
+                              "completed",
+                              "intervention-required",
+                              "missed",
+                              "review-required",
+                              "reviewed",
+                              "running",
+                              "verification-required"
+                            ]
+                          },
+                          "due_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "updated_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "before": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "after": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "policy_id",
+                          "family",
+                          "target",
+                          "state",
+                          "due_at",
+                          "updated_at",
+                          "detail",
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "families": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "action": {
+                            "enum": [
+                              "prepare",
+                              "rotate",
+                              "review"
+                            ]
+                          },
+                          "requirement": {
+                            "type": "string"
+                          },
+                          "guide": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "action",
+                          "requirement",
+                          "guide"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "peer_leaf_renewal": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "revision",
+                    "observed_at",
+                    "worker",
+                    "policies",
+                    "jobs",
+                    "families",
+                    "peer_leaf_renewal"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schema": 1,
+                  "revision": 0,
+                  "policies": [],
+                  "jobs": [],
+                  "observed_at": null,
+                  "worker": "not-observed",
+                  "families": [
+                    {
+                      "id": "online-signer",
+                      "label": "Online instruction signer",
+                      "action": "prepare",
+                      "requirement": "Offline certificate and retirement approvals",
+                      "guide": "admin-guide/signer-rotation/"
+                    },
+                    {
+                      "id": "device-instruction",
+                      "label": "Device instruction encryption key",
+                      "action": "rotate",
+                      "requirement": "Seven-day overlap; verify device acceptance",
+                      "guide": "admin-guide/rotations/#rotate-one-devices-instruction-key"
+                    },
+                    {
+                      "id": "management-token",
+                      "label": "Console management credential",
+                      "action": "rotate",
+                      "requirement": "Verify all Console instances before retiring overlap",
+                      "guide": "admin-guide/rotations/#rotate-the-management-credential"
+                    },
+                    {
+                      "id": "browser-tls",
+                      "label": "Console browser TLS",
+                      "action": "review",
+                      "requirement": "Approved certificate and private-key pair in TLS & trust",
+                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                    },
+                    {
+                      "id": "management-tls",
+                      "label": "Management TLS",
+                      "action": "review",
+                      "requirement": "Stage Console trust, replace server pair, verify listeners",
+                      "guide": "admin-guide/rotations/#rotate-the-management-certificate"
+                    },
+                    {
+                      "id": "device-tls",
+                      "label": "Device-pinned TLS",
+                      "action": "review",
+                      "requirement": "Device trust rollout and re-onboarding",
+                      "guide": "admin-guide/rotations/#rotate-the-certificate-that-devices-trust"
+                    },
+                    {
+                      "id": "peer-ca",
+                      "label": "Private swarm issuing CA",
+                      "action": "review",
+                      "requirement": "Coordinated trust rollout; distinct from automatic leaf renewal",
+                      "guide": "admin-guide/rotations/"
+                    },
+                    {
+                      "id": "offline-roots",
+                      "label": "Offline signing roots",
+                      "action": "review",
+                      "requirement": "Independent custodians and device trust rollout",
+                      "guide": "admin-guide/instruction-keys/"
+                    },
+                    {
+                      "id": "age-identity",
+                      "label": "Encryption-at-rest identity and recipients",
+                      "action": "review",
+                      "requirement": "Protected backup, stopped writers and decryption proof",
+                      "guide": "admin-guide/rotations/#rotate-the-age-recipients"
+                    },
+                    {
+                      "id": "seeder-token",
+                      "label": "Seeder announce credential",
+                      "action": "review",
+                      "requirement": "Maintenance freeze and tracker serving proof",
+                      "guide": "admin-guide/rotations/#rotate-the-seeder-announce-credential"
+                    },
+                    {
+                      "id": "metrics-token",
+                      "label": "Metrics scrape credential",
+                      "action": "review",
+                      "requirement": "Collector update and successful scrape before retirement",
+                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                    },
+                    {
+                      "id": "collector-headers",
+                      "label": "Outbound telemetry credentials",
+                      "action": "review",
+                      "requirement": "Collector authority approval and delivery proof",
+                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                    }
+                  ],
+                  "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "management_post_internal_v1_settings_key_maintenance",
+        "summary": "Configure or approve key maintenance",
+        "description": "Configure or approve key maintenance. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configure or approve key maintenance response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema": {
+                      "const": 1
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "observed_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "worker": {
+                      "enum": [
+                        "not-observed",
+                        "observed",
+                        "stale",
+                        "clock-error"
+                      ]
+                    },
+                    "policies": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "next_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "interval_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 365
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 1440
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "family",
+                          "target",
+                          "enabled",
+                          "next_at",
+                          "interval_days",
+                          "window_minutes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "jobs": {
+                      "type": "array",
+                      "maxItems": 256,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "policy_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "approval-required",
+                              "cancelled",
+                              "completed",
+                              "intervention-required",
+                              "missed",
+                              "review-required",
+                              "reviewed",
+                              "running",
+                              "verification-required"
+                            ]
+                          },
+                          "due_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "updated_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "before": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "after": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "policy_id",
+                          "family",
+                          "target",
+                          "state",
+                          "due_at",
+                          "updated_at",
+                          "detail",
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "families": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "action": {
+                            "enum": [
+                              "prepare",
+                              "rotate",
+                              "review"
+                            ]
+                          },
+                          "requirement": {
+                            "type": "string"
+                          },
+                          "guide": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "action",
+                          "requirement",
+                          "guide"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "peer_leaf_renewal": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "revision",
+                    "observed_at",
+                    "worker",
+                    "policies",
+                    "jobs",
+                    "families",
+                    "peer_leaf_renewal"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schema": 1,
+                  "revision": 0,
+                  "policies": [],
+                  "jobs": [],
+                  "observed_at": null,
+                  "worker": "not-observed",
+                  "families": [
+                    {
+                      "id": "online-signer",
+                      "label": "Online instruction signer",
+                      "action": "prepare",
+                      "requirement": "Offline certificate and retirement approvals",
+                      "guide": "admin-guide/signer-rotation/"
+                    },
+                    {
+                      "id": "device-instruction",
+                      "label": "Device instruction encryption key",
+                      "action": "rotate",
+                      "requirement": "Seven-day overlap; verify device acceptance",
+                      "guide": "admin-guide/rotations/#rotate-one-devices-instruction-key"
+                    },
+                    {
+                      "id": "management-token",
+                      "label": "Console management credential",
+                      "action": "rotate",
+                      "requirement": "Verify all Console instances before retiring overlap",
+                      "guide": "admin-guide/rotations/#rotate-the-management-credential"
+                    },
+                    {
+                      "id": "browser-tls",
+                      "label": "Console browser TLS",
+                      "action": "review",
+                      "requirement": "Approved certificate and private-key pair in TLS & trust",
+                      "guide": "admin-guide/rotations/#rotate-the-console-browser-certificate"
+                    },
+                    {
+                      "id": "management-tls",
+                      "label": "Management TLS",
+                      "action": "review",
+                      "requirement": "Stage Console trust, replace server pair, verify listeners",
+                      "guide": "admin-guide/rotations/#rotate-the-management-certificate"
+                    },
+                    {
+                      "id": "device-tls",
+                      "label": "Device-pinned TLS",
+                      "action": "review",
+                      "requirement": "Device trust rollout and re-onboarding",
+                      "guide": "admin-guide/rotations/#rotate-the-certificate-that-devices-trust"
+                    },
+                    {
+                      "id": "peer-ca",
+                      "label": "Private swarm issuing CA",
+                      "action": "review",
+                      "requirement": "Coordinated trust rollout; distinct from automatic leaf renewal",
+                      "guide": "admin-guide/rotations/"
+                    },
+                    {
+                      "id": "offline-roots",
+                      "label": "Offline signing roots",
+                      "action": "review",
+                      "requirement": "Independent custodians and device trust rollout",
+                      "guide": "admin-guide/instruction-keys/"
+                    },
+                    {
+                      "id": "age-identity",
+                      "label": "Encryption-at-rest identity and recipients",
+                      "action": "review",
+                      "requirement": "Protected backup, stopped writers and decryption proof",
+                      "guide": "admin-guide/rotations/#rotate-the-age-recipients"
+                    },
+                    {
+                      "id": "seeder-token",
+                      "label": "Seeder announce credential",
+                      "action": "review",
+                      "requirement": "Maintenance freeze and tracker serving proof",
+                      "guide": "admin-guide/rotations/#rotate-the-seeder-announce-credential"
+                    },
+                    {
+                      "id": "metrics-token",
+                      "label": "Metrics scrape credential",
+                      "action": "review",
+                      "requirement": "Collector update and successful scrape before retirement",
+                      "guide": "admin-guide/rotations/#rotate-the-metrics-scrape-token"
+                    },
+                    {
+                      "id": "collector-headers",
+                      "label": "Outbound telemetry credentials",
+                      "action": "review",
+                      "requirement": "Collector authority approval and delivery proof",
+                      "guide": "admin-guide/rotations/#rotate-the-collector-headers"
+                    }
+                  ],
+                  "peer_leaf_renewal": "Device-managed; one-day certificates renew six hours before expiry."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "save-policy"
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "policy": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "family": {
+                            "enum": [
+                              "online-signer",
+                              "device-instruction",
+                              "management-token",
+                              "browser-tls",
+                              "management-tls",
+                              "device-tls",
+                              "peer-ca",
+                              "offline-roots",
+                              "age-identity",
+                              "seeder-token",
+                              "metrics-token",
+                              "collector-headers"
+                            ]
+                          },
+                          "target": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "next_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "interval_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 365
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 1440
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "family",
+                          "target",
+                          "enabled",
+                          "next_at",
+                          "interval_days",
+                          "window_minutes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "revision",
+                      "policy"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "retry",
+                          "reviewed",
+                          "retire-management",
+                          "reconcile-management"
+                        ]
+                      },
+                      "job_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "job_id",
+                      "confirm"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "example": {
+                "action": "save-policy",
+                "revision": 0,
+                "policy": {
+                  "id": "00000000-0000-0000-0000-000000000001",
+                  "family": "online-signer",
+                  "target": "deployment",
+                  "enabled": false,
+                  "next_at": 1790294400,
+                  "interval_days": 14,
+                  "window_minutes": 30
                 }
               }
             }

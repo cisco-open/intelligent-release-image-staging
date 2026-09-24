@@ -17,6 +17,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add opt-in UTC key maintenance schedules and Console controls for signer
+  preparation, device instruction-key rotation and Docker management-token
+  rotation. Preserve overlap, require offline approvals or consumer verification,
+  and stop for review after interrupted operations. Other credential families
+  have review reminders, not automated replacement. Include the private-swarm
+  CA in recipient re-encryption and reject rekey with a pending signer candidate.
+
 - Add guided online instruction-signing key rotation in the Console, with
   offline public approvals, crash-safe activation and signed retirement of the
   previous key. Preserve device roots and replay state. Include fresh Guest
