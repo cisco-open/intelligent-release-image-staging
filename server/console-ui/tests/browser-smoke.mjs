@@ -396,6 +396,37 @@ try {
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-retire').click();
   await page.locator('#service-credential-result').getByText(/Previous scrape token retired/).waitFor();
+  await page.locator('#service-credential-family').selectOption('collector-headers');
+  await page.locator('#service-credential-endpoint').fill('https://collector.example:4318');
+  await page.locator('#service-credential-headers [data-field=value]').fill('Bearer isolated-ui-fixture');
+  await page.locator('#service-credential-add-header').click();
+  await page.locator('#service-credential-headers [data-field=name]').last().fill('authorization');
+  await page.locator('#service-credential-headers [data-field=value]').last().fill('duplicate');
+  const beforeDuplicate = settingsWrites.length;
+  await page.locator('#service-credential-replace').click();
+  await page.locator('#service-credential-result').getByText('Provide distinct authentication header names.', {exact: true}).waitFor();
+  assert.equal(settingsWrites.length, beforeDuplicate);
+  await page.locator('#service-credential-headers button').last().click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#service-credential-replace').click();
+  await page.locator('#service-credential-state').getByText(/awaiting verification/).waitFor();
+  assert.equal(settingsWrites.at(-1).body.endpoint, 'https://collector.example:4318');
+  assert.equal(await page.locator('#service-credential-headers [data-field=value]').inputValue(), '');
+  assert.equal(await page.locator('#service-credential-retire').isDisabled(), true);
+  if (process.env.IRIS_UI_SCREENSHOTS) {
+    await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+    for (const [name, width, height] of [['desktop', 1440, 1000], ['mobile', 390, 844]]) {
+      await page.setViewportSize({width, height});
+      for (const id of ['browser-tls-workflow', 'service-credential-workflow']) {
+        await page.locator('#' + id).screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, id + '-' + name + '.png')});
+      }
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    }
+    await page.setViewportSize({width: 1440, height: 1000});
+  }
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#service-credential-revert').click();
+  await page.locator('#service-credential-result').getByText(/Previous IRIS setting restored/).waitFor();
   await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
   assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
   await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).waitFor();
