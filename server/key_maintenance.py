@@ -165,6 +165,9 @@ class Maintenance:
     def status(self):
         with self.locked():
             data = self.load()
+        return self._view(data)
+
+    def _view(self, data):
         observed = data['observed_at']
         worker = ('not-observed' if observed is None else 'clock-error' if int(self.now()) < observed
                   else 'stale' if int(self.now()) - observed > 90 else 'observed')
@@ -321,6 +324,13 @@ class Maintenance:
             elif action == 'retry' and job['state'] == 'intervention-required' and job['family'] in ('online-signer', 'device-instruction'):
                 self._execute(data, job)
             elif action == 'reconcile-management' and job['family'] == 'management-token' and job['state'] == 'intervention-required':
+                # The adapter must durably checkpoint the old identity before
+                # touching either credential. No identity means no mutation
+                # was admitted, even if a read-only mount prevents locking.
+                if job['before'] is None and job['after'] is None:
+                    job.update(state='cancelled', detail='No credential change was admitted; operation cancelled.', updated_at=int(self.now()))
+                    self.save(data)
+                    return self._view(data)
                 module = _cli('iris-management-token')
                 with module.locked():
                     current, previous = tier_auth.load_pair(*module._paths())
@@ -328,7 +338,7 @@ class Maintenance:
                             and _fingerprint(previous) == job['before'] and _fingerprint(current) != job['before']):
                         job.update(after=_fingerprint(current), state='verification-required',
                             detail='Replacement and overlap recovered. Verify every Console before retiring overlap.')
-                    elif job['before'] is not None and _fingerprint(current) == job['before'] and previous is None:
+                    elif job['before'] is not None and _fingerprint(current) == job['before']:
                         job.update(state='cancelled', detail='Original credential still active; interrupted rotation cancelled.')
                     else:
                         raise MaintenanceError('Credential files do not prove this operation; restore custody before reconciliation')

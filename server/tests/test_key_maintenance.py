@@ -170,6 +170,22 @@ def test_management_crash_after_replacement_can_reconcile(tmp_path, monkeypatch)
     assert not previous.exists()
 
 
+def test_read_only_management_mount_does_not_leave_irrecoverable_job(tmp_path, monkeypatch):
+    engine = maintenance.Maintenance(tmp_path, now=lambda: NOW)
+    install(engine, policy('management-token'))
+    @contextlib.contextmanager
+    def readonly():
+        raise OSError('Read-only credential mount')
+        yield
+    monkeypatch.setattr(maintenance, '_cli', lambda _: SimpleNamespace(locked=readonly))
+    engine.now = lambda: NOW + 60
+    engine.tick()
+    job = engine.status()['jobs'][0]
+    assert job['state'] == 'intervention-required' and job['before'] is None
+    result = engine.act(dict(action='reconcile-management', job_id=job['id'], confirm=True))
+    assert result['jobs'][0]['state'] == 'cancelled'
+
+
 def test_real_age_persistence_and_producer_restamp(custody, tmp_path, monkeypatch):
     import catalog
     import instruction_stamper as stamper

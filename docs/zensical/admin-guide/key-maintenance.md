@@ -95,6 +95,8 @@ For management credentials, **Check credential recovery** compares the current
 and previous files with the recorded public fingerprints. A proven replacement
 returns to verification. A proven unchanged original cancels the interrupted
 operation. Conflicting files require repair before recovery can proceed.
+If credential storage rejected the operation before any change was admitted,
+the recovery control cancels it without writing to that storage.
 
 Never delete the maintenance journal to clear an uncertain operation.
 Include `state/key-maintenance/` with the rest of the server state in backups.
