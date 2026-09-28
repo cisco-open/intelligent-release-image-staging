@@ -29,6 +29,10 @@ from . import backup, backup_archive
 from .state import InstallError, Journal, atomic_write, regular_bytes
 
 
+ROTATION_FAMILIES = ('management-tls', 'device-tls', 'peer-ca',
+                     'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce')
+
+
 class Worker:
     def __init__(self, state_dir, backup_dir, recovery_dir, *, identity=None, extract_dir=None):
         self.state_dir = backup_archive.private_directory(state_dir)
@@ -37,6 +41,25 @@ class Worker:
         if self.backup_dir == self.recovery_dir:
             raise InstallError("Data and identity recovery storage must be separate")
         self.identity = Path(identity) if identity else None
+        self.identity_history = [self.identity] if self.identity else []
+        self.operation_identities = {}
+        self.custody_record = self.state_dir / 'recovery-access.json'
+        if self.custody_record.exists() or self.custody_record.is_symlink():
+            info = self.custody_record.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                raise InstallError('Unsafe recovery access authority')
+            access = json.loads(regular_bytes(self.custody_record))
+            if (not isinstance(access, dict) or set(access) != {'active', 'identities', 'operations'}
+                    or not isinstance(access['identities'], list) or not 1 <= len(access['identities']) <= 101
+                    or any(not isinstance(value, str) or not Path(value).is_absolute() for value in access['identities'])
+                    or access['active'] not in access['identities'] or not isinstance(access['operations'], dict)
+                    or any(not re.fullmatch(r'[0-9a-f-]{36}', key) or value not in access['identities']
+                           for key, value in access['operations'].items())):
+                raise InstallError('Invalid recovery access authority')
+            self.identity = Path(access['active'])
+            self.identity_history = [Path(value) for value in access['identities']]
+            self.operation_identities = access['operations']
         self.extract_dir = backup_archive.private_directory(extract_dir) if extract_dir else None
         self.record = self.state_dir / 'lifecycle-jobs.json'
         self.lock = threading.Lock()
@@ -54,16 +77,127 @@ class Worker:
     def save(self):
         atomic_write(self.record, json.dumps(self.jobs, sort_keys=True).encode())
 
+    def save_custody(self):
+        atomic_write(self.custody_record, json.dumps({'active': str(self.identity),
+            'identities': list(dict.fromkeys(map(str, self.identity_history))),
+            'operations': self.operation_identities}, sort_keys=True).encode())
+
     def status(self):
         with self.lock:
             return {'available': True, 'target': 'single-docker',
                     'storage': 'operator-configured-host-directories',
                     'can_verify': self.identity is not None,
                     'can_extract': self.identity is not None and self.extract_dir is not None,
-                    'jobs': json.loads(json.dumps(self.jobs)),
+                    'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] != 'rotate'])),
                     'note': 'Keep encrypted copies and pinned backup signer trust off this host. Extraction does not start services or authorize cutover.'}
 
+    def rotation_status(self):
+        with self.lock:
+            return {'available': True, 'target': 'single-docker',
+                    'can_rotate': self.identity is not None,
+                    'families': list(ROTATION_FAMILIES),
+                    'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] == 'rotate'])),
+                    'note': 'Rotation stops this deployment after a verified cold backup. Trust changes also require device removal and package rebuilds.'}
+
+    def submit_rotation(self, request):
+        if set(request) != {'action', 'request_id', 'family', 'allow_downtime'}:
+            raise InstallError('Unexpected rotation fields')
+        request_id, family = request['request_id'], request['family']
+        if not isinstance(request_id, str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request_id):
+            raise InstallError('Provide a bounded maintenance request ID')
+        if not isinstance(family, str) or family not in ROTATION_FAMILIES:
+            raise InstallError('Choose a supported credential family')
+        if request['allow_downtime'] is not True:
+            raise InstallError('Confirm deployment downtime before rotation')
+        if not self.identity:
+            raise InstallError('Provision independent recovery access before rotation')
+        with self.lock:
+            previous = next((job for job in self.jobs if job['id'] == request_id), None)
+            if previous:
+                if previous['action'] != 'rotate' or previous['family'] != family:
+                    raise InstallError('Request ID already belongs to a different operation')
+                if request['action'] == 'recover-rotation' and previous['state'] == 'recovery-required':
+                    if any(job['id'] != request_id and job['state'] in ('running', 'recovery-required') for job in self.jobs):
+                        raise InstallError('Another operation requires recovery')
+                    previous.update(state='running', detail='Recovering the previously approved operation')
+                    self.save()
+                    self.thread = threading.Thread(target=self.perform_rotation, args=(previous,),
+                        kwargs={'recovery': True}, daemon=False)
+                    self.thread.start()
+                # Repeating the original request only observes it. Recovery
+                # needs its own explicit action and revalidates host custody.
+                return {'job_id': previous['id']}
+            if request['action'] == 'recover-rotation':
+                raise InstallError('Choose an interrupted operation from this deployment')
+            if any(job['state'] in ('running', 'recovery-required') for job in self.jobs):
+                raise InstallError('A maintenance operation is active or requires recovery')
+            if len(self.jobs) >= 100:
+                raise InstallError('Lifecycle history limit reached; operator maintenance required')
+            job = {'id': request_id, 'action': 'rotate', 'family': family,
+                   'state': 'running', 'started_at': int(time.time()), 'detail': '', 'proof': None}
+            # Pin the old recovery identity before the job can mutate custody.
+            # Recovery after a crash between pointer publication and job
+            # completion must still decrypt the ORIGINAL backup and plan.
+            self.operation_identities[request_id] = str(self.identity)
+            if self.identity not in self.identity_history:
+                self.identity_history.append(self.identity)
+            self.save_custody()
+            self.jobs.append(job)
+            self.save()
+            self.thread = threading.Thread(target=self.perform_rotation, args=(job,), daemon=False)
+            self.thread.start()
+            return {'job_id': request_id}
+
+    def perform_rotation(self, job, *, recovery=False):
+        try:
+            if job['family'] in ('device-tls', 'peer-ca', 'instruction-roots'):
+                from . import trust_maintenance as implementation
+            else:
+                from . import credential_maintenance as implementation
+            result = implementation.rotate(self.state_dir, self.backup_dir, self.recovery_dir,
+                kind=job['family'], operation_id=job['id'],
+                recovery_identity=Path(self.operation_identities.get(job['id'], str(self.identity))), recovery=recovery)
+            if job['family'] == 'age-recovery' and result['state'] == 'rotated':
+                # Only host-root UI may stage this file; no browser path is
+                # accepted. Bind the pointer update to proven public custody.
+                candidate_path = self.state_dir / 'recovery-candidate.json'
+                info = candidate_path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                    raise InstallError('Unsafe replacement recovery authority')
+                candidate = json.loads(regular_bytes(candidate_path))
+                if (candidate.get('operation_id') != job['id']
+                        or candidate.get('recipient') != result.get('proof', {}).get('recovery_recipient')):
+                    raise InstallError('Replacement recovery authority changed')
+                replacement = Path(candidate['identity_path'])
+                history = list(dict.fromkeys([str(replacement), *map(str, self.identity_history)]))
+                self.identity, self.identity_history = replacement, [Path(value) for value in history]
+                self.save_custody()
+            state, detail = result['state'], 'Maintenance finished. Review recorded evidence before re-onboarding devices.'
+            proof = result.get('proof')
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, InstallError) else type(exc).__name__
+            print('Credential maintenance failed: ' + reason, file=sys.stderr, flush=True)
+            state, detail, proof = 'recovery-required', 'Rotation incomplete. Preserve the protected operation journal and backup; no reset was performed.', None
+            operation = self.state_dir / 'credential-operations' / job['id'] / 'record.json'
+            # Backends persist this intent before any credential mutation.
+            # Failed admission must not create an unrecoverable phantom job.
+            if not operation.exists() and not operation.is_symlink():
+                state, detail = 'failed', 'Preflight refused the operation before credential changes. Correct deployment or recovery access and start a new request.'
+            else:
+                try:
+                    record = json.loads(regular_bytes(operation))
+                    if record.get('phase') == 'refused' and record.get('mutations_admitted') is False:
+                        state, detail = 'failed', 'Final preflight refused credential changes. The original deployment was restarted and verified; correct the prerequisite and start a new request.'
+                except (OSError, ValueError, InstallError):
+                    pass
+        with self.lock:
+            job.update(state=state, detail=detail, proof=proof, finished_at=int(time.time()))
+            self.save()
+
     def submit(self, request):
+        if isinstance(request, dict) and request.get('action') in ('rotate', 'recover-rotation'):
+            return self.submit_rotation(request)
         if not isinstance(request, dict) or request.get('action') not in ('backup', 'verify', 'extract'):
             raise InstallError("Unsupported maintenance action")
         action = request['action']
@@ -123,10 +257,31 @@ class Worker:
                 if destination:
                     destination.mkdir(mode=0o700)
                     destination_created = True
-                first = backup_archive.read(data, self.identity, signer,
-                    destination=destination / 'data' if destination else None)
-                second = backup_archive.read(recovery, self.identity, signer,
-                    destination=destination / 'identity' if destination else None)
+                selected = None
+                # Old backup sets remain encrypted to their original recovery
+                # custodian. Retain explicitly provisioned access, not secret
+                # bytes, across a recipient transition. Verify BOTH before
+                # writing any extraction with the selected identity.
+                for identity in self.identity_history or [self.identity]:
+                    try:
+                        first = backup_archive.read(data, identity, signer)
+                        second = backup_archive.read(recovery, identity, signer)
+                        selected = identity
+                        break
+                    except (OSError, ValueError, InstallError):
+                        continue
+                if selected is None:
+                    raise InstallError('No provisioned recovery identity opens both backup sets')
+                if (first['metadata'].get('scope') != 'managed-deployment-files'
+                        or second['metadata'].get('scope') != 'identity-recovery'
+                        or first['metadata'].get('target') != 'single-docker'
+                        or second['metadata'].get('target') != 'single-docker'
+                        or first['metadata'].get('backup_set_id') != second['metadata'].get('backup_set_id')
+                        or first['metadata'].get('instance_id') != second['metadata'].get('instance_id')):
+                    raise InstallError('Data and recovery identity sets do not match')
+                if destination:
+                    first = backup_archive.read(data, selected, signer, destination=destination / 'data')
+                    second = backup_archive.read(recovery, selected, signer, destination=destination / 'identity')
                 if (first['metadata'].get('backup_set_id') != second['metadata'].get('backup_set_id')
                         or first['metadata'].get('instance_id') != second['metadata'].get('instance_id')):
                     raise InstallError("Data and recovery identity sets do not match")
@@ -172,7 +327,8 @@ def make_server(path, worker, *, allowed_uids=(0, 10001)):
                 if len(raw) > 4096 or not raw.endswith(b'\n'):
                     raise InstallError("Invalid maintenance request")
                 request = json.loads(raw)
-                result = worker.status() if request == {'action': 'status'} else worker.submit(request)
+                result = (worker.status() if request == {'action': 'status'} else
+                          worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
             except (InstallError, ValueError, TypeError) as exc:
                 response = {'ok': False, 'error': str(exc) if isinstance(exc, InstallError) else 'Invalid maintenance request'}

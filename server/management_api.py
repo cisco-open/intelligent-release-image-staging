@@ -51,6 +51,7 @@ import gui_fleet
 import gui_onboard
 import gui_tls
 import tls_rotation
+import trust_rotation
 import service_credentials
 import certificate_lifecycle
 import instruction_rotation
@@ -4977,6 +4978,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except (OSError, ValueError):
                     self._json(503, {"error": "rotation status unavailable; inspect custody before retrying"})
                 return
+            if path == '/api/settings/deployment-rotation':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                self._json(200, lifecycle_client.rotation_status())
+                return
+            if path == '/api/settings/trust-rotation':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                try:
+                    self._json(200, {'items': [trust_rotation.status(family) for family in trust_rotation.FAMILIES],
+                                     'drain': trust_rotation.drain_status()})
+                except (trust_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self._json(503, {'error': 'Trust approval state unavailable; preserve existing requests'})
+                return
             if path == "/api/settings/backups":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -6422,6 +6439,35 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="publishing in place from %s" % src,
                            src_ip=self._client_ip())
                 self._json(200, {"job_id": images.start_publish(src)}); return
+            if path == '/api/settings/deployment-rotation':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if data.get('action') not in ('rotate', 'recover-rotation'):
+                    self._json(400, {'error': 'Choose a scoped credential rotation'}); return
+                try:
+                    result = lifecycle_client.call(data)
+                except ValueError as exc:
+                    self._json(400, {'error': str(exc)}); return
+                except lifecycle_client.LifecycleUnavailable as exc:
+                    self._json(503, {'error': str(exc)}); return
+                self._audit('deployment_rotation', 'security', action=data['action'],
+                    actor=actor, target=data['family'], detail='Maintenance request accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path == '/api/settings/trust-rotation':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = trust_rotation.operate(data)
+                    self._audit('trust_approval', 'security', action=data.get('action'), actor=actor,
+                        target=data.get('family'), detail='Public trust approval state updated', src_ip=self._client_ip())
+                    self._json(200, result)
+                except (trust_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self._json(503, {'error': 'Trust operation incomplete; refresh the request before retrying'})
+                return
             if path == "/api/settings/backups":
                 data = self._json_body(raw)
                 if data is None:

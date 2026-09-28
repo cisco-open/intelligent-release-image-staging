@@ -26,6 +26,9 @@ Review reminders leave credentials unchanged. **Acknowledge review** records
 that you reviewed the procedure, not that a rotation succeeded.
 For browser TLS, metrics tokens and collector authentication, complete the
 [guided Console workflow](console-credentials.md) separately from the reminder.
+For deployment trust, seeder credentials and encryption custody, use
+[deployment maintenance](deployment-rotation.md). Its explicit downtime and
+offline approvals are not started by acknowledging a reminder.
 Device agents already renew their private-swarm leaf certificates six hours
 before their one-day validity ends. Replacing the issuing CA is a separate task.
 

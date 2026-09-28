@@ -114,6 +114,8 @@ See [Schedule key maintenance](key-maintenance.md).
 
 These workflows use server-owned encrypted configuration and the authenticated
 Console connection. They do not modify host bind mounts or Kubernetes Secrets.
-Management and device TLS, peer issuing CA, offline signing roots, age identity
-replacement and seeder credentials do not yet have complete guided UI rotation.
-Do not treat a review acknowledgment as evidence that those credentials changed.
+For management and device TLS, peer issuing CA, offline signing roots, service
+encryption identity and seeder credentials, use
+[deployment maintenance](deployment-rotation.md). That host-worker workflow has
+a narrower deployment boundary and requires verified recovery access.
+Do not treat a review acknowledgment as evidence that credentials changed.

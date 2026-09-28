@@ -260,6 +260,10 @@ decrypted_devices() {
   mkdir -p "$IRIS_CONFIG/peer-tls"
   "$TMP/fake-age" -r "$PRIMARY_PUB" \
     -o "$IRIS_CONFIG/peer-tls/ca.pem.age" "$TMP/instruction-key"
+  "$TMP/fake-age" -r "$PRIMARY_PUB" \
+    -o "$IRIS_CONFIG/tls/management-key.pem.age" "$TMP/instruction-key"
+  "$TMP/fake-age" -r "$PRIMARY_PUB" \
+    -o "$IRIS_CONFIG/tls/console-fallback.pem.age" "$TMP/instruction-key"
 
   run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
       IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
@@ -270,7 +274,7 @@ decrypted_devices() {
 
   # Every file now names both recipients and still holds the SAME plaintext.
   for f in secrets.json.age rpc-secret.age tls/key.pem.age tls/gui-key.pem.age \
-      instr/signing-key.age peer-tls/ca.pem.age; do
+      instr/signing-key.age peer-tls/ca.pem.age tls/management-key.pem.age tls/console-fallback.pem.age; do
     hdr="$(head -n1 "$IRIS_CONFIG/$f")"
     [[ "$hdr" == *"$BREAKGLASS_PUB"* ]] || { echo "$f not re-encrypted to break-glass: $hdr"; return 1; }
     [[ "$hdr" == *"$PRIMARY_PUB"* ]]    || { echo "$f lost the primary recipient: $hdr"; return 1; }
@@ -282,6 +286,10 @@ decrypted_devices() {
   [ "$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"    = "$crt_before" ]
   [ "$(tail -n +2 "$IRIS_CONFIG/tls/gui-key.pem.age")" = "GUI-KEY" ]
   [ "$(tail -n +2 "$IRIS_CONFIG/instr/signing-key.age")" = \
+    "fixture-signing-content" ]
+  [ "$(tail -n +2 "$IRIS_CONFIG/tls/management-key.pem.age")" = \
+    "fixture-signing-content" ]
+  [ "$(tail -n +2 "$IRIS_CONFIG/tls/console-fallback.pem.age")" = \
     "fixture-signing-content" ]
   [ "$(stat -c '%a' "$IRIS_CONFIG/instr/signing-key.age")" = "640" ]
 }

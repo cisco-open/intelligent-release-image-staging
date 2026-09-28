@@ -13,6 +13,9 @@ worker. For an installer-owned single-host Docker deployment, **Back up now**
 stops the server and Console, captures encrypted data and a separate identity
 recovery set, then starts the services that were running. Confirm the downtime
 before proceeding. The host worker continues while the Console is unavailable.
+For an interrupted credential rotation, use the
+[host recovery window](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped)
+even while the Console is stopped.
 
 **Verify backup** checks the signature, decryption and every captured file in
 both sets. **Extract for isolated recovery** writes to a new protected directory.

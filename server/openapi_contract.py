@@ -18,6 +18,7 @@ import api_routes
 import instructions
 import key_maintenance
 import tls_rotation
+import trust_rotation
 import peer_policy
 import schedules
 
@@ -1822,6 +1823,11 @@ _JSON_REQUESTS = {
     "/settings/backups": ({"action": "backup", "allow_downtime": True,
                             "request_id": "00000000-0000-0000-0000-000000000001"},
                            ("action", "allow_downtime", "request_id"), True),
+    '/settings/deployment-rotation': ({'action': 'rotate', 'allow_downtime': True,
+        'request_id': '00000000-0000-0000-0000-000000000001', 'family': 'management-tls'},
+        ('action', 'allow_downtime', 'request_id', 'family'), True),
+    '/settings/trust-rotation': ({'action': 'prepare', 'family': 'peer-ca',
+        'request_id': '00000000-0000-0000-0000-000000000001'}, ('action', 'family', 'request_id'), True),
     "/settings/certificates/instruction/renew": (
         {"certificate": "ssh-ed25519-cert-v01@openssh.com ...",
          "public_key_sha256": "00" * 32, "certificate_sha256": "11" * 32},
@@ -1908,6 +1914,28 @@ def _request_body(route):
         variants.append(_schedule_object({'action': {'enum': ['retire', 'revert']},
             'family': {'enum': ['metrics-token', 'collector-headers']},
             'request_id': {'type': 'string', 'format': 'uuid'}, 'confirm': {'const': True}}))
+        schema = {'oneOf': variants}
+    if suffix == '/settings/deployment-rotation':
+        schema = _schedule_object({'action': {'enum': ['rotate', 'recover-rotation']}, 'allow_downtime': {'const': True},
+            'request_id': {'type': 'string', 'format': 'uuid'},
+            'family': {'enum': ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce']}})
+    if suffix == '/settings/trust-rotation':
+        variants = []
+        for family, action, extra in [
+            ('device-tls', 'prepare', {'names': {'type': 'array', 'minItems': 1, 'maxItems': 16,
+                'items': {'type': 'string', 'maxLength': 253}}, 'mode': {'enum': ['ca', 'self-signed']}}),
+            ('peer-ca', 'prepare', {}),
+            ('instruction-roots', 'prepare', {'roots': {'type': 'object', 'minProperties': 2, 'maxProperties': 2,
+                'additionalProperties': {'type': 'string', 'maxLength': 4096}}, 'keylist_signer': {'type': 'string', 'maxLength': 64}}),
+            ('device-tls', 'approve', {'certificate': {'type': 'string', 'maxLength': 65536}}),
+            ('instruction-roots', 'approve', {'certificate': {'type': 'string', 'maxLength': 65536},
+                'keylist': {'type': 'string', 'maxLength': 174764}}),
+            ('instruction-roots', 'attestation-request', {'root_id': {'type': 'string', 'maxLength': 64}}),
+            ('instruction-roots', 'attestation-apply', {'root_id': {'type': 'string', 'maxLength': 64},
+                'keylist': {'type': 'string', 'maxLength': 174764}}),
+            *[(family, 'cancel', {}) for family in trust_rotation.FAMILIES]]:
+            variants.append(_schedule_object({'family': {'const': family}, 'action': {'const': action},
+                'request_id': {'type': 'string', 'format': 'uuid'}, **extra}))
         schema = {'oneOf': variants}
     if suffix == '/settings/certificates/browser/rotation':
         variants = []
@@ -2052,7 +2080,7 @@ def _request_body(route):
 def _json_success_example(route):
     """Return the actual stable fields for a JSON success response."""
     suffix = _resource_suffix(route)
-    if suffix == "/settings/backups" and route.method == "POST":
+    if suffix in ('/settings/backups', '/settings/deployment-rotation') and route.method == "POST":
         return {"job_id": "00000000-0000-0000-0000-000000000001"}
 
     exact = {
@@ -2273,6 +2301,11 @@ def _json_success_example(route):
             "available": False, "target": "unavailable", "storage": "unavailable",
             "can_verify": False, "can_extract": False, "jobs": [],
             "note": "Configure the lifecycle worker on the installer host."},
+        '/settings/deployment-rotation': {
+            'available': False, 'target': 'unavailable', 'can_rotate': False,
+            'families': [], 'jobs': [], 'note': 'Configure deployment maintenance and recovery access.'},
+        '/settings/trust-rotation': {'items': [trust_rotation._view(None, family, live=False) for family in trust_rotation.FAMILIES],
+            'drain': {'ready': True, 'blocked_device_ids': [], 'removed_device_ids': []}} if route.method == 'GET' else trust_rotation._view(None, 'peer-ca', live=False),
         "/settings/setup-status": {
             "admin": {"state": "ok", "username": "admin"},
             "telemetry": {"state": "ok", "endpoint":
@@ -2791,6 +2824,47 @@ def _success(route):
                 'required': ['request_id', 'payload', 'root_id'], 'properties': {
                     'request_id': {'type': 'string', 'format': 'uuid'}, 'payload': {'type': 'string'},
                     'root_id': {'type': 'string'}}}]}
+    elif suffix == '/settings/trust-rotation':
+        item = _schedule_object({'family': {'enum': list(trust_rotation.FAMILIES)},
+            'request_id': {'type': ['string', 'null'], 'format': 'uuid'},
+            'state': {'enum': ['idle', *trust_rotation.STATES]},
+            'created_at': {'type': ['integer', 'null']}, 'names': {'type': 'array', 'items': {'type': 'string'}},
+            'mode': {'type': ['string', 'null']}, 'csr': {'type': ['string', 'null']},
+            'certificate': {'type': ['string', 'null']}, 'fingerprint_sha256': {'type': ['string', 'null']},
+            'roots': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+            'online_public_key': {'type': ['string', 'null']}, 'keylist_payload': {'type': ['string', 'null']},
+            'keylist_signer': {'type': ['string', 'null']}, 'requires_reonboarding': {'type': 'boolean'},
+            'requires_package_rebuild': {'type': 'boolean'},
+            'attestation_request_id': {'type': ['string', 'null'], 'format': 'uuid'},
+            'attestation_root_id': {'type': ['string', 'null']},
+            'attested_root_ids': {'type': 'array', 'items': {'type': 'string'}}})
+        schema = _schedule_object({'items': {'type': 'array', 'minItems': 3, 'maxItems': 3, 'items': item},
+            'drain': _schedule_object({'ready': {'type': 'boolean'}, 'blocked_device_ids': {'type': 'array', 'items': {'type': 'string'}},
+                'removed_device_ids': {'type': 'array', 'items': {'type': 'string'}}})}) if route.method == 'GET' else {'oneOf': [item,
+                    _schedule_object({'request_id': {'type': 'string', 'format': 'uuid'}, 'root_id': {'type': 'string'},
+                                      'payload': {'type': 'string'}})]}
+    elif suffix == '/settings/deployment-rotation' and route.method == 'GET':
+        schema = _schedule_object({'available': {'type': 'boolean'}, 'target': {'enum': ['single-docker', 'unavailable']},
+            'can_rotate': {'type': 'boolean'}, 'note': {'type': 'string'},
+            'families': {'type': 'array', 'items': {'enum': ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce']}},
+            'jobs': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+                'required': ['id', 'action', 'family', 'state', 'started_at', 'detail', 'proof'],
+                'properties': {'id': {'type': 'string', 'format': 'uuid'}, 'action': {'const': 'rotate'},
+                    'family': {'type': 'string'}, 'state': {'type': 'string'}, 'started_at': {'type': 'integer'},
+                    'finished_at': {'type': 'integer'}, 'detail': {'type': 'string'},
+                    'proof': {'type': ['object', 'null'], 'additionalProperties': False, 'properties': {
+                        'management_https': {'const': 'verified'}, 'certificate_sha256': {'type': 'string'},
+                        'dedicated_management_key': {'const': 'verified'}, 'age_files': {'type': 'integer'},
+                        'service_recipient': {'type': 'string'}, 'recovery_recipient': {'type': 'string'},
+                        'independent_decryption': {'const': 'verified'},
+                        'seeded_torrents': {'type': 'integer'}, 'credential_changed': {'const': True},
+                        'isolated_tracker_proof': {'const': 'verified'}, 'restarted_tracker_proof': {'const': 'verified'},
+                        'family': {'enum': list(trust_rotation.FAMILIES)}, 'request_id': {'type': 'string', 'format': 'uuid'},
+                        'packages_verified': {'const': True}, 'device_consumers': {'const': 're-onboarding-required'},
+                        'catalog_tls_sha256': {'type': 'string'}, 'peer_ca_sha256': {'type': 'string'},
+                        'origin_mode': {'enum': ['required', 'disabled']},
+                        'root_sha256': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+                        'keylist_seq': {'type': 'integer'}}}}}}})
     elif suffix == "/settings/backups" and route.method == "GET":
         schema["properties"]["jobs"]["items"] = {
             "type": "object", "additionalProperties": False,

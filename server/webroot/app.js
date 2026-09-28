@@ -6464,6 +6464,176 @@
   });
   ['replace', 'retire', 'revert'].forEach(function (action) { serviceCredentialField(action).addEventListener('click', function () { changeServiceCredential(action); }); });
 
+  var deploymentRotation = null, deploymentTrust = null, deploymentBusy = false, deploymentRead = 0, deploymentPending = null;
+  var deploymentRotationUrl = '/api/v1/settings/deployment-rotation', deploymentTrustUrl = '/api/v1/settings/trust-rotation';
+  function deploymentField(name) { return document.getElementById('deployment-rotation-' + name); }
+  function deploymentTrustItem() {
+    return deploymentTrust && deploymentTrust.items.find(function (item) { return item.family === deploymentField('family').value; });
+  }
+  function renderDeploymentRotation() {
+    var family = deploymentField('family').value, trust = ['device-tls', 'peer-ca', 'instruction-roots'].includes(family);
+    var item = deploymentTrustItem(), state = item ? item.state : 'unavailable';
+    var busyJob = deploymentRotation && deploymentRotation.jobs.some(function (job) { return ['running', 'recovery-required'].includes(job.state); });
+    deploymentField('worker').textContent = deploymentRotation ? deploymentRotation.note : 'Worker state unavailable. Refresh before starting maintenance.';
+    deploymentField('state').textContent = trust ? 'Trust request: ' + state.replaceAll('-', ' ') + '. Publication requires stopped writers and confirmed device removal.' :
+      family === 'age-identity' ? 'Replace the server encryption identity and retain the independently held recovery recipient. Existing backups keep their original recovery requirements.' :
+      family === 'seeder-announce' ? 'Pause normal writers while an isolated tracker and seeder verify the replacement credential against published torrents.' :
+      'Replace the internal TLS key and certificate, update the local Console trust, and verify an authenticated connection.';
+    deploymentField('trust').hidden = !trust;
+    deploymentField('tls').hidden = family !== 'device-tls';
+    deploymentField('roots').hidden = family !== 'instruction-roots';
+    deploymentField('approval').hidden = !item || !['awaiting-approval', 'approved'].includes(state) || family === 'peer-ca' || item.mode === 'self-signed';
+    deploymentField('keylist-label').hidden = family !== 'instruction-roots';
+    var attest = family === 'instruction-roots' && ['idle', 'cancelled', 'published'].includes(state) && Object.keys(item.roots || {}).length === 2;
+    deploymentField('attestation').hidden = !attest;
+    var rootSelect = deploymentField('attestation-root'), selectedRoot = rootSelect.value;
+    rootSelect.replaceChildren();
+    if (attest) {
+      Object.keys(item.roots).forEach(function (name) { var option = document.createElement('option'); option.value = name; option.textContent = name; rootSelect.appendChild(option); });
+      if (Object.hasOwn(item.roots, selectedRoot)) rootSelect.value = selectedRoot;
+      else if (item.attestation_root_id && Object.hasOwn(item.roots, item.attestation_root_id)) rootSelect.value = item.attestation_root_id;
+      deploymentField('attested').textContent = 'Fresh signed custody evidence: ' + ((item.attested_root_ids || []).join(', ') || 'none') + '. Each root requires its own signed approval.';
+    }
+    ['attestation-request', 'attestation-apply'].forEach(function (name) { deploymentField(name).disabled = deploymentBusy || !attest || busyJob; });
+    deploymentField('fingerprint').textContent = item && item.fingerprint_sha256 ? 'Replacement SHA256: ' + item.fingerprint_sha256 : '';
+    if (trust && deploymentTrust && deploymentTrust.drain) deploymentField('state').textContent += deploymentTrust.drain.ready ?
+      ' Recorded deployments are removed; the worker will check again after stopping writers.' :
+      ' Removal required: ' + deploymentTrust.drain.blocked_device_ids.join(', ') + '.';
+    document.querySelectorAll('#deployment-rotation-workflow input,#deployment-rotation-workflow select').forEach(function (el) { el.disabled = deploymentBusy; });
+    deploymentField('prepare').disabled = deploymentBusy || !item || !['idle', 'published', 'cancelled'].includes(state) || busyJob;
+    deploymentField('approve').disabled = deploymentBusy || !item || !['awaiting-approval', 'approved'].includes(state) || busyJob;
+    deploymentField('cancel').disabled = deploymentBusy || !item || !['awaiting-approval', 'approved'].includes(state) || busyJob;
+    deploymentField('download').disabled = deploymentBusy || !item || !(item.csr || item.certificate || item.online_public_key);
+    deploymentField('apply').disabled = deploymentBusy || !deploymentRotation || !deploymentRotation.can_rotate || busyJob ||
+      !deploymentRotation.families.includes(family) || (trust && (state !== 'approved' || !deploymentTrust.drain || !deploymentTrust.drain.ready));
+    deploymentField('refresh').disabled = deploymentBusy;
+    deploymentField('jobs').replaceChildren();
+    if (deploymentRotation) deploymentRotation.jobs.slice().reverse().forEach(function (job) {
+      var row = document.createElement('tr');
+      [job.family + ' / ' + job.id, job.state.replaceAll('-', ' '), job.detail + (job.proof ? ' ' + JSON.stringify(job.proof) : '')].forEach(function (value) {
+        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      });
+      if (job.state === 'recovery-required') {
+        var recover = document.createElement('button'); recover.className = 'btn ghost'; recover.textContent = 'Recover approved operation';
+        recover.disabled = deploymentBusy || !deploymentRotation.can_rotate;
+        recover.addEventListener('click', function () { recoverDeploymentRotation(job); });
+        row.lastChild.appendChild(recover);
+      }
+      deploymentField('jobs').appendChild(row);
+    });
+  }
+  async function refreshDeploymentRotation() {
+    if (deploymentBusy) return;
+    var generation = ++deploymentRead;
+    deploymentRotation = null; deploymentTrust = null; renderDeploymentRotation();
+    try {
+      var results = await Promise.all([deploymentRotationUrl, deploymentTrustUrl].map(async function (url) {
+        try {
+        var response = await fetch(url), data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Maintenance status unavailable.');
+        return data;
+        } catch (error) { return {unavailable: error.message}; }
+      }));
+      if (generation !== deploymentRead) return;
+      if (!Array.isArray(results[0].jobs) || !Array.isArray(results[0].families) || typeof results[0].can_rotate !== 'boolean') throw new Error(results[0].unavailable || 'Maintenance response invalid; no changes enabled.');
+      deploymentRotation = results[0];
+      if (Array.isArray(results[1].items) && results[1].items.length === 3) deploymentTrust = results[1];
+      else deploymentField('result').textContent = results[1].unavailable || 'Trust requests unavailable. Independent credential operations remain available.';
+      renderDeploymentRotation();
+    } catch (error) { if (generation === deploymentRead) deploymentField('result').textContent = error.message; }
+  }
+  async function deploymentPublicFile(name, limit) {
+    var file = deploymentField(name).files[0];
+    if (!file || file.size > limit) throw new Error('Choose the required bounded public approval file.');
+    var value = await file.text();
+    if (/PRIVATE KEY|AGE-SECRET-KEY/i.test(value)) throw new Error('Private keys must stay with their custodian; upload only public material.');
+    return value;
+  }
+  async function recoverDeploymentRotation(job) {
+    if (deploymentBusy || !confirm('Resume only this previously approved operation? IRIS will recheck its backup and custody, stop writers and verify the replacement before restarting.')) return;
+    deploymentBusy = true; ++deploymentRead; renderDeploymentRotation();
+    try {
+      var response = await fetch(deploymentRotationUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}),
+        body: JSON.stringify({action: 'recover-rotation', family: job.family, request_id: job.id, allow_downtime: true})});
+      var data = await response.json();
+      if (!response.ok || data.job_id !== job.id) throw new Error(data.error || 'Recovery outcome unknown. Refresh the same operation.');
+      deploymentField('result').textContent = 'Recovery accepted for ' + job.id + '. Reconnect after downtime and check evidence.';
+    } catch (error) { deploymentField('result').textContent = error.message; }
+    finally { deploymentBusy = false; await refreshDeploymentRotation(); }
+  }
+  async function deploymentAction(action) {
+    if (deploymentBusy || !deploymentRotation) return;
+    var family = deploymentField('family').value, item = deploymentTrustItem();
+    if (['device-tls', 'peer-ca', 'instruction-roots'].includes(family) && !item) return;
+    var payload = {action: action, family: family, request_id: item && item.request_id}, endpoint = deploymentTrustUrl;
+    try {
+      if (action === 'prepare') {
+        if (family === 'device-tls') {
+          payload.names = deploymentField('names').value.split(',').map(function (value) { return value.trim(); });
+          payload.mode = deploymentField('mode').value;
+        } else if (family === 'instruction-roots') {
+          var first = deploymentField('root-a-name').value.trim(), second = deploymentField('root-b-name').value.trim();
+          if (!first || first === second) throw new Error('Provide two distinct existing root names.');
+          payload.roots = Object.create(null);
+          payload.roots[first] = await deploymentPublicFile('root-a', 4096);
+          payload.roots[second] = await deploymentPublicFile('root-b', 4096);
+          payload.keylist_signer = first;
+        }
+        if (!confirm('Prepare replacement trust? Active credentials remain unchanged until a separately confirmed maintenance operation.')) return;
+        payload.request_id = null;
+        var parameters = JSON.stringify(payload);
+        if (!deploymentPending || deploymentPending.parameters !== parameters) deploymentPending = {parameters: parameters, id: maintenanceRequestId()};
+        payload.request_id = deploymentPending.id;
+      } else if (action === 'attestation-request' || action === 'attestation-apply') {
+        payload.root_id = deploymentField('attestation-root').value;
+        if (action === 'attestation-apply') {
+          if (!item.attestation_request_id || item.attestation_root_id !== payload.root_id) throw new Error('Download and approve a request for the selected root first.');
+          payload.request_id = item.attestation_request_id;
+          payload.keylist = await deploymentPublicFile('attestation-keylist', 174764);
+        } else {
+          var attestationParameters = 'attestation:' + payload.root_id;
+          if (!deploymentPending || deploymentPending.parameters !== attestationParameters) deploymentPending = {parameters: attestationParameters, id: maintenanceRequestId()};
+          payload.request_id = deploymentPending.id;
+        }
+      } else if (action === 'approve') {
+        payload.certificate = await deploymentPublicFile('certificate', 65536);
+        if (family === 'instruction-roots') payload.keylist = await deploymentPublicFile('keylist', 174764);
+      } else if (action === 'rotate') {
+        if (!confirm('Stop this IRIS deployment, verify a cold backup, and rotate this credential? Trust changes require confirmed IRIS removal from devices. Wait for the recorded result and verify consumers before resuming use.')) return;
+        endpoint = deploymentRotationUrl;
+        if (!item) {
+          var key = 'rotate:' + family;
+          if (!deploymentPending || deploymentPending.parameters !== key) deploymentPending = {parameters: key, id: maintenanceRequestId()};
+          payload.request_id = deploymentPending.id;
+        }
+        payload.allow_downtime = true;
+      } else if (action === 'cancel' && !confirm('Discard this uncommitted trust request? Active trust will remain unchanged.')) return;
+      deploymentBusy = true; ++deploymentRead; renderDeploymentRotation();
+      var response = await fetch(endpoint, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
+      deploymentPending = null;
+      if (action === 'attestation-request') rotationDownload('keylist-payload.json', data.payload);
+      deploymentField('result').textContent = action === 'attestation-request' ? 'Public request downloaded. Approve it with the selected root in IRIS Offline signing, then import the signed revocation list here.' :
+        action === 'attestation-apply' ? 'Signed root attestation validated. Review each root’s fresh evidence.' :
+        action === 'rotate' ? 'Maintenance request accepted: ' + data.job_id + '. The Console will disconnect during downtime. Reconnect and refresh evidence; acceptance is not completion.' :
+        action === 'approve' ? 'Public approval validated. Schedule downtime before applying it.' : action === 'cancel' ? 'Replacement request cancelled.' : 'Replacement prepared. Download public files and complete required approvals.';
+    } catch (error) { deploymentField('result').textContent = error.message; }
+    finally { deploymentBusy = false; renderDeploymentRotation(); await refreshDeploymentRotation(); }
+  }
+  deploymentField('family').addEventListener('change', renderDeploymentRotation);
+  deploymentField('refresh').addEventListener('click', refreshDeploymentRotation);
+  ['prepare', 'approve', 'cancel', 'attestation-request', 'attestation-apply'].forEach(function (action) { deploymentField(action).addEventListener('click', function () { deploymentAction(action); }); });
+  deploymentField('apply').addEventListener('click', function () { deploymentAction('rotate'); });
+  deploymentField('download').addEventListener('click', function () {
+    var item = deploymentTrustItem();
+    if (!item || deploymentBusy) return;
+    [['csr', 'iris-device.csr'], ['certificate', 'iris-approved-certificate.pem'], ['online_public_key', 'online.pub'], ['keylist_payload', 'keylist-payload.json']].forEach(function (field) {
+      if (item[field[0]]) rotationDownload(field[1], item[field[0]]);
+    });
+    deploymentField('result').textContent = 'Public files downloaded. For signing roots, use IRIS Offline signing to approve the online key and preserved revocation list, then import both approvals here.';
+  });
+
   var maintenanceState = null, maintenanceBusy = false, maintenanceRead = 0;
   var maintenanceUrl = '/api/v1/settings/key-maintenance';
   function maintenanceField(name) { return document.getElementById('maintenance-' + name); }
@@ -6705,7 +6875,7 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
-    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); refreshBrowserTls(); refreshServiceCredential(); }
+    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); refreshBrowserTls(); refreshServiceCredential(); refreshDeploymentRotation(); }
     if (sub === 'backups') refreshBackups();
     refreshSettings();
   }

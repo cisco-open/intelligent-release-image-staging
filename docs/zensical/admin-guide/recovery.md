@@ -6,6 +6,55 @@ SPDX-License-Identifier: Apache-2.0
 
 # Recover from an interrupted job or damaged state
 
+## Recover a deployment rotation while the Console is stopped
+
+For an installer-owned single-host Docker deployment, open **Deployment
+recovery** on the installer host's authorized desktop display. Use the same
+private state directory as the configured lifecycle worker:
+
+```bash
+sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/iris
+```
+
+1. Select **Refresh operations**. Choose the rotation marked
+   `recovery-required` and review its operation ID, credential family and
+   recorded evidence.
+2. Select **Recover approved operation** and confirm the deployment downtime.
+   The worker resumes the same approved operation from its protected journal.
+3. Watch the operation state and evidence. The window refreshes every ten
+   seconds. A submitted request is not proof of completion.
+
+The worker must remain available outside the containers. If it is unavailable,
+start its configured service and refresh. The recovery window requires a
+desktop display and the installer package's `python3-tk` dependency.
+
+!!! warning
+
+    Preserve the operation journal and encrypted backup. Recovery refuses
+    changed authority; do not delete the journal or reset keys to bypass that
+    refusal. This control resumes credential rotations, not interrupted backup
+    captures or a restore cutover.
+
+## Replace the independent recovery recipient
+
+1. Create the replacement with
+   [IRIS Offline signing](../install/offline-approval.md#create-an-independent-recovery-identity).
+   Keep an independent private copy off the deployment host.
+2. On the installer host, open **Deployment recovery** with the command above.
+   Under **Replace the independent recovery recipient**, select the private
+   age identity through **Browse**. It must have private file permissions and
+   belong to root or the desktop account that launched the window with `sudo`.
+3. Confirm **I hold an independent off-host copy and will retain keys for older
+   backups**. Select **Review replacement**, compare the public recipient with
+   your independent copy, and confirm downtime.
+4. Review the matching operation's state and evidence. The application imports
+   a protected host copy and keeps the request ID when you retry. Its private
+   file and local path never pass through the Console.
+
+Finish an active rotation before preparing another recipient. Existing backups
+still require their original recovery keys. Retain those keys and your
+independent copies after the new recipient is active.
+
 ## What this is for
 
 A job that stops partway through, or storage that comes back with the wrong

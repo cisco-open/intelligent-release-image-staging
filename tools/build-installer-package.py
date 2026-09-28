@@ -64,6 +64,8 @@ def build(repo, output):
         (source / "INSTALLER-SOURCE.json").write_text(json.dumps(inventory, sort_keys=True, indent=2) + "\n")
         shutil.copytree(source / "tools/iris_installer", lib / "iris_installer")
         shutil.copy2(source / "tools/irisctl", lib / "irisctl")
+        shutil.copy2(source / "tools/iris-custody-askpass", lib / "iris-custody-askpass")
+        (lib / "iris-custody-askpass").chmod(0o755)
         binary = root / "usr/bin"
         binary.mkdir(parents=True)
         (binary / "irisctl").symlink_to("../lib/iris-installer/irisctl")
@@ -73,10 +75,18 @@ def build(repo, output):
         (control / "control").write_text(
             "Package: iris-installer\nVersion: " + version + "\nArchitecture: amd64\n"
             "Maintainer: IRIS contributors\nSection: admin\nPriority: optional\n"
-            "Depends: python3 (>= 3.12), ca-certificates, openssh-client\n"
+            "Depends: python3 (>= 3.12), python3-tk, age, ca-certificates, openssh-client\n"
             "Description: IRIS Ubuntu installer candidate\n"
             " Source-build deployment with managed Ubuntu dependencies and offline signing approval.\n"
             " Candidate: not yet a qualified all-topology production release.\n")
+        applications = root / "usr/share/applications"
+        applications.mkdir(parents=True)
+        (applications / "iris-offline-signing.desktop").write_text(
+            "# Copyright 2026 Cisco Systems, Inc. and its affiliates\n"
+            "# SPDX-License-Identifier: Apache-2.0\n"
+            "[Desktop Entry]\nType=Application\nName=IRIS Offline signing\n"
+            "Comment=Approve public requests with a root kept on this machine\n"
+            "Exec=/usr/bin/irisctl custody-ui\nTerminal=false\nCategories=System;Security;\n")
         doc = root / "usr/share/doc/iris-installer"
         doc.mkdir(parents=True)
         shutil.copy2(source / "LICENSE", doc / "copyright")

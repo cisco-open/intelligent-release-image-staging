@@ -14,8 +14,12 @@ scheduled retention or split-host/Kubernetes backup adapters. These are still
 release gates, not optional production follow-ups. Scheduled signer preparation,
 device instruction-key rotation and Docker management-token rotation now have
 opt-in adapters. Browser TLS and telemetry credentials have operator-driven UI
-workflows; their schedules remain review reminders. Other trust families still
-lack complete rotation and consumer-rollout adapters.
+workflows; their schedules remain review reminders. Installer-owned single-Docker
+deployments also have planned maintenance adapters for management/device TLS,
+peer CA, offline roots, service age identity and seeder credentials. The host UI
+also changes the independent recovery recipient without sending a private
+identity through the browser. Device
+consumer rollout remains an explicit remove/re-onboard/verify procedure.
 
 ## Certificate maintenance
 
@@ -29,8 +33,41 @@ producer or replaces a key. An expired certificate can be renewed with the same
 key. The root private key stays offline; only the public approval is uploaded.
 
 Browser TLS now also has the public request/approval workflow below.
-Management/device-facing trust changes still follow the manual rotation guide.
+Management/device-facing trust changes use the scoped host-worker workflow below.
 No background automatic renewal or external reminder delivery service is supplied.
+
+## Deployment trust transactions
+
+`server/trust_rotation.py` prepares encrypted candidates and validates public
+approvals without publishing them. It preserves the exact installed KRL,
+revocations, sequence and instruction epoch during root replacement. Its strict
+drain check includes orphan credentials and abandoned deployment records, and
+runs again after every normal writer has stopped.
+
+`tools/iris_installer/credential_maintenance.py` owns the single-Docker transaction:
+independently decrypt both cold-backup sets, stop writers, apply approved bytes,
+restart the server, verify the family, restart Console, then prove authenticated
+management HTTPS from Console. Recovery is explicit, same-ID and old-or-approved
+hash bounded. `trust_maintenance.py` also updates installer root pins and
+rebuilds both IOx architectures and XR when signing roots change.
+
+Seeder maintenance runs only tracker and seeder on an isolated Docker network
+with no published ports. It uses a temporary runtime loopback certificate and
+the existing authenticated serving predicate. Normal startup restores canonical
+public announces, and serving is proved again before completion. Public tracker
+validation still refuses loopback outside this explicit maintenance process mode.
+
+The worker accepts fixed UUID/family requests, not browser-provided paths or
+commands. `irisctl maintenance-ui` reaches the same protected Unix socket when
+the Console is stopped. `irisctl custody-ui` handles offline approvals separately.
+Neither UI transports offline private roots. See the
+[operator procedure](../zensical/admin-guide/deployment-rotation.md).
+
+Recovery-recipient replacement pins the original key for the operation's backup
+and encrypted write plan. The worker's protected `recovery-access.json` retains
+per-operation key locations and prior backup access, activates the new identity
+only after verified completion, and survives a crash between custody activation
+and job completion. These locations are never returned through the API.
 
 ## Browser TLS and service credentials
 

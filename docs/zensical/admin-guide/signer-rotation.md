@@ -35,7 +35,9 @@ an attacker-held key unusable until devices receive its signed revocation.
    Record the previous and replacement public-file SHA256 values shown in the
    Console. Confirm the downloaded file with the custodian through your
    independently trusted custody channel.
-2. On the offline custody machine, run:
+2. On the offline machine, use
+   [IRIS Offline signing](../install/offline-approval.md#approve-a-public-request)
+   and choose **Online signing certificate**. The terminal alternative is:
 
    ```bash
    irisctl approve-signing --public-key iris-replacement.pub \
@@ -58,7 +60,9 @@ pending requires cancelling and preparing a new request.
 1. Choose the approving root and **Download retirement request**. The public
    `keylist.payload` preserves existing revocations and adds the previous key.
 2. Have that root's custodian review the request, sequence and KRL digest through
-   the custody procedure. On their offline machine, run:
+   the custody procedure. In
+   [IRIS Offline signing](../install/offline-approval.md#approve-a-public-request),
+   choose **Retirement list**. The terminal alternative is:
 
    ```bash
    irisctl approve-keylist --payload keylist.payload \

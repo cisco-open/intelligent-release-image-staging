@@ -35,6 +35,9 @@ try {
     {id: 'browser-tls', label: 'Console browser TLS', action: 'review', requirement: 'Operator certificate approval'}]};
   let backupFixture = {available: false, target: 'unavailable', can_verify: false, can_extract: false,
     jobs: [], note: 'Configure the lifecycle worker on the installer host.'};
+  let deploymentFixture = {available: false, target: 'unavailable', can_rotate: false, families: [], jobs: [], note: 'Configure independent recovery access.'};
+  let trustFixture = {items: ['device-tls', 'peer-ca', 'instruction-roots'].map(family => ({family, state: 'idle', request_id: null})),
+    drain: {ready: true, blocked_device_ids: [], removed_device_ids: []}};
   const backupId = '11111111-1111-1111-1111-111111111111';
   await page.addInitScript(() => {
     window.addEventListener('iris:policy-state', event => { window.testPolicyState = event.detail; });
@@ -53,6 +56,8 @@ try {
       if (url.pathname === '/api/v1/settings') settingsReads++;
       if (url.pathname === '/api/v1/settings/certificates/browser/rotation' && route.request().method() === 'GET') return route.fulfill({json: browserTlsFixture});
       if (url.pathname === '/api/v1/settings/service-credentials' && route.request().method() === 'GET') return route.fulfill({json: serviceCredentialFixture});
+      if (url.pathname === '/api/v1/settings/deployment-rotation' && route.request().method() === 'GET') return route.fulfill({json: deploymentFixture});
+      if (url.pathname === '/api/v1/settings/trust-rotation' && route.request().method() === 'GET') return route.fulfill({json: trustFixture});
       if (url.pathname === '/api/v1/settings/key-maintenance' && route.request().method() === 'GET') return route.fulfill({json: maintenanceFixture});
       if (url.pathname === '/api/v1/settings/certificates/instruction/rotation' && route.request().method() === 'GET') return route.fulfill({json: rotationFixture});
       if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
@@ -96,6 +101,19 @@ try {
           row.request_id = body.request_id;
           row.state = body.action === 'replace' ? 'awaiting-verification' : body.action === 'revert' ? 'reverted' : 'completed';
           return route.fulfill({json: serviceCredentialFixture});
+        }
+        if (url.pathname === '/api/v1/settings/trust-rotation') {
+          assert.equal(body.family, 'peer-ca');
+          assert.equal(body.action, 'prepare');
+          const item = trustFixture.items.find(item => item.family === body.family);
+          Object.assign(item, {request_id: body.request_id, state: 'approved', certificate: 'PUBLIC CERTIFICATE', fingerprint_sha256: 'cd'.repeat(32)});
+          return route.fulfill({json: item});
+        }
+        if (url.pathname === '/api/v1/settings/deployment-rotation') {
+          assert.equal(body.action, 'rotate');
+          assert.equal(body.allow_downtime, true);
+          deploymentFixture.jobs.push({id: body.request_id, family: body.family, state: 'running', detail: 'Preparing verified backup', proof: null});
+          return route.fulfill({json: {job_id: body.request_id}});
         }
         if (url.pathname === '/api/v1/settings/key-maintenance') {
           assert.equal(body.action, 'save-policy');
@@ -427,6 +445,30 @@ try {
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-revert').click();
   await page.locator('#service-credential-result').getByText(/Previous IRIS setting restored/).waitFor();
+  assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
+  deploymentFixture = {...deploymentFixture, available: true, can_rotate: true, target: 'single-docker',
+    families: ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'seeder-announce'], note: 'Verified backup required; downtime expected.'};
+  await page.locator('#deployment-rotation-refresh').click();
+  await page.waitForFunction(() => !document.getElementById('deployment-rotation-apply').disabled);
+  await page.locator('#deployment-rotation-family').selectOption('peer-ca');
+  assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#deployment-rotation-prepare').click();
+  await page.waitForFunction(() => !document.getElementById('deployment-rotation-apply').disabled);
+  const trustOperation = settingsWrites.at(-1).body.request_id;
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#deployment-rotation-apply').click();
+  await page.locator('#deployment-rotation-result').getByText(/acceptance is not completion/).waitFor();
+  assert.equal(settingsWrites.at(-1).body.request_id, trustOperation);
+  assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
+  if (process.env.IRIS_UI_SCREENSHOTS) {
+    for (const [name, width, height] of [['desktop', 1440, 1000], ['mobile', 390, 844]]) {
+      await page.setViewportSize({width, height});
+      await page.locator('#deployment-rotation-workflow').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'deployment-rotation-' + name + '.png')});
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    }
+    await page.setViewportSize({width: 1440, height: 1000});
+  }
   await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
   assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
   await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).waitFor();

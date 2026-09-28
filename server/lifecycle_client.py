@@ -14,19 +14,28 @@ class LifecycleUnavailable(Exception):
     pass
 
 
+ROTATION_FAMILIES = ('management-tls', 'device-tls', 'peer-ca',
+                     'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce')
+
+
 def call(request):
     if not isinstance(request, dict):
         raise ValueError('Expected a maintenance request')
     action = request.get('action')
-    fields = {'status': {'action'}, 'backup': {'action', 'request_id', 'allow_downtime'},
+    fields = {'status': {'action'}, 'rotation-status': {'action'},
+              'rotate': {'action', 'request_id', 'family', 'allow_downtime'},
+              'recover-rotation': {'action', 'request_id', 'family', 'allow_downtime'},
+              'backup': {'action', 'request_id', 'allow_downtime'},
               'verify': {'action', 'request_id', 'backup_id'}, 'extract': {'action', 'request_id', 'backup_id'}}
     if not isinstance(action, str) or action not in fields or set(request) != fields[action]:
         raise ValueError('Unsupported maintenance request')
-    if action != 'status' and (not isinstance(request['request_id'], str)
-            or not re.fullmatch(r'[0-9a-f-]{36}', request['request_id'])):
+    if action not in ('status', 'rotation-status') and (not isinstance(request['request_id'], str)
+            or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['request_id'])):
         raise ValueError('Provide a bounded maintenance request ID')
-    if action == 'backup' and request['allow_downtime'] is not True:
+    if action in ('backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
         raise ValueError('Confirm IRIS downtime before capture')
+    if action in ('rotate', 'recover-rotation') and request['family'] not in ROTATION_FAMILIES:
+        raise ValueError('Choose a supported credential family')
     if action in ('verify', 'extract') and (not isinstance(request['backup_id'], str)
             or not re.fullmatch(r'[0-9a-f-]{36}', request['backup_id'])):
         raise ValueError('Choose a captured backup')
@@ -58,3 +67,12 @@ def status():
         return {'available': False, 'target': 'unavailable', 'storage': 'unavailable',
                 'can_verify': False, 'can_extract': False, 'jobs': [],
                 'note': 'Configure the lifecycle worker on the installer host. No backup or recovery verification is attested.'}
+
+
+def rotation_status():
+    try:
+        return call({'action': 'rotation-status'})
+    except LifecycleUnavailable:
+        return {'available': False, 'target': 'unavailable', 'can_rotate': False,
+                'families': [], 'jobs': [],
+                'note': 'Configure the deployment worker and independent recovery access before rotation.'}

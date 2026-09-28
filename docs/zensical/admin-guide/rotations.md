@@ -22,6 +22,10 @@ For the guided online-certificate workflow, see
 [Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate).
 For browser TLS and telemetry credentials, use the
 [guided Console workflows](console-credentials.md).
+Installer-owned single-Docker deployments also have
+[guided deployment trust maintenance](deployment-rotation.md), including offline
+root approval and host-UI recovery-recipient changes. The procedures below
+remain relevant to deployments without that scoped worker.
 
 ## Rotate the management credential
 

@@ -256,6 +256,53 @@ def test_resume_checks_everything_before_build_or_bootstrap(installation, monkey
         installation.resume()
 
 
+@pytest.mark.parametrize('phase', ['backup-pending', 'stopping', 'applying', 'recovery-required', 'restarting-server', 'restarting-console'])
+def test_resume_cannot_bypass_interrupted_credential_maintenance(installation, monkeypatch, phase):
+    called = []
+    monkeypatch.setattr(installation, 'verify_inputs', lambda: called.append('must-not-run'))
+    (installation.base / 'credential-operation.json').write_text(json.dumps({
+        'phase': phase, 'instance_id': installation.journal.document['id']}))
+    with pytest.raises(InstallError, match='host maintenance UI'):
+        installation.resume()
+    assert called == []
+
+
+@pytest.mark.parametrize('kind', ['corrupt', 'symlink', 'wrong-instance'])
+def test_resume_rejects_untrusted_credential_authority(installation, monkeypatch, kind):
+    called = []
+    monkeypatch.setattr(installation, 'verify_inputs', lambda: called.append('must-not-run'))
+    target = installation.base / 'credential-operation.json'
+    if kind == 'corrupt':
+        target.write_text('broken')
+    elif kind == 'symlink':
+        target.symlink_to(installation.base / 'missing-authority')
+    else:
+        target.write_text(json.dumps({'phase': 'rotated', 'instance_id': 'another-deployment'}))
+    with pytest.raises(InstallError, match='maintenance UI'):
+        installation.resume()
+    assert called == []
+
+
+@pytest.mark.parametrize('phase,admitted,allowed', [('rotated', True, True), ('refused', False, True),
+                                                   ('refused', True, False), ('refused', None, False)])
+def test_resume_terminal_maintenance_requires_no_mutation_refusal(installation, monkeypatch, phase, admitted, allowed):
+    called = []
+    def next_step():
+        called.append('allowed')
+        raise RuntimeError('stop after admission')
+    monkeypatch.setattr(installation, 'verify_inputs', next_step)
+    (installation.base / 'credential-operation.json').write_text(json.dumps({
+        'phase': phase, 'mutations_admitted': admitted, 'instance_id': installation.journal.document['id']}))
+    if allowed:
+        with pytest.raises(RuntimeError, match='stop after admission'):
+            installation.resume()
+        assert called == ['allowed']
+    else:
+        with pytest.raises(InstallError, match='maintenance UI'):
+            installation.resume()
+        assert called == []
+
+
 def test_resume_phase_order_and_approval_pause(installation, monkeypatch):
     phases = []
     for method in ("verify_inputs", "verify_resource_ownership", "prepare", "build", "bootstrap"):
@@ -399,6 +446,7 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
     shutil.copytree(REPO / "tools/iris_installer", repo / "tools/iris_installer",
                     ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(REPO / "tools/irisctl", repo / "tools/irisctl")
+    shutil.copy2(REPO / "tools/iris-custody-askpass", repo / "tools/iris-custody-askpass")
     (repo / "docs/dev").mkdir(parents=True)
     (repo / "docs/dev/installer.md").write_text("Candidate installer\n")
     for name, content in (("VERSION", "2026.09.23"), ("LICENSE", "Apache-2.0"), ("NOTICE", "Notices")):
@@ -422,6 +470,11 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 0
     assert "--recovery-recipient" in result.stdout
+    assert (extracted / "usr/lib/iris-installer/iris-custody-askpass").stat().st_mode & 0o777 == 0o755
+    desktop = (extracted / "usr/share/applications/iris-offline-signing.desktop").read_text()
+    assert "Exec=/usr/bin/irisctl custody-ui" in desktop
+    assert "Terminal=false" in desktop
+    assert "python3-tk" in subprocess.check_output(["dpkg-deb", "-f", str(artifact), "Depends"], text=True)
     control = subprocess.check_output(["dpkg-deb", "--ctrl-tarfile", str(artifact)])
     import io, tarfile
     with tarfile.open(fileobj=io.BytesIO(control)) as archive:

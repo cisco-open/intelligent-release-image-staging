@@ -24,6 +24,14 @@ def validate(value):
     as a tracker endpoint are refused.  Errors deliberately never echo the
     supplied value because it may have been misconfigured with a credential.
     """
+    # The deployment worker's isolated tracker/seeder rehearsal has no
+    # published ports and never starts the catalog or management writers.
+    # Permit its one fixed loopback endpoint only in that explicit process
+    # mode. Normal startup rewrites canonical torrents to the public endpoint
+    # before any normal service starts.
+    if (os.environ.get('IRIS_MAINTENANCE_SEEDER_ONLY') == '1'
+            and value == 'https://127.0.0.1:6969/announce'):
+        return value
     if not isinstance(value, str) or not value:
         raise ValueError(_INVALID)
     if any(ord(char) <= 0x20 or ord(char) == 0x7f for char in value):

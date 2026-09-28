@@ -146,6 +146,9 @@
 .iris-react-shell #browser-tls-identity { overflow-wrap: anywhere; white-space: normal; }
 .iris-react-shell #browser-tls-approved { max-width: 100%; min-width: 0; }
 .iris-react-shell .maintenance-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,240px),1fr)); gap: 16px; margin-block: 24px; align-items: end; }
+.iris-react-shell .maintenance-form[hidden] { display: none; }
+.iris-react-shell #deployment-rotation-workflow .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell #deployment-rotation-workflow input[type=file] { max-width: 100%; }
 .iris-react-shell .maintenance-form label { display: grid; gap: 6px; min-width: 0; }
 .iris-react-shell .maintenance-form .maintenance-enable { display: flex; align-items: center; align-self: center; }
 .iris-react-shell .maintenance-form input:not([type=checkbox]), .iris-react-shell .maintenance-form select { width: 100%; min-width: 0; box-sizing: border-box; }

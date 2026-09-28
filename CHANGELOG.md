@@ -17,12 +17,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add planned single-Docker credential maintenance in the Console for management
+  and device TLS, peer CA, offline signing roots, server age identity and seeder
+  credentials. Require independently verified cold backups, stopped writers,
+  bounded recovery and consumer evidence. Rebuild native packages when signing
+  roots change; require device removal and re-onboarding for changed trust.
+  Package desktop tools for offline key generation/approval, independent recovery
+  recipient replacement and host recovery. Preserve access to older backup sets.
+  Split-host and Kubernetes maintenance adapters remain unfinished.
+
 - Add owner-only Console browser TLS request, public CA approval, explicit
   self-signed replacement and recoverable publication with listener reload.
   Add encrypted metrics-token and destination-bound collector credential
   overrides, consumer-use evidence, confirmed retirement and pending rollback.
-  Keep deployment mounts unchanged; other trust-family UI adapters remain
-  unfinished.
+  Keep deployment mounts unchanged for these browser and telemetry overrides.
 
 - Add opt-in UTC key maintenance schedules and Console controls for signer
   preparation, device instruction-key rotation and Docker management-token

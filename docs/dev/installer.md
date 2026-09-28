@@ -76,10 +76,17 @@ is created or logged in automatically. Exit 22 means deployed services await
 production review: root attestations/keylist, renewal and backup arrangements
 are not yet orchestrated. Neither status is a production READY declaration.
 
-Kubernetes deployment, split Docker, a prebuilt/offline kit, guided root creation,
+The packaged `irisctl custody-ui` desktop application generates encrypted offline
+roots and approves public requests without uploading private roots. See
+[offline approval](../zensical/install/offline-approval.md).
+
+Kubernetes deployment, split Docker, a prebuilt/offline kit,
 fully recoverable initial reservation, upgrade/uninstall and automated recovery
 cutover remain unfinished. Single-host cold backup, verification and isolated
 extraction are implemented as described in [Lifecycle development](lifecycle.md).
+The same scoped worker supports planned credential maintenance, with a verified
+backup prerequisite and `irisctl maintenance-ui` for interrupted-operation
+recovery when the Console is stopped.
 The Kubernetes doctor below is diagnostic support, not deployment
 support. Do not use this candidate as evidence that those release gates passed.
 

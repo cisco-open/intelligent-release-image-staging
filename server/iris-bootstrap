@@ -108,6 +108,8 @@ AGE_GUI_KEY="$IRIS_CONFIG/tls/gui-key.pem.age"
 # bootstrap. --rekey still promises to rewrap every ciphertext that exists.
 AGE_INSTR_KEY="$IRIS_CONFIG/instr/signing-key.age"
 AGE_PEER_CA="$IRIS_CONFIG/peer-tls/ca.pem.age"
+AGE_MANAGEMENT_KEY="$IRIS_CONFIG/tls/management-key.pem.age"
+AGE_CONSOLE_FALLBACK="$IRIS_CONFIG/tls/console-fallback.pem.age"
 
 FORCE_DESTROYS="--force --yes discards ALL existing state: every device catalog token, the admin credential and credential profiles, the RPC secret, and the TLS key + certificate that every onboarded device pins at runtime (all devices must be re-onboarded; deployment-neutral IOx/XR packages do not need rebuilding)."
 
@@ -156,11 +158,11 @@ derive_pubkey() {
   printf '%s\n' "$pk"
 }
 make_scratch() {
-  # A configured online signing key may exist in plaintext only on verified
-  # memory-backed storage. Refuse the whole rekey before the first decrypt or
+  # Private keys may exist in plaintext only on verified memory-backed
+  # storage. Refuse the whole rekey before the first decrypt or
   # replacement if neither the deployment runtime mount nor /dev/shm can be
   # verified as tmpfs/ramfs. Ordinary bootstrap retains its existing fallback.
-  if [ "$REKEY" -eq 1 ] && { [ -f "$AGE_INSTR_KEY" ] || [ -f "$AGE_PEER_CA" ]; }; then
+  if [ "$REKEY" -eq 1 ]; then
     SCRATCH_BASE=""
     for candidate in "$IRIS_RUN" /dev/shm; do
       [ -d "$candidate" ] && [ -w "$candidate" ] || continue
@@ -195,10 +197,13 @@ if [ "$REKEY" -eq 1 ]; then
   # A pending replacement also contains age ciphertext inside its journal.
   # Finish/cancel that transaction before changing recipient custody. Never
   # silently leave a candidate encrypted only to an identity being retired.
-  PYTHONPATH="$SCRIPT_DIR" python3 - <<'PY' || die "--rekey: resolve the pending signer or TLS rotation before changing recipients"
+  PYTHONPATH="$SCRIPT_DIR" python3 - <<'PY' || die "--rekey: resolve pending signer or TLS/trust rotations and unknown or unsafe encrypted custody before changing recipients"
 import instruction_keys as keys
 import instruction_rotation
 import tls_rotation
+import trust_rotation
+import os
+from pathlib import Path
 paths = keys.InstructionPaths.from_env()
 record = instruction_rotation._load(paths)
 if record and record['state'] in ('awaiting-approval', 'committing'):
@@ -206,6 +211,29 @@ if record and record['state'] in ('awaiting-approval', 'committing'):
 tls_record = tls_rotation._load()
 if tls_record and tls_record['state'] in ('awaiting-approval', 'approved', 'committing'):
     raise SystemExit(1)
+for family in trust_rotation.FAMILIES:
+    pending = trust_rotation._load(family)
+    if pending and pending['state'] in ('awaiting-approval', 'approved', 'committing'):
+        raise SystemExit(1)
+# Refuse unknown ciphertext and symlink custody before changing any file. A
+# newly added key family must explicitly join this audited inventory.
+config = Path(paths.config_dir)
+known = {'secrets.json.age', 'rpc-secret.age', 'tls/key.pem.age',
+         'tls/gui-key.pem.age', 'instr/signing-key.age', 'peer-tls/ca.pem.age',
+         'tls/management-key.pem.age', 'tls/console-fallback.pem.age'}
+if config.is_symlink():
+    raise SystemExit(1)
+for directory, dirs, files in os.walk(config, followlinks=False):
+    if any((Path(directory) / name).is_symlink() for name in dirs):
+        raise SystemExit(1)
+    for name in files:
+        candidate = Path(directory) / name
+        if name.endswith('.age'):
+            if str(candidate.relative_to(config)) not in known:
+                raise SystemExit(1)
+            keys._read_regular(candidate, 64 * 1024 * 1024,
+                               unavailable='Encrypted custody file is invalid',
+                               too_large='Encrypted custody file exceeds its limit')
 PY
   umask 077
   # Memory-custody preflight happens before this command announces or performs
@@ -214,7 +242,7 @@ PY
   log "re-encrypting existing state to recipient(s): $IRIS_AGE_RECIPIENTS"
   n=0
   for enc in "$AGE_SECRETS" "$AGE_RPC" "$AGE_KEY" "$AGE_GUI_KEY" \
-      "$AGE_INSTR_KEY" "$AGE_PEER_CA"; do
+      "$AGE_INSTR_KEY" "$AGE_PEER_CA" "$AGE_MANAGEMENT_KEY" "$AGE_CONSOLE_FALLBACK"; do
     [ -f "$enc" ] || continue
     plain="$SCRATCH/rekey.$n"; tmp_enc="$enc.rekey.tmp"; n=$((n + 1))
     # A failed round-trip must not leave a half-written ciphertext beside the

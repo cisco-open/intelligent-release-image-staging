@@ -121,6 +121,33 @@ teardown() { rm -rf "$TMP"; }
   [ -f "$TMP/run/tls/cert.pem" ]
 }
 
+@test "entrypoint loads an independently encrypted management TLS key" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=iris \
+    -addext subjectAltName=DNS:iris -keyout "$TMP/management-key" \
+    -out "$TMP/config/tls/management-crt.pem" >/dev/null 2>&1
+  { printf 'AGEFAKE\n'; cat "$TMP/management-key"; } > "$TMP/config/tls/management-key.pem.age"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  cmp "$TMP/management-key" "$TMP/run/tls/management-key.pem"
+  cmp "$TMP/config/tls/management-crt.pem" "$TMP/run/tls/management-crt.pem"
+  [ "$(stat -c %a "$TMP/run/tls/management-key.pem")" = 600 ]
+}
+
+@test "entrypoint refuses incomplete management rotation instead of fallback" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  printf 'partial public pair\n' > "$TMP/config/tls/management-crt.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"lifecycle management TLS identity incomplete"* ]]
+}
+
 @test "entrypoint cleanly skips an absent instruction signing key" {
   printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
   run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \

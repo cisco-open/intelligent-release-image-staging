@@ -33,6 +33,7 @@ nav = [
       { "Download the build tools" = "install/build-tools.md" },
       { "Build the images" = "install/build-images.md" },
       { "Create the signing keys" = "install/signing-roots.md" },
+      { "Approve signing requests offline" = "install/offline-approval.md" },
     ] },
     { "Deploy the server" = [
       { "One Docker host" = "install/one-docker-host.md" },
@@ -61,6 +62,7 @@ nav = [
     { "Routine maintenance" = "admin-guide/maintenance.md" },
     { "Rotate credentials and certificates" = "admin-guide/rotations.md" },
     { "Rotate browser and telemetry credentials in the Console" = "admin-guide/console-credentials.md" },
+    { "Rotate deployment trust and keys" = "admin-guide/deployment-rotation.md" },
     { "Replace or recover signing keys" = "admin-guide/instruction-keys.md" },
     { "Rotate the online signer" = "admin-guide/signer-rotation.md" },
     { "Schedule key maintenance" = "admin-guide/key-maintenance.md" },

@@ -18,6 +18,19 @@ import tracker
 import tracker_announce
 
 
+def test_only_isolated_maintenance_accepts_its_exact_loopback_endpoint(monkeypatch):
+    endpoint = 'https://127.0.0.1:6969/announce'
+    monkeypatch.delenv('IRIS_MAINTENANCE_SEEDER_ONLY', raising=False)
+    with pytest.raises(ValueError):
+        tracker_announce.validate(endpoint)
+    monkeypatch.setenv('IRIS_MAINTENANCE_SEEDER_ONLY', '1')
+    assert tracker_announce.validate(endpoint) == endpoint
+    for changed in ('https://127.0.0.2:6969/announce', 'https://127.0.0.1:6968/announce',
+                    endpoint + '?token=secret', 'http://127.0.0.1:6969/announce'):
+        with pytest.raises(ValueError):
+            tracker_announce.validate(changed)
+
+
 def test_resolve_derives_https_url_with_default_or_configured_port():
     assert tracker_announce.resolve({"IRIS_HOST_IP": "100.64.0.1"}) == \
         "https://100.64.0.1:6969/announce"

@@ -34,6 +34,9 @@ def parser():
     result = argparse.ArgumentParser(
         description="IRIS Ubuntu installer candidate. Single-host source installation; broader qualification in progress.")
     commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("custody-ui", help="open the local offline signing window on the key holder's desktop")
+    maintenance = commands.add_parser("maintenance-ui", help="open host-side recovery even while the Console is stopped")
+    maintenance.add_argument("--state-dir", type=Path, required=True)
     install = commands.add_parser("install", help="install a new single-host deployment on Ubuntu 24.04")
     install.add_argument("--target", choices=("docker", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
@@ -214,6 +217,12 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == "custody-ui":
+                from .custody_gui import main as custody_window
+                return custody_window()
+            if args.command == "maintenance-ui":
+                from .maintenance_gui import main as maintenance_window
+                return maintenance_window(args)
             if args.command == "lifecycle-worker":
                 from .lifecycle_worker import serve
                 return serve(args)

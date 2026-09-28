@@ -1089,6 +1089,61 @@
             <p id="rotation-result" role="status" aria-live="polite"></p>
             <p class="muted">Server-side completion does not prove device acceptance. Confirm Guest Shell, both IOx architectures and IOS-XR devices fetch the new signer and keylist. Private roots stay offline.</p>
           </div>
+          <div class="card" id="deployment-rotation-workflow">
+            <h3>Rotate deployment trust and keys</h3>
+            <p>Plan a maintenance window. The host worker verifies a cold backup before changing credentials. Device trust changes require removing the IRIS agent from affected devices first, then onboarding with the replacement trust.</p>
+            <label>Credential family<select id="deployment-rotation-family">
+              <option value="management-tls">Console-to-server TLS identity</option>
+              <option value="device-tls">Device-pinned server TLS identity</option>
+              <option value="peer-ca">Private swarm issuing CA</option>
+              <option value="instruction-roots">Offline instruction signing roots</option>
+              <option value="age-identity">Server encryption identity</option>
+              <option value="seeder-announce">Seeder announce credential</option>
+            </select></label>
+            <p id="deployment-rotation-worker" role="status">Checking deployment maintenance…</p>
+            <p id="deployment-rotation-state" role="status"></p>
+            <div id="deployment-rotation-trust" hidden>
+              <p><a href="#fleet">Open devices to remove IRIS deployments</a>. A missing or abandoned device is not proof of removal.</p>
+              <div id="deployment-rotation-tls" class="maintenance-form" hidden>
+                <label>Exact device-facing DNS names or IP addresses, comma-separated<input id="deployment-rotation-names" placeholder="iris.example.com, 192.0.2.10"></label>
+                <label>Approval method<select id="deployment-rotation-mode"><option value="ca">Request approval from my CA</option><option value="self-signed">Create a self-signed certificate (90 days)</option></select></label>
+              </div>
+              <div id="deployment-rotation-roots" hidden>
+                <p>Create replacement keys in the <strong>IRIS Offline signing</strong> desktop application on the custodian machine. Import only its public root files. Keep the existing root names.</p>
+                <div class="maintenance-form">
+                  <label>First existing root name<input id="deployment-rotation-root-a-name" value="root-a"></label>
+                  <label>First replacement public root<input id="deployment-rotation-root-a" type="file" accept=".pub"></label>
+                  <label>Second existing root name<input id="deployment-rotation-root-b-name" value="root-b"></label>
+                  <label>Second replacement public root<input id="deployment-rotation-root-b" type="file" accept=".pub"></label>
+                </div>
+                <p>The first root approves the preserved revocation list. Approve the online key with either replacement root.</p>
+              </div>
+              <p><button class="btn" id="deployment-rotation-prepare" disabled>Prepare replacement trust</button>
+                <button class="btn ghost" id="deployment-rotation-download" disabled>Download public approval files</button>
+                <button class="btn ghost" id="deployment-rotation-cancel" disabled>Cancel replacement</button></p>
+              <div id="deployment-rotation-approval" hidden>
+                <label>Approved public certificate<input id="deployment-rotation-certificate" type="file" accept=".pub,.pem,.crt,.cer"></label>
+                <label id="deployment-rotation-keylist-label" hidden>Approved public revocation list<input id="deployment-rotation-keylist" type="file"></label>
+                <p><button class="btn" id="deployment-rotation-approve" disabled>Validate public approval</button></p>
+              </div>
+              <p class="machine" id="deployment-rotation-fingerprint"></p>
+              <div id="deployment-rotation-attestation" hidden>
+                <h4>Confirm each offline root's custody</h4>
+                <p id="deployment-rotation-attested" role="status"></p>
+                <label>Root to attest<select id="deployment-rotation-attestation-root"></select></label>
+                <p><button class="btn ghost" id="deployment-rotation-attestation-request">Download root attestation request</button></p>
+                <label>Approved public revocation list<input id="deployment-rotation-attestation-keylist" type="file"></label>
+                <p><button class="btn" id="deployment-rotation-attestation-apply">Validate root attestation</button></p>
+              </div>
+            </div>
+            <p><button class="btn" id="deployment-rotation-apply" disabled>Back up and rotate during downtime</button>
+              <button class="btn ghost" id="deployment-rotation-refresh">Refresh maintenance evidence</button></p>
+            <p id="deployment-rotation-result" role="status" aria-live="polite"></p>
+            <div class="table-scroll"><table class="tbl">
+              <thead><tr><th>Family / operation</th><th>State</th><th>Evidence</th></tr></thead>
+              <tbody id="deployment-rotation-jobs"></tbody>
+            </table></div>
+          </div>
           <div class="card" id="key-maintenance">
             <h3>Scheduled key maintenance</h3>
             <p>Choose a UTC window and an action for each key family. No schedules are enabled initially. Review reminders leave credentials unchanged; signer preparation still needs offline approval.</p>

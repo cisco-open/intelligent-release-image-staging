@@ -357,6 +357,18 @@ class DockerInstall:
         return OWNER_CLAIM if claimed == b"False" else PRODUCTION_REVIEW
 
     def resume(self, certificate=None):
+        operation = self.base / 'credential-operation.json'
+        if operation.exists() or operation.is_symlink():
+            try:
+                authority = json.loads(regular_bytes(operation))
+            except (OSError, ValueError, InstallError):
+                raise InstallError('Credential maintenance authority is unreadable; preserve it and use the host maintenance UI') from None
+            terminal = isinstance(authority, dict) and (
+                authority.get('phase') == 'rotated' or (
+                    authority.get('phase') == 'refused' and authority.get('mutations_admitted') is False))
+            if (not terminal
+                    or authority.get('instance_id') != self.journal.document['id']):
+                raise InstallError('Recover the approved credential operation in the host maintenance UI before resuming installation')
         self.verify_inputs()
         ubuntu.provision(self.command)
         self.verify_resource_ownership()
