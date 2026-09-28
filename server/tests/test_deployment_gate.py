@@ -131,6 +131,17 @@ def test_make_server_observes_checkpoint_created_after_start(tmp_path):
                          store_dict=_device_store())[0] == 200
 
 
+def _serve_main_fixture(servers, writers):
+    """Exercise startup wiring while stopping the real bounded writer."""
+    try:
+        assert len(servers) == 1 and len(writers) == 1
+        servers[0].serve_forever()
+    finally:
+        for writer in writers:
+            assert writer(2) is True
+    return 0
+
+
 def test_main_wires_required_identity_checkpoint(tmp_path, monkeypatch):
     captured = {}
 
@@ -149,9 +160,8 @@ def test_main_wires_required_identity_checkpoint(tmp_path, monkeypatch):
     # wiring, not TLS, so opt in rather than provision a throwaway cert.
     monkeypatch.setenv("IRIS_CATALOG_ALLOW_PLAINTEXT", "1")
     monkeypatch.setattr(catalog, "make_server", fake_make_server)
-    monkeypatch.setattr(catalog.threading, "Thread",
-                        lambda *a, **k: type("T", (), {"start": lambda self: None})())
-    catalog.main()
+    monkeypatch.setattr(catalog.service_shutdown, "serve", _serve_main_fixture)
+    assert catalog.main() == 0
 
     assert captured["deployment_checkpoint"] == str(
         tmp_path / "identity-compatible-ready")
@@ -173,7 +183,6 @@ def test_main_preserves_upgrade_default_without_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_CATALOG_ALLOW_PLAINTEXT", "1")
     monkeypatch.setattr(catalog, "make_server",
                         lambda *a, **kw: captured.update(kw) or Server())
-    monkeypatch.setattr(catalog.threading, "Thread",
-                        lambda *a, **k: type("T", (), {"start": lambda self: None})())
-    catalog.main()
+    monkeypatch.setattr(catalog.service_shutdown, "serve", _serve_main_fixture)
+    assert catalog.main() == 0
     assert captured["deployment_checkpoint"] is None
