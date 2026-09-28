@@ -36,6 +36,18 @@ FIELDS = {"kubeconfig_path", "kube_context", "kube_namespace", "kube_storage_cla
 LABEL = "iris.cisco.com/installation"
 INTENT = "iris.cisco.com/intent-sha256"
 SERVICES = {"iris": "iris-seed-server", "console": "iris-console"}
+MAINTENANCE_IDLE = '''import os,signal,sys,time
+stopped=False
+def stop(*_):
+ global stopped
+ stopped=True
+signal.signal(signal.SIGTERM,stop)
+signal.signal(signal.SIGINT,stop)
+os.makedirs(sys.argv[1],mode=0o700,exist_ok=True)
+os.chmod(sys.argv[1],0o700)
+while not stopped:
+ time.sleep(.1)
+'''
 
 
 def validate_config(config):
@@ -966,7 +978,7 @@ print(json.dumps(proof))
                 "IRIS_TELEMETRY_CA": "/run/iris/tls/maintenance-crt.pem", "IRIS_INSTALLER_SHUTDOWN_PROOF": ""}.items()]
         else:
             container["command"] = ["python3", "-I", "-B", "-c",
-                "import os,time; os.makedirs('/run/iris/instr',mode=0o700,exist_ok=True); os.chmod('/run/iris/instr',0o700); time.sleep(86400)"]
+                                    MAINTENANCE_IDLE, "/run/iris/instr"]
         desired = self._object("Pod", name, spec=spec)
         desired["metadata"]["labels"]["iris.cisco.com/maintenance"] = "true"
         prior = self.journal.document["completed"].get("kube-helper")

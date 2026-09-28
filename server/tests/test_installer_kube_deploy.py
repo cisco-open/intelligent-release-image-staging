@@ -429,6 +429,34 @@ def test_helper_create_crash_recovers_only_exact_durable_intent(tmp_path):
     name = obj.maintenance_open()
     assert name == current["metadata"]["name"]
     assert obj.journal.document["completed"]["kube-helper"]["uid"] == "created-helper"
+    assert current["spec"]["containers"][0]["command"] == ["python3", "-I", "-B", "-c", kube.MAINTENANCE_IDLE, "/run/iris/instr"]
+    assert current["spec"]["restartPolicy"] == "Never"
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT"])
+def test_actual_idle_helper_command_exits_cleanly_on_shutdown(tmp_path, signal_name):
+    import signal
+    import subprocess
+    import time
+    runtime = tmp_path / "runtime-instr"
+    # The packaged code and arguments are unchanged except the fixed runtime
+    # directory, relocated into this unprivileged test's private workspace.
+    process = subprocess.Popen([sys.executable, "-I", "-B", "-c", kube.MAINTENANCE_IDLE, str(runtime)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 5
+        while not runtime.is_dir():
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(.01)
+        assert runtime.stat().st_mode & 0o777 == 0o700
+        process.send_signal(getattr(signal, signal_name))
+        stdout, stderr = process.communicate(timeout=2)
+        assert process.returncode == 0
+        assert stdout == stderr == b""
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=2)
 
 
 def test_helper_exec_refuses_same_uid_with_substituted_image(tmp_path):

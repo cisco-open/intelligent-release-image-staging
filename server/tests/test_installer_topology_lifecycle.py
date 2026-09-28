@@ -77,7 +77,7 @@ def test_snapshot_detects_stopped_writer_violation(helper):
     def run(argv, **kwargs):
         nonlocal reads
         result = helper.run(argv, **kwargs)
-        if argv[4] == tl._READ:
+        if argv[4] == tl._READ_BATCH:
             reads += 1
             source.write_bytes(b'mutated!')
         return result
@@ -86,6 +86,136 @@ def test_snapshot_detects_stopped_writer_violation(helper):
         tl.snapshot_tree(run, '/data/images', helper.target)
     assert reads == 1
     assert helper.target.stat().st_mode & 0o777 == 0o700
+
+
+def test_snapshot_batches_tiny_files_without_reordering_inventory(helper):
+    (helper.source / 'nested').mkdir()
+    for number in range(260):
+        (helper.source / 'nested' / ('file-%03d' % number)).write_bytes(
+            ('payload-%03d' % number).encode())
+    (helper.source / 'empty').write_bytes(b'')
+    batches = []
+
+    def run(argv, **kwargs):
+        if argv[4] == tl._READ_BATCH:
+            batches.append(json.loads(kwargs['input']))
+        return helper.run(argv, **kwargs)
+
+    records = tl.snapshot_tree(run, '/data/images', helper.target)
+    # Previously 262 independent full resource fences; now two inventories
+    # and three bounded read batches. Every batch still uses the same run().
+    assert len(helper.calls) == 5
+    assert list(map(len, batches)) == [128, 128, 4]
+    assert [item['name'] for batch in batches for item in batch] == [
+        record['name'] for record in records if record['type'] == 'file' and record['size']]
+    for record in records:
+        if record['type'] == 'file':
+            assert (helper.target / record['name']).read_bytes() == (
+                helper.source / record['name']).read_bytes()
+
+
+def test_snapshot_large_file_chunks_remain_bounded(helper):
+    value = b'x' * (tl.CHUNK * 2 + 19)
+    (helper.source / 'large').write_bytes(value)
+    batches = []
+
+    def run(argv, **kwargs):
+        if argv[4] == tl._READ_BATCH:
+            batches.append(json.loads(kwargs['input']))
+        return helper.run(argv, **kwargs)
+
+    tl.snapshot_tree(run, '/data/images', helper.target)
+    assert [[(r['offset'], r['length']) for r in batch] for batch in batches] == [
+        [(0, tl.CHUNK)], [(tl.CHUNK, tl.CHUNK)], [(tl.CHUNK * 2, 19)]]
+    assert (helper.target / 'large').read_bytes() == value
+
+
+@pytest.mark.parametrize('change', ['truncated', 'extra', 'corrupted'])
+def test_snapshot_batch_response_framing_and_digest_fail_closed(helper, change):
+    (helper.source / 'first').write_bytes(b'abc')
+    (helper.source / 'second').write_bytes(b'defg')
+
+    def run(argv, **kwargs):
+        result = helper.run(argv, **kwargs)
+        if argv[4] == tl._READ_BATCH:
+            result = result[:-1] if change == 'truncated' else (
+                result + b'extra' if change == 'extra' else b'X' + result[1:])
+        return result
+
+    with pytest.raises(InstallError, match='batch|digest'):
+        tl.snapshot_tree(run, '/data/images', helper.target)
+    assert not helper.target.with_name('copy-inventory.json').exists()
+
+
+def _read_batch_record(helper):
+    (helper.source / 'first').write_bytes(b'abc')
+    record = tl._inventory(helper.run, '/data/images')[1]
+    return dict(name=record['name'], offset=0, length=record['size'],
+                identity=record['identity'])
+
+
+@pytest.mark.parametrize('change', ['duplicate', 'wrong-identity', 'traversal',
+                                   'too-many', 'response-bound', 'offset',
+                                   'bool-length', 'unknown-field', 'empty'])
+def test_remote_batch_rejects_invalid_records(helper, change):
+    member = _read_batch_record(helper)
+    records = [member]
+    if change == 'duplicate':
+        records.append(dict(member))
+    elif change == 'wrong-identity':
+        member['identity'][1] += 1
+    elif change == 'traversal':
+        member['name'] = '../outside'
+    elif change == 'too-many':
+        records *= 129
+    elif change == 'response-bound':
+        member['length'] = member['identity'][2] = tl.CHUNK
+        records.append(dict(member, name='second'))
+    elif change == 'offset':
+        member['offset'] = 1
+    elif change == 'bool-length':
+        member['length'] = True
+    elif change == 'unknown-field':
+        member['path'] = '/outside'
+    else:
+        records = []
+    with pytest.raises(subprocess.CalledProcessError):
+        tl._run(helper.run, tl._READ_BATCH, '/data/images',
+                input=json.dumps(records).encode())
+
+
+def test_remote_batch_bounds_metadata_before_parsing(helper):
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        tl._run(helper.run, tl._READ_BATCH, '/data/images',
+                input=b' ' * (tl.MAX_BATCH_REQUEST + 1))
+    assert b'batch request bounds' in error.value.stderr
+
+
+def test_remote_batch_rechecks_identity_after_each_read(helper):
+    member = _read_batch_record(helper)
+    script = tl._READ_BATCH.replace("data=f.read(record['length'])",
+        "data=f.read(record['length']); os.utime(path,ns=(s.st_atime_ns,s.st_mtime_ns+1))")
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        tl._run(helper.run, script, '/data/images', input=json.dumps([member]).encode())
+    assert b'writer' in error.value.stderr
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'hardlink', 'fifo'])
+def test_remote_batch_refuses_post_inventory_file_replacement(helper, kind):
+    member = _read_batch_record(helper)
+    path = helper.source / 'first'
+    path.unlink()
+    other = helper.source / 'replacement'
+    other.write_bytes(b'abc')
+    if kind == 'symlink':
+        path.symlink_to(other)
+    elif kind == 'hardlink':
+        os.link(other, path)
+    else:
+        os.mkfifo(path)
+    with pytest.raises(subprocess.CalledProcessError):
+        tl._run(helper.run, tl._READ_BATCH, '/data/images',
+                input=json.dumps([member]).encode())
 
 
 def test_snapshot_rejects_excessive_space_and_existing_destination(helper):

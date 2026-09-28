@@ -22,6 +22,8 @@ from . import backup_archive
 from .state import InstallError, atomic_write
 
 CHUNK = 4 * 1024 * 1024
+MAX_BATCH_MEMBERS = 128
+MAX_BATCH_REQUEST = 1024 * 1024
 MAX_CREDENTIAL = 32 * 1024 * 1024
 MAX_LIVE_CIPHERTEXTS = 128 * 1024 * 1024
 ROOTS = frozenset(('/data/config', '/data/state', '/data/images',
@@ -83,6 +85,32 @@ with os.fdopen(fd,'rb') as f:
  f.seek(offset); data=f.read(length)
  if len(data)!=length or fingerprint(os.fstat(f.fileno()))!=expected: raise RuntimeError('writer')
 sys.stdout.buffer.write(data)
+'''
+
+_READ_BATCH = _COMMON + '''
+raw=sys.stdin.buffer.read(1048577)
+if len(raw)>1048576: raise RuntimeError('batch request bounds')
+records=json.loads(raw)
+if not isinstance(records,list) or not 1<=len(records)<=128: raise RuntimeError('batch count')
+seen=set(); total=0
+for record in records:
+ if not isinstance(record,dict) or set(record)!={'name','offset','length','identity'}: raise RuntimeError('batch record')
+ name=record['name']; offset=record['offset']; length=record['length']; expected=record['identity']
+ if not isinstance(name,str): raise RuntimeError('batch member')
+ relative(name)
+ if type(offset) is not int or offset<0 or type(length) is not int or not 0<length<=4194304: raise RuntimeError('chunk bounds')
+ if not isinstance(expected,list) or len(expected)!=8 or any(type(n) is not int or n<0 for n in expected): raise RuntimeError('file identity')
+ if offset+length>expected[2] or (name,offset) in seen: raise RuntimeError('duplicate or excessive chunk')
+ seen.add((name,offset)); total+=length
+ if total>4194304: raise RuntimeError('batch response bounds')
+for record in records:
+ path=relative(record['name']); expected=record['identity']
+ fd,s=opened(path)
+ with os.fdopen(fd,'rb') as f:
+  if fingerprint(s)!=expected: raise RuntimeError('writer')
+  f.seek(record['offset']); data=f.read(record['length'])
+  if len(data)!=record['length'] or fingerprint(os.fstat(f.fileno()))!=expected: raise RuntimeError('writer')
+ sys.stdout.buffer.write(data)
 '''
 
 _CIPHERS = _COMMON + '''
@@ -177,6 +205,48 @@ def _inventory(run, root):
     return records
 
 
+def _snapshot_chunks(run, root, records):
+    """Batch tiny reads without caching or bypassing a helper admission fence.
+
+    The validated request supplies the framing: exact ordered byte lengths,
+    not helper-provided paths or lengths. A batch remains at most one normal
+    chunk in bytes and 128 members, with bounded request metadata. Every call
+    uses the original transport and therefore its full stopped-writer checks.
+    """
+    batch, size, metadata_size = [], 0, 2
+
+    def read(members):
+        request = json.dumps(members, separators=(',', ':')).encode()
+        if len(request) > MAX_BATCH_REQUEST:
+            raise InstallError('PVC batch metadata exceeds its bound')
+        data = _run(run, _READ_BATCH, root, input=request)
+        if len(data) != sum(item['length'] for item in members):
+            raise InstallError('Truncated or excessive PVC snapshot batch')
+        position = 0
+        for item in members:
+            end = position + item['length']
+            yield data[position:end]
+            position = end
+
+    for record in records:
+        if record['type'] != 'file':
+            continue
+        for offset in range(0, record['size'], CHUNK):
+            length = min(CHUNK, record['size'] - offset)
+            member = dict(name=record['name'], offset=offset, length=length,
+                          identity=record['identity'])
+            encoded_size = len(json.dumps(member, separators=(',', ':')).encode())
+            if batch and (len(batch) >= MAX_BATCH_MEMBERS or size + length > CHUNK
+                          or metadata_size + 1 + encoded_size > MAX_BATCH_REQUEST):
+                yield from read(batch)
+                batch, size, metadata_size = [], 0, 2
+            metadata_size += encoded_size + (1 if batch else 0)
+            batch.append(member)
+            size += length
+    if batch:
+        yield from read(batch)
+
+
 def snapshot_tree(run, root, destination, *, max_bytes=1024 ** 4):
     """Copy a stopped PVC component with bounded chunks and end-to-end hashes.
 
@@ -198,6 +268,7 @@ def snapshot_tree(run, root, destination, *, max_bytes=1024 ** 4):
     if total > max_bytes or shutil.disk_usage(destination.parent).free < int(total * 1.2) + headroom:
         raise InstallError('Insufficient bounded PVC snapshot space')
     destination.mkdir(mode=0o700)
+    chunks = _snapshot_chunks(run, root, records)
     for record in records[1:]:
         path = destination / record['name']
         if record['type'] == 'directory':
@@ -208,8 +279,7 @@ def snapshot_tree(run, root, destination, *, max_bytes=1024 ** 4):
             os.fchmod(output.fileno(), 0o600)
             for offset in range(0, record['size'], CHUNK):
                 length = min(CHUNK, record['size'] - offset)
-                chunk = _run(run, _READ, root, record['name'], offset, length,
-                             json.dumps(record['identity']))
+                chunk = next(chunks)
                 if len(chunk) != length:
                     raise InstallError('Truncated PVC snapshot chunk')
                 value.update(chunk)
@@ -218,6 +288,8 @@ def snapshot_tree(run, root, destination, *, max_bytes=1024 ** 4):
             os.fsync(output.fileno())
         if value.hexdigest() != record['sha256']:
             raise InstallError('PVC snapshot digest mismatch')
+    if next(chunks, None) is not None:
+        raise InstallError('Unexpected PVC snapshot chunk')
     if _inventory(run, root) != records:
         raise InstallError('PVC changed during stopped-writer capture')
     # The containing directory stays caller-owned 0700. Preserve the source's

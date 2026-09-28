@@ -86,6 +86,9 @@ PVC identity, intended resource specifications and immutable image references.
 The server remains one replica, with one to eight independent Console consumers.
 `topology_lifecycle.py` bounds PVC reads and candidate writes by paths, digests
 and object identities; mutable private host mirrors live in protected tmpfs.
+Snapshot reads batch at most 128 members and 4 MiB per transport, with the full
+stopped-writer check on every batch, per-file identity and digest verification,
+and a final unchanged inventory. No ownership checks are cached across batches.
 The shutdown marker binds pod UID and a fresh process nonce to child exit status.
 Forced pod deletion cannot substitute for stopped-writer proof. Age-identity
 proof checks the restarted PVC rather than trusting a pre-restart local mirror.
