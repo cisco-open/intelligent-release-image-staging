@@ -241,6 +241,104 @@ def test_replica_fingerprint_disagreement_fails_closed(tmp_path):
         obj.lifecycle_consumer_proof()
 
 
+@pytest.mark.parametrize("matches", [True, False])
+def test_management_replacement_token_is_proved_in_same_https_probe(tmp_path, matches):
+    obj = install(tmp_path)
+    pods = [{"name": "console-1", "uid": "uid-1", "container_id": "containerd://first"}]
+    obj._pods = lambda service: pods
+    obj.get = lambda *args: {"metadata": {"uid": "uid-1"}}
+    def execute(*args, **kwargs):
+        assert args[-1] == "b" * 64
+        code = args[-2]
+        assert "token_sha256=hashlib.sha256(t).hexdigest()" in code
+        assert "'Authorization':'Bearer '+t.decode()" in code
+        return json.dumps({"management_https": "verified", "certificate_sha256": "a" * 64,
+                           "current_sha256": "b" * 64 if matches else "c" * 64}).encode()
+    obj.kube = execute
+    if matches:
+        assert obj.lifecycle_consumer_proof(expected_token="b" * 64)["console_consumers"][0]["current_sha256"] == "b" * 64
+    else:
+        with pytest.raises(InstallError, match="approved management credential"):
+            obj.lifecycle_consumer_proof(expected_token="b" * 64)
+
+
+def test_same_pod_container_restart_invalidates_consumer_proof(tmp_path):
+    obj = install(tmp_path)
+    before = [{"name": "console-1", "uid": "uid-1", "container_id": "containerd://first"}]
+    after = [{"name": "console-1", "uid": "uid-1", "container_id": "containerd://second"}]
+    snapshots = iter((before, after))
+    obj._pods = lambda service: next(snapshots)
+    obj.get = lambda *args: {"metadata": {"uid": "uid-1"}}
+    obj.kube = lambda *args, **kwargs: json.dumps({"management_https": "verified", "certificate_sha256": "a" * 64}).encode()
+    with pytest.raises(InstallError, match="replicas changed"):
+        obj.lifecycle_consumer_proof()
+
+
+@pytest.mark.parametrize("same_operation", [True, False])
+def test_scheduled_management_sync_recovers_only_its_exact_pending_manifest(tmp_path, same_operation):
+    obj = install(tmp_path)
+    identifier = "33eaaec9-a7e8-42bc-a425-c746518ced40"
+    approved = {"request_id": identifier, "current_sha256": "b" * 64}
+    old = obj._secret("iris-tier-auth", {"current": b"old", "previous": b""})
+    manifest(obj, old)
+    new = obj._secret("iris-tier-auth", {"current": b"new", "previous": b"old"})
+    new["metadata"].pop("annotations", None)
+    new["metadata"]["annotations"] = {kube.INTENT: hashlib.sha256(kube._canonical(new)).hexdigest()}
+    actual = copy.deepcopy(new)
+    actual["metadata"].update(uid="owned-uid", resourceVersion="18")
+    obj.get = lambda *args: actual
+    atomic_write(obj.manifest_file, kube._canonical([new]))
+    atomic_write(tmp_path / "kube-update.json", kube._canonical({"before": old, "after": new, "uid": "owned-uid"}))
+    authority = dict(approved, instance_id=obj.journal.document["id"], mutation_sha256=hashlib.sha256(kube._canonical(new)).hexdigest())
+    if not same_operation:
+        authority["request_id"] = "555a8520-6d70-423c-b681-cf410af27e2c"
+    atomic_write(tmp_path / "management-sync.json", kube._canonical(authority))
+    obj._pods = lambda *args, **kwargs: [{"name": "server", "uid": "server-uid", "container_id": "server-incarnation"}]
+    obj.kube = lambda *args, **kwargs: json.dumps(approved if args[0] == "exec" else {"items": []}).encode()
+    obj.python = lambda *args: json.dumps(approved).encode()
+    def recovered():
+        assert not (tmp_path / "kube-update.json").exists()
+        assert obj.manifests() == [new]
+        raise RuntimeError("recovered checkpoint")
+    obj.pin_runtime = recovered
+    if same_operation:
+        with pytest.raises(RuntimeError, match="recovered checkpoint"):
+            obj.sync_management_operation(identifier)
+    else:
+        with pytest.raises(InstallError, match="not approved by this management operation"):
+            obj.sync_management_operation(identifier)
+        assert (tmp_path / "kube-update.json").exists()
+
+
+def test_management_sync_journals_scoped_intent_before_each_publication(tmp_path):
+    obj = install(tmp_path)
+    identifier = "33eaaec9-a7e8-42bc-a425-c746518ced40"
+    approved = {"request_id": identifier, "current_sha256": "b" * 64}
+    data = {"current": "bmV3", "previous": "b2xk"}
+    replies = iter((approved, data, approved))
+    obj.python = lambda *args: json.dumps(next(replies)).encode()
+    obj.pin_runtime = lambda: None
+    objects = [obj._secret("iris-tier-auth", {"current": b"old", "previous": b""}),
+               obj._object("Deployment", "iris-console", spec={"template": {"metadata": {}}})]
+    obj.manifests = lambda: copy.deepcopy(objects)
+    published = []
+    def replace(desired):
+        record = json.loads((tmp_path / "management-sync.json").read_bytes())
+        assert record["request_id"] == identifier and record["current_sha256"] == approved["current_sha256"]
+        normalized = copy.deepcopy(desired)
+        normalized["metadata"].pop("annotations", None)
+        normalized["metadata"]["annotations"] = {kube.INTENT: hashlib.sha256(kube._canonical(normalized)).hexdigest()}
+        assert record["mutation_sha256"] == hashlib.sha256(kube._canonical(normalized)).hexdigest()
+        published.append(desired["kind"])
+    obj._replace_owned = replace
+    def consumers(*, expected_token):
+        assert expected_token == approved["current_sha256"]
+        return {"console_consumers": [{"pod_uid": "one"}, {"pod_uid": "two"}]}
+    obj.lifecycle_consumer_proof = consumers
+    assert obj.sync_management_operation(identifier) == dict(approved, consumers_verified=2)
+    assert published == ["Secret", "Deployment"]
+
+
 def test_maintenance_close_uses_uid_delete_precondition(tmp_path):
     obj = install(tmp_path)
     obj.journal.document["completed"]["kube-helper"] = {"name": "helper", "uid": "owned"}

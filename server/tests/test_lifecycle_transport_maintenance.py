@@ -160,6 +160,16 @@ def test_interrupted_rollout_recovers_same_certificates_and_overlap(deployment):
     assert all(custody[role + ".key"].read_bytes() == before[role + ".key"] for role in renewal.ROLES)
 
 
+def test_new_transport_operation_cannot_adopt_pending_management_update(deployment):
+    base, custody, server, install, before, url = deployment
+    identifier = str(uuid.uuid4())
+    atomic_write(base / "kube-update.json", b'{"pending":"another-operation"}')
+    with pytest.raises(InstallError, match="original operation before connection renewal"):
+        renewal.renew(base, identifier, server)
+    assert not (base / "lifecycle-transport-operations" / identifier).exists()
+    assert all(custody[name].read_bytes() == value for name, value in before.items())
+
+
 def test_different_operation_cannot_take_over_pending_renewal(deployment):
     base, custody, server, install, before, url = deployment
     identifier = str(uuid.uuid4())
@@ -168,6 +178,24 @@ def test_different_operation_cannot_take_over_pending_renewal(deployment):
         renewal.renew(base, identifier, server)
     with pytest.raises(InstallError, match="existing connection"):
         renewal.renew(base, str(uuid.uuid4()), server)
+
+
+@pytest.mark.parametrize("same_uid", [False, True])
+def test_transport_proof_is_bound_to_one_server_incarnation(deployment, same_uid):
+    base, custody, server, install, before, url = deployment
+    identifier = str(uuid.uuid4())
+    current = [{"name": "server-pod", "uid": "server-uid", "container_id": "first"}]
+    install._pods = lambda service: copy.deepcopy(current)
+    execute = install.execute
+    def replaced(*args, **kwargs):
+        result = execute(*args, **kwargs)
+        current[0] = {"name": "server-pod", "uid": "server-uid" if same_uid else "replacement-uid", "container_id": "second"}
+        return result
+    install.execute = replaced
+    with pytest.raises(InstallError, match="Restarted server did not prove"):
+        renewal.renew(base, identifier, server)
+    record = json.loads((base / "lifecycle-transport-operation.json").read_bytes())
+    assert record["phase"] == "server-restarted" and record.get("proof") is None
 
 
 def test_completed_record_recovers_pointer_publication_and_retires_overlap(deployment):

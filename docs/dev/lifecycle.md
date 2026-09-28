@@ -98,6 +98,9 @@ command is accepted. Scheduled management
 token changes publish overlap to remote consumers through a bounded public job
 ID, then prove current-token use. A failed sync retains overlap and requires
 reconciliation; explicit retirement performs a fresh consumer check.
+Consumer proof binds the credential used for the HTTPS request to the inspected
+container or pod execution. A replacement or restart during verification refuses
+completion; evidence from the previous execution cannot authorize retirement.
 
 `lifecycle_transport_maintenance.py` renews the Kubernetes worker CA and leaf
 certificates while preserving all three private keys. Host-root Unix requests

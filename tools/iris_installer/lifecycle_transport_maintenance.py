@@ -274,6 +274,9 @@ def renew(base, request_id, network_server, *, recovery=False):
                 raise InstallError("Use same-operation recovery for interrupted connection renewal")
             install._recover_object_update()
         else:
+            pending_update = base / "kube-update.json"
+            if pending_update.exists() or pending_update.is_symlink():
+                raise InstallError("Recover the existing Kubernetes update under its original operation before connection renewal")
             if recovery:
                 jobs_path = base / "lifecycle-jobs.json"
                 if not jobs_path.exists() and not jobs_path.is_symlink():
@@ -339,9 +342,10 @@ def renew(base, request_id, network_server, *, recovery=False):
             install._replace_owned(deployment)
         install.kube("rollout", "status", "deployment/iris-seed-server", "--timeout=300s", timeout=330)
         _save(base, directory, record, "server-restarted")
+        server_pods = install._pods("iris")
         proof = json.loads(install.execute("python3", "-I", "-B", "-c", _PROBE, identifier, capture=True, timeout=30))
         expected = {"request_id": identifier, "client_sha256": record["after"]["client"], "worker_sha256": record["after"]["worker"]}
-        if proof != expected:
+        if proof != expected or install._pods("iris") != server_pods:
             raise InstallError("Restarted server did not prove the renewed connection certificates")
         _save(base, directory, record, "new-client-verified")
         for role in ROLES:
@@ -351,11 +355,13 @@ def renew(base, request_id, network_server, *, recovery=False):
             atomic_write(custody[role + ".crt"], regular_bytes(candidate[role + ".crt"], 16384), 0o644)
         _save(base, directory, record, "certificates-published")
         network_server.configure_transport(custody)
-        if json.loads(install.execute("python3", "-I", "-B", "-c", _PROBE, identifier, capture=True, timeout=30)) != expected:
+        if (install._pods("iris") != server_pods
+                or json.loads(install.execute("python3", "-I", "-B", "-c", _PROBE, identifier, capture=True, timeout=30)) != expected
+                or install._pods("iris") != server_pods):
             raise InstallError("Renewed connection proof failed after retiring the old client certificate")
         if _key_proof(custody, install.command) != record["key_spki_sha256"]:
             raise InstallError("Connection renewal unexpectedly changed private-key identities")
         record["proof"] = dict(expected, ca_sha256=record["after"]["ca"], same_private_keys=True, old_client_retired=True,
-                               server_pod_uid=install._pods("iris")[0]["uid"])
+                               server_pod_uid=server_pods[0]["uid"])
         _save(base, directory, record, TERMINAL)
         return record["proof"]

@@ -23,6 +23,7 @@ import ssl
 import stat
 import tarfile
 import time
+from types import SimpleNamespace
 import uuid
 
 from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run
@@ -540,13 +541,14 @@ class KubeInstall(DockerInstall):
         self.kube("rollout", "status", "deployment/iris-seed-server", "--timeout=300s", timeout=330)
         self.journal.checkpoint("server", True)
 
-    def _pods(self, service):
+    def _pods(self, service, *, declared_objects=None):
         deployment = self.get("deployment", SERVICES[service])
         key = "Deployment/" + SERVICES[service]
         record = self.journal.document["completed"].get("kube-resources", {}).get(key)
         if not deployment or not record or deployment["metadata"].get("uid") != record["uid"]:
             raise InstallError("Workload ownership changed")
-        declared = next(o for o in self.manifests() if o["kind"] == "Deployment" and o["metadata"]["name"] == SERVICES[service])
+        declared = next(o for o in (self.manifests() if declared_objects is None else declared_objects)
+                        if o["kind"] == "Deployment" and o["metadata"]["name"] == SERVICES[service])
         if not _contains(deployment, declared):
             raise InstallError("Workload specification changed")
         replicasets = json.loads(self.kube("get", "replicasets", "-l", LABEL + "=" + self.journal.document["id"], "-o", "json", capture=True))["items"]
@@ -566,7 +568,14 @@ class KubeInstall(DockerInstall):
                 raise InstallError("Pod execution or storage differs from the owned workload")
             if not any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod.get("status", {}).get("conditions", [])):
                 raise InstallError("Expected workload pod is not ready")
-            valid.append({"name": pod["metadata"]["name"], "uid": pod["metadata"]["uid"]})
+            status = next((row for row in pod.get("status", {}).get("containerStatuses", []) if row.get("name") == ("iris" if service == "iris" else "console")), {})
+            started = status.get("state", {}).get("running", {}).get("startedAt")
+            if (not isinstance(status.get("containerID"), str) or not status["containerID"]
+                    or not isinstance(started, str) or not started
+                    or type(status.get("restartCount")) is not int or status["restartCount"] < 0):
+                raise InstallError("Running workload container incarnation is unavailable")
+            valid.append({"name": pod["metadata"]["name"], "uid": pod["metadata"]["uid"],
+                          "container_id": status["containerID"], "started_at": started, "restart_count": status["restartCount"]})
         expected = 1 if service == "iris" else self.config["kube_console_replicas"]
         if len(valid) != expected:
             raise InstallError("Expected owned running workload is unavailable")
@@ -735,7 +744,7 @@ except Exception:
         self.packages()
         return self.finish()
 
-    def lifecycle_consumer_proof(self):
+    def lifecycle_consumer_proof(self, expected_token=None):
         code = '''import os,sys,ssl,http.client,hashlib,json
 sys.path.insert(0,'/opt/iris/server')
 import tier_auth
@@ -743,13 +752,17 @@ from urllib.parse import urlsplit
 u=urlsplit(os.environ['IRIS_MANAGEMENT_API_URL'])
 c=http.client.HTTPSConnection(u.hostname,u.port or 443,timeout=15,context=ssl.create_default_context(cafile=os.environ['IRIS_MANAGEMENT_API_CA']))
 t,_=tier_auth.load_pair(os.environ['IRIS_MANAGEMENT_API_TOKEN_FILE'])
+token_sha256=hashlib.sha256(t).hexdigest()
+if len(sys.argv)>1 and token_sha256!=sys.argv[1]: raise RuntimeError('replacement credential not mounted')
 c.connect()
 fingerprint=hashlib.sha256(c.sock.getpeercert(binary_form=True)).hexdigest()
 c.request('GET','/internal/v1/console-certificate',headers={'Authorization':'Bearer '+t.decode(),'X-IRIS-Default-Certificate':'available'})
 r=c.getresponse()
 if r.status not in (200,204): raise RuntimeError('authentication')
 c.close()
-print(json.dumps({'management_https':'verified','certificate_sha256':fingerprint}))
+proof={'management_https':'verified','certificate_sha256':fingerprint}
+if len(sys.argv)>1: proof['current_sha256']=token_sha256
+print(json.dumps(proof))
 '''
         pods = self._pods("console")
         proofs = []
@@ -757,9 +770,12 @@ print(json.dumps({'management_https':'verified','certificate_sha256':fingerprint
             current = self.get("pod", pod["name"])
             if not current or current["metadata"].get("uid") != pod["uid"]:
                 raise InstallError("Console pod changed during consumer verification")
-            result = json.loads(self.kube("exec", "-i", pod["name"], "-c", "console", "--", "python3", "-I", "-B", "-c", code, capture=True, timeout=30))
+            result = json.loads(self.kube("exec", "-i", pod["name"], "-c", "console", "--", "python3", "-I", "-B", "-c", code,
+                                          *([expected_token] if expected_token is not None else []), capture=True, timeout=30))
             if (result.get("management_https") != "verified" or not re.fullmatch(r"[0-9a-f]{64}", result.get("certificate_sha256", ""))):
                 raise InstallError("Authenticated Kubernetes Console consumer proof failed")
+            if expected_token is not None and result.get("current_sha256") != expected_token:
+                raise InstallError("A Console replica has not proved the approved management credential")
             proofs.append(dict(result, pod_uid=pod["uid"]))
         if self._pods("console") != pods or len({p["certificate_sha256"] for p in proofs}) != 1:
             raise InstallError("Console replicas changed or observed different management identities")
@@ -1207,25 +1223,58 @@ print(json.dumps({'management_https':'verified','certificate_sha256':fingerprint
 
     def sync_management_operation(self, operation_id):
         from .management_sync import validate_operation
+        authority_path = self.base / "management-sync.json"
+        pending_path = self.base / "kube-update.json"
+        if pending_path.exists() or pending_path.is_symlink():
+            authority = json.loads(regular_bytes(authority_path))
+            pending = json.loads(regular_bytes(pending_path, 8 * 1024 * 1024))
+            after = pending.get("after", {})
+            if (authority.get("instance_id") != self.journal.document["id"]
+                    or authority.get("request_id") != operation_id
+                    or (after.get("kind"), after.get("metadata", {}).get("name")) not in (
+                        ("Secret", "iris-tier-auth"), ("Deployment", SERVICES["console"]))
+                    or authority.get("mutation_sha256") != hashlib.sha256(_canonical(after)).hexdigest()):
+                raise InstallError("Pending Kubernetes update is not approved by this management operation")
+            # A crash may leave the manifest ahead of its journal checksum.
+            # Validate the exact pending before/after custody read-only, then
+            # interrogate the unchanged server before repairing that update.
+            self.verify_resource_ownership()
+            objects = json.loads(regular_bytes(self.manifest_file, 8 * 1024 * 1024))
+            server_pods = self._pods("iris", declared_objects=objects)
+            def read_server(code, *args):
+                if self._pods("iris", declared_objects=objects) != server_pods:
+                    raise InstallError("Management authority server changed during recovery")
+                result = self.kube("exec", "-i", server_pods[0]["name"], "-c", "iris", "--", "python3", "-I", "-B", "-c",
+                    "import sys;sys.path.insert(0,'/opt/iris/server');" + code, *args, capture=True, timeout=30)
+                if self._pods("iris", declared_objects=objects) != server_pods:
+                    raise InstallError("Management authority server changed during recovery")
+                return result
+            current = validate_operation(SimpleNamespace(python=read_server), operation_id)
+            if current != {key: authority[key] for key in ("request_id", "current_sha256")}:
+                raise InstallError("Scheduled management authority changed before recovery")
+            self._recover_object_update()
         approved = validate_operation(self, operation_id)
         self.pin_runtime()
+        authority = dict(approved, instance_id=self.journal.document["id"])
+        def replace_for_operation(desired):
+            planned = copy.deepcopy(desired)
+            planned["metadata"].pop("annotations", None)
+            planned["metadata"]["annotations"] = {INTENT: hashlib.sha256(_canonical(planned)).hexdigest()}
+            authority["mutation_sha256"] = hashlib.sha256(_canonical(planned)).hexdigest()
+            atomic_write(authority_path, _canonical(authority))
+            self._replace_owned(desired)
         data = json.loads(self.python("import os,json,base64; from pathlib import Path; print(json.dumps({name:base64.b64encode(Path(os.environ[variable]).read_bytes() if name=='current' or Path(os.environ[variable]).exists() else b'').decode() for name,variable in [('current','IRIS_MANAGEMENT_API_TOKEN_FILE'),('previous','IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE')]}))"))
         pair = copy.deepcopy(next(o for o in self.manifests() if o["kind"] == "Secret" and o["metadata"]["name"] == "iris-tier-auth"))
         if pair["data"] != data:
             pair["data"] = data
-            self._replace_owned(pair)
+            replace_for_operation(pair)
         console = copy.deepcopy(next(o for o in self.manifests() if o["kind"] == "Deployment" and o["metadata"]["name"] == SERVICES["console"]))
         annotations = console["spec"]["template"]["metadata"].setdefault("annotations", {})
         if annotations.get("iris.cisco.com/management-operation") != operation_id:
             annotations["iris.cisco.com/management-operation"] = operation_id
-            self._replace_owned(console)
+            replace_for_operation(console)
         self.kube("rollout", "status", "deployment/iris-console", "--timeout=300s", timeout=330)
-        for pod in self._pods("console"):
-            checksum = self.kube("exec", "-i", pod["name"], "-c", "console", "--", "python3", "-I", "-B", "-c",
-                "import sys,os,hashlib;sys.path.insert(0,'/opt/iris/server');import tier_auth;t,_=tier_auth.load_pair(os.environ['IRIS_MANAGEMENT_API_TOKEN_FILE']);print(hashlib.sha256(t).hexdigest())", capture=True).decode().strip()
-            if checksum != approved["current_sha256"]:
-                raise InstallError("A Console replica has not consumed the approved management credential")
-        proof = self.lifecycle_consumer_proof()
+        proof = self.lifecycle_consumer_proof(expected_token=approved["current_sha256"])
         if validate_operation(self, operation_id) != approved:
             raise InstallError("Management credential authority changed during synchronization")
         return dict(approved, consumers_verified=len(proof["console_consumers"]))

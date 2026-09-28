@@ -141,6 +141,43 @@ def owned():
     labels=obj.get('Config',{}).get('Labels',{}) if kind=='container' else obj.get('Labels',{})
     if not labels or labels.get('com.cisco.iris.installer')!=identity:
      raise RuntimeError('Unfamiliar Console Docker resource')
+def console_record():
+ owned(); record,=json.loads(run(['docker','container','inspect',project+'-console']))
+ if record.get('Config',{}).get('Labels',{}).get('com.cisco.iris.installer')!=identity or record['Image']!=r['image']:
+  raise RuntimeError('Console image or ownership changed')
+ for mount in record['Mounts']:
+  if mount['Type'] not in ('bind','tmpfs') or (mount['Type']=='bind' and (mount['Source']!=str(root) or mount.get('RW',True))):
+   raise RuntimeError('Unexpected Console mount')
+ for identifier in run(['docker','container','ls','-aq']).decode().split():
+  other,=json.loads(run(['docker','container','inspect',identifier]))
+  if other['Id']==record['Id']: continue
+  for mount in other['Mounts']:
+   source=pathlib.Path(mount.get('Source','/nonexistent'))
+   if mount.get('RW',True) and (source==root or root in source.parents or source in root.parents):
+    raise RuntimeError('Another container can modify Console custody')
+ return record
+def console_spec():
+ spec=root/'compose.json'
+ if spec.is_symlink(): raise RuntimeError('Console configuration changed')
+ data=spec.read_bytes()
+ if hashlib.sha256(data).hexdigest()!=r['digest']:
+  raise RuntimeError('Console configuration changed')
+ return json.loads(data)['services']['console']
+def proof_runtime(record,spec):
+ state=record['State']
+ if (record['Id']!=r['container_id'] or state.get('StartedAt')!=r['started_at']
+     or not state.get('Running') or state.get('Restarting') or state.get('Dead')):
+  raise RuntimeError('Console runtime changed during management proof')
+ binds=[m for m in record['Mounts'] if m['Type']=='bind']
+ if len(binds)!=1 or binds[0].get('Destination')!='/run/iris-console-custody':
+  raise RuntimeError('Console credential mount changed')
+ environment={}
+ for value in record['Config'].get('Env',[]):
+  name,separator,value=value.partition('=')
+  if not separator or name in environment: raise RuntimeError('Invalid Console runtime environment')
+  environment[name]=value
+ for name,value in spec['environment'].items():
+  if environment.get(name)!=str(value): raise RuntimeError('Console runtime environment changed')
 def write(name,data,mode):
  path=root/name
  if path.is_symlink(): raise RuntimeError('Unsafe Console file')
@@ -173,20 +210,27 @@ elif action=='provision':
 elif action=='inspect':
  owned(); sys.stdout.buffer.write(run(['docker','image','inspect',r['image'],'--format','{{.Id}}']))
 elif action=='container':
- owned(); record,=json.loads(run(['docker','container','inspect',project+'-console']))
- if record.get('Config',{}).get('Labels',{}).get('com.cisco.iris.installer')!=identity or record['Image']!=r['image']:
-  raise RuntimeError('Console image or ownership changed')
- for mount in record['Mounts']:
-  if mount['Type'] not in ('bind','tmpfs') or (mount['Type']=='bind' and (mount['Source']!=str(root) or mount.get('RW',True))):
-   raise RuntimeError('Unexpected Console mount')
- for identifier in run(['docker','container','ls','-aq']).decode().split():
-  other,=json.loads(run(['docker','container','inspect',identifier]))
-  if other['Id']==record['Id']: continue
-  for mount in other['Mounts']:
-   source=pathlib.Path(mount.get('Source','/nonexistent'))
-   if mount.get('RW',True) and (source==root or root in source.parents or source in root.parents):
-    raise RuntimeError('Another container can modify Console custody')
+ record=console_record()
  sys.stdout.write(json.dumps({'id':record['Id'],'service':'console','remote':True,'running':record['State']['Running'],'state':record['State']}))
+elif action=='proof':
+ spec=console_spec(); before=console_record(); proof_runtime(before,spec)
+ code="""import os,sys,ssl,http.client,hashlib,json
+sys.path.insert(0,'/opt/iris/server')
+import tier_auth
+from urllib.parse import urlsplit
+u=urlsplit(os.environ['IRIS_MANAGEMENT_API_URL'])
+c=http.client.HTTPSConnection(u.hostname,u.port or 443,timeout=20,context=ssl.create_default_context(cafile=os.environ['IRIS_MANAGEMENT_API_CA']))
+t,_=tier_auth.load_pair(os.environ['IRIS_MANAGEMENT_API_TOKEN_FILE'])
+c.connect(); fingerprint=hashlib.sha256(c.sock.getpeercert(binary_form=True)).hexdigest()
+c.request('GET','/internal/v1/console-certificate',headers={'Authorization':'Bearer '+t.decode(),'X-IRIS-Default-Certificate':'available'})
+r=c.getresponse()
+if r.status not in (200,204): raise RuntimeError('authentication')
+c.close(); print(json.dumps({'management_https':'verified','certificate_sha256':fingerprint,'current_token_sha256':hashlib.sha256(t).hexdigest()}))
+"""
+ proof=json.loads(run(['docker','exec','-i',before['Id'],'python3','-I','-B','-c',code]))
+ after=console_record(); proof_runtime(after,console_spec())
+ proof.update(container_id=before['Id'],started_at=before['State']['StartedAt'])
+ sys.stdout.write(json.dumps(proof))
 elif action=='write':
  owned()
  allowed={'compose.json','current.json','previous.json','ca.pem','tls.crt','tls.key'}
@@ -487,37 +531,54 @@ class SplitDockerInstall(DockerInstall):
             raise InstallError('Invalid Console custody backup')
         self.remote('write', files=files)
 
-    def verify_console_management(self, expected_token=None):
-        code = '''import os,sys,ssl,http.client,hashlib,json
-sys.path.insert(0,'/opt/iris/server')
-import tier_auth
-from urllib.parse import urlsplit
-u=urlsplit(os.environ['IRIS_MANAGEMENT_API_URL'])
-c=http.client.HTTPSConnection(u.hostname,u.port or 443,timeout=20,context=ssl.create_default_context(cafile=os.environ['IRIS_MANAGEMENT_API_CA']))
-t,_=tier_auth.load_pair(os.environ['IRIS_MANAGEMENT_API_TOKEN_FILE'])
-c.connect(); fingerprint=hashlib.sha256(c.sock.getpeercert(binary_form=True)).hexdigest()
-c.request('GET','/internal/v1/console-certificate',headers={'Authorization':'Bearer '+t.decode(),'X-IRIS-Default-Certificate':'available'})
-r=c.getresponse()
-if r.status not in (200,204): raise RuntimeError('authentication')
-c.close(); print(json.dumps({'management_https':'verified','certificate_sha256':fingerprint,'current_token_sha256':hashlib.sha256(t).hexdigest()}))
-'''
-        answer = json.loads(self.remote_console('exec', '-T', 'console', 'python3', '-I', '-B', '-c', code, capture=True))
-        if answer.get('management_https') != 'verified' or not re.fullmatch(r'[0-9a-f]{64}', answer.get('certificate_sha256', '')):
+    @staticmethod
+    def _console_runtime_identity(container):
+        state = container.get('state', {})
+        identifier, started = container.get('id'), state.get('StartedAt')
+        if (not isinstance(identifier, str) or not re.fullmatch(r'[0-9a-f]{64}', identifier)
+                or not isinstance(started, str) or not 1 <= len(started) <= 64
+                or not state.get('Running') or state.get('Restarting') or state.get('Dead')):
+            raise InstallError('Remote Console must have a stable running identity')
+        return {'container_id': identifier, 'started_at': started}
+
+    def verify_console_management(self, expected_token=None, expected_container=None):
+        before = self._console_runtime_identity(
+            self.remote_container() if expected_container is None else expected_container)
+        actual = digest(self.console_file)
+        if self.journal.document['completed'].get('console-prepared') != actual:
+            raise InstallError('Owned Console configuration changed')
+        answer = json.loads(self.remote('proof',
+            image=self.journal.document['completed']['console-image'],
+            digest=actual, timeout=90, **before))
+        fields = {'management_https', 'certificate_sha256', 'current_token_sha256',
+                  'container_id', 'started_at'}
+        if (not isinstance(answer, dict) or set(answer) != fields
+                or answer.get('management_https') != 'verified'
+                or any(not isinstance(answer.get(name), str) or not re.fullmatch(r'[0-9a-f]{64}', answer[name])
+                       for name in ('certificate_sha256', 'current_token_sha256'))):
             raise InstallError('Remote Console could not authenticate the management connection')
+        if ({name: answer[name] for name in before} != before
+                or self._console_runtime_identity(self.remote_container()) != before):
+            raise InstallError('Remote Console runtime changed during management proof')
         token = answer.pop('current_token_sha256', None)
         if expected_token is not None and token != expected_token:
             raise InstallError('Remote Console is not using the approved replacement credential')
+        answer.pop('container_id')
+        answer.pop('started_at')
         return answer
 
     def sync_management_operation(self, operation_id):
         from .management_sync import validate_operation
         authority = validate_operation(self, operation_id)
         self.verify_resource_ownership()
-        self.remote_container()  # Exact owned image and custody mounts.
+        container = self.remote_container()  # Pin before publishing new custody.
+        before = self._console_runtime_identity(container)
         self.sync_console_credentials()
-        self.verify_console_management(expected_token=authority['current_sha256'])
+        self.verify_console_management(expected_token=authority['current_sha256'], expected_container=container)
         if validate_operation(self, operation_id) != authority:
             raise InstallError('Management credential authority changed during publication')
+        if self._console_runtime_identity(self.remote_container()) != before:
+            raise InstallError('Remote Console runtime changed during credential publication')
         return dict(authority, consumers_verified=1)
 
     lifecycle_consumer_proof = verify_console_management

@@ -84,7 +84,19 @@ def install(tmp_path):
         'completed': {'images': {'server-tag': 'sha256:' + 'a' * 64}, 'console-image': 'sha256:' + 'b' * 64}})
     obj.compose_file.write_text(json.dumps({'services': {'iris': {'image': 'server-tag', 'build': 'source'}}}))
     obj.console_file.write_text('{}')
+    obj.journal.document['completed']['console-prepared'] = split.digest(obj.console_file)
     return obj
+
+
+def running_console():
+    return {'id': 'c' * 64, 'running': True,
+            'state': {'Running': True, 'StartedAt': '2026-09-28T12:00:00.000000000Z'}}
+
+
+def management_proof():
+    return {'management_https': 'verified', 'certificate_sha256': 'a' * 64,
+            'current_token_sha256': 'b' * 64, 'container_id': 'c' * 64,
+            'started_at': running_console()['state']['StartedAt']}
 
 
 def test_ssh_transport_pins_host_and_disables_ambient_credentials(tmp_path):
@@ -193,9 +205,10 @@ def test_restore_rejects_service_key_transfer(tmp_path):
 def test_consumer_proof_must_be_authenticated_and_fingerprinted(tmp_path):
     obj = install(tmp_path)
     good = {'management_https': 'verified', 'certificate_sha256': 'a' * 64}
-    obj.remote_console = lambda *args, **kwargs: json.dumps(good).encode()
+    obj.remote_container = running_console
+    obj.remote = lambda *args, **kwargs: json.dumps(management_proof()).encode()
     assert obj.verify_console_management() == good
-    obj.remote_console = lambda *args, **kwargs: b'{"management_https":"verified"}'
+    obj.remote = lambda *args, **kwargs: b'{"management_https":"verified"}'
     with pytest.raises(InstallError):
         obj.verify_console_management()
 
@@ -265,21 +278,132 @@ def test_management_operation_sync_binds_publication_to_replacement_and_rechecks
     calls = []
     monkeypatch.setattr(management_sync, 'validate_operation', lambda *_: calls.append('validate') or authority)
     obj.verify_resource_ownership = lambda: calls.append('owned')
-    obj.remote_container = lambda: calls.append('container')
+    obj.remote_container = lambda: calls.append('container') or running_console()
     obj.sync_console_credentials = lambda: calls.append('publish')
     obj.verify_console_management = lambda **kwargs: calls.append(('proof', kwargs))
     assert obj.sync_management_operation(operation) == dict(authority, consumers_verified=1)
     assert calls == ['validate', 'owned', 'container', 'publish',
-                     ('proof', {'expected_token': 'b' * 64}), 'validate']
+                     ('proof', {'expected_token': 'b' * 64, 'expected_container': running_console()}),
+                     'validate', 'container']
 
 
 def test_remote_consumer_proof_rejects_overlap_token(tmp_path):
     obj = install(tmp_path)
-    obj.remote_console = lambda *args, **kwargs: json.dumps({
-        'management_https': 'verified', 'certificate_sha256': 'a' * 64,
-        'current_token_sha256': 'b' * 64}).encode()
+    obj.remote_container = running_console
+    obj.remote = lambda *args, **kwargs: json.dumps(management_proof()).encode()
     with pytest.raises(InstallError, match='replacement'):
         obj.verify_console_management(expected_token='c' * 64)
+
+
+@pytest.mark.parametrize('change', ['replacement', 'restart', 'stopped'])
+def test_consumer_proof_rejects_runtime_change_after_authenticated_request(tmp_path, change):
+    obj = install(tmp_path)
+    before, after = running_console(), running_console()
+    if change == 'replacement':
+        after['id'] = 'd' * 64
+    elif change == 'restart':
+        after['state']['StartedAt'] = '2026-09-28T13:00:00.000000000Z'
+    else:
+        after['state']['Running'] = False
+    records = iter([before, after])
+    obj.remote_container = lambda: next(records)
+    def remote(action, **values):
+        assert action == 'proof'
+        assert values['container_id'] == before['id']
+        assert values['started_at'] == before['state']['StartedAt']
+        assert set(values) == {'image', 'digest', 'timeout', 'container_id', 'started_at'}
+        return json.dumps(management_proof()).encode()
+    obj.remote = remote
+    with pytest.raises(InstallError, match='identity|runtime changed'):
+        obj.verify_console_management(expected_token='b' * 64)
+
+
+def test_sync_refuses_runtime_replacement_after_server_authority_recheck(tmp_path, monkeypatch):
+    obj = install(tmp_path)
+    authority = {'request_id': str(uuid.uuid4()), 'current_sha256': 'b' * 64}
+    changed = running_console()
+    changed['id'] = 'd' * 64
+    records = iter([running_console(), changed])
+    obj.remote_container = lambda: next(records)
+    obj.verify_resource_ownership = lambda: None
+    obj.sync_console_credentials = lambda: None
+    obj.verify_console_management = lambda **kwargs: management_proof()
+    monkeypatch.setattr(management_sync, 'validate_operation', lambda *_: authority)
+    with pytest.raises(InstallError, match='credential publication'):
+        obj.sync_management_operation(authority['request_id'])
+
+
+@pytest.mark.parametrize('change', [None, 'replacement', 'restart', 'image', 'environment', 'mount'])
+@pytest.mark.parametrize('when', ['before', 'after'])
+def test_fixed_remote_proof_executes_exact_id_and_rechecks_runtime(tmp_path, monkeypatch, change, when):
+    root = tmp_path / 'console'
+    root.mkdir()
+    identity, project = 'fixture-id', config()['instance']
+    (root / 'owner.json').write_text(json.dumps({'instance_id': identity, 'project': project}))
+    environment = {'IRIS_MANAGEMENT_API_URL': 'https://192.0.2.10:9443',
+                   'IRIS_MANAGEMENT_API_TOKEN_FILE': '/run/iris-console-custody/current.json',
+                   'IRIS_MANAGEMENT_API_CA': '/run/iris-console-custody/ca.pem'}
+    (root / 'compose.json').write_text(json.dumps({'services': {'console': {'environment': environment}}}))
+    image = 'sha256:' + 'b' * 64
+    runtime = {'Id': 'c' * 64, 'Image': image, 'State': running_console()['state'],
+        'Config': {'Labels': {'com.cisco.iris.installer': identity},
+                   'Env': [name + '=' + value for name, value in environment.items()]},
+        'Mounts': [{'Type': 'bind', 'Source': str(root), 'RW': False,
+                    'Destination': '/run/iris-console-custody'}]}
+    request = {'action': 'proof', 'root': str(root), 'identity': identity, 'project': project,
+               'image': image, 'digest': split.digest(root / 'compose.json'),
+               'container_id': runtime['Id'], 'started_at': runtime['State']['StartedAt']}
+    calls = []
+    def change_runtime():
+        if change == 'replacement':
+            runtime['Id'] = 'd' * 64
+        elif change == 'restart':
+            runtime['State']['StartedAt'] = '2026-09-28T13:00:00.000000000Z'
+        elif change == 'image':
+            runtime['Image'] = 'sha256:' + 'e' * 64
+        elif change == 'environment':
+            runtime['Config']['Env'][0] = 'IRIS_MANAGEMENT_API_URL=https://other.invalid:9443'
+        elif change == 'mount':
+            runtime['Mounts'][0]['Destination'] = '/unrelated'
+    if when == 'before':
+        change_runtime()
+    def docker(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ['docker', 'exec', '-i']:
+            assert command[3:8] == ['c' * 64, 'python3', '-I', '-B', '-c']
+            assert 'tier_auth.load_pair' in command[8]
+            assert "hashlib.sha256(t).hexdigest()" in command[8]
+            if when == 'after':
+                change_runtime()
+            result = {name: value for name, value in management_proof().items()
+                      if name not in ('container_id', 'started_at')}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
+        if command[:3] == ['docker', 'container', 'inspect']:
+            assert command[3] == project + '-console'
+            return SimpleNamespace(returncode=0, stdout=json.dumps([runtime]).encode())
+        assert command[0] == 'docker' and command[2] == 'ls'
+        return SimpleNamespace(returncode=0, stdout=b'')
+    real_stat = Path.stat
+    def protected_stat(path, *args, **kwargs):
+        actual = real_stat(path, *args, **kwargs)
+        return SimpleNamespace(st_uid=0, st_mode=actual.st_mode & ~0o022)
+    output = io.StringIO()
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'stat', protected_stat)
+        patch.setattr(split.subprocess, 'run', docker)
+        patch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode())))
+        patch.setattr(sys, 'stdout', output)
+        if change is None:
+            exec(compile(split.REMOTE_PROGRAM, '<remote-console>', 'exec'), {})
+        else:
+            with pytest.raises(RuntimeError, match='changed'):
+                exec(compile(split.REMOTE_PROGRAM, '<remote-console>', 'exec'), {})
+    if change is None:
+        assert json.loads(output.getvalue()) == management_proof()
+    else:
+        assert output.getvalue() == ''
+    expected_execs = 0 if change is not None and when == 'before' else 1
+    assert sum(command[:3] == ['docker', 'exec', '-i'] for command in calls) == expected_execs
 
 
 @pytest.mark.parametrize('operation', ['not-a-uuid', '../state', None])

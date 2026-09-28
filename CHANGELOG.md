@@ -27,7 +27,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   including recovery after expiry. Drain HTTP requests, publishers, exports and
   background writers before admitting clean-stop backup evidence. Handle Console
   pod termination gracefully and distinguish an idle seeder from an unreachable
-  active BitTorrent listener during installation checks.
+  active BitTorrent listener during installation checks. Bind credential-use
+  evidence to the exact running consumer and recover interrupted Kubernetes
+  token publication only under its original operation.
 
 - Add planned single-Docker credential maintenance in the Console for management
   and device TLS, peer CA, offline signing roots, server age identity and seeder
