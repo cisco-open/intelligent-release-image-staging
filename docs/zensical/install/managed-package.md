@@ -76,7 +76,7 @@ SSH custody and immutable Console image for later maintenance.
 
 Allow the Console to reach the server's device-facing address on authenticated
 HTTPS 9443. Only the Console's credentials, public management CA and browser
-identity go to that host—not server data, the age identity or management private
+identity go to that host, not server data, the age identity or management private
 key. Keep the controller's SSH access available for backup and rotation.
 
 ### Kubernetes
@@ -136,7 +136,7 @@ sudo irisctl resume --state-dir /var/lib/iris-installer/my-iris \
 Resume reuses recorded identities and checks source, topology and resource
 ownership. It builds and verifies the device packages before starting the
 Console. Exit `21` means you must claim your administrator account yourself.
-Exit `22` means the running deployment still needs production review—not that
+Exit `22` means the running deployment still needs production review, not that
 it is production-ready. Complete root attestations, backup access and renewal
 arrangements using the [certificate workflows](../admin-guide/rotations.md).
 

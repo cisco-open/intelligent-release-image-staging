@@ -22,6 +22,13 @@ from iris_installer import cli, probe
 import setup_status
 
 
+def test_doctor_uses_existing_k3s_without_installing_dependencies(monkeypatch):
+    monkeypatch.setattr(cli.shutil, 'which', lambda name: '/usr/local/bin/k3s' if name == 'k3s' else None)
+    args = cli.parser().parse_args(['doctor', '--target', 'kubernetes', '--context', 'lab',
+        '--namespace', 'iris', '--pod', 'server-123', '--container', 'iris'])
+    assert cli.runtime_command(args)[:2] == ['k3s', 'kubectl']
+
+
 @pytest.fixture
 def artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 10001)

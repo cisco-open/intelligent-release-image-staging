@@ -62,6 +62,16 @@ def test_accepts_explicit_root_custody(monkeypatch):
     split.validate_split_config(config())
 
 
+def test_backup_restart_refreshes_remote_trust_before_console_start(monkeypatch):
+    adapter = object.__new__(split.SplitDockerInstall)
+    calls = []
+    monkeypatch.setattr(adapter, 'sync_console_credentials', lambda: calls.append('sync'))
+    monkeypatch.setattr(adapter, 'remote_console', lambda *args: calls.append('start'))
+    monkeypatch.setattr(adapter, 'verify_console_management', lambda: calls.append('proof'))
+    adapter.restart_writer({'remote': True})
+    assert calls == ['sync', 'start', 'proof']
+
+
 def install(tmp_path):
     obj = object.__new__(split.SplitDockerInstall)
     obj.config = config()

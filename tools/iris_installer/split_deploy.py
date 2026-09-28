@@ -340,6 +340,10 @@ class SplitDockerInstall(DockerInstall):
 
     def restart_writer(self, container):
         if container.get('remote'):
+            # The bootstrap management certificate is reconstructed when the
+            # server starts. Refresh its public trust and current token pair
+            # before the remote Console attempts its authenticated startup.
+            self.sync_console_credentials()
             self.remote_console('up', '-d', '--no-build', '--wait', '--wait-timeout', '180', 'console')
             self.verify_console_management()
         else:

@@ -8,6 +8,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -157,7 +158,8 @@ def runtime_command(args):
         # Forcing --user would hide an incorrectly root-configured deployment.
         command += ["exec", "-i", args.container]
     else:
-        command = ["kubectl", "--context", args.context, "--namespace", args.namespace,
+        client = ['k3s', 'kubectl'] if not shutil.which('kubectl') and shutil.which('k3s') else ['kubectl']
+        command = [*client, "--context", args.context, "--namespace", args.namespace,
                    "exec", "-i", args.pod, "-c", args.container, "--"]
     command += ["python3", "-I", "-B", "-"]
     if args.optional_xr:
