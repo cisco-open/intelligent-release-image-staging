@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Recover a deployment rotation while the Console is stopped
 
-For an installer-owned single-host Docker deployment, open **Deployment
+For an installer-owned Docker, split Docker or Kubernetes deployment, open **Deployment
 recovery** on the installer host's authorized desktop display. Use the same
 private state directory as the configured lifecycle worker:
 
@@ -24,8 +24,11 @@ sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/iris
 3. Watch the operation state and evidence. The window refreshes every ten
    seconds. A submitted request is not proof of completion.
 
-The worker must remain available outside the containers. If it is unavailable,
-start its configured service and refresh. The recovery window requires a
+The worker must remain available outside the containers or pods. If it is
+unavailable, restart it with the recorded installation and custody settings,
+then refresh. Worker service setup is operator-managed; see
+[worker setup](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md#deployment-side-worker).
+The recovery window requires a
 desktop display and the installer package's `python3-tk` dependency.
 
 !!! warning

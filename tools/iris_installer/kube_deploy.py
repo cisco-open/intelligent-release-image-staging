@@ -22,6 +22,7 @@ import socket
 import ssl
 import stat
 import tarfile
+import time
 import uuid
 
 from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run
@@ -636,22 +637,76 @@ class KubeInstall(DockerInstall):
                       "service/" + service, "--timeout=180s", timeout=210)
             current = self.get("service", service)
             if [item.get("ip") for item in current.get("status", {}).get("loadBalancer", {}).get("ingress", [])] != [address]:
-                raise InstallError("LoadBalancer did not allocate the exact requested deployment address")
+                raise InstallError("LoadBalancer " + service + " did not allocate the exact requested deployment address " + address)
         device_certificate = self.execute("openssl", "x509", "-in", "/run/iris/tls/cert.pem", "-outform", "PEM", capture=True)
+        endpoints = [(name, self.config["host"], port, device_certificate)
+                     for name, port in (("tracker", 6969), ("catalog", 8443), ("artifacts", 8000), ("telemetry", 9101))]
+        endpoints.append(("Console", self.config["console_bind"], self.config["console_port"], console_certificate))
+        for name, address, port, certificate in endpoints:
+            self._verify_external_endpoint(name, address, port, certificate)
+        seeder = self.seeder_readiness()
+        # aria2 opens its peer listener only while a torrent is active. A new
+        # installation has no torrents; authenticated RPC proves that the
+        # idle seeder is ready without inventing a required empty listener.
+        if seeder["active_torrents"]:
+            self._verify_external_endpoint("BitTorrent seeder", self.config["host"], 6881)
+        self.journal.checkpoint("kube-external-services", {"server": self.config["host"], "console": self.config["console_bind"],
+                                "verified": True, "seeder": dict(seeder, peer_listener="verified" if seeder["active_torrents"] else "idle-no-active-torrents")})
+
+    def seeder_readiness(self):
+        code = '''import sys,os,json,re
+sys.path.insert(0,'/opt/iris/server')
+try:
+ import telemetry,seeder_auth
+ secret=seeder_auth.credential_text(telemetry._read_rpc_secret(os.environ))
+ rpc=telemetry.make_jsonrpc_caller('http://127.0.0.1:6800/jsonrpc',secret)
+ version=rpc('aria2.getVersion',[])
+ active=rpc('aria2.tellActive',[['infoHash']])
+ assert isinstance(version,dict) and isinstance(version.get('version'),str) and version['version']
+ assert isinstance(active,list) and all(isinstance(row,dict) for row in active)
+ hashes=[row['infoHash'] for row in active if row.get('infoHash')]
+ assert all(isinstance(value,str) and re.fullmatch('[0-9a-fA-F]{40}',value) for value in hashes)
+ print(json.dumps({'rpc':'verified','active_torrents':len(hashes)}))
+except Exception:
+ raise SystemExit('Authenticated seeder readiness check failed') from None
+'''
         try:
-            device_tls = ssl.create_default_context(cadata=device_certificate.decode())
-            console_tls = ssl.create_default_context(cadata=console_certificate.decode())
-            endpoints = [(self.config["host"], port, device_tls) for port in (6969, 8443, 8000, 9101)]
-            endpoints.append((self.config["console_bind"], self.config["console_port"], console_tls))
-            for address, port, context in endpoints:
-                with socket.create_connection((address, port), timeout=8) as sock:
-                    with context.wrap_socket(sock, server_hostname=address):
-                        pass
-            with socket.create_connection((self.config["host"], 6881), timeout=8):
-                pass
-        except (OSError, ValueError, UnicodeError):
-            raise InstallError("External deployment listeners are unreachable or their TLS identities differ from the owned workload") from None
-        self.journal.checkpoint("kube-external-services", {"server": self.config["host"], "console": self.config["console_bind"], "verified": True})
+            result = json.loads(self.execute("python3", "-I", "-B", "-c", code, capture=True, timeout=30))
+            if (set(result) != {"rpc", "active_torrents"} or result["rpc"] != "verified"
+                    or type(result["active_torrents"]) is not int or result["active_torrents"] < 0):
+                raise ValueError()
+            return result
+        except (InstallError, ValueError, TypeError):
+            raise InstallError("Authenticated local seeder RPC readiness could not be verified") from None
+
+    def _verify_external_endpoint(self, name, address, port, certificate=None):
+        context = None
+        if certificate is not None:
+            try:
+                context = ssl.create_default_context(cadata=certificate.decode())
+                expected = hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate.decode())).digest()
+            except (OSError, ValueError, UnicodeError):
+                raise InstallError("Cannot load the owned public TLS certificate for " + name) from None
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                with socket.create_connection((address, port), timeout=5) as sock:
+                    if context is not None:
+                        with context.wrap_socket(sock, server_hostname=address) as secured:
+                            if hashlib.sha256(secured.getpeercert(binary_form=True)).digest() != expected:
+                                raise ssl.SSLCertVerificationError("Owned certificate mismatch")
+                return
+            except ssl.SSLCertVerificationError:
+                reason = "TLS certificate does not match the owned endpoint identity"
+            except ssl.SSLError:
+                reason = "TLS handshake failed"
+            except TimeoutError:
+                reason = "connection timed out"
+            except OSError:
+                reason = "TCP listener is unreachable"
+            if time.monotonic() >= deadline:
+                raise InstallError("External " + name + " at " + address + ":" + str(port) + " failed after bounded LoadBalancer propagation retries: " + reason) from None
+            time.sleep(1)
 
     def resume(self, certificate=None):
         transport = self.base / "lifecycle-transport-operation.json"

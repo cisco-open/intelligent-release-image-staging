@@ -68,8 +68,11 @@ Add:
 --console-port 8080
 ```
 
-The remote host needs Docker Compose and Python 3. Provision a dedicated SSH key
-and verify its host key independently. Local transport files must be root-owned;
+The remote host must run Ubuntu 24.04 amd64, with Python 3, SSH access and
+noninteractive root access through `sudo`. The installer adds missing Docker,
+Compose and OpenSSL dependencies without replacing an existing engine.
+Provision a dedicated SSH key and verify its host key independently.
+Local transport files must be root-owned;
 the private key must be mode `0600`. The remote state parent must already exist
 and be root-owned; the instance directory must be new. The installer pins the
 SSH custody and immutable Console image for later maintenance.
@@ -84,6 +87,9 @@ key. Keep the controller's SSH access available for backup and rotation.
 Use an existing cluster with a suitable StorageClass, NetworkPolicy enforcement
 and a LoadBalancer implementation that can assign the selected external IPs.
 The installer does not create a cluster or replace its networking/storage setup.
+It preserves an existing `kubectl` or k3s client and installs a pinned `kubectl`
+when neither exists. The client must be within one minor version of the API
+server; an incompatible existing client is refused, not replaced.
 Add:
 
 ```text
@@ -103,14 +109,19 @@ Add:
 `--host` is the server LoadBalancer address. The kubeconfig must be root-owned,
 mode `0600`, and use verified HTTPS. Use a fresh dedicated namespace. Registry
 authentication, when needed, comes from `--kube-registry-auth` pointing to a
-protected Docker `config.json`; do not put credentials in the registry argument.
+root-owned, mode `0600` Docker `config.json`. It must contain only static `auths`;
+credential helpers are not supported. Only credentials for the selected registry
+enter the deployment. Do not put credentials in the registry argument.
 
 The server has exactly one replica and owns the persistent data. The Console
 supports one to eight replicas; adding Console pods does not make the stateful
 server highly available. Each Console must pass authenticated management checks.
 The lifecycle worker runs outside the cluster and uses a deployment-specific
-mutual-TLS connection, so it remains available while pods are stopped.
-Use the controller's **Host maintenance** window to review this connection's
+mutual-TLS connection, so it can remain available while pods are stopped.
+Allow the server pod to reach the recorded controller address and port.
+The server pod receives the public CA and client certificate/key; the CA private
+key and worker private key remain on the controller, never in Console pods.
+Use the controller's **Deployment recovery** window to review this connection's
 certificate expiries and renew them before expiry. This renews certificates
 without replacing their private keys; it is not compromised-key recovery.
 
@@ -143,6 +154,10 @@ Exit `22` means the running deployment still needs production review, not that
 it is production-ready. Complete root attestations, backup access and renewal
 arrangements using the [certificate workflows](../admin-guide/rotations.md).
 
+Start the lifecycle worker separately using the
+[worker setup procedure](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md#deployment-side-worker).
+The installer does not install a worker service or provision backup storage.
+
 Use [Backup & restore](../admin-guide/backups.md) and
 [deployment rotation](../admin-guide/deployment-rotation.md) for managed
 maintenance. Keep encrypted copies and recovery custody off the controller.
@@ -155,7 +170,7 @@ Isolated recovery extraction is not an automated restore or service cutover.
 | A resource differs from recorded installation intent | Check the exact instance, cluster and namespace. Preserve the journal and investigate changes outside the installer; do not delete ownership records to adopt a resource. |
 | Writers did not stop cleanly | Keep the failed operation and backup evidence. Inspect the stopped service and outstanding work; forced termination is not a consistent backup. |
 | Management credential synchronization needs intervention | Keep the previous credential active. Restore worker/Console connectivity and use the schedule's reconciliation control before retirement. |
-| The Kubernetes worker connection certificate expired | Use the controller's local Host maintenance window to renew or recover the recorded operation. Do not regenerate its private custody directory. |
+| The Kubernetes worker connection certificate expired | Use the controller's local Deployment recovery window to renew or recover the recorded operation. Do not regenerate its private custody directory. |
 
 For interrupted credential replacement, use the
 [host recovery procedure](../admin-guide/recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).

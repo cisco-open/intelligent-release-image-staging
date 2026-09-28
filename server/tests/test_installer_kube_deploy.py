@@ -378,6 +378,81 @@ def test_external_service_address_must_match_requested_ip(tmp_path):
         obj.verify_external_services(b"unused certificate")
 
 
+@pytest.mark.parametrize("active", [0, 2])
+def test_external_seeder_listener_only_required_for_actual_active_torrents(tmp_path, active):
+    obj = install(tmp_path)
+    obj.get = lambda kind, service: {"status": {"loadBalancer": {"ingress": [{"ip": obj.config["host"] if service == "iris-seed-server" else obj.config["console_bind"]}]}}}
+    obj.execute = lambda *args, **kwargs: b"device certificate"
+    obj.seeder_readiness = lambda: {"rpc": "verified", "active_torrents": active}
+    endpoints = []
+    obj._verify_external_endpoint = lambda *args: endpoints.append(args)
+    obj.verify_external_services(b"console certificate")
+    assert [row[2] for row in endpoints] == [6969, 8443, 8000, 9101, 28080] + ([6881] if active else [])
+    proof = obj.journal.document["completed"]["kube-external-services"]["seeder"]
+    assert proof == {"rpc": "verified", "active_torrents": active,
+                     "peer_listener": "verified" if active else "idle-no-active-torrents"}
+
+
+@pytest.mark.parametrize("report", [{"rpc": "verified", "active_torrents": True}, {"rpc": "verified", "active_torrents": -1}, {"rpc": "failed", "active_torrents": 0}, {}])
+def test_seeder_readiness_requires_explicit_valid_authenticated_rpc_evidence(tmp_path, report):
+    obj = install(tmp_path)
+    obj.execute = lambda *args, **kwargs: json.dumps(report).encode()
+    with pytest.raises(InstallError, match="Authenticated local seeder RPC"):
+        obj.seeder_readiness()
+
+
+def test_external_endpoint_retries_transient_service_propagation(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    obj = install(tmp_path)
+    attempts = []
+    def connect(address, timeout):
+        attempts.append(address)
+        if len(attempts) == 1:
+            raise ConnectionRefusedError("private exception details")
+        return nullcontext()
+    monkeypatch.setattr(kube.socket, "create_connection", connect)
+    monkeypatch.setattr(kube.time, "sleep", lambda duration: None)
+    obj._verify_external_endpoint("BitTorrent seeder", "192.0.2.10", 6881)
+    assert attempts == [("192.0.2.10", 6881)] * 2
+
+
+def test_external_endpoint_failure_names_endpoint_without_exception_details(tmp_path, monkeypatch):
+    obj = install(tmp_path)
+    ticks = iter((0, 31))
+    monkeypatch.setattr(kube.time, "monotonic", lambda: next(ticks))
+    def connect(*args, **kwargs):
+        raise TimeoutError("private exception details")
+    monkeypatch.setattr(kube.socket, "create_connection", connect)
+    with pytest.raises(InstallError, match="External catalog at 192.0.2.10:8443.*connection timed out") as failure:
+        obj._verify_external_endpoint("catalog", "192.0.2.10", 8443)
+    assert "private exception details" not in str(failure.value)
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_external_tls_probe_requires_hostname_and_exact_owned_certificate(tmp_path, monkeypatch, matches):
+    from contextlib import nullcontext
+    obj = install(tmp_path)
+    secured = SimpleNamespace(getpeercert=lambda **kwargs: b"owned" if matches else b"other")
+    calls = []
+    def wrap(sock, server_hostname):
+        calls.append(server_hostname)
+        return nullcontext(secured)
+    def context(*, cadata):
+        assert cadata == "owned public PEM"
+        return SimpleNamespace(wrap_socket=wrap)
+    monkeypatch.setattr(kube.ssl, "create_default_context", context)
+    monkeypatch.setattr(kube.ssl, "PEM_cert_to_DER_cert", lambda pem: b"owned")
+    monkeypatch.setattr(kube.socket, "create_connection", lambda *args, **kwargs: nullcontext("socket"))
+    ticks = iter((0, 31))
+    monkeypatch.setattr(kube.time, "monotonic", lambda: next(ticks))
+    if matches:
+        obj._verify_external_endpoint("catalog", "192.0.2.10", 8443, b"owned public PEM")
+    else:
+        with pytest.raises(InstallError, match="catalog at 192.0.2.10:8443.*TLS certificate"):
+            obj._verify_external_endpoint("catalog", "192.0.2.10", 8443, b"owned public PEM")
+    assert calls == ["192.0.2.10"]
+
+
 def test_pending_manifest_write_before_checkpoint_is_recoverable(tmp_path):
     obj = install(tmp_path)
     old = obj._object("ConfigMap", "test", data={"x": "old"})

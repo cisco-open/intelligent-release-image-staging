@@ -49,7 +49,8 @@ set `--console-bind` and `--console-port` explicitly for approved management
 network exposure. Restrict first-claim access before deployment. A named,
 installer-owned Compose project isolates containers, images, volumes and state.
 Existing instances are refused, not adopted. Private offline roots stay with
-their custodians; the installer generates only the server's age and online keys.
+their custodians. The installer generates deployment identities, including age,
+online signing and TLS keys, but never generates an offline signing root.
 
 The engine pauses with exit 20 and exports `requests/online.pub` below its state
 directory. Take that public file to the offline custodian machine and run:
@@ -86,6 +87,11 @@ roots and approves public requests without uploading private roots. See
 
 The candidate also has explicit `docker-split` and `kubernetes` targets; see the
 [managed installation procedure](../zensical/install/managed-package.md).
+The split Console host must also run Ubuntu 24.04 amd64 and provide Python 3,
+verified SSH and noninteractive root sudo. Missing Docker, Compose and OpenSSL
+dependencies are provisioned there. Kubernetes uses an existing cluster; the
+controller preserves an installed client or provisions the pinned `kubectl`.
+Client/API-server minor versions must differ by no more than one.
 These adapters require their own live qualification; a passing single-Docker
 test does not qualify another topology. A prebuilt/offline kit,
 fully recoverable initial reservation, upgrade/uninstall and automated recovery
@@ -146,8 +152,8 @@ resumable operations, upgrades, renewal, backup/restore and failure recovery.
 The server remains single-replica; multi-node scheduling is not multi-writer HA.
 Optional demo mode cannot satisfy production acceptance gates.
 
-Next work is completion of the authenticated release/build kit and transaction
-recovery, deployment adapters and lifecycle qualification. Existing crypto operations remain the
+Next work is completion of the authenticated release/build kit, initial-install
+transaction recovery and topology/lifecycle qualification. Existing crypto operations remain the
 authority; builders receive public roots only. No install command is exposed
 as production-complete until the required qualification gates pass.
 

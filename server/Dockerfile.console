@@ -33,7 +33,7 @@ LABEL org.opencontainers.image.title="IRIS web console" \
 WORKDIR /opt/iris/server
 COPY LICENSE NOTICE /opt/iris/
 COPY server/gui_server.py server/api_problem.py server/api_routes.py \
-     server/tier_auth.py server/bounded_pool.py /opt/iris/server/
+     server/tier_auth.py server/bounded_pool.py server/service_shutdown.py /opt/iris/server/
 COPY server/webroot/ /opt/iris/server/webroot/
 COPY --from=console-ui-build /build/console-ui/dist/ /opt/iris/server/webroot/assets/
 COPY docs/zensical/swagger/ /opt/iris/docs/zensical/swagger/

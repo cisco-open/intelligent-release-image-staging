@@ -9,10 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 The current candidate implements same-key instruction certificate renewal and
 guided online signer rotation in the Console, and a topology-aware
 cold-backup worker with file verification and isolated extraction. It does not
-yet implement production recovery cutover,
-scheduled retention. These are still
+yet implement production recovery cutover or scheduled retention. These are still
 release gates, not optional production follow-ups. Scheduled signer preparation,
-device instruction-key rotation and Docker management-token rotation now have
+device instruction-key rotation and management-token rotation now have
 opt-in adapters. Browser TLS and telemetry credentials have operator-driven UI
 workflows; their schedules remain review reminders. Installer-owned Docker,
 split Docker and Kubernetes
@@ -92,8 +91,10 @@ Forced pod deletion cannot substitute for stopped-writer proof. Age-identity
 proof checks the restarted PVC rather than trusting a pre-restart local mirror.
 
 The external worker accepts the same fixed requests through deployment-specific
-mutual TLS (`lifecycle_network.py`); its CA and server private key never enter a
-pod. No browser-selected host, path or command is accepted. Scheduled management
+mutual TLS (`lifecycle_network.py`). The CA private key and worker private key
+remain on the controller. Only the public CA and client certificate/key enter
+the server pod; none enter Console pods. No browser-selected host, path or
+command is accepted. Scheduled management
 token changes publish overlap to remote consumers through a bounded public job
 ID, then prove current-token use. A failed sync retains overlap and requires
 reconciliation; explicit retirement performs a fresh consumer check.
@@ -183,7 +184,10 @@ instructions without generating another key. Management-token rotation shares
 the CLI lock, retains previous credentials, and requires a request using the
 new credential plus operator confirmation before retirement. Interrupted
 management writes can be reconciled against recorded public fingerprints.
-Projected Kubernetes Secrets need the manual Kubernetes adapter.
+Installer-owned split Docker and Kubernetes deployments use the host worker to
+publish credential overlap and prove current-token use on every owned Console.
+An unsuccessful synchronization retains overlap for explicit reconciliation.
+Manually provisioned Kubernetes deployments use the separate manual procedure.
 
 Signer preparation retains offline approval boundaries and polls the existing
 rotation journal for completion or cancellation. Review-only entries cover TLS,
@@ -202,9 +206,12 @@ for that change.
 
 ## Deployment-side worker
 
-New candidate installations mount only their dedicated `control/` directory
+Installer-owned Docker deployments mount their dedicated `control/` directory
 into the server, read-only. An external root worker listens on its Unix socket;
-the socket accepts root or the server's uid 10001. The Console has no Docker
+the socket accepts root or the server's uid 10001. Kubernetes instead connects
+the server to that external worker over the recorded mutual-TLS endpoint, with
+no host control-directory mount. Its host desktop still uses the local Unix
+socket. The Console has no Docker
 socket or cluster-admin access. Owner session and CSRF checks happen at the
 existing management boundary. RPC accepts fixed operations and backup IDs, never
 shell commands, host paths, private keys or arbitrary resource names.
@@ -224,6 +231,12 @@ components. Place the two sets in separate protected directories. A directory
 on the same host is not off-host protection. Storage provisioning and a system
 service for this foreground worker are not yet installer-managed. Earlier
 candidate instances without the control mount are not silently modified/adopted.
+
+For Kubernetes, the same command also serves the installation's recorded
+`--lifecycle-url`; allow the server pod to reach that controller address and port.
+The listener binds that address by default. Use the worker's `--listen-address`
+only when the local bind address must differ; this does not change the recorded
+URL or certificate names.
 
 To permit verification or isolated extraction, temporarily provision the
 independently held age recovery identity on the worker and pass
@@ -257,8 +270,11 @@ sudo irisctl backup --state-dir /var/lib/iris-installer/my-instance \
 
 Both output directories must be new. Capture checks source/root/configuration
 drift, resource ownership, local volume drivers and unaccounted/shared mounts.
-It exports the service images, stops both containers, and captures all managed
-volumes plus source, deployment configuration, imported images and artifacts.
+It exports the service images and stops the owned server and all Console
+consumers. Docker captures the managed volumes; Kubernetes captures the server
+PVC through an owned helper pod. Both include source, deployment configuration,
+imported images and artifacts. Split Docker also captures encrypted remote
+Console custody, and Kubernetes includes the host worker's transport custody.
 Service age identity and the dedicated backup signing key go in the separate
 identity set. Both sets share an authenticated encrypted backup-set ID. The
 backup signing key is not an instruction root and never changes device trust.

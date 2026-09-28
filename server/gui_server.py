@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 import api_problem
 import api_routes
 import bounded_pool
+import service_shutdown
 import tier_auth
 
 
@@ -845,8 +846,8 @@ def main():
         sys.exit(2)
     print("iris-console on %s://%s:%d/" % (
         "http" if plaintext else "https", host, port), flush=True)
-    server.serve_forever()
+    return service_shutdown.serve([server])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
