@@ -21,6 +21,7 @@ import shutil
 import socket
 import ssl
 import stat
+import tarfile
 import uuid
 
 from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run
@@ -94,6 +95,32 @@ def preflight(config, runner=run):
 
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _archive_identity(archive, source_id, config_digest):
+    """Docker classic IDs name configs; containerd-backed IDs name OCI roots."""
+    if source_id == config_digest:
+        return
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', source_id):
+        raise InstallError('Invalid recorded image identity')
+    selected = {}
+    blob = 'blobs/sha256/' + source_id.split(':', 1)[1]
+    with tarfile.open(archive) as stream:
+        for count, member in enumerate(stream):
+            if count > 8192:
+                raise InstallError('Image archive has too many members')
+            if member.name not in ('index.json', blob):
+                continue
+            if not member.isfile() or not 0 < member.size <= 1024 * 1024 or member.name in selected:
+                raise InstallError('Invalid image archive identity member')
+            selected[member.name] = stream.extractfile(member).read()
+    try:
+        references = json.loads(selected['index.json'])['manifests']
+        if (not any(item.get('digest') == source_id for item in references)
+                or 'sha256:' + hashlib.sha256(selected[blob]).hexdigest() != source_id):
+            raise ValueError()
+    except (KeyError, ValueError, TypeError, AttributeError):
+        raise InstallError('Image archive does not contain the recorded immutable build') from None
 
 
 def _contains(actual, expected):
@@ -332,8 +359,7 @@ class KubeInstall(DockerInstall):
                 archive = self.base / ("kube-" + service + ".tar")
                 self.command(["docker", "save", "--output", archive, tag])
                 saved = json.loads(self.command(["skopeo", "inspect", "--raw", "docker-archive:" + str(archive)], capture=True))
-                if saved.get("config", {}).get("digest") != source_id:
-                    raise InstallError("Image archive does not contain the recorded immutable build")
+                _archive_identity(archive, source_id, saved.get("config", {}).get("digest"))
                 self.command(["k3s", "ctr", "images", "import", archive])
                 rows = self.command(["k3s", "ctr", "images", "list"], capture=True).decode().splitlines()
                 hashes = [row.split()[2] for row in rows if row.split() and row.split()[0] == tag and len(row.split()) >= 3]
