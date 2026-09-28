@@ -6,6 +6,7 @@
 
 import hashlib
 import json
+import uuid
 
 from .state import InstallError, atomic_write, regular_bytes
 
@@ -112,6 +113,14 @@ def finish(install, kind, operation_id):
     verifies the served Guest Shell bundle and distributed onboarding pin.
     """
     if kind == 'instruction-roots':
+        if str(uuid.UUID(operation_id)) != operation_id:
+            raise InstallError('Invalid trust operation identifier')
+        # Public roots participate in the canonical image source fingerprint.
+        # Keep the old-root archive intact and let the existing build verifier
+        # create or verify this operation's new archive. Explicit same-ID
+        # recovery selects the same path; never force past source/hash checks.
+        install.env['IRIS_DEVICE_IMAGE_OCI'] = str(
+            install.base / 'artifacts' / ('device-roots-' + operation_id + '.oci.tar'))
         install.journal.document['completed'].pop('packages', None)
         install.journal.document['completed'].pop('guestshell', None)
         install.journal.save()

@@ -39,16 +39,25 @@ No background automatic renewal or external reminder delivery service is supplie
 ## Deployment trust transactions
 
 `server/trust_rotation.py` prepares encrypted candidates and validates public
-approvals without publishing them. It preserves the exact installed KRL,
-revocations, sequence and instruction epoch during root replacement. Its strict
+approvals without publishing them. Root replacement preserves the exact installed
+KRL, revocations and instruction epoch, and advances the keylist sequence. Its strict
 drain check includes orphan credentials and abandoned deployment records, and
 runs again after every normal writer has stopped.
+
+Existing-root attestations use a separate public request journal and the normal
+Console API, without host-worker downtime or root replacement. Initial approval
+creates an empty signed revocation list; later approvals preserve the KRL and
+advance the sequence. Each root needs its own signed approval. Status derives
+fresh attested root IDs from current evidence within the 180-day window.
 
 `tools/iris_installer/credential_maintenance.py` owns the single-Docker transaction:
 independently decrypt both cold-backup sets, stop writers, apply approved bytes,
 restart the server, verify the family, restart Console, then prove authenticated
-management HTTPS from Console. Recovery is explicit, same-ID and old-or-approved
-hash bounded. `trust_maintenance.py` also updates installer root pins and
+management HTTPS from Console. Recovery is explicit, same-ID and normally
+old-or-approved hash bounded. Age identity and recovery-recipient recovery can
+preserve newer ciphertext from a restarted writer only if the current service
+recipient matches the approved transition and service and independent recovery
+identities decrypt it to identical plaintext. `trust_maintenance.py` also updates installer root pins and
 rebuilds both IOx architectures and XR when signing roots change.
 
 Seeder maintenance runs only tracker and seeder on an isolated Docker network
@@ -149,10 +158,13 @@ must never be interpreted as completed rotation. Private-swarm leaf renewal is
 already device-managed and distinct from CA replacement. No email/webhook
 delivery, enterprise-CA integration or automated trust rollout is included.
 
-Recipient rekey now includes the encrypted peer CA. It refuses pending signer
-or browser TLS candidates because their journals embed ciphertext under the existing recipients.
-Writers must be stopped for recipient rekey; changing the runtime age identity
-still requires the separate documented deployment procedure.
+CLI recipient rekey includes the encrypted peer CA, independent management key
+and default Console identity. It refuses pending signer, browser TLS or deployment
+trust candidates because their journals embed ciphertext under the existing
+recipients. Writers must be stopped. This recipients-only command does not replace
+the runtime service identity; use the guided
+[encryption identity rotation](../zensical/admin-guide/deployment-rotation.md#rotate-management-tls-encryption-identity-or-seeder-credentials)
+for that change.
 
 ## Deployment-side worker
 

@@ -29,7 +29,8 @@ def installation(tmp_path):
                 'completed': {'packages': {'test': 'hash'}, 'guestshell': {'state': 'ok'}, 'preserved': 'yes'}}
     saved = []
     journal = SimpleNamespace(document=document, save=lambda: saved.append(json.loads(json.dumps(document))))
-    return SimpleNamespace(base=tmp_path, journal=journal, saved=saved)
+    return SimpleNamespace(base=tmp_path, journal=journal, saved=saved,
+                           env={'IRIS_DEVICE_IMAGE_OCI': str(tmp_path / 'artifacts/device.oci.tar')})
 
 
 def record():
@@ -87,6 +88,53 @@ def test_host_root_external_mutation_refused(installation):
     with pytest.raises(InstallError, match='outside'):
         maintenance._sync_roots(installation, approved)
     assert (installation.base / 'roots/root-a.pub').read_text() == 'not old or approved'
+
+
+def test_root_rebuild_uses_operation_archive_preserves_original_and_recovers_same_path(installation):
+    original = Path(installation.env['IRIS_DEVICE_IMAGE_OCI'])
+    original.parent.mkdir()
+    original.write_bytes(b'old-root OCI')
+    original.with_suffix('.tar.manifest').write_bytes(b'old-root provenance')
+    approved = record()
+    attempted = []
+    def packages():
+        archive = Path(installation.env['IRIS_DEVICE_IMAGE_OCI'])
+        attempted.append(archive)
+        assert archive != original
+        assert archive.name == 'device-roots-' + approved['request_id'] + '.oci.tar'
+        assert 'IRIS_FORCE_DEVICE_IMAGE_BUILD' not in installation.env
+        assert 'packages' not in installation.journal.document['completed']
+        if not archive.exists():
+            archive.write_bytes(b'approved-root OCI')
+            raise InstallError('interrupted after OCI build')
+        assert archive.read_bytes() == b'approved-root OCI'
+    installation.packages = packages
+    installation.python = lambda *args: b'{"packages_verified": true}'
+    with pytest.raises(InstallError, match='interrupted after OCI'):
+        maintenance.finish(installation, 'instruction-roots', approved['request_id'])
+    # A recovered transaction constructs a fresh DockerInstall with the default
+    # archive environment. The approved operation must select its own path again.
+    installation.env['IRIS_DEVICE_IMAGE_OCI'] = str(original)
+    assert maintenance.finish(installation, 'instruction-roots', approved['request_id']) == {'packages_verified': True}
+    assert attempted[0] == attempted[1]
+    assert original.read_bytes() == b'old-root OCI'
+    assert original.with_suffix('.tar.manifest').read_bytes() == b'old-root provenance'
+    previous_archive = attempted[-1]
+    approved = record()
+    with pytest.raises(InstallError, match='interrupted after OCI'):
+        maintenance.finish(installation, 'instruction-roots', approved['request_id'])
+    assert attempted[-1] != previous_archive
+    assert previous_archive.read_bytes() == b'approved-root OCI'
+
+
+@pytest.mark.parametrize('kind', ['device-tls', 'peer-ca'])
+def test_non_root_refresh_keeps_original_oci_archive(installation, kind):
+    original = installation.env['IRIS_DEVICE_IMAGE_OCI']
+    installation.packages = lambda: None
+    installation.python = lambda *args: b'{"packages_verified": true}'
+    maintenance.finish(installation, kind, record()['request_id'])
+    assert installation.env['IRIS_DEVICE_IMAGE_OCI'] == original
+    assert installation.journal.document['completed']['packages'] == {'test': 'hash'}
 
 
 @pytest.mark.parametrize('state', [{'Running': True, 'ExitCode': 0},

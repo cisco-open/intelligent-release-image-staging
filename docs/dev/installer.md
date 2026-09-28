@@ -73,8 +73,12 @@ then provisions and verifies the Guest Shell bundle, exact digest sidecar,
 bootstrap and embedded public trust as the server user. It starts the Console
 only after those checks pass. Exit 21 means owner claim is still required. No account
 is created or logged in automatically. Exit 22 means deployed services await
-production review: root attestations/keylist, renewal and backup arrangements
-are not yet orchestrated. Neither status is a production READY declaration.
+production review: the operator must complete root attestations/keylist, renewal
+and backup arrangements through the documented Console, offline and host workflows.
+The installer does not complete those approvals automatically. See
+[root attestations](../zensical/admin-guide/deployment-rotation.md#attest-existing-signing-roots)
+and [backup controls](../zensical/admin-guide/backups.md#console-backup-controls).
+Neither status is a production READY declaration.
 
 The packaged `irisctl custody-ui` desktop application generates encrypted offline
 roots and approves public requests without uploading private roots. See

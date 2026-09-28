@@ -26,7 +26,7 @@ On separate Docker hosts, the server publishes private port 9443 for the Console
 3. [Open the required ports](open-ports.md)
 4. [Download the tools that build device packages](build-tools.md)
 5. [Build the server and Console images](build-images.md)
-6. [Create the two offline signing keys](signing-roots.md)
+6. [Create the two offline signing keys](signing-roots.md) and use the [offline approval application](offline-approval.md)
 7. Your layout: [Install on one Docker host](one-docker-host.md), [Install on separate Docker hosts](separate-docker-hosts.md), or [Install on Kubernetes](kubernetes.md), which also adds Kubernetes sections to steps 5 and 11
 8. [Sign in for the first time](first-sign-in.md)
 9. [Turn on instruction signing](activate-signing.md)

@@ -7,10 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 # Rotate deployment trust and keys
 
 Open **Settings > Certificates & keys > Rotate deployment trust and keys**.
-These controls use the Ubuntu installer's host worker. They support an
+Credential replacement uses the Ubuntu installer's host worker. It supports an
 installer-owned, single-host Docker deployment. Split Docker and Kubernetes
-do not yet have this maintenance adapter; their controls remain unavailable.
+do not yet have this maintenance adapter; their replacement controls remain unavailable.
 Use the [topology-specific procedures](rotations.md) for those deployments.
+Root attestations use the Console directly and do not require this host worker.
 
 ## Before starting
 
@@ -31,6 +32,7 @@ available for recovery. Do not delete an operation journal to clear an error.
 | Private swarm issuing CA | Encrypted peer issuer and newly issued origin identity | Remove IRIS deployments first, then onboard and verify peers. |
 | Offline instruction signing roots | Both public roots, approved online certificate and preserved revocation list | Approve offline, remove deployments, rebuild packages, then onboard devices. |
 | Server encryption identity | Service age identity and encrypted configuration | Independent recovery recipient stays unchanged; existing backups retain their original custody. |
+| Independent recovery recipient | Recovery recipient for encrypted configuration; service identity stays unchanged | Import the protected identity through the host window and retain original keys for older backups. |
 | Seeder announce credential | Seeder token and canonical torrent announces | Worker proves serving on an isolated tracker and again after normal restart. |
 
 ## Rotate management TLS, encryption identity or seeder credentials
@@ -88,7 +90,7 @@ all native packages.
 3. Select **Prepare replacement trust**, then **Download public approval files**.
 4. In the offline application, approve the online public key with either new
    root. Approve the prepared revocation-list payload with the first root named
-   in the Console. The payload preserves existing revocations and sequence.
+   in the Console. The payload preserves existing revocations and advances the sequence.
 5. Import both public approvals and select **Validate public approval**.
 6. Remove existing IRIS device deployments and check that no removal blockers
    remain. Select **Back up and rotate during downtime**.
@@ -105,6 +107,29 @@ This replaces trust during a planned maintenance window. It is not a rolling
 root-overlap protocol and does not reset instruction epochs or discard revoked
 keys.
 
+## Attest existing signing roots
+
+Use this procedure for the initial production review and each quarterly check.
+It keeps the existing roots and needs neither device removal nor downtime.
+Complete or cancel any pending trust replacement first.
+
+1. Select **Offline instruction signing roots**. Under **Confirm each offline
+   root's custody**, select the first root and **Download root attestation request**.
+2. Its holder opens **IRIS Offline signing** on their separate offline machine,
+   selects **Retirement list**, and approves that public request with the matching
+   private root. Follow the fingerprint checks in
+   [offline approval](../install/offline-approval.md).
+3. Return only the signed public file. Choose it under **Approved public
+   revocation list** and select **Validate root attestation**.
+4. Select the other root, download a new request and repeat with its holder.
+   Check that **Fresh signed custody evidence** lists both root names.
+
+The first approval creates a signed empty revocation list when none exists.
+Later approvals preserve all existing revocations and advance the sequence.
+Each holder must approve their own request; one signature does not attest both
+roots. Repeat quarterly, before the 180-day evidence freshness expires.
+Online certificate renewal remains a [separate approval](instruction-keys.md#renew-the-instruction-signing-certificate).
+
 ## Recover an interrupted operation
 
 If the Console is reachable, use **Recover approved operation** beside the
@@ -117,9 +142,13 @@ sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/my-instance
 
 It needs a local graphical session and the lifecycle worker running for that
 installation. Select the interrupted operation and **Recover approved
-operation**. Recovery revalidates the independent backup and permits only the
-original or already-approved replacement bytes. It does not approve new trust,
-wipe conflicting state or claim that devices have migrated.
+operation**. Recovery revalidates the independent backup and checks original or
+already-approved replacement bytes. For encryption identity or recovery-recipient
+changes, it can preserve newer encrypted state written after restart only when
+the service identity matches the approved transition and both that identity and
+the approved independent recovery identity decrypt it to identical content.
+It does not approve new trust, wipe conflicting state or claim that devices have
+migrated.
 
 If recovery refuses a conflict, preserve the protected installation directory
 and backups. Resolve the reported custody problem before retrying the same

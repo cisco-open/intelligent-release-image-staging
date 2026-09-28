@@ -117,8 +117,9 @@ A new deployment prints something close to this:
 
 - `state: keylist_missing`: the keylist is the signed list of withdrawn keys the
   server sends to devices. Onboarding works without it; install one for
-  production, see
-  [Replace or recover signing keys](../admin-guide/instruction-keys.md#instruction-root-ceremony-and-recovery).
+  production through the
+  [Console root attestation procedure](../admin-guide/deployment-rotation.md#attest-existing-signing-roots).
+  Complete it independently with both root holders.
 - `root_ceremony_overdue`, `root_quorum_degraded` and `roots_attested_180d`:
   nobody has attested these root keys yet. Expected on a new deployment.
 - `certificate_days_to_expiry`: the server stops signing with seven days or

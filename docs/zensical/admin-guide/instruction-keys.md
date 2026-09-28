@@ -93,6 +93,10 @@ states](../reference/state-and-data.md).
 
 ### Quarterly two-root ceremony
 
+Use the [Console root attestation procedure](deployment-rotation.md#attest-existing-signing-roots)
+for initial and quarterly confirmations by both holders. Renew the online
+certificate separately when due. The commands below are the CLI alternative.
+
 1. Have both custodians confirm they hold their private key at separate sites.
    Compare public fingerprints with the approved inventory by running
    `ssh-keygen -lf root-a.pub` and `ssh-keygen -lf root-b.pub` on public
