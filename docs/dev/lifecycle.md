@@ -65,7 +65,12 @@ with no published ports. It uses a temporary runtime loopback certificate and
 the existing authenticated serving predicate. Normal startup restores canonical
 public announces, and serving is proved again before completion. Kubernetes uses
 an isolated helper pod and a deny-all NetworkPolicy for the same maintenance
-callback. Public tracker
+callback. NetworkPolicy is not equivalent to Docker's network isolation: traffic
+to the pod's own node is exempt. Keep the node and its services trusted, and
+qualify CNI enforcement with a reachable off-node positive control and a denied
+helper connection to that same endpoint. See the
+[Kubernetes NetworkPolicy limitations](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
+Public tracker
 validation still refuses loopback outside this explicit maintenance process mode.
 
 The worker accepts fixed UUID/family requests, not browser-provided paths or
