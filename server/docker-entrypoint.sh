@@ -383,11 +383,22 @@ PYTHONPATH="$script_dir" python3 "$script_dir/migrate_tracker_announces.py" \
 
 cd /opt/iris/server
 PIDS=()
+CHILD_RESULTS=()
+# An exact pod UID plus a fresh process-start nonce prevents a prior container
+# restart in the same pod from being mistaken for this shutdown's evidence.
+if [ -n "${IRIS_INSTALLER_SHUTDOWN_PROOF:-}" ]; then
+  python3 "$script_dir/installer_shutdown.py" prepare
+fi
 
 stop_services() {
+  CHILD_RESULTS=()
   if [ "${#PIDS[@]}" -gt 0 ]; then
     kill "${PIDS[@]}" 2>/dev/null || true
-    wait "${PIDS[@]}" 2>/dev/null || true
+    for child in "${PIDS[@]}"; do
+      status=0
+      wait "$child" 2>/dev/null || status=$?
+      CHILD_RESULTS+=("$child:$status")
+    done
   fi
 }
 
@@ -395,7 +406,17 @@ on_shutdown() {
   trap - TERM INT
   echo "iris container stopping"
   stop_services
-  exit 0
+  clean_exit=0
+  for result in "${CHILD_RESULTS[@]}"; do
+    case "$result" in
+      *:0|*:143) ;;
+      *) clean_exit=1 ;;
+    esac
+  done
+  if [ -n "${IRIS_INSTALLER_SHUTDOWN_PROOF:-}" ]; then
+    python3 "$script_dir/installer_shutdown.py" record "${CHILD_RESULTS[@]}" || clean_exit=1
+  fi
+  exit "$clean_exit"
 }
 
 trap on_shutdown TERM INT

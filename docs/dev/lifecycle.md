@@ -7,14 +7,15 @@ SPDX-License-Identifier: Apache-2.0
 # Installer lifecycle development
 
 The current candidate implements same-key instruction certificate renewal and
-guided online signer rotation in the Console, and a single-host Docker
+guided online signer rotation in the Console, and a topology-aware
 cold-backup worker with file verification and isolated extraction. It does not
 yet implement production recovery cutover,
-scheduled retention or split-host/Kubernetes backup adapters. These are still
+scheduled retention. These are still
 release gates, not optional production follow-ups. Scheduled signer preparation,
 device instruction-key rotation and Docker management-token rotation now have
 opt-in adapters. Browser TLS and telemetry credentials have operator-driven UI
-workflows; their schedules remain review reminders. Installer-owned single-Docker
+workflows; their schedules remain review reminders. Installer-owned Docker,
+split Docker and Kubernetes
 deployments also have planned maintenance adapters for management/device TLS,
 peer CA, offline roots, service age identity and seeder credentials. The host UI
 also changes the independent recovery recipient without sending a private
@@ -50,7 +51,7 @@ creates an empty signed revocation list; later approvals preserve the KRL and
 advance the sequence. Each root needs its own signed approval. Status derives
 fresh attested root IDs from current evidence within the 180-day window.
 
-`tools/iris_installer/credential_maintenance.py` owns the single-Docker transaction:
+`tools/iris_installer/credential_maintenance.py` owns the shared transaction:
 independently decrypt both cold-backup sets, stop writers, apply approved bytes,
 restart the server, verify the family, restart Console, then prove authenticated
 management HTTPS from Console. Recovery is explicit, same-ID and normally
@@ -63,7 +64,9 @@ rebuilds both IOx architectures and XR when signing roots change.
 Seeder maintenance runs only tracker and seeder on an isolated Docker network
 with no published ports. It uses a temporary runtime loopback certificate and
 the existing authenticated serving predicate. Normal startup restores canonical
-public announces, and serving is proved again before completion. Public tracker
+public announces, and serving is proved again before completion. Kubernetes uses
+an isolated helper pod and a deny-all NetworkPolicy for the same maintenance
+callback. Public tracker
 validation still refuses loopback outside this explicit maintenance process mode.
 
 The worker accepts fixed UUID/family requests, not browser-provided paths or
@@ -71,6 +74,29 @@ commands. `irisctl maintenance-ui` reaches the same protected Unix socket when
 the Console is stopped. `irisctl custody-ui` handles offline approvals separately.
 Neither UI transports offline private roots. See the
 [operator procedure](../zensical/admin-guide/deployment-rotation.md).
+
+### Topology adapters
+
+`split_deploy.py` pins SSH host/identity custody and the remote Console project.
+Only tier credentials, the public management CA and Console browser identity
+cross that boundary. Capture includes encrypted remote Console custody; rotation
+proves authenticated management access from the actual remote container.
+
+`kube_deploy.py` records the explicit cluster UID/context, namespace ownership,
+PVC identity, intended resource specifications and immutable image references.
+The server remains one replica, with one to eight independent Console consumers.
+`topology_lifecycle.py` bounds PVC reads and candidate writes by paths, digests
+and object identities; mutable private host mirrors live in protected tmpfs.
+The shutdown marker binds pod UID and a fresh process nonce to child exit status.
+Forced pod deletion cannot substitute for stopped-writer proof. Age-identity
+proof checks the restarted PVC rather than trusting a pre-restart local mirror.
+
+The external worker accepts the same fixed requests through deployment-specific
+mutual TLS (`lifecycle_network.py`); its CA and server private key never enter a
+pod. No browser-selected host, path or command is accepted. Scheduled management
+token changes publish overlap to remote consumers through a bounded public job
+ID, then prove current-token use. A failed sync retains overlap and requires
+reconciliation; explicit retirement performs a fresh consumer check.
 
 Recovery-recipient replacement pins the original key for the operation's backup
 and encrypted write plan. The worker's protected `recovery-access.json` retains

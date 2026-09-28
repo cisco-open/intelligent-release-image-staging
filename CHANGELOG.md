@@ -17,6 +17,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Extend the Ubuntu installer candidate to split Docker and Kubernetes with
+  explicit remote custody, cluster/resource ownership, native package builds,
+  topology-aware cold backups and seven deployment credential workflows.
+  Verify every Console consumer, preserve management-token overlap on failed
+  synchronization, and require pod/process-bound shutdown proof for PVC capture.
+  Keep the Kubernetes lifecycle worker outside the cluster behind mutual TLS.
+
 - Add planned single-Docker credential maintenance in the Console for management
   and device TLS, peer CA, offline signing roots, server age identity and seeder
   credentials. Require independently verified cold backups, stopped writers,
@@ -24,7 +31,6 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   roots change; require device removal and re-onboarding for changed trust.
   Package desktop tools for offline key generation/approval, independent recovery
   recipient replacement and host recovery. Preserve access to older backup sets.
-  Split-host and Kubernetes maintenance adapters remain unfinished.
 
 - Add owner-only Console browser TLS request, public CA approval, explicit
   self-signed replacement and recoverable publication with listener reload.

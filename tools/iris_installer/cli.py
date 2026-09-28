@@ -32,13 +32,13 @@ def positive_timeout(value):
 
 def parser():
     result = argparse.ArgumentParser(
-        description="IRIS Ubuntu installer candidate. Single-host source installation; broader qualification in progress.")
+        description="IRIS Ubuntu installer candidate. Explicit Docker or Kubernetes deployment and maintenance.")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("custody-ui", help="open the local offline signing window on the key holder's desktop")
     maintenance = commands.add_parser("maintenance-ui", help="open host-side recovery even while the Console is stopped")
     maintenance.add_argument("--state-dir", type=Path, required=True)
-    install = commands.add_parser("install", help="install a new single-host deployment on Ubuntu 24.04")
-    install.add_argument("--target", choices=("docker", "kubernetes"), default="docker")
+    install = commands.add_parser("install", help="install a new owned deployment from Ubuntu 24.04")
+    install.add_argument("--target", choices=("docker", "docker-split", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
                          default=Path(__file__).resolve().parent.parent / "source")
     install.add_argument("--state-dir", type=Path)
@@ -49,6 +49,26 @@ def parser():
     install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
     install.add_argument("--console-port", type=int, default=8080)
     install.add_argument("--peer-tls", choices=("required", "disabled"), default="required")
+    split = install.add_argument_group('Split Docker: explicit remote Console custody')
+    split.add_argument('--console-ssh-host')
+    split.add_argument('--console-ssh-user')
+    split.add_argument('--console-ssh-port', type=int, default=22)
+    split.add_argument('--console-ssh-key', type=Path)
+    split.add_argument('--console-known-hosts', type=Path)
+    split.add_argument('--console-state-dir')
+    split.add_argument('--management-bind', help='server management interface; defaults to --host')
+    kube = install.add_argument_group('Kubernetes: explicit cluster and a new dedicated namespace')
+    kube.add_argument('--kubeconfig-path', type=Path)
+    kube.add_argument('--kube-context')
+    kube.add_argument('--kube-namespace')
+    kube.add_argument('--kube-storage-class')
+    kube.add_argument('--kube-storage-size', default='20Gi')
+    kube.add_argument('--kube-registry', default='')
+    kube.add_argument('--kube-registry-auth', default='', help='optional protected Docker config.json for the selected registry')
+    kube.add_argument('--kube-console-replicas', type=int, default=1)
+    kube.add_argument('--kube-image-import', choices=('registry', 'k3s'), default='registry')
+    kube.add_argument('--kube-node', default='', help='exact local single-node k3s node for explicit image import')
+    kube.add_argument('--lifecycle-url', help='verified HTTPS endpoint of this deployment host worker')
     install.add_argument("--accept-changes", action="store_true", help="approve Ubuntu dependency installation, source builds and new services")
     resume = commands.add_parser("resume", help="resume without regenerating identity or resetting state")
     resume.add_argument("--state-dir", type=Path, required=True)
@@ -61,7 +81,7 @@ def parser():
     retire.add_argument("--payload", type=Path, required=True)
     retire.add_argument("--root-key", type=Path, required=True)
     retire.add_argument("--output", type=Path, default=Path("keylist.envelope"))
-    backup = commands.add_parser("backup", help="cold encrypted backup of an installer-owned single-host Docker deployment")
+    backup = commands.add_parser("backup", help="cold encrypted backup of an installer-owned deployment")
     backup.add_argument("--state-dir", type=Path, required=True)
     backup.add_argument("--output", type=Path, required=True, help="new backup set under a private 0700 parent")
     backup.add_argument("--recovery-output", type=Path, required=True, help="separate new identity set under a different private 0700 parent")
@@ -72,6 +92,7 @@ def parser():
     worker.add_argument("--recovery-dir", type=Path, required=True)
     worker.add_argument("--recovery-identity", type=Path, help="optional temporary operator-provisioned age identity for verification")
     worker.add_argument("--extract-dir", type=Path, help="optional private isolated recovery workspace")
+    worker.add_argument('--listen-address', help='optional explicit bind address for the recorded Kubernetes mutual-TLS endpoint')
     for command, help_text in (
         ("verify-backup", "authenticate and decrypt all backup files without restoring services"),
         ("extract-backup", "extract verified files into a NEW isolated directory; no service startup or cutover"),
@@ -105,7 +126,7 @@ def install_questions(args, command_parser):
     if missing and not sys.stdin.isatty():
         command_parser.error("interactive installation needs a terminal; otherwise supply --host, --roots-dir and --recovery-recipient")
     if missing:
-        print("Ubuntu installation: dependencies, builds and a new isolated Docker stack.")
+        print("Ubuntu installation: dependencies, builds and a new isolated deployment.")
         print("Private signing roots stay on the custodians' machines. This candidate is not a qualified production release.")
         args.host = args.host or input("Device-facing IPv4 address: ").strip()
         args.roots_dir = args.roots_dir or Path(input("Directory containing the two approved PUBLIC roots: ").strip())

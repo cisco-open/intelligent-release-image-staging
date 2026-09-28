@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Installer-owned single-Docker trust cutover; no arbitrary paths or commands."""
+"""Installer-owned trust cutover; no arbitrary browser paths or commands."""
 
 import hashlib
 import json
@@ -15,11 +15,17 @@ FAMILIES = ('device-tls', 'peer-ca', 'instruction-roots')
 
 def _one_shot(install, code, *arguments):
     source = "import sys; sys.path.insert(0,'/opt/iris/server'); " + code
+    hook = getattr(install, 'maintenance_run', None)
+    if hook is not None:
+        return hook(['python3', '-I', '-B', '-c', source, *arguments], capture=True)
     return install.compose('run', '--rm', '--no-deps', '-T', '--entrypoint', 'python3',
                            'iris', '-I', '-B', '-c', source, *arguments, capture=True)
 
 
 def _stopped(install):
+    hook = getattr(install, 'assert_writers_stopped', None)
+    if hook is not None:
+        return hook()
     ids = install.compose('ps', '--all', '--quiet', 'iris', 'console', capture=True).decode().split()
     if not ids:
         raise InstallError('Cannot prove deployment services are stopped')
@@ -65,6 +71,9 @@ def _sync_roots(install, record):
     # finish always invalidates it before rebuilding or exposing the Console.
     install.journal.document['completed'].setdefault('packages', transition['packages_before'])
     install.journal.save()
+    sync = getattr(install, 'sync_public_roots', None)
+    if sync is not None:
+        sync(record)
 
 
 def apply(install, kind, operation_id):

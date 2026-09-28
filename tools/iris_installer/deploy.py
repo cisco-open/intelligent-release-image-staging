@@ -25,6 +25,7 @@ from .state import InstallError, Journal, atomic_write, regular_bytes
 WAITING_APPROVAL = 20
 OWNER_CLAIM = 21
 PRODUCTION_REVIEW = 22
+BASE_CONFIG_KEYS = {"target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls"}
 
 
 def digest(path):
@@ -68,13 +69,24 @@ def run(command, *, env=None, input=None, timeout=7200, capture=False):
 
 
 def validate_config(config):
-    required = {"target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls"}
+    if isinstance(config, dict) and config.get('target') in ('docker-split', 'kubernetes'):
+        if not BASE_CONFIG_KEYS.issubset(config):
+            raise InstallError('Installation configuration is incomplete or invalid')
+        validate_config(dict({name: config[name] for name in BASE_CONFIG_KEYS}, target='docker'))
+        if config['target'] == 'docker-split':
+            from .split_deploy import validate_split_config
+            validate_split_config(config)
+        else:
+            from .kube_deploy import validate_kube_config
+            validate_kube_config(config)
+        return
+    required = BASE_CONFIG_KEYS
     if (not isinstance(config, dict) or set(config) != required
             or type(config.get("console_port")) is not int
             or any(not isinstance(config.get(key), str) for key in required - {"console_port"})):
         raise InstallError("Installation configuration is incomplete or invalid")
     if config["target"] != "docker":
-        raise InstallError("Kubernetes deployment is not implemented in this candidate; no changes made")
+        raise InstallError("Unsupported deployment target; no changes made")
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", config["instance"]):
         raise InstallError("Instance name must start with a letter and contain lowercase letters/digits/hyphens")
     for key in ("host", "console_bind"):
@@ -409,12 +421,35 @@ def snapshot(source, destination):
     return manifest
 
 
+def installation(journal, runner=None):
+    """Select only a recorded, validated deployment adapter; never infer context."""
+    validate_config(journal.document['config'])
+    target = journal.document['config']['target']
+    if target == 'docker-split':
+        from .split_deploy import SplitDockerInstall
+        return SplitDockerInstall(journal, runner=runner or run)
+    if target == 'kubernetes':
+        from .kube_deploy import KubeInstall
+        return KubeInstall(journal, runner=runner or run)
+    return DockerInstall(journal) if runner is None else DockerInstall(journal, runner=runner)
+
+
 def start(args):
     if os.geteuid() != 0:
         raise InstallError("Run the installer with sudo; dependency and service setup require root")
     ubuntu.check_platform()
     config = {name: getattr(args, name) for name in (
         "target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls")}
+    if args.target == 'docker-split':
+        from .split_deploy import SPLIT_FIELDS
+        config.update({name: getattr(args, name) for name in SPLIT_FIELDS})
+        config['management_bind'] = config['management_bind'] or config['host']
+        for name in ('console_ssh_key', 'console_known_hosts'):
+            config[name] = str(config[name]) if config[name] is not None else ''
+    elif args.target == 'kubernetes':
+        from .kube_deploy import FIELDS
+        config.update({name: getattr(args, name) for name in FIELDS})
+        config['kubeconfig_path'] = str(config['kubeconfig_path']) if config['kubeconfig_path'] is not None else ''
     validate_config(config)
     roots = read_roots(args.roots_dir)
     if not args.accept_changes:
@@ -426,7 +461,15 @@ def start(args):
         if any(p.name != "lock" for p in journal.directory.iterdir()):
             raise InstallError("State directory is not empty; refusing to adopt or overwrite it")
         ubuntu.provision(run)
-        port_preflight(config)
+        if config['target'] == 'docker-split':
+            from .split_deploy import preflight
+            preflight(config, runner=run)
+        elif config['target'] == 'kubernetes':
+            from .kube_deploy import preflight
+            ubuntu.provision_kubernetes_client(run)
+            preflight(config, runner=run)
+        else:
+            port_preflight(config)
         # Refuse adoption, even if an old project's containers are stopped.
         for kind in ("container", "volume", "network"):
             command = ["docker", kind, "ls", "-q"]
@@ -446,7 +489,7 @@ def start(args):
                             "root_digests": {name: hashlib.sha256(data).hexdigest() for name, data in roots.items()},
                             "completed": {}, "state": "INITIALIZED"}
         journal.save()
-        return DockerInstall(journal).resume()
+        return installation(journal).resume()
 
 
 def resume(args):
@@ -455,4 +498,4 @@ def resume(args):
     with Journal(args.state_dir).locked() as journal:
         if journal.document is None:
             raise InstallError("No installation journal exists")
-        return DockerInstall(journal).resume(args.certificate)
+        return installation(journal).resume(args.certificate)

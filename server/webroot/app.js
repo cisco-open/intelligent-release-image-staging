@@ -6474,11 +6474,14 @@
     var family = deploymentField('family').value, trust = ['device-tls', 'peer-ca', 'instruction-roots'].includes(family);
     var item = deploymentTrustItem(), state = item ? item.state : 'unavailable';
     var busyJob = deploymentRotation && deploymentRotation.jobs.some(function (job) { return ['running', 'recovery-required'].includes(job.state); });
-    deploymentField('worker').textContent = deploymentRotation ? deploymentRotation.note : 'Worker state unavailable. Refresh before starting maintenance.';
+    var topologyLabels = {'single-docker': 'Docker on one host', 'split-docker': 'Docker on separate hosts', 'kubernetes': 'Kubernetes'};
+    deploymentField('worker').textContent = deploymentRotation ?
+      (topologyLabels[deploymentRotation.target] ? 'Deployment: ' + topologyLabels[deploymentRotation.target] + '. ' : '') + deploymentRotation.note :
+      'Worker state unavailable. Refresh before starting maintenance.';
     deploymentField('state').textContent = trust ? 'Trust request: ' + state.replaceAll('-', ' ') + '. Publication requires stopped writers and confirmed device removal.' :
       family === 'age-identity' ? 'Replace the server encryption identity and retain the independently held recovery recipient. Existing backups keep their original recovery requirements.' :
       family === 'seeder-announce' ? 'Pause normal writers while an isolated tracker and seeder verify the replacement credential against published torrents.' :
-      'Replace the internal TLS key and certificate, update the local Console trust, and verify an authenticated connection.';
+      'Replace the internal TLS key and certificate, update Console trust, and verify authenticated connections from every deployed Console.';
     deploymentField('trust').hidden = !trust;
     deploymentField('tls').hidden = family !== 'device-tls';
     deploymentField('roots').hidden = family !== 'instruction-roots';

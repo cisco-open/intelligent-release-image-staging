@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stopped-writer credential maintenance for installer-owned single Docker.
+"""Stopped-writer credential maintenance for installer-owned deployments.
 
 The independently decrypted backup is a recovery prerequisite, not an automatic
 rollback: a failed operation stays stopped until the same approved operation is
@@ -76,6 +76,9 @@ def _memory(install):
 
 
 def _stop(install, containers, *, recovering_clean_operation=False):
+    hook = getattr(install, 'stop_writers', None)
+    if hook is not None:
+        return hook(containers, recovering_clean_operation=recovering_clean_operation)
     for container in containers:  # Console first, server last.
         record, = json.loads(install.command(
             ['docker', 'container', 'inspect', container['id']], capture=True))
@@ -91,6 +94,14 @@ def _stop(install, containers, *, recovering_clean_operation=False):
 
 def _consumer_proof(install):
     """A real authenticated, CA/hostname-verified request FROM the Console."""
+    hook = getattr(install, 'lifecycle_consumer_proof', None)
+    if hook is not None:
+        result = hook()
+        if (not isinstance(result, dict) or result.get('management_https') != 'verified'
+                or not isinstance(result.get('certificate_sha256'), str)
+                or not re.fullmatch('[0-9a-f]{64}', result.get('certificate_sha256', ''))):
+            raise InstallError('Management consumer proof was not returned')
+        return result
     code = '''import os,sys,ssl,http.client,hashlib,json
 sys.path.insert(0,'/opt/iris/server')
 import tier_auth
@@ -124,6 +135,9 @@ def _pin_runtime(install):
     A private, short-lived Compose projection prevents a concurrent tag change
     between inspection and container creation from selecting different code.
     """
+    hook = getattr(install, 'pin_runtime', None)
+    if hook is not None:
+        return hook()
     images = install.journal.document['completed'].get('images')
     if not isinstance(images, dict) or not images:
         raise InstallError('Recorded deployment images are required for maintenance')
@@ -142,6 +156,19 @@ def _pin_runtime(install):
             return install.command(['docker', 'compose', '-p', install.config['instance'],
                                     '-f', path, *args], **kwargs)
     install.compose = compose
+
+
+def _installation(journal):
+    if journal.document['config'].get('target', 'docker') == 'docker':
+        return DockerInstall(journal)
+    from .deploy import installation
+    return installation(journal)
+
+
+def _before_console_start(install):
+    hook = getattr(install, 'before_console_start', None)
+    if hook is not None:
+        hook()
 
 
 class Transaction:
@@ -195,7 +222,8 @@ class Transaction:
                 or keys['metadata'].get('instance_id') != install.journal.document['id']
                 or data['metadata'].get('scope') != 'managed-deployment-files'
                 or keys['metadata'].get('scope') != 'identity-recovery'
-                or any(value['metadata'].get('target') != 'single-docker' for value in (data, keys))):
+                or any(value['metadata'].get('target') != backup.target_name(install)
+                       for value in (data, keys))):
             raise InstallError('Recovery sets do not belong to this installation')
 
     def _retry_backup(self, install):
@@ -220,7 +248,7 @@ class Transaction:
             pre_apply_check=None):
         # Do not hold Journal's lock across backup.create (it acquires its own).
         with Journal(self.base).locked() as journal:
-            install = DockerInstall(journal)
+            install = _installation(journal)
             _pin_runtime(install)
             recipient = install.command(['age-keygen', '-y', self.identity], capture=True).decode().strip()
             service = install.command(['age-keygen', '-y', self.base / 'age.txt'], capture=True).decode().strip()
@@ -275,7 +303,7 @@ class Transaction:
                     recovery_output=str(self.recoveries / backup_id), allow_downtime=True))
             # Partial sets are never deleted or silently overwritten.
         with Journal(self.base).locked() as journal:
-            install = DockerInstall(journal)
+            install = _installation(journal)
             _pin_runtime(install)
             self._backup_proof(install)
             install.credential_transaction = self
@@ -295,6 +323,9 @@ class Transaction:
                 _stop(install, containers, recovering_clean_operation=(
                     recovery and self.record.get('initial_clean_stop') is True))
                 self.record['initial_clean_stop'] = True
+                capture = getattr(install, 'prepare_credential_sources', None)
+                if capture is not None:
+                    capture(self.sources)
                 if pre_apply_check is not None and self.record.get('mutations_admitted') is False:
                     try:
                         pre_apply_check(install, self.kind, self.id)
@@ -304,8 +335,12 @@ class Transaction:
                         # restored to let the owner resolve a pending approval
                         # or device drain. Never take this path after apply.
                         self.save('preflight-refused')
+                        before_server = getattr(install, 'before_server_start', None)
+                        if before_server is not None:
+                            before_server()
                         install.compose('up', '-d', '--no-build', '--no-deps', '--force-recreate',
                                         '--wait', '--wait-timeout', '180', 'iris')
+                        _before_console_start(install)
                         install.compose('up', '-d', '--no-build', '--no-deps', '--force-recreate',
                                         '--wait', '--wait-timeout', '180', 'console')
                         _consumer_proof(install)
@@ -315,16 +350,23 @@ class Transaction:
                 self.save('applying')
                 apply(install, self.kind, self.id)
                 self.save('restarting-server')
+                before_server = getattr(install, 'before_server_start', None)
+                if before_server is not None:
+                    before_server()
                 install.compose('up', '-d', '--no-build', '--no-deps', '--force-recreate',
                                 '--wait', '--wait-timeout', '180', 'iris')
                 proof = finish(install, self.kind, self.id) or {}
                 self.save('restarting-console')
+                _before_console_start(install)
                 install.compose('up', '-d', '--no-build', '--no-deps', '--force-recreate',
                                 '--wait', '--wait-timeout', '180', 'console')
                 consumer = _consumer_proof(install)
                 if self.record.get('expected_management_sha256') not in (None, consumer['certificate_sha256']):
                     raise InstallError('Console reached an unexpected management certificate')
                 proof.update(consumer)
+                cleanup = getattr(install, 'cleanup_snapshot_sources', None)
+                if cleanup is not None:
+                    cleanup(self.sources)
                 self.record['result'] = dict(state='rotated', kind=self.kind,
                                             backup_id=self.record['backup_id'], proof=proof)
                 self.save('rotated')
@@ -337,12 +379,16 @@ class Transaction:
                 try:
                     install.verify_resource_ownership()
                     install.compose('stop', '--timeout', '120', 'console', 'iris', timeout=300)
+                    _maintenance_cleanup(install, self)
                 finally:
                     self.save('recovery-required')
                 raise
 
     def _reconcile_compose(self, install):
         """Repair only a journal checkpoint interrupted after an approved write."""
+        hook = getattr(install, 'reconcile_credential_configuration', None)
+        if hook is not None:
+            return hook(self)
         path = self.directory / 'write-plan.json'
         if not path.exists():
             return
@@ -412,8 +458,14 @@ class Transaction:
             decoded.append((item, content))
         for item, content in decoded:
             path = Path(item['path'])
+            publish = getattr(self.install, 'publish_credential_file', None)
+            if publish is not None:
+                publish(path, item['before'], content, item['mode'], item['uid'], item['gid'])
             atomic_write(path, content, item['mode'])
             os.chown(path, item['uid'], item['gid'])
+        finalize = getattr(self.install, 'finalize_credential_configuration', None)
+        if finalize is not None:
+            finalize(self)
         # A modified deployment remains an explicitly installer-owned input.
         self.install.journal.document['completed']['prepared'] = digest(self.install.compose_file)
         if self.kind == 'age-recovery':
@@ -433,7 +485,11 @@ for family in u.FAMILIES:
  pending=u._load(family)
  if pending and pending['state'] not in ('published','cancelled'): raise SystemExit(2)
 '''
-    install.compose('run', '--rm', '--no-deps', '-T', 'iris', 'python3', '-I', '-B', '-c', code)
+    reader = getattr(install, 'run_readonly', None)
+    if reader is not None:
+        reader(['python3', '-I', '-B', '-c', code])
+    else:
+        install.compose('run', '--rm', '--no-deps', '-T', 'iris', 'python3', '-I', '-B', '-c', code)
 
 
 def _age_apply(install, kind, operation_id):
@@ -562,8 +618,12 @@ def _management_apply(install, kind, operation_id):
     config = Path(tx.sources['volume-iris-config'])
     with _memory(install) as scratch:
         key, cert = scratch / 'key', scratch / 'cert'
+        names = 'DNS:iris,DNS:iris-server,DNS:localhost,IP:127.0.0.1,IP:' + install.config['host']
+        san = getattr(install, 'management_tls_san', None)
+        if san is not None:
+            names = san()
         install.command(['openssl', 'req', '-x509', '-newkey', 'rsa:3072', '-nodes', '-days', '397',
-            '-subj', '/CN=iris', '-addext', 'subjectAltName=DNS:iris,DNS:iris-server,DNS:localhost,IP:127.0.0.1,IP:' + install.config['host'],
+            '-subj', '/CN=iris', '-addext', 'subjectAltName=' + names,
             '-keyout', key, '-out', cert], timeout=60)
         compose = json.loads(regular_bytes(install.compose_file))
         env = compose['services']['iris']['environment']
@@ -586,16 +646,23 @@ def _management_apply(install, kind, operation_id):
 def _finish(install, kind, operation_id):
     tx = install.credential_transaction
     if kind in ('age-identity', 'age-recovery'):
-        public = install.execute('age-keygen', '-y', '/run/secrets/iris_age_key', capture=True).decode().strip()
+        public = install.execute('age-keygen', '-y', getattr(install, 'service_identity_path', '/run/secrets/iris_age_key'), capture=True).decode().strip()
         if public != tx.record.get('service_recipient'):
             raise InstallError('Restarted server did not consume the approved age identity')
         independent = _replacement_identity(install) if kind == 'age-recovery' else tx.identity
-        for path in Path(tx.sources['volume-iris-config']).rglob('*.age'):
-            _safe_file(path)
-            value = regular_bytes(path, MAX_SECRET)
-            if _decrypt(install, value, install.base / 'age.txt') != _decrypt(install, value, independent):
-                raise InstallError('Restarted encrypted state is not independently recoverable')
-        result = {'age_files': tx.record['age_files'], 'service_recipient': public,
+        verifier = getattr(install, 'verify_live_age', None)
+        if verifier is not None:
+            age_files = verifier(tx, independent)
+            if type(age_files) is not int or age_files <= 0:
+                raise InstallError('Restarted encrypted state verification returned no files')
+        else:
+            for path in Path(tx.sources['volume-iris-config']).rglob('*.age'):
+                _safe_file(path)
+                value = regular_bytes(path, MAX_SECRET)
+                if _decrypt(install, value, install.base / 'age.txt') != _decrypt(install, value, independent):
+                    raise InstallError('Restarted encrypted state is not independently recoverable')
+            age_files = tx.record['age_files']
+        result = {'age_files': age_files, 'service_recipient': public,
                   'independent_decryption': 'verified'}
         if kind == 'age-recovery':
             result['recovery_recipient'] = tx.record['recovery_recipient_after']
@@ -612,10 +679,17 @@ def _capability(install, marker):
     # Running a fixed read-only command bypasses normal entrypoint startup.
     # An older installed image must refuse BEFORE starting unfrozen services.
     code = "from pathlib import Path; import sys; raise SystemExit(0 if sys.argv[1] in Path('/opt/iris/server/docker-entrypoint.sh').read_text() else 2)"
-    install.compose('run', '--rm', '--no-deps', '-T', 'iris', 'python3', '-I', '-B', '-c', code, marker)
+    reader = getattr(install, 'run_readonly', None)
+    if reader is not None:
+        reader(['python3', '-I', '-B', '-c', code, marker])
+    else:
+        install.compose('run', '--rm', '--no-deps', '-T', 'iris', 'python3', '-I', '-B', '-c', code, marker)
 
 
 def _maintenance_cleanup(install, tx):
+    hook = getattr(install, 'maintenance_cleanup', None)
+    if hook is not None:
+        return hook(tx)
     path = tx.directory / 'maintenance.json'
     if not path.exists():
         return
@@ -668,6 +742,9 @@ print(json.dumps({'info_hashes':sorted(expected),'credential_changed':True,'isol
 
 
 def _seeder_apply(install, kind, operation_id):
+    hook = getattr(install, 'seeder_maintenance_apply', None)
+    if hook is not None:
+        return hook(install.credential_transaction)
     tx = install.credential_transaction
     _capability(install, 'IRIS_MAINTENANCE_SEEDER_ONLY')
     path = tx.directory / 'maintenance.json'

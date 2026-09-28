@@ -450,6 +450,12 @@ try {
     families: ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'seeder-announce'], note: 'Verified backup required; downtime expected.'};
   await page.locator('#deployment-rotation-refresh').click();
   await page.waitForFunction(() => !document.getElementById('deployment-rotation-apply').disabled);
+  for (const [target, label] of [['split-docker', 'Docker on separate hosts'], ['kubernetes', 'Kubernetes']]) {
+    deploymentFixture.target = target;
+    await page.locator('#deployment-rotation-refresh').click();
+    await page.locator('#deployment-rotation-worker').getByText('Deployment: ' + label + '.', {exact: false}).waitFor();
+    await page.waitForFunction(() => !document.getElementById('deployment-rotation-apply').disabled);
+  }
   await page.locator('#deployment-rotation-family').selectOption('peer-ca');
   assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
   page.once('dialog', dialog => dialog.accept());

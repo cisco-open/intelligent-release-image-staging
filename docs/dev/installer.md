@@ -84,15 +84,18 @@ The packaged `irisctl custody-ui` desktop application generates encrypted offlin
 roots and approves public requests without uploading private roots. See
 [offline approval](../zensical/install/offline-approval.md).
 
-Kubernetes deployment, split Docker, a prebuilt/offline kit,
+The candidate also has explicit `docker-split` and `kubernetes` targets; see the
+[managed installation procedure](../zensical/install/managed-package.md).
+These adapters require their own live qualification; a passing single-Docker
+test does not qualify another topology. A prebuilt/offline kit,
 fully recoverable initial reservation, upgrade/uninstall and automated recovery
-cutover remain unfinished. Single-host cold backup, verification and isolated
+cutover remain unfinished. Topology-aware cold backup, verification and isolated
 extraction are implemented as described in [Lifecycle development](lifecycle.md).
 The same scoped worker supports planned credential maintenance, with a verified
 backup prerequisite and `irisctl maintenance-ui` for interrupted-operation
 recovery when the Console is stopped.
-The Kubernetes doctor below is diagnostic support, not deployment
-support. Do not use this candidate as evidence that those release gates passed.
+The Kubernetes doctor below is a separate read-only diagnostic command.
+Do not use this candidate as evidence that all production release gates passed.
 
 ## Implemented: native-package runtime checks
 

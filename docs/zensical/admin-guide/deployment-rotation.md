@@ -8,9 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 
 Open **Settings > Certificates & keys > Rotate deployment trust and keys**.
 Credential replacement uses the Ubuntu installer's host worker. It supports an
-installer-owned, single-host Docker deployment. Split Docker and Kubernetes
-do not yet have this maintenance adapter; their replacement controls remain unavailable.
-Use the [topology-specific procedures](rotations.md) for those deployments.
+installer-owned Docker, split Docker and Kubernetes deployments. The worker
+reports the recorded topology and available maintenance families; it does not
+adopt an existing manually provisioned deployment. Use the
+[topology-specific procedures](rotations.md) for deployments without that worker.
 Root attestations use the Console directly and do not require this host worker.
 
 ## Before starting
@@ -27,7 +28,7 @@ available for recovery. Do not delete an operation journal to clear an error.
 
 | Family | What changes | Required follow-through |
 | --- | --- | --- |
-| Console-to-server TLS identity | A separate encrypted management key and certificate; local Console trust | Worker verifies an authenticated, trusted connection from the Console. |
+| Console-to-server TLS identity | A separate encrypted management key and certificate; deployed Console trust | Worker verifies authenticated, trusted connections from the remote Console or every Console pod. |
 | Device-pinned server TLS identity | Server key, certificate and distributed onboarding pin | Remove IRIS deployments first, then onboard and verify devices. |
 | Private swarm issuing CA | Encrypted peer issuer and newly issued origin identity | Remove IRIS deployments first, then onboard and verify peers. |
 | Offline instruction signing roots | Both public roots, approved online certificate and preserved revocation list | Approve offline, remove deployments, rebuild packages, then onboard devices. |

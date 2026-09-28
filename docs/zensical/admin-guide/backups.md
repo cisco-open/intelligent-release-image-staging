@@ -9,7 +9,8 @@ SPDX-License-Identifier: Apache-2.0
 ## Console backup controls
 
 **Settings → Backup & restore** connects to the installer host's lifecycle
-worker. For an installer-owned single-host Docker deployment, **Back up now**
+worker. For installer-owned Docker, split Docker and Kubernetes deployments,
+**Back up now**
 stops the server and Console, captures encrypted data and a separate identity
 recovery set, then starts the services that were running. Confirm the downtime
 before proceeding. The host worker continues while the Console is unavailable.
@@ -24,12 +25,19 @@ copies and the trusted backup public key off the deployment host.
 
 !!! warning "Installer candidate scope"
 
-    These controls currently support installer-owned single-host Docker only.
+    These controls require an installer-owned deployment and its recorded topology.
     Isolated extraction does not start a restored deployment or authorize
-    cutover. Split-host Docker, Kubernetes, scheduled retention and automated
+    cutover. Scheduled retention and automated
     recovery cutover remain under development. Use the layout-specific manual
     procedure below for existing installations. Worker setup and qualification
     are documented in the [installer lifecycle development guide](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md).
+
+Split Docker also captures encrypted Console custody from the recorded remote
+host. Kubernetes stops every Console replica and the server, checks clean writer
+shutdown evidence tied to the exact pod and process start, then captures the
+server PVC. A vanished or forcibly terminated pod is not sufficient evidence.
+The service age identity remains in the separate recovery set. The external
+worker and its transport credentials must remain available during downtime.
 
 ## What to back up
 

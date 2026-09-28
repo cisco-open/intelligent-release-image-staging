@@ -2844,7 +2844,7 @@ def _success(route):
                     _schedule_object({'request_id': {'type': 'string', 'format': 'uuid'}, 'root_id': {'type': 'string'},
                                       'payload': {'type': 'string'}})]}
     elif suffix == '/settings/deployment-rotation' and route.method == 'GET':
-        schema = _schedule_object({'available': {'type': 'boolean'}, 'target': {'enum': ['single-docker', 'unavailable']},
+        schema = _schedule_object({'available': {'type': 'boolean'}, 'target': {'enum': ['single-docker', 'split-docker', 'kubernetes', 'unavailable']},
             'can_rotate': {'type': 'boolean'}, 'note': {'type': 'string'},
             'families': {'type': 'array', 'items': {'enum': ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce']}},
             'jobs': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
@@ -2854,6 +2854,9 @@ def _success(route):
                     'finished_at': {'type': 'integer'}, 'detail': {'type': 'string'},
                     'proof': {'type': ['object', 'null'], 'additionalProperties': False, 'properties': {
                         'management_https': {'const': 'verified'}, 'certificate_sha256': {'type': 'string'},
+                        'console_consumers': {'type': 'array', 'minItems': 1, 'items': _schedule_object({
+                            'pod_uid': {'type': 'string'}, 'certificate_sha256': {'type': 'string'},
+                            'management_https': {'const': 'verified'}})},
                         'dedicated_management_key': {'const': 'verified'}, 'age_files': {'type': 'integer'},
                         'service_recipient': {'type': 'string'}, 'recovery_recipient': {'type': 'string'},
                         'independent_decryption': {'const': 'verified'},

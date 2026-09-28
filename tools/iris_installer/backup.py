@@ -2,10 +2,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cold backups of installer-owned single-host Docker deployments.
+"""Cold backups of installer-owned Docker and Kubernetes deployments.
 
 The two encrypted sets preserve data and the service identity separately. Restore
 currently verifies/extracts isolated files; it never authorizes fleet cutover.
+Topology adapters resolve owned storage and prove stopped writers before capture.
 """
 
 import json
@@ -51,6 +52,11 @@ def initialize(journal, installation):
 
 
 def capture_plan(installation):
+    hook = getattr(installation, 'capture_plan', None)
+    return hook() if hook is not None else docker_capture_plan(installation)
+
+
+def docker_capture_plan(installation, *, services=('console', 'iris')):
     """Resolve exact existing resources. Refuse adoption or unaccounted mounts."""
     journal = installation.journal
     completed = journal.document['completed']
@@ -61,8 +67,8 @@ def capture_plan(installation):
     if digest(installation.compose_file) != completed['prepared']:
         raise InstallError("Deployment configuration changed; backup adoption is not supported")
     compose = json.loads(regular_bytes(installation.compose_file))
-    if set(compose['services']) != {'iris', 'console'}:
-        raise InstallError("Only the installer-owned single-host layout is supported")
+    if set(compose['services']) != set(services):
+        raise InstallError("Deployment services differ from the owned topology")
     sources = {name: installation.base / name for name in ('source', 'roots', 'artifacts', 'images')}
     sources.update({'deployment': installation.compose_file,
                     'environment': installation.base / 'compose.env',
@@ -80,7 +86,7 @@ def capture_plan(installation):
         sources[member] = Path(record['Mountpoint'])
         volumes[name] = str(sources[member])
     containers = []
-    for service in ('console', 'iris'):
+    for service in services:
         record, = json.loads(installation.command(
             ['docker', 'container', 'inspect', compose['services'][service]['container_name']], capture=True))
         if (record['Config'].get('Labels', {}).get('com.cisco.iris.installer') != journal.document['id']
@@ -115,6 +121,9 @@ def capture_plan(installation):
 
 def capacity_preflight(installation, sources, output, recovery):
     """Reserve an estimate plus headroom BEFORE exporting images or stopping IRIS."""
+    hook = getattr(installation, 'backup_capacity_preflight', None)
+    if hook is not None:
+        return hook(sources, output, recovery)
     size, count = 0, 0
     state_root = sources.get('volume-iris-state')
     live_control = Path(state_root) / 'iox/control.sock' if state_root is not None else None
@@ -156,6 +165,54 @@ def capacity_preflight(installation, sources, output, recovery):
             raise InstallError("Insufficient backup space including image export and one GiB of headroom")
 
 
+def _installation(journal):
+    if journal.document['config'].get('target', 'docker') == 'docker':
+        return DockerInstall(journal)
+    from .deploy import installation
+    return installation(journal)
+
+
+def target_name(installation):
+    target = installation.config.get('target', 'docker')
+    return {'docker': 'single-docker', 'docker-split': 'split-docker'}.get(target, target)
+
+
+def stop_writers(installation, containers, *, recovering_clean_operation=False):
+    hook = getattr(installation, 'stop_writers', None)
+    if hook is not None:
+        return hook(containers, recovering_clean_operation=recovering_clean_operation)
+    for container in containers:
+        record, = json.loads(installation.command(
+            ['docker', 'container', 'inspect', container['id']], capture=True))
+        if record['State']['Running']:
+            installation.command(['docker', 'stop', '--time', '120', container['id']], timeout=180)
+        record, = json.loads(installation.command(
+            ['docker', 'container', 'inspect', container['id']], capture=True))
+        state = record['State']
+        if state['Running'] or (not recovering_clean_operation and (
+                state.get('OOMKilled') or state.get('ExitCode') not in (0, 143))):
+            raise InstallError('Maintenance requires cleanly stopped writers')
+
+
+def restart_writer(installation, container):
+    hook = getattr(installation, 'restart_writer', None)
+    if hook is not None:
+        return hook(container)
+    installation.command(['docker', 'start', container['id']])
+    deadline = time.monotonic() + 180
+    while True:
+        record, = json.loads(installation.command(
+            ['docker', 'container', 'inspect', container['id']], capture=True))
+        state = record['State']
+        if not state['Running']:
+            raise InstallError('Service exited after backup restart')
+        if state.get('Health', {}).get('Status', 'healthy') == 'healthy':
+            return
+        if time.monotonic() >= deadline:
+            raise InstallError('Service health did not recover after backup')
+        time.sleep(1)
+
+
 def create(args):
     if os.geteuid() != 0:
         raise InstallError("Run managed deployment backup with sudo")
@@ -172,21 +229,25 @@ def create(args):
     with Journal(args.state_dir).locked() as journal:
         if journal.document is None:
             raise InstallError("No installer-owned deployment was found")
-        installation = DockerInstall(journal)
+        installation = _installation(journal)
         sources, volumes, containers = capture_plan(installation)
         capacity_preflight(installation, sources, output, recovery)
         signer = initialize(journal, installation)
         recipient = journal.document['config']['recovery_recipient']
         set_id = str(uuid.uuid4())
         metadata = {'backup_set_id': set_id, 'instance_id': journal.document['id'],
-                    'target': 'single-docker', 'volumes': volumes,
+                    'target': target_name(installation), 'volumes': volumes,
                     'image_ids': journal.document['completed']['images'],
                     'scope': 'managed-deployment-files', 'cutover_permitted': False}
         # Export immutable service images while the deployment is still running.
         with tempfile.TemporaryDirectory(prefix='backup-images-', dir=journal.directory) as temporary:
             images = Path(temporary) / 'images.tar'
-            installation.command(['docker', 'image', 'save', '-o', images,
-                                  *sorted(set(metadata['image_ids'].values()))])
+            export = getattr(installation, 'backup_export_images', None)
+            if export is not None:
+                export(images)
+            else:
+                installation.command(['docker', 'image', 'save', '-o', images,
+                                      *sorted(set(metadata['image_ids'].values()))])
             images.chmod(0o600)
             sources['container-images'] = images
             status = {'state': 'stopping', 'backup_set_id': set_id,
@@ -195,16 +256,10 @@ def create(args):
             atomic_write(status_path, json.dumps(status).encode())
             restart_errors = []
             try:
-                for container in containers:
-                    if container['running']:
-                        installation.command(['docker', 'stop', '--time', '120', container['id']])
-                for container in containers:
-                    record, = json.loads(installation.command(
-                        ['docker', 'container', 'inspect', container['id']], capture=True))
-                    if record['State']['Running']:
-                        raise InstallError("A deployment writer is still running")
-                    if record['State'].get('OOMKilled') or record['State'].get('ExitCode') not in (0, 143):
-                        raise InstallError("A deployment service did not stop cleanly; consistent capture refused")
+                stop_writers(installation, containers)
+                extras = getattr(installation, 'capture_backup_extras', None)
+                if extras is not None:
+                    extras(sources)
                 backup_archive.create({'service-identity': installation.base / 'age.txt',
                                        'backup-signer': signer}, recovery, recipient, signer,
                                       metadata=dict(metadata, scope='identity-recovery'))
@@ -219,19 +274,7 @@ def create(args):
                 for container in reversed(containers):
                     if container['running']:
                         try:
-                            installation.command(['docker', 'start', container['id']])
-                            deadline = time.monotonic() + 180
-                            while True:
-                                record, = json.loads(installation.command(
-                                    ['docker', 'container', 'inspect', container['id']], capture=True))
-                                state = record['State']
-                                if not state['Running']:
-                                    raise InstallError("Service exited after backup restart")
-                                if state.get('Health', {}).get('Status', 'healthy') == 'healthy':
-                                    break
-                                if time.monotonic() >= deadline:
-                                    raise InstallError("Service health did not recover after backup")
-                                time.sleep(1)
+                            restart_writer(installation, container)
                         except (InstallError, OSError):
                             restart_errors.append(container['service'])
                 status['restart_required'] = restart_errors
@@ -239,6 +282,9 @@ def create(args):
                 atomic_write(status_path, json.dumps(status).encode())
             if restart_errors:
                 raise InstallError("Backup captured, but service restart needs attention")
+            cleanup = getattr(installation, 'cleanup_snapshot_sources', None)
+            if cleanup is not None:
+                cleanup(sources)
         print('Captured encrypted deployment and separate identity recovery sets: ' + set_id)
         print('Pin the backup signer public key outside this host: ' + str(signer) + '.pub')
         print('Capture is not a verified restore. Verify both sets using the independently held recovery identity.')

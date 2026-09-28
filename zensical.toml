@@ -37,6 +37,7 @@ nav = [
     ] },
     { "Deploy the server" = [
       { "One Docker host" = "install/one-docker-host.md" },
+      { "Managed installer candidate" = "install/managed-package.md" },
       { "Separate Docker hosts" = "install/separate-docker-hosts.md" },
       { "Kubernetes" = "install/kubernetes.md" },
     ] },

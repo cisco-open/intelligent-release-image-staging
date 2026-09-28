@@ -76,6 +76,29 @@ def _fingerprint(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def _sync_management_consumers(job):
+    """Require topology-owned publication/proof before reporting or retiring.
+
+    The single-host shared-volume layout retains its existing confirmation
+    boundary. Split Docker and Kubernetes must prove every owned Console using
+    the replacement, not merely authenticate one request with the overlap.
+    """
+    target = os.environ.get('IRIS_INSTALLER_TARGET', 'docker')
+    if target == 'docker':
+        return
+    if target not in ('docker-split', 'kubernetes'):
+        raise MaintenanceError('Unknown installer topology; management publication refused')
+    import lifecycle_client
+    try:
+        proof = lifecycle_client.call({'action': 'sync-management', 'request_id': job['id']})
+    except lifecycle_client.LifecycleUnavailable:
+        raise MaintenanceError('Management overlap retained. Restore the deployment worker, then reconcile this operation.') from None
+    if (not isinstance(proof, dict) or set(proof) != {'request_id', 'current_sha256', 'consumers_verified'}
+            or proof['request_id'] != job['id'] or proof['current_sha256'] != job['after']
+            or type(proof['consumers_verified']) is not int or proof['consumers_verified'] < 1):
+        raise MaintenanceError('Every owned Console must prove the replacement management credential before retirement')
+
+
 class Maintenance:
     def __init__(self, directory=None, *, now=None, adapter=None):
         self.directory = Path(directory or os.environ.get('IRIS_STATE', '/srv/state')) / 'key-maintenance'
@@ -219,6 +242,10 @@ class Maintenance:
                 if previous is None or _fingerprint(previous) != job['before']:
                     raise MaintenanceError('Management credential authority changed')
                 job['after'] = _fingerprint(current)
+                checkpoint()  # Worker publication is bound to this durable intent.
+                _sync_management_consumers(job)
+            if os.environ.get('IRIS_INSTALLER_TARGET', 'docker') in ('docker-split', 'kubernetes'):
+                return 'verification-required', 'Replacement published and verified on every installer-owned Console. Confirm retirement after your checks.'
             return 'verification-required', 'New management credential active. Update and verify every Console before retiring overlap.'
         if family == 'device-instruction':
             device = job['target']
@@ -336,7 +363,10 @@ class Maintenance:
                     current, previous = tier_auth.load_pair(*module._paths())
                     if (job['before'] is not None and previous is not None
                             and _fingerprint(previous) == job['before'] and _fingerprint(current) != job['before']):
-                        job.update(after=_fingerprint(current), state='verification-required',
+                        job.update(after=_fingerprint(current))
+                        self.save(data)
+                        _sync_management_consumers(job)
+                        job.update(state='verification-required',
                             detail='Replacement and overlap recovered. Verify every Console before retiring overlap.')
                     elif job['before'] is not None and _fingerprint(current) == job['before']:
                         job.update(state='cancelled', detail='Original credential still active; interrupted rotation cancelled.')
@@ -351,6 +381,7 @@ class Maintenance:
                             or not hmac.compare_digest(current, presented)
                             or previous is not None and _fingerprint(previous) != job['before']):
                         raise MaintenanceError('Use the replacement credential and verify all Console copies before retirement')
+                    _sync_management_consumers(job)
                     module._retire_previous_locked()
                 job.update(state='completed', detail='Previous management credential retired after current-credential proof and operator confirmation.')
             else:

@@ -32335,6 +32335,8 @@
                     "target": {
                       "enum": [
                         "single-docker",
+                        "split-docker",
+                        "kubernetes",
                         "unavailable"
                       ]
                     },
@@ -32407,6 +32409,30 @@
                               },
                               "certificate_sha256": {
                                 "type": "string"
+                              },
+                              "console_consumers": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "pod_uid": {
+                                      "type": "string"
+                                    },
+                                    "certificate_sha256": {
+                                      "type": "string"
+                                    },
+                                    "management_https": {
+                                      "const": "verified"
+                                    }
+                                  },
+                                  "required": [
+                                    "pod_uid",
+                                    "certificate_sha256",
+                                    "management_https"
+                                  ],
+                                  "additionalProperties": false
+                                }
                               },
                               "dedicated_management_key": {
                                 "const": "verified"
@@ -70122,6 +70148,8 @@
                     "target": {
                       "enum": [
                         "single-docker",
+                        "split-docker",
+                        "kubernetes",
                         "unavailable"
                       ]
                     },
@@ -70194,6 +70222,30 @@
                               },
                               "certificate_sha256": {
                                 "type": "string"
+                              },
+                              "console_consumers": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "pod_uid": {
+                                      "type": "string"
+                                    },
+                                    "certificate_sha256": {
+                                      "type": "string"
+                                    },
+                                    "management_https": {
+                                      "const": "verified"
+                                    }
+                                  },
+                                  "required": [
+                                    "pod_uid",
+                                    "certificate_sha256",
+                                    "management_https"
+                                  ],
+                                  "additionalProperties": false
+                                }
                               },
                               "dedicated_management_key": {
                                 "const": "verified"

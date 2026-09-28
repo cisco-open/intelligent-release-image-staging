@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
@@ -24,6 +25,51 @@ def worker(tmp_path):
     for name in ('state', 'backups', 'recovery', 'extract'):
         (tmp_path / name).mkdir(mode=0o700)
     return worker_module.Worker(tmp_path / 'state', tmp_path / 'backups', tmp_path / 'recovery')
+
+
+@pytest.mark.parametrize('state', ['running', 'recovery-required'])
+def test_management_sync_refuses_unfinished_lifecycle(worker, state):
+    worker.jobs = [{'state': state}]
+    with pytest.raises(InstallError, match='active lifecycle'):
+        worker.submit({'action': 'sync-management', 'request_id': str(uuid.uuid4())})
+
+
+@pytest.mark.parametrize('bad', [None, 'wrong-id', 'extra', 'bad-hash', 'bool-count', 'zero-count'])
+def test_management_sync_requires_exact_adapter_evidence(worker, monkeypatch, bad):
+    from iris_installer import deploy
+    from types import SimpleNamespace
+    request_id = str(uuid.uuid4())
+    expected = {'request_id': request_id, 'current_sha256': 'a' * 64, 'consumers_verified': 2}
+    result = dict(expected)
+    if bad == 'wrong-id':
+        result['request_id'] = str(uuid.uuid4())
+    elif bad == 'extra':
+        result['private_token'] = 'must-not-be-returned'
+    elif bad == 'bad-hash':
+        result['current_sha256'] = 'invalid'
+    elif bad == 'bool-count':
+        result['consumers_verified'] = True
+    elif bad == 'zero-count':
+        result['consumers_verified'] = 0
+    @contextmanager
+    def locked(self):
+        yield self
+    monkeypatch.setattr(worker_module.Journal, 'locked', locked)
+    monkeypatch.setattr(deploy, 'installation', lambda journal: SimpleNamespace(
+        sync_management_operation=lambda operation: result if operation == request_id else None))
+    request = {'action': 'sync-management', 'request_id': request_id}
+    if bad is None:
+        assert worker.submit(request) == expected
+    else:
+        with pytest.raises(InstallError, match='matching evidence'):
+            worker.submit(request)
+    assert worker.jobs == []
+
+
+@pytest.mark.parametrize('extra', [{'path': '/tmp/token'}, {'token': 'not-accepted'}, {'host': 'elsewhere'}])
+def test_management_sync_accepts_no_caller_selected_authority(worker, extra):
+    with pytest.raises(InstallError, match='Invalid management'):
+        worker.submit({'action': 'sync-management', 'request_id': str(uuid.uuid4()), **extra})
 
 
 @pytest.mark.parametrize('payload', [None, [], {'action': 'exec'}, {'action': 'backup'},

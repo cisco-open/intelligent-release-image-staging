@@ -8,6 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 
 Read this guide once, in order. At the end you have a running server and Console, device packages the server serves, and one device staging one image.
 
+For the Ubuntu source-build installer candidate, use the
+[managed package procedure](managed-package.md). The pages below describe
+manual provisioning and remain applicable to deployments not owned by the installer.
+
 ## Choose a layout
 
 | Layout | Where the Console runs | Deployment files |

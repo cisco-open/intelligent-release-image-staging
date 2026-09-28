@@ -75,15 +75,24 @@ the replacement credential. An old credential cannot authorize its own removal.
 
 ### On separate Docker hosts
 
-Copy the replacement management credential to every Console using the
+For an installer-owned split deployment with its host worker running, the
+scheduler publishes the current/previous pair to the recorded remote Console
+and verifies current-token access. Failed publication keeps overlap active and
+requires reconciliation. Retirement repeats the consumer check.
+
+For manually provisioned deployments, copy the replacement management credential using the
 [separate-host procedure](rotations.md#on-separate-docker-hosts). Verify each
 Console before retiring the previous value. The scheduler leaves the overlap
 active until you confirm.
 
 ### On Kubernetes
 
-Signer preparation, device instruction keys and review reminders use server
-storage. Mounted Kubernetes Secrets are read-only: use the
+Installer-owned deployments use the writable server credential authority and
+their external worker to publish the pair to Console Secrets and verify every
+replica. Keep the worker running; failed synchronization must be reconciled
+before retirement. The scheduler does not remove overlap automatically.
+
+For manually provisioned deployments, mounted Kubernetes Secrets are read-only: use the
 [management credential procedure](rotations.md#on-kubernetes) instead of
 enabling that family's automated rotation.
 

@@ -20,6 +20,7 @@ import instruction_rotation
 import secrets_store
 import secretfs
 import tier_auth
+import lifecycle_client
 from test_gui_server import _serve_full, _auth, _req
 from test_instruction_rotation import custody
 from test_instruction_keys import NOW as SIGNING_NOW
@@ -290,6 +291,87 @@ def test_existing_management_overlap_is_not_overwritten(tmp_path, monkeypatch):
     engine.tick()
     assert current.read_bytes() == b'a' * 64 and previous.read_bytes() == b'b' * 64
     assert engine.status()['jobs'][0]['state'] == 'intervention-required'
+
+
+@pytest.mark.parametrize('target', ['docker-split', 'kubernetes'])
+def test_multi_host_management_publication_is_durable_and_retirement_explicit(tmp_path, monkeypatch, target):
+    clock = [NOW]
+    current, previous = tmp_path / 'current', tmp_path / 'previous'
+    current.write_bytes(b'a' * 64)
+    current.chmod(0o600)
+    monkeypatch.setenv('IRIS_MANAGEMENT_API_TOKEN_FILE', str(current))
+    monkeypatch.setenv('IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE', str(previous))
+    monkeypatch.setenv('IRIS_INSTALLER_TARGET', target)
+    engine = maintenance.Maintenance(tmp_path, now=lambda: clock[0])
+    calls = []
+    def sync(request):
+        job = engine.load()['jobs'][0]  # Unlocked atomic read avoids scheduler deadlock.
+        token, old = tier_auth.load_pair(str(current), str(previous))
+        assert job['after'] == maintenance._fingerprint(token)
+        assert request == {'action': 'sync-management', 'request_id': job['id']}
+        calls.append(request)
+        return {'request_id': job['id'], 'current_sha256': job['after'], 'consumers_verified': 2}
+    monkeypatch.setattr(lifecycle_client, 'call', sync)
+    install(engine, policy('management-token'))
+    clock[0] += 60
+    engine.tick()
+    job = engine.status()['jobs'][0]
+    assert job['state'] == 'verification-required' and previous.exists()
+    assert len(calls) == 1
+    token, _ = tier_auth.load_pair(str(current), str(previous))
+    engine.act({'action': 'retire-management', 'job_id': job['id'], 'confirm': True}, presented=token)
+    assert len(calls) == 2 and not previous.exists()
+
+
+def test_management_sync_failure_retains_overlap_and_reconciliation_retries(tmp_path, monkeypatch):
+    clock = [NOW]
+    current, previous = tmp_path / 'current', tmp_path / 'previous'
+    current.write_bytes(b'a' * 64)
+    current.chmod(0o600)
+    monkeypatch.setenv('IRIS_MANAGEMENT_API_TOKEN_FILE', str(current))
+    monkeypatch.setenv('IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE', str(previous))
+    monkeypatch.setenv('IRIS_INSTALLER_TARGET', 'docker-split')
+    engine = maintenance.Maintenance(tmp_path, now=lambda: clock[0])
+    def unavailable(request):
+        raise lifecycle_client.LifecycleUnavailable('worker offline')
+    monkeypatch.setattr(lifecycle_client, 'call', unavailable)
+    install(engine, policy('management-token'))
+    clock[0] += 60
+    engine.tick()
+    job = engine.status()['jobs'][0]
+    assert job['state'] == 'intervention-required'
+    assert job['after'] and previous.read_bytes() == b'a' * 64
+    request = {'action': 'reconcile-management', 'job_id': job['id'], 'confirm': True}
+    with pytest.raises(maintenance.MaintenanceError, match='overlap retained'):
+        engine.act(request)
+    assert engine.status()['jobs'][0]['state'] == 'intervention-required'
+    monkeypatch.setattr(lifecycle_client, 'call', lambda request: {
+        'request_id': job['id'], 'current_sha256': job['after'], 'consumers_verified': 1})
+    assert engine.act(request)['jobs'][0]['state'] == 'verification-required'
+    assert previous.exists()
+
+
+@pytest.mark.parametrize('change', [{'current_sha256': '0' * 64}, {'request_id': str(uuid.uuid4())},
+                                    {'consumers_verified': 0}, {'consumers_verified': True}])
+def test_management_retirement_refuses_missing_or_wrong_consumer_proof(tmp_path, monkeypatch, change):
+    clock = [NOW]
+    current, previous = tmp_path / 'current', tmp_path / 'previous'
+    current.write_bytes(b'a' * 64)
+    current.chmod(0o600)
+    monkeypatch.setenv('IRIS_MANAGEMENT_API_TOKEN_FILE', str(current))
+    monkeypatch.setenv('IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE', str(previous))
+    engine = maintenance.Maintenance(tmp_path, now=lambda: clock[0])
+    install(engine, policy('management-token'))
+    clock[0] += 60
+    engine.tick()
+    job = engine.status()['jobs'][0]
+    token, _ = tier_auth.load_pair(str(current), str(previous))
+    monkeypatch.setenv('IRIS_INSTALLER_TARGET', 'kubernetes')
+    monkeypatch.setattr(lifecycle_client, 'call', lambda request: dict({
+        'request_id': job['id'], 'current_sha256': job['after'], 'consumers_verified': 2}, **change))
+    with pytest.raises(maintenance.MaintenanceError, match='Every owned Console'):
+        engine.act({'action': 'retire-management', 'job_id': job['id'], 'confirm': True}, presented=token)
+    assert previous.exists()
 
 
 def test_device_retry_restamps_without_generating_another_key(tmp_path, monkeypatch):

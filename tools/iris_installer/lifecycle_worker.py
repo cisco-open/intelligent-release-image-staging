@@ -36,6 +36,15 @@ ROTATION_FAMILIES = ('management-tls', 'device-tls', 'peer-ca',
 class Worker:
     def __init__(self, state_dir, backup_dir, recovery_dir, *, identity=None, extract_dir=None):
         self.state_dir = backup_archive.private_directory(state_dir)
+        self.target = 'single-docker'
+        self.rotation_families = list(ROTATION_FAMILIES)
+        installed = self.state_dir / 'installation.json'
+        if installed.exists():
+            configuration = json.loads(regular_bytes(installed))['config']
+            self.target = {'docker': 'single-docker', 'docker-split': 'split-docker',
+                           'kubernetes': 'kubernetes'}.get(configuration.get('target'))
+            if self.target is None:
+                raise InstallError('Unsupported lifecycle deployment target')
         self.backup_dir = backup_archive.private_directory(backup_dir)
         self.recovery_dir = backup_archive.private_directory(recovery_dir)
         if self.backup_dir == self.recovery_dir:
@@ -84,7 +93,7 @@ class Worker:
 
     def status(self):
         with self.lock:
-            return {'available': True, 'target': 'single-docker',
+            return {'available': True, 'target': self.target,
                     'storage': 'operator-configured-host-directories',
                     'can_verify': self.identity is not None,
                     'can_extract': self.identity is not None and self.extract_dir is not None,
@@ -93,11 +102,37 @@ class Worker:
 
     def rotation_status(self):
         with self.lock:
-            return {'available': True, 'target': 'single-docker',
-                    'can_rotate': self.identity is not None,
-                    'families': list(ROTATION_FAMILIES),
+            return {'available': True, 'target': self.target,
+                    'can_rotate': self.identity is not None and bool(self.rotation_families),
+                    'families': list(self.rotation_families),
                     'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] == 'rotate'])),
                     'note': 'Rotation stops this deployment after a verified cold backup. Trust changes also require device removal and package rebuilds.'}
+
+    def sync_management(self, request):
+        if (set(request) != {'action', 'request_id'} or request.get('action') != 'sync-management'
+                or not isinstance(request.get('request_id'), str)
+                or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['request_id'])):
+            raise InstallError('Invalid management consumer synchronization request')
+        # The request selects a PUBLIC scheduler operation, never a token, a
+        # host, a path or a command. The adapter checks the durable producer
+        # operation against the actual pair before and after publication.
+        with self.lock:
+            if any(job['state'] in ('running', 'recovery-required') for job in self.jobs):
+                raise InstallError('Finish the active lifecycle operation before synchronizing consumers')
+            with Journal(self.state_dir).locked() as journal:
+                from .deploy import installation
+                adapter = installation(journal)
+                sync = getattr(adapter, 'sync_management_operation', None)
+                if sync is None:
+                    raise InstallError('This deployment has no management consumer synchronization adapter')
+                result = sync(request['request_id'])
+                if (not isinstance(result, dict) or set(result) != {'request_id', 'current_sha256', 'consumers_verified'}
+                        or result['request_id'] != request['request_id']
+                        or not isinstance(result['current_sha256'], str)
+                        or not re.fullmatch(r'[0-9a-f]{64}', result['current_sha256'])
+                        or type(result['consumers_verified']) is not int or not 1 <= result['consumers_verified'] <= 8):
+                    raise InstallError('Management consumer synchronization did not return matching evidence')
+                return result
 
     def submit_rotation(self, request):
         if set(request) != {'action', 'request_id', 'family', 'allow_downtime'}:
@@ -105,7 +140,7 @@ class Worker:
         request_id, family = request['request_id'], request['family']
         if not isinstance(request_id, str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request_id):
             raise InstallError('Provide a bounded maintenance request ID')
-        if not isinstance(family, str) or family not in ROTATION_FAMILIES:
+        if not isinstance(family, str) or family not in self.rotation_families:
             raise InstallError('Choose a supported credential family')
         if request['allow_downtime'] is not True:
             raise InstallError('Confirm deployment downtime before rotation')
@@ -196,6 +231,8 @@ class Worker:
             self.save()
 
     def submit(self, request):
+        if isinstance(request, dict) and request.get('action') == 'sync-management':
+            return self.sync_management(request)
         if isinstance(request, dict) and request.get('action') in ('rotate', 'recover-rotation'):
             return self.submit_rotation(request)
         if not isinstance(request, dict) or request.get('action') not in ('backup', 'verify', 'extract'):
@@ -274,8 +311,8 @@ class Worker:
                     raise InstallError('No provisioned recovery identity opens both backup sets')
                 if (first['metadata'].get('scope') != 'managed-deployment-files'
                         or second['metadata'].get('scope') != 'identity-recovery'
-                        or first['metadata'].get('target') != 'single-docker'
-                        or second['metadata'].get('target') != 'single-docker'
+                        or first['metadata'].get('target') != self.target
+                        or second['metadata'].get('target') != self.target
                         or first['metadata'].get('backup_set_id') != second['metadata'].get('backup_set_id')
                         or first['metadata'].get('instance_id') != second['metadata'].get('instance_id')):
                     raise InstallError('Data and recovery identity sets do not match')
@@ -369,10 +406,19 @@ def serve(args):
 
 def _serve_locked(args):
     with Journal(args.state_dir).locked() as journal:
-        if journal.document is None or journal.document['config']['target'] != 'docker':
-            raise InstallError("Worker requires an installer-owned Docker deployment")
+        if journal.document is None:
+            raise InstallError("Worker requires an installer-owned deployment")
+        from .deploy import installation
+        adapter = installation(journal)
+        configuration = dict(journal.document['config'])
+        capabilities = getattr(adapter, 'lifecycle_capabilities', None)
+        families = list(capabilities()) if capabilities else (
+            list(ROTATION_FAMILIES) if configuration['target'] == 'docker' else [])
+        if any(family not in ROTATION_FAMILIES for family in families):
+            raise InstallError('Invalid deployment maintenance capabilities')
     worker = Worker(args.state_dir, args.backup_dir, args.recovery_dir,
                     identity=args.recovery_identity, extract_dir=args.extract_dir)
+    worker.rotation_families = families
     control = Path(args.state_dir) / 'control'
     if not control.exists() and not control.is_symlink():
         control.mkdir(mode=0o750)
@@ -391,6 +437,29 @@ def _serve_locked(args):
     server = make_server(socket_path, worker)
     os.chown(socket_path, 0, 10001)
     stop = threading.Event()
+    network_server = None
+    network_thread = None
+    try:
+        if configuration['target'] == 'kubernetes':
+            from .lifecycle_network import endpoint, make_https_server, prepare_network_custody
+            if not (Path(args.state_dir) / 'lifecycle-tls').is_dir():
+                raise InstallError('Recorded lifecycle transport custody is missing; do not regenerate it')
+            from .deploy import run
+            custody = prepare_network_custody(args.state_dir, configuration['lifecycle_url'], run)
+            host, port = endpoint(configuration['lifecycle_url'])
+            network_server = make_https_server(getattr(args, 'listen_address', None) or host, port, worker, custody)
+            network_server.timeout = 0.5
+            def serve_network():
+                while not stop.is_set():
+                    network_server.handle_request()
+            network_thread = threading.Thread(target=serve_network, daemon=True)
+            network_thread.start()
+        elif getattr(args, 'listen_address', None):
+            raise InstallError('Network lifecycle binding is only configured for this Kubernetes installation')
+    except BaseException:
+        server.server_close()
+        socket_path.unlink()
+        raise
     previous = {}
     for sig in (signal.SIGTERM, signal.SIGINT):
         previous[sig] = signal.signal(sig, lambda *_: stop.set())
@@ -400,6 +469,11 @@ def _serve_locked(args):
         while not stop.is_set():
             server.handle_request()
     finally:
+        stop.set()
+        if network_thread:
+            network_thread.join(timeout=10)
+        if network_server:
+            network_server.server_close()
         server.server_close()
         if worker.thread:
             worker.thread.join()
