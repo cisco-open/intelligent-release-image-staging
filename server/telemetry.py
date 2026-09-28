@@ -18,6 +18,7 @@ import secrets
 import socket
 import ssl
 import threading
+import service_shutdown
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -810,6 +811,7 @@ class Telemetry:
                           "announces_refused_expired_total": 0}
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._thread = None
         # When no registry is supplied, own one wired to our event hook — this
         # breaks the construction cycle (registry needs the hook, hook needs us).
         if registry is None:
@@ -2034,10 +2036,17 @@ class Telemetry:
                 pass                        # never let the sampler die
 
     def start(self):
-        threading.Thread(target=self.run_forever, daemon=True).start()
+        self._thread = service_shutdown.WriterThread(
+            target=self.run_forever, name="telemetry-sampler", daemon=True,
+            stop_event=self._stop)
+        self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout=5):
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(0, timeout))
+            return not self._thread.is_alive() and self._thread.clean_exit
+        return True
 
 
 def _read_rpc_secret(env):

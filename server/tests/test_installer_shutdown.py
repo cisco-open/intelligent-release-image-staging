@@ -26,18 +26,18 @@ def environment(tmp_path):
 def test_clean_children_produce_pod_and_start_bound_proof(environment):
     shutdown.prepare(environment)
     nonce = (Path(environment['IRIS_RUN']) / 'installer-shutdown-nonce').read_text()
-    shutdown.record(['10:0', '11:143'], environment)
+    shutdown.record(['10:0', '11:0'], environment)
     proof = Path(environment['IRIS_INSTALLER_SHUTDOWN_PROOF'])
     data = json.loads(proof.read_bytes())
     assert data == {'pod_uid': environment['IRIS_POD_UID'], 'nonce': nonce, 'clean': True,
-                    'children': [{'pid': 10, 'exit_code': 0}, {'pid': 11, 'exit_code': 143}]}
+                    'children': [{'pid': 10, 'exit_code': 0}, {'pid': 11, 'exit_code': 0}]}
     assert proof.stat().st_mode & 0o777 == 0o600
     shutdown.prepare(environment)
     assert not proof.exists()
     assert (Path(environment['IRIS_RUN']) / 'installer-shutdown-nonce').read_text() != nonce
 
 
-@pytest.mark.parametrize('children', [[], ['10:137'], ['10:1'], ['10:0', '10:0'], ['bad'], ['0:0']])
+@pytest.mark.parametrize('children', [[], ['10:137'], ['10:143'], ['10:1'], ['10:0', '10:0'], ['bad'], ['0:0']])
 def test_forced_or_failed_shutdown_never_gets_clean_proof(environment, children):
     shutdown.prepare(environment)
     with pytest.raises(ValueError):

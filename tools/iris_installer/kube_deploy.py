@@ -99,10 +99,10 @@ def _canonical(value):
 
 def _archive_identity(archive, source_id, config_digest):
     """Docker classic IDs name configs; containerd-backed IDs name OCI roots."""
+    if not isinstance(source_id, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', source_id):
+        raise InstallError('Invalid recorded image identity')
     if source_id == config_digest:
         return
-    if not re.fullmatch(r'sha256:[0-9a-f]{64}', source_id):
-        raise InstallError('Invalid recorded image identity')
     selected = {}
     blob = 'blobs/sha256/' + source_id.split(':', 1)[1]
     with tarfile.open(archive) as stream:
@@ -128,6 +128,13 @@ def _contains(actual, expected):
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
             return False
+        if expected.get('kind') == 'NetworkPolicy':
+            # The API omits empty ingress/egress lists. With explicit
+            # policyTypes, absent and [] both deny all matching traffic.
+            actual = dict(actual, spec=dict(actual.get('spec', {})))
+            for field in ('ingress', 'egress'):
+                if expected['spec'].get(field) == [] and actual['spec'].get(field) is None:
+                    actual['spec'][field] = []
         if expected.get("kind") in ("Secret", "ConfigMap"):
             if any(actual.get(field, {}) != expected.get(field, {}) for field in ("data", "binaryData", "stringData")):
                 return False
@@ -647,6 +654,12 @@ class KubeInstall(DockerInstall):
         self.journal.checkpoint("kube-external-services", {"server": self.config["host"], "console": self.config["console_bind"], "verified": True})
 
     def resume(self, certificate=None):
+        transport = self.base / "lifecycle-transport-operation.json"
+        if transport.exists() or transport.is_symlink():
+            authority = json.loads(regular_bytes(transport))
+            if (authority.get("instance_id") != self.journal.document["id"]
+                    or authority.get("phase") != "complete"):
+                raise InstallError("Recover the approved connection certificate operation before resuming installation")
         operation = self.base / "credential-operation.json"
         if operation.exists() or operation.is_symlink():
             authority = json.loads(regular_bytes(operation))
@@ -852,7 +865,7 @@ print(json.dumps({'management_https':'verified','certificate_sha256':fingerprint
             children = observed.get("children")
             if (observed.get("pod_uid") != proof["pod_uid"] or observed.get("nonce") != proof["nonce"]
                     or observed.get("clean") is not True or not isinstance(children, list) or not children
-                    or any(type(child.get("exit_code")) is not int or child["exit_code"] not in (0, 143) for child in children)):
+                    or any(type(child.get("exit_code")) is not int or child["exit_code"] != 0 for child in children)):
                 raise InstallError("Server did not provide matching clean-shutdown proof; backup refused")
             proof["verified"] = True
             self.journal.checkpoint("kube-clean-stop", proof)

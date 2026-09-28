@@ -4262,6 +4262,19 @@ def test_control_server_close_is_bounded_with_an_incomplete_client(
     assert not (tmp_path / "iox" / "control.sock").exists()
 
 
+def test_control_server_close_refuses_a_surviving_accept_thread(tmp_path):
+    module = _module()
+    server = module.IoxControlServer(str(tmp_path), "c" * 32, lambda request: None)
+    class StillAccepting:
+        def join(self, timeout):
+            pass
+        def is_alive(self):
+            return True
+    server.thread = StillAccepting()
+    with pytest.raises(RuntimeError, match="admission workers"):
+        server.close()
+
+
 @pytest.mark.parametrize("shape", ["symlink", "nonsocket"])
 def test_control_server_refuses_a_preexisting_endpoint_without_replacing_it(
         tmp_path, shape):

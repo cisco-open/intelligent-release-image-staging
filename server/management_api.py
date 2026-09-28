@@ -1550,6 +1550,7 @@ _CA_JOB_TTL = 3600                  # evict terminal refresh jobs after (s)
 # polls. Per-process: a restart abandons in-flight jobs.
 _CA_JOBS = {}
 _CA_JOBS_LOCK = threading.Lock()
+_CA_JOB_THREADS = {}
 
 
 def _validate_ca_url(raw):
@@ -1635,6 +1636,7 @@ def start_ca_refresh(url, audit_fn=None, download_fn=None):
                  and j["finished_at"] <= now - _CA_JOB_TTL]
         for jid in stale:
             del _CA_JOBS[jid]
+            _CA_JOB_THREADS.pop(jid, None)
         _CA_JOBS[job_id] = job
 
     def run():
@@ -1650,8 +1652,16 @@ def start_ca_refresh(url, audit_fn=None, download_fn=None):
             job["certs"] = certs
             job["finished_at"] = time.time()
 
-    threading.Thread(target=run, daemon=True).start()
+    thread = _ManagedWriterThread(target=run)
+    with _CA_JOBS_LOCK:
+        _CA_JOB_THREADS[job_id] = thread
+    thread.start()
     return job_id
+
+
+def _manual_ca_writers():
+    with _CA_JOBS_LOCK:
+        return list(_CA_JOB_THREADS.values())
 
 
 def get_ca_job(job_id):
@@ -7904,6 +7914,45 @@ class _TerminationRequested(BaseException):
     """Internal unwind used to route container SIGTERM through cleanup."""
 
 
+class _ManagedWriterThread(threading.Thread):
+    """Retain completion/failure evidence for daemon writers at pod shutdown."""
+
+    def __init__(self, *, target, args=()):
+        super().__init__(target=target, args=args, daemon=True)
+        self.start_attempted = False
+        self.writer_failed = False
+        self.writer_finished = threading.Event()
+
+    def start(self):
+        # TERM can interrupt Thread.start before ident is populated. Recording
+        # admission first prevents that race from looking like an unused thread.
+        self.start_attempted = True
+        super().start()
+
+    def run(self):
+        try:
+            super().run()
+        except BaseException:
+            self.writer_failed = True
+            print('iris-management: a background writer failed; clean shutdown cannot be attested',
+                  file=sys.stderr, flush=True)
+        finally:
+            self.writer_finished.set()
+
+
+def _drain_management_writers(threads, *, timeout=30):
+    """One total deadline, with failure sticky even after a daemon has exited."""
+    deadline = time.monotonic() + timeout
+    clean = True
+    for thread in threads:
+        if not thread.start_attempted:
+            continue
+        finished = thread.writer_finished.wait(max(0.0, deadline - time.monotonic()))
+        if not finished or thread.writer_failed:
+            clean = False
+    return clean
+
+
 class _SigtermLatch(object):
     """Install TERM protection before local admission can begin."""
 
@@ -8169,16 +8218,22 @@ def main():
     # all state-owner adapters were constructed. Importing or calling
     # make_server() remains inert.
     schedule_stop = threading.Event()
-    schedule_thread = threading.Thread(
-        target=schedule_service.run, args=(schedule_stop,), daemon=True)
+    schedule_thread = _ManagedWriterThread(
+        target=schedule_service.run, args=(schedule_stop,))
     custody_stop = threading.Event()
     instruction_stop = threading.Event()
     ca_stop = threading.Event()
     bulkhash_stop = threading.Event()
     export_stop = threading.Event()
     maintenance_stop = threading.Event()
-    maintenance_thread = threading.Thread(
-        target=key_maintenance.Maintenance(state_dir).run, args=(maintenance_stop,), daemon=True)
+    maintenance_thread = _ManagedWriterThread(
+        target=key_maintenance.Maintenance(state_dir).run, args=(maintenance_stop,))
+    writer_threads = [schedule_thread, maintenance_thread]
+
+    def start_writer(target, args):
+        thread = _ManagedWriterThread(target=target, args=args)
+        writer_threads.append(thread)
+        thread.start()
 
     def start_management():
         # All admission starts under the termination latch. A signal during
@@ -8187,26 +8242,17 @@ def main():
         schedule_thread.start()
         maintenance_thread.start()
         # Maintenance stays in this process, sharing its trusted stores.
-        threading.Thread(
-            target=instruction_keys.status_loop,
-            args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
-            daemon=True).start()
-        threading.Thread(
-            target=instruction_stamper.status_loop,
-            args=(instruction_stop, instruction_stamper.InstructionStamper(
-                fleet=fleet, catalog_store=catalog)),
-            daemon=True).start()
-        threading.Thread(target=ca_trust_refresh_loop,
-                         args=(ca_stop, state_dir, _bg_audit),
-                         daemon=True).start()
-        threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
-                         args=(bulkhash_stop, state_dir, catalog, _bg_audit),
-                         daemon=True).start()
+        start_writer(instruction_keys.status_loop,
+                     (custody_stop, instruction_keys.InstructionPaths.from_env()))
+        start_writer(instruction_stamper.status_loop,
+                     (instruction_stop, instruction_stamper.InstructionStamper(
+                         fleet=fleet, catalog_store=catalog)))
+        start_writer(ca_trust_refresh_loop, (ca_stop, state_dir, _bg_audit))
+        start_writer(bulkhash_refresh.bulkhash_refresh_loop,
+                     (bulkhash_stop, state_dir, catalog, _bg_audit))
         # Read export credentials through the accessor at each run.
-        threading.Thread(target=audit_export.export_loop,
-                         args=(export_stop, audit_path, state_dir,
-                               creds.audit_export_secrets, _bg_audit),
-                         daemon=True).start()
+        start_writer(audit_export.export_loop,
+                     (export_stop, audit_path, state_dir, creds.audit_export_secrets, _bg_audit))
         control_server.start()
     scheme = "https" if srv.tls_active else "http"
     if not srv.tls_active:
@@ -8217,17 +8263,20 @@ def main():
     print("iris-management on %s://%s:%d/internal/v1" %
           (scheme, host, port), flush=True)
     def shutdown_management():
+        srv.stop_request_admission()
         for stop in (schedule_stop, custody_stop, instruction_stop, ca_stop,
                      bulkhash_stop, export_stop, maintenance_stop):
             stop.set()
-        if maintenance_thread.ident is not None:
-            maintenance_thread.join(timeout=10)
         schedule_service.stop()
-        if schedule_thread.ident is not None:
-            schedule_thread.join(timeout=10)
-        if schedule_thread.is_alive():
-            print("iris-management: schedule runner did not stop within 10s",
-                  file=sys.stderr, flush=True)
+        # Drain API handlers before snapshotting manual CA jobs: an admitted
+        # request may still be about to enqueue its download. An unfinished
+        # request already makes this shutdown ineligible for a clean proof.
+        clean_requests = srv.drain_requests(timeout=30)
+        writer_deadline = time.monotonic() + 30
+        clean_images = images.shutdown(timeout=max(0.0, writer_deadline - time.monotonic()))
+        clean_exports = audit_export.drain_exports(timeout=max(0.0, writer_deadline - time.monotonic()))
+        clean_writers = _drain_management_writers(writer_threads + _manual_ca_writers(),
+            timeout=max(0.0, writer_deadline - time.monotonic()))
         try:
             control_server.close()
         finally:
@@ -8238,6 +8287,8 @@ def main():
                     onboard.shutdown()
                 finally:
                     iox_controller.close()
+        if not clean_requests or not clean_writers or not clean_images or not clean_exports:
+            raise RuntimeError('Management writers did not finish cleanly; consistent backup refused')
 
     _serve_with_shutdown(
         srv, shutdown_management, latch=term_latch,

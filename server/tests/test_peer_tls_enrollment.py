@@ -215,7 +215,8 @@ def test_origin_supervisor_replaces_child_on_certificate_rotation(enrollment, tm
     cfg, client, issuer = enrollment
     script = tmp_path / 'seed.sh'
     starts = tmp_path / 'starts'
-    script.write_text('printf "%s\\n" "$$" >> "$IRIS_TEST_STARTS"\nexec sleep 120\n')
+    script.write_text('printf "%s\\n" "$$" >> "$IRIS_TEST_STARTS"\n'
+        "exec python3 -c 'import signal,sys,time; signal.signal(signal.SIGTERM,lambda *_:sys.exit(0)); time.sleep(120)'\n")
     root = Path(__file__).resolve().parents[1]
     proc = subprocess.Popen(['python3', str(root / 'peer_tls_seed.py'), str(script)],
                             env=dict(os.environ, IRIS_TEST_STARTS=str(starts)),
@@ -257,7 +258,8 @@ def test_origin_supervisor_applies_mode_and_stops_on_invalid_settings(enrollment
     settings.save('disabled')
     script = tmp_path / 'mode-seed.sh'
     starts = tmp_path / 'mode-starts'
-    script.write_text('printf "%s %s\\n" "$IRIS_PEER_TLS_MODE" "$$" >> "$IRIS_TEST_STARTS"\nexec sleep 120\n')
+    script.write_text('printf "%s %s\\n" "$IRIS_PEER_TLS_MODE" "$$" >> "$IRIS_TEST_STARTS"\n'
+        "exec python3 -c 'import signal,sys,time; signal.signal(signal.SIGTERM,lambda *_:sys.exit(0)); time.sleep(120)'\n")
     root = Path(__file__).resolve().parents[1]
     process = subprocess.Popen(['python3', str(root/'peer_tls_seed.py'), str(script)],
                                env=dict(os.environ, IRIS_TEST_STARTS=str(starts)),

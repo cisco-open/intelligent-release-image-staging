@@ -14,6 +14,8 @@ import re
 import ssl
 import stat
 import tempfile
+import threading
+from socketserver import ThreadingMixIn
 from urllib.parse import urlsplit
 
 from .state import InstallError, atomic_write, regular_bytes
@@ -37,7 +39,7 @@ def endpoint(value):
                                           for label in host.split('.')):
                 raise ValueError()
         else:
-            if address.is_unspecified or address.is_multicast:
+            if address.version != 4 or address.is_unspecified or address.is_multicast:
                 raise ValueError()
         return host, port
     except (ValueError, TypeError, AttributeError):
@@ -125,8 +127,8 @@ def prepare_network_custody(base, url, runner):
     return {name: directory / name for name in names}
 
 
-def make_https_server(bind, port, worker, custody):
-    """Only a pinned server-tier client certificate may send bounded RPC."""
+def _transport(custody, extra_client_digests=()):
+    """Build replacement context completely before publishing it to listeners."""
     for name in ('worker.key', 'client.key'):
         _private(custody[name])
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -136,20 +138,52 @@ def make_https_server(bind, port, worker, custody):
     context.verify_mode = ssl.CERT_REQUIRED
     client_der = ssl.PEM_cert_to_DER_cert(regular_bytes(custody['client.crt'], 16384).decode())
     expected = hashlib.sha256(client_der).digest()
+    if any(not isinstance(value, bytes) or len(value) != 32 for value in extra_client_digests):
+        raise InstallError('Invalid client certificate overlap')
+    return context, frozenset((expected, *extra_client_digests))
 
-    class Server(HTTPServer):
-        def get_request(self):
-            raw, address = super().get_request()
-            raw.settimeout(5)
+
+def make_https_server(bind, port, worker, custody):
+    """Only a pinned server-tier client certificate may send bounded RPC."""
+    initial_transport = _transport(custody)
+
+    class Server(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+        def __init__(self, *args):
+            self.transport = initial_transport
+            self.connections = threading.BoundedSemaphore(8)
+            super().__init__(*args)
+
+        def configure_transport(self, custody, extra_client_digests=()):
+            self.transport = _transport(custody, extra_client_digests)
+
+        def process_request(self, request, client_address):
+            if not self.connections.acquire(blocking=False):
+                self.shutdown_request(request)
+                return
             try:
-                secure = context.wrap_socket(raw, server_side=True)
-                if hashlib.sha256(secure.getpeercert(binary_form=True)).digest() != expected:
-                    secure.close()
-                    raise OSError('Unrecognized deployment client')
-                return secure, address
+                super().process_request(request, client_address)
             except BaseException:
-                raw.close()
+                self.connections.release()
                 raise
+
+        def process_request_thread(self, request, client_address):
+            secure = None
+            try:
+                request.settimeout(5)
+                active_context, permitted = self.transport
+                secure = active_context.wrap_socket(request, server_side=True)
+                if hashlib.sha256(secure.getpeercert(binary_form=True)).digest() not in permitted:
+                    return
+                self.finish_request(secure, client_address)
+            except Exception:
+                # Worker/runtime errors must not produce a thread traceback
+                # containing private filesystem or subprocess diagnostics.
+                pass
+            finally:
+                self.shutdown_request(secure if secure is not None else request)
+                self.connections.release()
 
         def handle_error(self, request, client_address):
             # Socket/parser failures must not disclose headers or key material.
@@ -171,13 +205,24 @@ def make_https_server(bind, port, worker, custody):
                 request = json.loads(raw)
                 if not isinstance(request, dict):
                     raise ValueError()
-                result = (worker.status() if request == {'action': 'status'} else
-                          worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
+                if request.get('action') in ('transport-status', 'renew-transport', 'recover-transport'):
+                    raise ValueError('Host-only action')
+                if request.get('action') == 'transport-proof':
+                    if set(request) != {'action', 'request_id'} or not hasattr(worker, 'transport_proof'):
+                        raise ValueError('Invalid transport proof')
+                    peer = hashlib.sha256(self.connection.getpeercert(binary_form=True)).hexdigest()
+                    result = worker.transport_proof(request, peer)
+                else:
+                    result = (worker.status() if request == {'action': 'status'} else
+                              worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
                 status = 200
             except (InstallError, ValueError, TypeError):
                 response = {'ok': False, 'error': 'Maintenance request refused; inspect the protected host journal.'}
                 status = 400
+            except Exception:
+                response = {'ok': False, 'error': 'Maintenance service unavailable; inspect the protected host journal.'}
+                status = 500
             encoded = json.dumps(response).encode() + b'\n'
             if len(encoded) > 128 * 1024:
                 encoded = b'{"ok":false,"error":"Maintenance evidence exceeds the response limit"}\n'

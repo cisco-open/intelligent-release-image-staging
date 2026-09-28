@@ -36,7 +36,7 @@ def _network_call(request, endpoint):
     context = ssl.create_default_context(cafile=ca)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
-    timeout = 180 if request.get('action') == 'sync-management' else 5
+    timeout = 400 if request.get('action') == 'sync-management' else 5
     connection = http.client.HTTPSConnection(parsed.hostname, parsed.port, context=context, timeout=timeout)
     try:
         connection.request('POST', '/v1/lifecycle', body=json.dumps(request).encode(),
@@ -78,7 +78,7 @@ def call(request):
             raw = _network_call(request, network_endpoint)
         else:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(180 if action == 'sync-management' else 5)
+                connection.settimeout(400 if action == 'sync-management' else 5)
                 connection.connect(endpoint)
                 connection.sendall(json.dumps(request).encode() + b'\n')
                 with connection.makefile('rb') as stream:

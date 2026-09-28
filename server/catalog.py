@@ -43,6 +43,7 @@ import keyed_state
 import live_samples
 import secretfs
 import secrets_store
+import service_shutdown
 import tracker_announce
 import torrent_personalize
 import transfer_lifecycle
@@ -3621,11 +3622,11 @@ def main():
     deployment_checkpoint = (os.path.join(
         state_dir, "identity-compatible-ready") if require_identity_gate else None)
     stop = threading.Event()
-    threading.Thread(
+    writer = service_shutdown.WriterThread(
         target=live_samples.writer_loop,
         args=(live_table, os.path.join(state_dir, "live-samples.json"),
               live_samples.SNAPSHOT_WRITE_INTERVAL, stop),
-        daemon=True).start()
+        name="catalog-live-samples", daemon=True, stop_event=stop)
     srv = make_server(host, port, store, secrets_path, certfile=certfile,
                       live_table=live_table, stream_settings=stream_settings,
                       deployment_checkpoint=deployment_checkpoint,
@@ -3634,9 +3635,11 @@ def main():
                       management_previous_token_file=os.environ.get(
                           "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE") or None)
     scheme = "https" if certfile else "http"
+    writer.start()
     print("catalog on %s://%s:%d/v1/images" % (scheme, host, port), flush=True)
-    srv.serve_forever()
+    return service_shutdown.serve(
+        [srv], [lambda left: service_shutdown.stop_thread(writer, stop, left)])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

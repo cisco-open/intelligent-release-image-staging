@@ -139,6 +139,11 @@ def prepare_recovery_candidate(client, path, approved_recipient, *, independent_
 
 
 def recovery_request(job):
+    if isinstance(job, dict) and job.get("action") == "renew-transport":
+        if (job.get("state") != "recovery-required" or not isinstance(job.get("id"), str)
+                or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", job["id"])):
+            raise InstallError("Select an interrupted connection certificate renewal")
+        return {"action": "recover-transport", "request_id": job["id"], "allow_downtime": True}
     if (not isinstance(job, dict) or job.get("action") != "rotate" or
             job.get("state") != "recovery-required" or job.get("family") not in FAMILIES or
             not isinstance(job.get("id"), str) or not re.fullmatch(r"[0-9a-f-]{36}", job["id"])):
@@ -150,9 +155,18 @@ def recovery_request(job):
 class MaintenanceClient:
     def __init__(self, state_dir):
         self.state_dir = private_directory(state_dir)
+        installation = self.state_dir / "installation.json"
+        self.transport_supported = (installation.exists()
+            and json.loads(regular_bytes(installation)).get("config", {}).get("target") == "kubernetes")
+        self.transport_state = None
 
     def call(self, request):
-        if request not in ({"action": "status"}, {"action": "rotation-status"}):
+        if isinstance(request, dict) and request.get("action") in ("renew-transport", "recover-transport"):
+            if (set(request) != {"action", "request_id", "allow_downtime"} or request["allow_downtime"] is not True
+                    or not isinstance(request["request_id"], str)
+                    or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", request["request_id"])):
+                raise InstallError("Unsupported connection certificate maintenance request")
+        elif request not in ({"action": "status"}, {"action": "rotation-status"}, {"action": "transport-status"}):
             if not isinstance(request, dict) or set(request) != {"action", "request_id", "family", "allow_downtime"}:
                 raise InstallError("Unsupported maintenance request")
             expected = recovery_request({"action": "rotate", "state": "recovery-required",
@@ -205,7 +219,11 @@ class MaintenanceClient:
         ordinary = self.call({"action": "status"})
         rotations = self.call({"action": "rotation-status"})
         jobs = []
-        for response in (ordinary, rotations):
+        responses = [ordinary, rotations]
+        if self.transport_supported:
+            self.transport_state = self.call({"action": "transport-status"})
+            responses.append(self.transport_state)
+        for response in responses:
             items = response.get("jobs")
             if not isinstance(items, list) or len(items) > 100 or any(not isinstance(job, dict) for job in items):
                 raise InstallError("Invalid lifecycle job history")
@@ -222,8 +240,8 @@ class MaintenanceWindow:
         self.busy = False
         self.jobs = {}
         window.title("IRIS · Deployment recovery")
-        window.geometry("920x700")
-        window.minsize(720, 650)
+        window.geometry("920x760" if getattr(client, "transport_supported", False) else "920x700")
+        window.minsize(720, 700 if getattr(client, "transport_supported", False) else 650)
         style = ttk.Style(window)
         style.theme_use("clam")
         style.configure("TFrame", background="#ffffff")
@@ -232,12 +250,14 @@ class MaintenanceWindow:
         style.configure("TLabelframe.Label", background="#ffffff", foreground="#102942")
         style.configure("TCheckbutton", background="#ffffff", foreground="#102942")
         style.configure("Heading.TLabel", foreground="#102942", font=("DejaVu Sans", 20, "bold"))
+        style.configure("Expiry.TLabel", foreground="#102942", font=("DejaVu Sans Mono", 9))
+        style.configure("ExpiryWarning.TLabel", foreground="#9e3624", font=("DejaVu Sans Mono", 9))
         outer = ttk.Frame(window, padding=24)
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="Deployment recovery", style="Heading.TLabel").pack(anchor="w")
         ttk.Label(outer, text=str(client.state_dir), wraplength=830).pack(anchor="w", pady=(8, 16))
         ttk.Label(outer, text="Recover an approved rotation even while the Console is stopped.").pack(anchor="w", pady=(0, 12))
-        self.tree = ttk.Treeview(outer, columns=("operation", "family", "state"), show="headings", height=6, selectmode="browse")
+        self.tree = ttk.Treeview(outer, columns=("operation", "family", "state"), show="headings", height=4 if getattr(client, "transport_supported", False) else 6, selectmode="browse")
         for name, width in (("operation", 150), ("family", 190), ("state", 180)):
             self.tree.heading(name, text=name.capitalize())
             self.tree.column(name, width=width, minwidth=100)
@@ -267,6 +287,14 @@ class MaintenanceWindow:
         self.independent_copy = tk.BooleanVar(value=False)
         ttk.Checkbutton(outer, text="I hold an independent off-host copy and will retain keys for older backups.",
                         variable=self.independent_copy).pack(anchor="w", pady=(6, 0))
+        self.transport_button = None
+        if getattr(client, "transport_supported", False):
+            connection_box = ttk.LabelFrame(outer, text="Kubernetes lifecycle connection", padding=8)
+            connection_box.pack(fill="x", pady=(12, 0))
+            self.transport_expiry = ttk.Label(connection_box, text="Reading certificate expiry…", style="Expiry.TLabel")
+            self.transport_expiry.pack(side="left", fill="x", expand=True)
+            self.transport_button = ttk.Button(connection_box, text="Renew connection certificates", command=self.renew_transport, state="disabled")
+            self.transport_button.pack(side="right", padx=(12, 0))
         self.status = tk.StringVar(value="Reading the host worker…")
         status = ttk.Label(outer, textvariable=self.status, wraplength=830)
         status.pack(anchor="w", pady=(12, 0))
@@ -290,6 +318,9 @@ class MaintenanceWindow:
         self.recover_button.state(["disabled"])
         self.recipient_button.state(["disabled"] if self.busy or any(
             item.get("state") in ("running", "recovery-required") for item in self.jobs.values()) else ["!disabled"])
+        if self.transport_button is not None:
+            status = self.client.transport_state or {}
+            self.transport_button.state(["!disabled"] if not self.busy and status.get("can_renew") is True else ["disabled"])
         try:
             recovery_request(job)
         except InstallError:
@@ -304,6 +335,8 @@ class MaintenanceWindow:
         self.refresh_button.state(["disabled"])
         self.recover_button.state(["disabled"])
         self.recipient_button.state(["disabled"])
+        if self.transport_button is not None:
+            self.transport_button.state(["disabled"])
 
         def run():
             try:
@@ -325,9 +358,11 @@ class MaintenanceWindow:
         except InstallError as exc:
             self.status.set(str(exc))
             return
-        if not messagebox.askokcancel("Recover approved rotation", "Recover " + request["family"] +
+        if not messagebox.askokcancel("Recover approved rotation", "Recover " + request.get("family", "connection certificate renewal") +
                 " for operation " + request["request_id"] + "?\n\nThis can stop and restart this deployment. "
-                "The worker reuses its approved journal and refuses changed authority. Preserve the backup.", parent=self.window):
+                "The worker reuses its approved journal and refuses changed authority. Preserve the backup."
+                + (" Expired pending connection certificates will be renewed again using the same private keys; previous certificates are retained."
+                   if request["action"] == "recover-transport" else ""), parent=self.window):
             return
 
         def recover():
@@ -360,6 +395,21 @@ class MaintenanceWindow:
 
         self.start(rotate)
 
+    def renew_transport(self):
+        from tkinter import messagebox
+        if self.busy or not (self.client.transport_state or {}).get("can_renew"):
+            return
+        if not messagebox.askokcancel("Renew connection certificates",
+                "Renew the lifecycle CA, worker and server-client certificates using their existing private keys?\n\n"
+                "This restarts the Kubernetes server. The worker retains the previous client certificate until the new connection is verified. "
+                "Use this host window to recover an interrupted renewal.", parent=self.window):
+            return
+        request = {"action": "renew-transport", "request_id": str(uuid.uuid4()), "allow_downtime": True}
+        def renew():
+            self.client.call(request)
+            return self.client.snapshot(), "Connection renewal requested. Completion requires a verified new client connection."
+        self.start(renew)
+
     def poll(self):
         try:
             success, result = self.events.get_nowait()
@@ -382,6 +432,15 @@ class MaintenanceWindow:
                 if selected and selected[0] in self.jobs:
                     self.tree.selection_set(selected[0])
                 self.status.set(message)
+                if self.transport_button is not None:
+                    import datetime
+                    status = self.client.transport_state or {}
+                    lines = []
+                    for certificate in status.get("certificates", []):
+                        date = datetime.datetime.fromtimestamp(certificate["expires_at"], datetime.timezone.utc).strftime("%Y-%m-%d")
+                        lines.append(certificate["name"].capitalize().ljust(7) + date + "  (" + str(certificate["days_remaining"]) + " days)")
+                    self.transport_expiry.configure(text="\n".join(lines) or "Connection certificate status unavailable",
+                        style="ExpiryWarning.TLabel" if status.get("renewal_due") else "Expiry.TLabel")
             else:
                 self.status.set(str(result) if isinstance(result, InstallError) else
                                 "Recovery request failed. Refresh before retrying; keep the operation journal and backup.")

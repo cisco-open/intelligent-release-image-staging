@@ -98,6 +98,14 @@ token changes publish overlap to remote consumers through a bounded public job
 ID, then prove current-token use. A failed sync retains overlap and requires
 reconciliation; explicit retirement performs a fresh consumer check.
 
+`lifecycle_transport_maintenance.py` renews the Kubernetes worker CA and leaf
+certificates while preserving all three private keys. Host-root Unix requests
+are separate from remote RPC. A journalled old/new client-certificate overlap
+lasts until the owned server proves the replacement through an actual TLS
+connection. Recovery uses the same operation ID and remains available through
+the host UI after certificate expiry. This does not implement replacement of
+compromised transport keys.
+
 Recovery-recipient replacement pins the original key for the operation's backup
 and encrypted write plan. The worker's protected `recovery-access.json` retains
 per-operation key locations and prior backup access, activates the new identity

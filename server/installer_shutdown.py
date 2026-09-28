@@ -84,7 +84,7 @@ def record(children, env=os.environ):
         raise ValueError('Missing process-start evidence')
     results = []
     for child in children:
-        if not re.fullmatch(r'[1-9][0-9]*:(0|143)', child):
+        if not re.fullmatch(r'[1-9][0-9]*:0', child):
             raise ValueError('A managed writer did not stop cleanly')
         pid, code = map(int, child.split(':'))
         if any(item['pid'] == pid for item in results):

@@ -8,6 +8,7 @@ import http.client
 import json
 from pathlib import Path
 import ssl
+import socket
 import subprocess
 import sys
 import threading
@@ -34,7 +35,7 @@ def custody(tmp_path_factory):
 @pytest.mark.parametrize('url', ['http://worker:8443', 'https://u:p@worker:8443',
     'https://worker', 'https://worker:443', 'https://worker:8443/path',
     'https://worker:8443/?secret=x', 'https://0.0.0.0:8443',
-    'https://worker\n.invalid:8443', 'https://-flag:8443'])
+    'https://worker\n.invalid:8443', 'https://-flag:8443', 'https://[::1]:8443'])
 def test_rejects_unsafe_endpoint(url):
     with pytest.raises(InstallError):
         network.endpoint(url)
@@ -97,6 +98,20 @@ def test_no_client_certificate_cannot_reach_worker(custody, service):
             connection.request('POST', '/v1/lifecycle', json.dumps({'action': 'status'}))
             connection.getresponse()
     finally:
+        connection.close()
+
+
+def test_idle_unauthenticated_peer_does_not_block_real_client(custody, service):
+    stalled = socket.create_connection(('127.0.0.1', service), timeout=2)
+    connection = client(custody, service)
+    connection.timeout = 2
+    try:
+        connection.request('POST', '/v1/lifecycle', json.dumps({'action': 'status'}))
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())['result']['available']
+    finally:
+        stalled.close()
         connection.close()
 
 

@@ -34,6 +34,7 @@ import auth
 import bounded_pool
 import credential_cache
 import secrets_store
+import service_shutdown
 
 # Subdirectory (relative to the artifacts root) that holds per-device staging
 # configs. Files under this prefix are swept on a timer (start_sweeper) after
@@ -597,22 +598,25 @@ def make_server(host, port, directory, certfile=None, secrets_path=None,
     return srv
 
 
-def start_sweeper(directory, interval=300):
+def start_sweeper(directory, interval=300, stop_event=None):
     """Sweep staging/ on a timer instead of on the request path.
 
     Returns the daemon thread (started). The sweep is a directory scan that
     deletes credentials past STAGING_MAX_AGE_SECONDS; nothing about it needs
     to be synchronous with a fetch, and doing it per-GET meant a device could
     trigger the deletion of the very file it was asking for."""
+    stop_event = stop_event if stop_event is not None else threading.Event()
+
     def _loop():
-        while True:
+        while not stop_event.is_set():
             try:
                 sweep_staging(directory)
             except Exception:
                 pass    # a sweep failure must never take the server down
-            time.sleep(interval)
+            stop_event.wait(interval)
 
-    t = threading.Thread(target=_loop, name="staging-sweeper", daemon=True)
+    t = service_shutdown.WriterThread(target=_loop, name="staging-sweeper",
+                                      daemon=True, stop_event=stop_event)
     t.start()
     return t
 
@@ -642,12 +646,14 @@ def main():
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     srv = make_server(host, port, directory, certfile=certfile,
                       secrets_path=secrets_path)
-    start_sweeper(directory)
+    stop = threading.Event()
+    sweeper = start_sweeper(directory, stop_event=stop)
     scheme = "https" if certfile else "http"
     print("artifacts on %s://%s:%d (dir %s)" % (scheme, host, port, directory),
           flush=True)
-    srv.serve_forever()
+    return service_shutdown.serve(
+        [srv], [lambda left: service_shutdown.stop_thread(sweeper, stop, left)])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

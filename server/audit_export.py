@@ -332,6 +332,10 @@ _JOB_TTL = 3600                 # evict terminal export jobs after (s)
 # polls. Per-process: a restart abandons in-flight jobs.
 _JOBS = {}
 _JOBS_LOCK = threading.Lock()
+_EXPORT_CONDITION = threading.Condition(_JOBS_LOCK)
+_EXPORT_ACTIVE = set()
+_EXPORT_FAILED = False
+_EXPORT_CLOSING = False
 
 
 def start_export(audit_path, settings, password, state_dir, audit_fn=None,
@@ -341,16 +345,20 @@ def start_export(audit_path, settings, password, state_dir, audit_fn=None,
     turns terminal so a poller that sees done/error can rely on the audit
     line already existing. export_fn is a test seam (defaults to
     export_once, resolved at call time)."""
+    global _EXPORT_FAILED
     job_id = secrets.token_hex(8)
     job = {"state": "running", "detail": "", "finished_at": None}
     now = time.time()
     with _JOBS_LOCK:
+        if _EXPORT_CLOSING:
+            raise ValueError("audit export is shutting down")
         stale = [jid for jid, j in _JOBS.items()
                  if j["finished_at"] is not None
                  and j["finished_at"] <= now - _JOB_TTL]
         for jid in stale:
             del _JOBS[jid]
         _JOBS[job_id] = job
+        _EXPORT_ACTIVE.add(job_id)
 
     def run():
         try:
@@ -375,8 +383,50 @@ def start_export(audit_path, settings, password, state_dir, audit_fn=None,
             job["detail"] = detail
             job["finished_at"] = time.time()
 
-    threading.Thread(target=run, daemon=True).start()
+    def tracked_run():
+        global _EXPORT_FAILED
+        try:
+            run()
+        except BaseException:
+            with _EXPORT_CONDITION:
+                _EXPORT_FAILED = True
+        finally:
+            with _EXPORT_CONDITION:
+                _EXPORT_ACTIVE.discard(job_id)
+                _EXPORT_CONDITION.notify_all()
+
+    try:
+        threading.Thread(target=tracked_run, name="audit-export",
+                         daemon=True).start()
+    except Exception:
+        with _EXPORT_CONDITION:
+            _EXPORT_FAILED = True
+            _EXPORT_ACTIVE.discard(job_id)
+            _EXPORT_CONDITION.notify_all()
+        raise
+    except BaseException:
+        with _EXPORT_CONDITION:
+            _EXPORT_FAILED = True
+        raise
     return job_id
+
+
+def drain_exports(timeout=30):
+    """Fence manual exports and prove their settings/audit writes completed."""
+    global _EXPORT_CLOSING
+    deadline = time.monotonic() + max(0, timeout)
+    if not _JOBS_LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
+        return False
+    try:
+        _EXPORT_CLOSING = True
+        while _EXPORT_ACTIVE:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _EXPORT_CONDITION.wait(remaining)
+        return not _EXPORT_FAILED
+    finally:
+        _JOBS_LOCK.release()
 
 
 def get_job(job_id):

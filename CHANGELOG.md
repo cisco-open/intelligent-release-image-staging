@@ -23,6 +23,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   Verify every Console consumer, preserve management-token overlap on failed
   synchronization, and require pod/process-bound shutdown proof for PVC capture.
   Keep the Kubernetes lifecycle worker outside the cluster behind mutual TLS.
+  Add host-UI same-key renewal of that worker's CA and connection certificates,
+  including recovery after expiry. Drain HTTP requests, publishers, exports and
+  background writers before admitting clean-stop backup evidence.
 
 - Add planned single-Docker credential maintenance in the Console for management
   and device TLS, peer CA, offline signing roots, server age identity and seeder

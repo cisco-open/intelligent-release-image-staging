@@ -203,6 +203,9 @@ def test_task13_main_wires_state_handout_path_through_real_construction(
         def start(self):
             calls.append("hub-start")
 
+        def stop(self, timeout=5):
+            return True
+
         def note_announce(self):
             pass
 
@@ -221,6 +224,9 @@ def test_task13_main_wires_state_handout_path_through_real_construction(
         def start(self):
             calls.append("reconciler-start")
 
+        def stop(self, timeout=5):
+            return True
+
     class Server:
         def serve_forever(self):
             calls.append("serve")
@@ -229,7 +235,9 @@ def test_task13_main_wires_state_handout_path_through_real_construction(
     captured = {}
     monkeypatch.setattr(tracker.telemetry, "from_env", lambda: Hub())
     monkeypatch.setattr(tracker.telemetry, "metrics_port", lambda: None)
-    monkeypatch.setattr(tracker, "_start_pruner", lambda _registry: None)
+    monkeypatch.setattr(tracker, "_start_pruner", lambda _registry, _stop: None)
+    monkeypatch.setattr(tracker.service_shutdown, "serve",
+                        lambda servers, _writers: servers[0].serve_forever())
     monkeypatch.setattr(
         tracker, "_build_reconciler_from_env",
         lambda *_args, **_kwargs: Reconciler())

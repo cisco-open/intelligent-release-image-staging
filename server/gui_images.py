@@ -64,6 +64,10 @@ class ImageService:
         # publish starts. derive_id makes foo.bin/foo.SPA.bin aliases collide.
         self._upload_reservations = {}
         self._lock = threading.Lock()
+        self._publish_condition = threading.Condition(self._lock)
+        self._publish_active = set()
+        self._publish_failed = False
+        self._closing = False
         os.makedirs(images_dir, exist_ok=True)
 
     def _store(self):
@@ -354,8 +358,9 @@ class ImageService:
         job id immediately; poll get_job() for progress. A missing tracker URL or
         any publish error transitions the job to state 'error' with a message.
         Jobs are in-memory and per-process: a server restart loses all job state,
-        and an in-flight publish is abandoned (not resumed). Terminal jobs are
-        evicted after _JOB_TTL."""
+        and interrupted jobs are not resumed. Managed shutdown waits for the
+        admitted publish and verification callbacks; a timeout refuses clean
+        backup proof. Terminal jobs are evicted after _JOB_TTL."""
         job_id = secrets.token_hex(8)
         job = {
             "id": job_id,
@@ -373,6 +378,8 @@ class ImageService:
         }
         pending_id = publish_mod.derive_id(job["filename"])
         with self._lock:
+            if self._closing:
+                raise ValueError("image service is shutting down")
             reserved = self._upload_reservations.get(pending_id)
             if reserved is not None and os.path.realpath(reserved) != \
                     os.path.realpath(image_path):
@@ -386,6 +393,9 @@ class ImageService:
             self._jobs[job_id] = job
             self._upload_reservations.pop(pending_id, None)
             self._publishing.add(pending_id)
+            # Register before Thread.start, including the interval between
+            # admitting this job and creating its daemon callback.
+            self._publish_active.add(job_id)
 
         def run():
             tracker_url = None
@@ -430,8 +440,50 @@ class ImageService:
                 with self._lock:
                     self._publishing.discard(pending_id)
 
-        threading.Thread(target=run, daemon=True).start()
+        def tracked_run():
+            try:
+                run()
+            except BaseException:
+                with self._publish_condition:
+                    self._publish_failed = True
+            finally:
+                with self._publish_condition:
+                    self._publish_active.discard(job_id)
+                    self._publish_condition.notify_all()
+
+        try:
+            threading.Thread(target=tracked_run, name="image-publish",
+                             daemon=True).start()
+        except Exception:
+            with self._publish_condition:
+                self._publish_failed = True
+                self._publish_active.discard(job_id)
+                self._publishing.discard(pending_id)
+                self._publish_condition.notify_all()
+            raise
+        except BaseException:
+            # An asynchronous interruption can happen after thread launch;
+            # only its finally block may clear an uncertain active writer.
+            with self._publish_condition:
+                self._publish_failed = True
+            raise
         return job_id
+
+    def shutdown(self, timeout=30):
+        """Fence new jobs and prove all admitted writes have finished."""
+        deadline = time.monotonic() + max(0, timeout)
+        if not self._lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            return False
+        try:
+            self._closing = True
+            while self._publish_active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._publish_condition.wait(remaining)
+            return not self._publish_failed
+        finally:
+            self._lock.release()
 
     def _mark_verifying(self, job_id, image_id):
         """Publish succeeded; make the follow-on integrity phase pollable."""

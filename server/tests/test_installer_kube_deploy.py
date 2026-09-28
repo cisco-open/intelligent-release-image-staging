@@ -45,6 +45,20 @@ def test_accepts_explicit_registry_or_local_import():
     kube.validate_kube_config(config(kube_image_import="registry", kube_node="", kube_registry="registry.example/iris"))
 
 
+def test_api_omitted_empty_policy_lists_remain_deny_all():
+    expected = {'kind': 'NetworkPolicy', 'spec': {'podSelector': {},
+        'policyTypes': ['Ingress', 'Egress'], 'ingress': [], 'egress': []}}
+    actual = copy.deepcopy(expected)
+    actual['spec'].pop('ingress')
+    actual['spec'].pop('egress')
+    assert kube._contains(actual, expected)
+    actual['spec']['egress'] = [{}]
+    assert not kube._contains(actual, expected)
+    actual['spec'].pop('egress')
+    actual['spec']['policyTypes'] = ['Ingress']
+    assert not kube._contains(actual, expected)
+
+
 def install(tmp_path):
     obj = object.__new__(kube.KubeInstall)
     obj.base = tmp_path
@@ -60,6 +74,27 @@ def install(tmp_path):
     obj.cluster_preflight = lambda: None
     obj.kube = lambda *args, **kwargs: b'{"items": []}'
     return obj
+
+
+@pytest.mark.parametrize("phase", ["preparing", "overlap-active", "secret-published", "new-client-verified", "renewing-expired"])
+def test_install_resume_requires_explicit_pending_transport_recovery(tmp_path, phase):
+    obj = install(tmp_path)
+    authority = {"instance_id": obj.journal.document["id"], "phase": phase}
+    atomic_write(tmp_path / "lifecycle-transport-operation.json", json.dumps(authority).encode())
+    obj.verify_inputs = lambda: pytest.fail("ordinary resume bypassed pending connection recovery")
+    with pytest.raises(InstallError, match="connection certificate operation"):
+        obj.resume()
+
+
+def test_completed_transport_does_not_block_install_resume(tmp_path):
+    obj = install(tmp_path)
+    authority = {"instance_id": obj.journal.document["id"], "phase": "complete"}
+    atomic_write(tmp_path / "lifecycle-transport-operation.json", json.dumps(authority).encode())
+    def reached_inputs():
+        raise RuntimeError("normal input validation reached")
+    obj.verify_inputs = reached_inputs
+    with pytest.raises(RuntimeError, match="normal input validation reached"):
+        obj.resume()
 
 
 def manifest(obj, desired, uid="owned-uid"):

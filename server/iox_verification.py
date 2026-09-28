@@ -6468,9 +6468,9 @@ class IoxControlServer(object):
         except (OSError, ValueError):
             pass
         with self.connection_lock:
-            if self.workers:
+            if self.workers or (self.thread is not None and self.thread.is_alive()):
                 raise RuntimeError(
-                    "IOx control server retained active dispatch workers")
+                    "IOx control server retained active dispatch or admission workers")
 
 
 class _ControlClient(object):

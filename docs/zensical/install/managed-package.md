@@ -110,6 +110,9 @@ supports one to eight replicas; adding Console pods does not make the stateful
 server highly available. Each Console must pass authenticated management checks.
 The lifecycle worker runs outside the cluster and uses a deployment-specific
 mutual-TLS connection, so it remains available while pods are stopped.
+Use the controller's **Host maintenance** window to review this connection's
+certificate expiries and renew them before expiry. This renews certificates
+without replacing their private keys; it is not compromised-key recovery.
 
 For a local single-node k3s lab, replace `--kube-registry` with
 `--kube-image-import k3s --kube-node <exact-local-node-name>`. This imports the
@@ -144,3 +147,15 @@ Use [Backup & restore](../admin-guide/backups.md) and
 [deployment rotation](../admin-guide/deployment-rotation.md) for managed
 maintenance. Keep encrypted copies and recovery custody off the controller.
 Isolated recovery extraction is not an automated restore or service cutover.
+
+## If maintenance stops
+
+| Message or symptom | What to do |
+| --- | --- |
+| A resource differs from recorded installation intent | Check the exact instance, cluster and namespace. Preserve the journal and investigate changes outside the installer; do not delete ownership records to adopt a resource. |
+| Writers did not stop cleanly | Keep the failed operation and backup evidence. Inspect the stopped service and outstanding work; forced termination is not a consistent backup. |
+| Management credential synchronization needs intervention | Keep the previous credential active. Restore worker/Console connectivity and use the schedule's reconciliation control before retirement. |
+| The Kubernetes worker connection certificate expired | Use the controller's local Host maintenance window to renew or recover the recorded operation. Do not regenerate its private custody directory. |
+
+For interrupted credential replacement, use the
+[host recovery procedure](../admin-guide/recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).

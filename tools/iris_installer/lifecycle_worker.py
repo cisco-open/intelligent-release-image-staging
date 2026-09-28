@@ -97,7 +97,7 @@ class Worker:
                     'storage': 'operator-configured-host-directories',
                     'can_verify': self.identity is not None,
                     'can_extract': self.identity is not None and self.extract_dir is not None,
-                    'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] != 'rotate'])),
+                    'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] not in ('rotate', 'renew-transport')])),
                     'note': 'Keep encrypted copies and pinned backup signer trust off this host. Extraction does not start services or authorize cutover.'}
 
     def rotation_status(self):
@@ -107,6 +107,76 @@ class Worker:
                     'families': list(self.rotation_families),
                     'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] == 'rotate'])),
                     'note': 'Rotation stops this deployment after a verified cold backup. Trust changes also require device removal and package rebuilds.'}
+
+    def transport_status(self):
+        if self.target != 'kubernetes':
+            return {'available': False, 'jobs': []}
+        from . import lifecycle_transport_maintenance as maintenance
+        from .deploy import run
+        configuration = json.loads(regular_bytes(self.state_dir / 'installation.json'))['config']
+        result = maintenance.status(self.state_dir, configuration['lifecycle_url'], run)
+        with self.lock:
+            result['jobs'] = json.loads(json.dumps([job for job in self.jobs if job['action'] == 'renew-transport']))
+            result['can_renew'] = (getattr(self, 'network_server', None) is not None
+                and not any(job['state'] in ('running', 'recovery-required') for job in self.jobs))
+        return result
+
+    def transport_proof(self, request, peer_sha256):
+        # Called only by the authenticated network handler. The peer digest
+        # comes from its TLS socket, never from a request body or Unix caller.
+        from .lifecycle_transport_maintenance import proof_request
+        return proof_request(self.state_dir, request, peer_sha256)
+
+    def submit_transport(self, request):
+        if (self.target != 'kubernetes' or getattr(self, 'network_server', None) is None
+                or not isinstance(request, dict)
+                or set(request) != {'action', 'request_id', 'allow_downtime'}
+                or request['action'] not in ('renew-transport', 'recover-transport')
+                or request['allow_downtime'] is not True):
+            raise InstallError('Confirm server restart for this Kubernetes connection renewal')
+        from .lifecycle_transport_maintenance import _id
+        identifier = _id(request['request_id'])
+        recovery = request['action'] == 'recover-transport'
+        with self.lock:
+            previous = next((job for job in self.jobs if job['id'] == identifier), None)
+            if previous:
+                if previous['action'] != 'renew-transport':
+                    raise InstallError('Request ID belongs to a different operation')
+                if not recovery:
+                    return {'job_id': identifier}
+                if previous['state'] != 'recovery-required':
+                    raise InstallError('Choose an interrupted connection renewal')
+            elif recovery:
+                raise InstallError('There is no connection renewal to recover')
+            if any(job['id'] != identifier and job['state'] in ('running', 'recovery-required') for job in self.jobs):
+                raise InstallError('Finish the active maintenance operation first')
+            if previous is None:
+                if len(self.jobs) >= 100:
+                    raise InstallError('Lifecycle history limit reached')
+                previous = {'id': identifier, 'action': 'renew-transport', 'family': 'connection-certificates',
+                            'state': 'running', 'started_at': int(time.time()), 'detail': '', 'proof': None}
+                self.jobs.append(previous)
+            else:
+                previous.update(state='running', detail='Recovering the approved connection renewal')
+            self.save()
+            self.thread = threading.Thread(target=self.perform_transport, args=(previous,), kwargs={'recovery': recovery}, daemon=False)
+            self.thread.start()
+            return {'job_id': identifier}
+
+    def perform_transport(self, job, *, recovery=False):
+        from .lifecycle_transport_maintenance import renew
+        try:
+            proof = renew(self.state_dir, job['id'], self.network_server, recovery=recovery)
+            state, detail = 'renewed', 'CA and connection certificates renewed; private keys preserved and the old client certificate retired.'
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, InstallError) else type(exc).__name__
+            print('Connection certificate renewal failed: ' + reason, file=sys.stderr, flush=True)
+            record = self.state_dir / 'lifecycle-transport-operations' / job['id'] / 'record.json'
+            state = 'recovery-required' if record.exists() else 'failed'
+            detail, proof = 'Renewal incomplete. Preserve the operation and use host recovery; private keys were not replaced.', None
+        with self.lock:
+            job.update(state=state, detail=detail, proof=proof, finished_at=int(time.time()))
+            self.save()
 
     def sync_management(self, request):
         if (set(request) != {'action', 'request_id'} or request.get('action') != 'sync-management'
@@ -364,8 +434,13 @@ def make_server(path, worker, *, allowed_uids=(0, 10001)):
                 if len(raw) > 4096 or not raw.endswith(b'\n'):
                     raise InstallError("Invalid maintenance request")
                 request = json.loads(raw)
-                result = (worker.status() if request == {'action': 'status'} else
-                          worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
+                if isinstance(request, dict) and request.get('action') in ('transport-status', 'renew-transport', 'recover-transport'):
+                    if uid != 0:
+                        raise InstallError('Connection certificate maintenance requires root on this host')
+                    result = (worker.transport_status() if request == {'action': 'transport-status'} else worker.submit_transport(request))
+                else:
+                    result = (worker.status() if request == {'action': 'status'} else
+                              worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
             except (InstallError, ValueError, TypeError) as exc:
                 response = {'ok': False, 'error': str(exc) if isinstance(exc, InstallError) else 'Invalid maintenance request'}
@@ -441,13 +516,16 @@ def _serve_locked(args):
     network_thread = None
     try:
         if configuration['target'] == 'kubernetes':
-            from .lifecycle_network import endpoint, make_https_server, prepare_network_custody
+            from .lifecycle_network import endpoint, make_https_server
+            from .lifecycle_transport_maintenance import startup_custody
             if not (Path(args.state_dir) / 'lifecycle-tls').is_dir():
                 raise InstallError('Recorded lifecycle transport custody is missing; do not regenerate it')
             from .deploy import run
-            custody = prepare_network_custody(args.state_dir, configuration['lifecycle_url'], run)
+            custody, overlap = startup_custody(args.state_dir, configuration['lifecycle_url'], run)
             host, port = endpoint(configuration['lifecycle_url'])
             network_server = make_https_server(getattr(args, 'listen_address', None) or host, port, worker, custody)
+            network_server.configure_transport(custody, extra_client_digests=overlap)
+            worker.network_server = network_server
             network_server.timeout = 0.5
             def serve_network():
                 while not stop.is_set():

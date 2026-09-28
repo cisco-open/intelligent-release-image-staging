@@ -14,6 +14,16 @@ adopt an existing manually provisioned deployment. Use the
 [topology-specific procedures](rotations.md) for deployments without that worker.
 Root attestations use the Console directly and do not require this host worker.
 
+For Kubernetes, the worker connection has its own CA and client/server
+certificates. On the installer controller, open
+`sudo irisctl maintenance-ui --state-dir <installation-state-directory>`.
+The connection panel shows expiry and provides **Renew connection certificates**
+and recovery of an interrupted renewal. This is same-key certificate renewal,
+not replacement of compromised private keys. It restarts the server, verifies
+the new connection, then retires the old client certificate. The host window
+uses its local Unix socket, so an expired network certificate does not prevent
+recovery. These controls are not exposed to the browser or network worker API.
+
 ## Before starting
 
 Configure the [lifecycle worker](backups.md#console-backup-controls) with separate

@@ -1689,6 +1689,7 @@ class OnboardService:
             t = self._maintenance
         if t is not None:
             t.join(timeout=5)
+        return t is None or not t.is_alive()
 
     def shutdown(self):
         """Stop admission and drain the bounded worker pool safely.
@@ -1700,7 +1701,7 @@ class OnboardService:
         with self._lock:
             self._closing = True
         self.cancel_queued()
-        self.stop_maintenance()
+        clean_maintenance = self.stop_maintenance()
         self._work_queue.join()
         with self._lock:
             workers = list(self._workers)
@@ -1710,6 +1711,8 @@ class OnboardService:
             worker.join()
         with self._lock:
             self._workers = []
+        if not clean_maintenance:
+            raise RuntimeError("Onboarding maintenance retained an active writer")
 
     def _build_env(self, device_id, mint=True, resolved=None, env_extra=None,
                    resolve_credentials=True, onboarding=False):

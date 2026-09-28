@@ -30,6 +30,12 @@ def test_classic_store_binds_config_digest(tmp_path):
     _archive_identity(tmp_path / 'unused', 'sha256:' + 'a' * 64, 'sha256:' + 'a' * 64)
 
 
+@pytest.mark.parametrize('identity', [None, '', 'invalid'])
+def test_missing_identity_cannot_match_missing_config(tmp_path, identity):
+    with pytest.raises(InstallError):
+        _archive_identity(tmp_path / 'unused', identity, identity)
+
+
 @pytest.mark.parametrize('corruption', [None, 'blob', 'reference', 'duplicate', 'missing'])
 def test_containerd_store_binds_actual_root_blob(tmp_path, corruption):
     root = b'{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}'

@@ -17,6 +17,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'device' / 'agen
 from peer_tls import ensure
 
 
+def stop_child(child, *, timeout=15):
+    """Reap the seeder without turning a forced or failed exit into success."""
+    if child is None:
+        return True
+    result = child.poll()
+    forced = False
+    if result is None:
+        child.terminate()
+        try:
+            result = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            forced = True
+            child.kill()
+            result = child.wait()
+    # A default signal exit does not prove aria flushed its durable session.
+    # Its cooperative TERM handler must finish and return success itself.
+    return not forced and result == 0
+
+
 def main():
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -33,16 +52,13 @@ def main():
     child = None
     current = None
     next_identity_check = 0
+    clean_children = True
 
     def shutdown():
-        nonlocal child
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+        nonlocal child, clean_children
+        # Keep failure sticky across certificate/mode restarts. A later healthy
+        # child does not establish that an earlier writer flushed its state.
+        clean_children = stop_child(child) and clean_children
         child = None
 
     def report(state, active=None):
@@ -89,8 +105,8 @@ def main():
             stop.wait(2)
     finally:
         shutdown()
-        report('stopped')
-    return 0
+        report('stopped' if clean_children else 'error')
+    return 0 if clean_children else 1
 
 
 if __name__ == '__main__':

@@ -409,7 +409,7 @@ on_shutdown() {
   clean_exit=0
   for result in "${CHILD_RESULTS[@]}"; do
     case "$result" in
-      *:0|*:143) ;;
+      *:0) ;;
       *) clean_exit=1 ;;
     esac
   done

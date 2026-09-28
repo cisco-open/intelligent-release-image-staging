@@ -339,7 +339,7 @@ def test_schedule_daemon_lifecycle_is_ordered_after_deployment_recovery():
     assert "schedule_wake=schedule_wake_event.set" in source
     shutdown = source.split("def shutdown_management():", 1)[1]
     assert shutdown.index("schedule_service.stop()") < \
-        shutdown.index("schedule_thread.join(timeout=10)") < \
+        shutdown.index("_drain_management_writers(writer_threads + _manual_ca_writers(),") < \
         shutdown.index("onboard.shutdown()")
 
 
