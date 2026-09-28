@@ -461,16 +461,143 @@ def test_actual_idle_helper_command_exits_cleanly_on_shutdown(tmp_path, signal_n
 
 def test_helper_exec_refuses_same_uid_with_substituted_image(tmp_path):
     obj = install(tmp_path)
-    obj.assert_writers_stopped = lambda: None
+    obj.assert_writers_stopped = lambda **kwargs: None
+    obj._maintenance_read_view = lambda helper: {}
     desired = obj._object("Pod", "helper", spec=obj._pod_spec("iris"))
     atomic_write(tmp_path / "kube-helper.json", kube._canonical(desired))
     obj.journal.document["completed"]["kube-helper"] = {"name": "helper", "uid": "same-uid", "sha256": kube.digest(tmp_path / "kube-helper.json")}
     actual = copy.deepcopy(desired)
     actual["metadata"]["uid"] = "same-uid"
     actual["spec"]["containers"][0]["image"] = "attacker:latest"
-    obj.get = lambda *args: actual
+    obj.get = lambda *args, **kwargs: actual
     with pytest.raises(InstallError):
         obj.maintenance_run(["python3", "-V"])
+
+
+def bulk_maintenance(tmp_path):
+    obj = install(tmp_path)
+    desired = [obj._object("Namespace", obj.config["kube_namespace"]),
+        *[obj._object("Deployment", name, spec={"replicas": 0, "template": {"spec": obj._pod_spec(service)}})
+          for service, name in kube.SERVICES.items()],
+        obj._object("ConfigMap", "settings", data={"setting": "owned"}),
+        obj._secret("secret", {"value": b"private"}),
+        obj._object("NetworkPolicy", "deny", spec={"podSelector": {}, "policyTypes": ["Ingress"], "ingress": []})]
+    atomic_write(obj.manifest_file, kube._canonical(desired))
+    completed = obj.journal.document["completed"]
+    completed["kube-manifests"] = kube.digest(obj.manifest_file)
+    completed["kube-cluster"] = {"uid": "cluster-uid", "server": "https://cluster", "context": "lab"}
+    completed["kube-resources"] = {}
+    explicit, policies = [], []
+    for intent in desired:
+        actual = copy.deepcopy(intent)
+        actual["metadata"].update(uid="uid-" + intent["metadata"]["name"], resourceVersion="1")
+        (policies if intent["kind"] == "NetworkPolicy" else explicit).append(actual)
+        completed["kube-resources"][intent["kind"] + "/" + intent["metadata"]["name"]] = {
+            "uid": actual["metadata"]["uid"], "sha256": hashlib.sha256(kube._canonical(intent)).hexdigest()}
+    explicit.extend([{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "kube-system", "uid": "cluster-uid"}},
+        {"apiVersion": "storage.k8s.io/v1", "kind": "StorageClass", "metadata": {"name": "storage", "uid": "storage-uid"}}])
+    helper = obj._object("Pod", "helper", spec={"containers": [{"name": "iris", "image": "owned@sha256:" + "a" * 64}],
+        "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "iris-data"}}]})
+    atomic_write(tmp_path / "kube-helper.json", kube._canonical(helper))
+    completed["kube-helper"] = {"name": "helper", "uid": "helper-uid", "sha256": kube.digest(tmp_path / "kube-helper.json")}
+    helper = copy.deepcopy(helper)
+    helper["metadata"]["uid"] = "helper-uid"
+    helper["status"] = {"containerStatuses": [{"name": "iris", "containerID": "containerd://first",
+        "restartCount": 0, "state": {"running": {"startedAt": "2026-09-28T12:00:00Z"}}}]}
+    state = {"explicit": explicit, "namespace": [helper, *policies], "fresh_helper": helper, "calls": [], "preflights": 0}
+    def preflight():
+        state["preflights"] += 1
+    obj.cluster_preflight = preflight
+    def command(*args, **kwargs):
+        state["calls"].append(args)
+        if args[0] == "exec":
+            return b"checked"
+        if args[:2] == ("get", "pods,networkpolicies"):
+            assert "-l" not in args and "--selector" not in args
+            result = {"apiVersion": "v1", "kind": "List", "items": state["namespace"]}
+        elif args[:3] == ("get", "pod", "helper"):
+            result = state["fresh_helper"]
+        else:
+            assert args[0] == "get" and all("/" in ref for ref in args[1:-4])
+            result = {"apiVersion": "v1", "kind": "List", "items": state["explicit"]}
+        return json.dumps(result).encode()
+    obj.kube = command
+    return obj, state
+
+
+def test_bulk_maintenance_fence_refreshes_every_call_and_keeps_preflight(tmp_path):
+    obj, state = bulk_maintenance(tmp_path)
+    assert obj.maintenance_run(["python3", "-V"], capture=True) == b"checked"
+    assert obj.maintenance_run(["python3", "-V"], capture=True) == b"checked"
+    assert state["preflights"] == 2
+    assert len(state["calls"]) == 8  # two lists, fresh helper, exec per call
+    view = obj._maintenance_read_view(obj.journal.document["completed"]["kube-helper"])
+    assert obj.get("deployment", "iris-console", read_view=view) == obj.get("Deployment", "iris-console", read_view=view)
+    with pytest.raises(InstallError, match="does not cover"):
+        obj.get("Secret", "unrequested", read_view=view)
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "namespace", "unexpected", "api", "cluster", "uid", "spec", "foreign-writer", "foreign-policy", "helper-restart", "helper-uid", "helper-namespace", "duplicate-pod", "missing-helper"])
+def test_bulk_maintenance_refuses_drift_before_exec(tmp_path, fault):
+    obj, state = bulk_maintenance(tmp_path)
+    if fault == "missing":
+        state["explicit"].pop()
+    elif fault == "duplicate":
+        state["explicit"].append(copy.deepcopy(state["explicit"][0]))
+    elif fault == "namespace":
+        state["explicit"][1]["metadata"]["namespace"] = "other"
+    elif fault == "unexpected":
+        extra = copy.deepcopy(state["explicit"][3])
+        extra["metadata"]["name"] = "unrequested"
+        state["explicit"].append(extra)
+    elif fault == "api":
+        state["explicit"][1]["apiVersion"] = "foreign/v1"
+    elif fault == "cluster":
+        next(row for row in state["explicit"] if row["metadata"]["name"] == "kube-system")["metadata"]["uid"] = "another-cluster"
+    elif fault == "uid":
+        state["explicit"][1]["metadata"]["uid"] = "replacement"
+    elif fault == "spec":
+        state["explicit"][3]["data"]["setting"] = "changed"
+    elif fault in ("foreign-writer", "foreign-policy"):
+        extra = copy.deepcopy(state["namespace"][0 if fault == "foreign-writer" else 1])
+        extra["metadata"].update(name="foreign", uid="foreign-uid")
+        state["namespace"].append(extra)
+    elif fault == "helper-restart":
+        state["fresh_helper"] = copy.deepcopy(state["fresh_helper"])
+        state["fresh_helper"]["status"]["containerStatuses"][0]["containerID"] = "containerd://restarted"
+    elif fault == "helper-uid":
+        state["fresh_helper"] = copy.deepcopy(state["fresh_helper"])
+        state["fresh_helper"]["metadata"]["uid"] = "replacement-helper"
+    elif fault == "helper-namespace":
+        state["namespace"][0]["metadata"]["namespace"] = "another"
+    elif fault == "duplicate-pod":
+        state["namespace"].append(copy.deepcopy(state["namespace"][0]))
+    elif fault == "missing-helper":
+        state["namespace"].pop(0)
+    with pytest.raises(InstallError):
+        obj.maintenance_run(["python3", "-V"])
+    assert not any(call[0] == "exec" for call in state["calls"])
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_bulk_fence_preserves_exact_pending_before_after_authority(tmp_path, approved):
+    obj, state = bulk_maintenance(tmp_path)
+    objects = json.loads(obj.manifest_file.read_bytes())
+    before = next(row for row in objects if row["kind"] == "ConfigMap")
+    after = obj._object("ConfigMap", "settings", data={"setting": "approved"})
+    actual = next(row for row in state["explicit"] if row["kind"] == "ConfigMap")
+    actual["data"] = after["data"] if approved else {"setting": "unapproved"}
+    actual["metadata"]["annotations"] = after["metadata"]["annotations"]
+    objects[objects.index(before)] = after
+    atomic_write(obj.manifest_file, kube._canonical(objects))
+    atomic_write(tmp_path / "kube-update.json", kube._canonical({"before": before, "after": after, "uid": actual["metadata"]["uid"]}))
+    authority_bytes = (tmp_path / "kube-update.json").read_bytes()
+    if approved:
+        assert obj.maintenance_run(["python3", "-V"]) == b"checked"
+    else:
+        with pytest.raises(InstallError, match="pending update ownership changed"):
+            obj.maintenance_run(["python3", "-V"])
+    assert (tmp_path / "kube-update.json").read_bytes() == authority_bytes
 
 
 def test_failed_new_writer_can_be_stopped_for_same_transaction_recovery(tmp_path):

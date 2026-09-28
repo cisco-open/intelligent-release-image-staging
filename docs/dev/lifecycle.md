@@ -89,6 +89,9 @@ and object identities; mutable private host mirrors live in protected tmpfs.
 Snapshot reads batch at most 128 members and 4 MiB per transport, with the full
 stopped-writer check on every batch, per-file identity and digest verification,
 and a final unchanged inventory. No ownership checks are cached across batches.
+Each check bulk-reads the owned objects and the namespace's complete pod/policy
+lists after cluster preflight. It still rejects unexpected PVC writers or network
+policies and verifies the helper's current execution immediately before transfer.
 The shutdown marker binds pod UID and a fresh process nonce to child exit status.
 Forced pod deletion cannot substitute for stopped-writer proof. Age-identity
 proof checks the restarted PVC rather than trusting a pre-restart local mirror.

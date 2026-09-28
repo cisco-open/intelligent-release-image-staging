@@ -36,6 +36,9 @@ FIELDS = {"kubeconfig_path", "kube_context", "kube_namespace", "kube_storage_cla
 LABEL = "iris.cisco.com/installation"
 INTENT = "iris.cisco.com/intent-sha256"
 SERVICES = {"iris": "iris-seed-server", "console": "iris-console"}
+RESOURCE_NAMES = {"Namespace": "namespaces", "StorageClass": "storageclasses", "Secret": "secrets",
+                  "ConfigMap": "configmaps", "PersistentVolumeClaim": "persistentvolumeclaims",
+                  "Deployment": "deployments", "Service": "services", "NetworkPolicy": "networkpolicies", "Pod": "pods"}
 MAINTENANCE_IDLE = '''import os,signal,sys,time
 stopped=False
 def stop(*_):
@@ -48,6 +51,17 @@ os.chmod(sys.argv[1],0o700)
 while not stopped:
  time.sleep(.1)
 '''
+
+
+def _container_incarnation(pod, name):
+    statuses = [row for row in pod.get("status", {}).get("containerStatuses", []) if row.get("name") == name]
+    status = statuses[0] if len(statuses) == 1 else {}
+    started = status.get("state", {}).get("running", {}).get("startedAt")
+    if (not isinstance(status.get("containerID"), str) or not status["containerID"]
+            or not isinstance(started, str) or not started
+            or type(status.get("restartCount")) is not int or status["restartCount"] < 0):
+        raise InstallError("Running workload container incarnation is unavailable")
+    return {"container_id": status["containerID"], "started_at": started, "restart_count": status["restartCount"]}
 
 
 def validate_config(config):
@@ -193,7 +207,12 @@ class KubeInstall(DockerInstall):
                              "--context", self.config["kube_context"],
                              "--namespace", self.config["kube_namespace"], *args], **kwargs)
 
-    def get(self, kind, name):
+    def get(self, kind, name, *, read_view=None):
+        if read_view is not None:
+            canonical = next((key for key, plural in RESOURCE_NAMES.items() if kind.lower() in (key.lower(), plural)), None)
+            if canonical is None or (canonical, name) not in read_view["objects"]:
+                raise InstallError("Maintenance read view does not cover the requested resource")
+            return read_view["objects"][(canonical, name)]
         raw = self.kube("get", kind, name, "--ignore-not-found", "-o", "json", capture=True)
         return json.loads(raw) if raw.strip() else None
 
@@ -275,8 +294,14 @@ class KubeInstall(DockerInstall):
             self.journal.save()
         return current
 
-    def verify_resource_ownership(self):
-        self.cluster_preflight()
+    def verify_resource_ownership(self, *, read_view=None):
+        get = self.get if read_view is None else lambda kind, name: self.get(kind, name, read_view=read_view)
+        if read_view is None:
+            self.cluster_preflight()
+        elif (not read_view.get("cluster_identity")
+                or read_view["cluster_identity"] != self.journal.document["completed"].get("kube-cluster")
+                or get("Namespace", "kube-system")["metadata"]["uid"] != read_view["cluster_identity"]["uid"]):
+            raise InstallError("Maintenance cluster identity changed after preflight")
         if not self.manifest_file.exists():
             return
         desired = json.loads(regular_bytes(self.manifest_file, 8 * 1024 * 1024))
@@ -304,7 +329,7 @@ class KubeInstall(DockerInstall):
             record = self.journal.document["completed"].get("kube-resources", {}).get(key)
             if not record:
                 continue
-            actual = self.get(obj["kind"], obj["metadata"]["name"])
+            actual = get(obj["kind"], obj["metadata"]["name"])
             if pending and obj["kind"] == pending["before"]["kind"] and obj["metadata"]["name"] == pending["before"]["metadata"]["name"]:
                 if (not actual or record["uid"] != pending["uid"] or actual["metadata"].get("uid") != pending["uid"]
                         or obj not in (pending["before"], pending["after"])
@@ -318,7 +343,8 @@ class KubeInstall(DockerInstall):
             if not actual or actual["metadata"].get("uid") != record["uid"] or not _contains(actual, obj):
                 raise InstallError("Kubernetes ownership or declared resource configuration changed")
         allowed_policies = {obj["metadata"]["name"] for obj in desired if obj["kind"] == "NetworkPolicy"}
-        policies = json.loads(self.kube("get", "networkpolicies", "-o", "json", capture=True))["items"]
+        policies = (json.loads(self.kube("get", "networkpolicies", "-o", "json", capture=True))["items"]
+                    if read_view is None else read_view["policies"])
         if any(policy["metadata"]["name"] not in allowed_policies for policy in policies):
             raise InstallError("An unowned NetworkPolicy can broaden deployment or maintenance access")
 
@@ -580,14 +606,8 @@ class KubeInstall(DockerInstall):
                 raise InstallError("Pod execution or storage differs from the owned workload")
             if not any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod.get("status", {}).get("conditions", [])):
                 raise InstallError("Expected workload pod is not ready")
-            status = next((row for row in pod.get("status", {}).get("containerStatuses", []) if row.get("name") == ("iris" if service == "iris" else "console")), {})
-            started = status.get("state", {}).get("running", {}).get("startedAt")
-            if (not isinstance(status.get("containerID"), str) or not status["containerID"]
-                    or not isinstance(started, str) or not started
-                    or type(status.get("restartCount")) is not int or status["restartCount"] < 0):
-                raise InstallError("Running workload container incarnation is unavailable")
             valid.append({"name": pod["metadata"]["name"], "uid": pod["metadata"]["uid"],
-                          "container_id": status["containerID"], "started_at": started, "restart_count": status["restartCount"]})
+                          **_container_incarnation(pod, "iris" if service == "iris" else "console")})
         expected = 1 if service == "iris" else self.config["kube_console_replicas"]
         if len(valid) != expected:
             raise InstallError("Expected owned running workload is unavailable")
@@ -892,13 +912,15 @@ print(json.dumps(proof))
         desired["spec"]["replicas"] = replicas
         self._replace_owned(desired)
 
-    def assert_writers_stopped(self):
-        self.verify_resource_ownership()
+    def assert_writers_stopped(self, *, read_view=None):
+        get = self.get if read_view is None else lambda kind, name: self.get(kind, name, read_view=read_view)
+        self.verify_resource_ownership(**({"read_view": read_view} if read_view is not None else {}))
         for service in ("iris", "console"):
-            deployment = self.get("deployment", SERVICES[service])
+            deployment = get("deployment", SERVICES[service])
             if not deployment or deployment["spec"].get("replicas") != 0:
                 raise InstallError("Both Kubernetes deployments must be scaled to zero")
-        pods = json.loads(self.kube("get", "pods", "-o", "json", capture=True))["items"]
+        pods = (json.loads(self.kube("get", "pods", "-o", "json", capture=True))["items"]
+                if read_view is None else read_view["pods"])
         helper = self.journal.document["completed"].get("kube-helper", {})
         for pod in pods:
             uses_data = any(v.get("persistentVolumeClaim", {}).get("claimName") == "iris-data" for v in pod.get("spec", {}).get("volumes", []))
@@ -1004,16 +1026,75 @@ print(json.dumps(proof))
         self.kube("wait", "--for=condition=Ready", "pod/" + name, "--timeout=180s", timeout=210)
         return name
 
+    def _maintenance_read_view(self, helper):
+        """Fresh bulk reads for one fence only; never retained on the adapter."""
+        self.cluster_preflight()
+        cluster_identity = copy.deepcopy(self.journal.document["completed"].get("kube-cluster"))
+        desired = json.loads(regular_bytes(self.manifest_file, 8 * 1024 * 1024))
+        requested = {(obj["kind"], obj["metadata"]["name"]) for obj in desired}
+        if len(requested) != len(desired) or any(kind not in RESOURCE_NAMES for kind, _ in requested):
+            raise InstallError("Maintenance resource intent contains duplicate or unknown resources")
+        requested.update({("Namespace", "kube-system"), ("StorageClass", self.config["kube_storage_class"])})
+        explicit = {item for item in requested if item[0] not in ("Pod", "NetworkPolicy")}
+        refs = [RESOURCE_NAMES[kind] + "/" + name for kind, name in sorted(explicit)]
+        objects = {}
+        def items(raw):
+            if len(raw) > 16 * 1024 * 1024:
+                raise InstallError("Maintenance resource response exceeds its bound")
+            document = json.loads(raw)
+            if not isinstance(document, dict) or document.get("kind") != "List" or not isinstance(document.get("items"), list):
+                raise InstallError("Maintenance resource response is not an explicit object list")
+            return document["items"]
+        def record(obj, permitted):
+            if not isinstance(obj, dict) or not isinstance(obj.get("metadata"), dict):
+                raise InstallError("Maintenance resource response contains an invalid object")
+            kind, metadata = obj.get("kind"), obj["metadata"]
+            if not isinstance(kind, str) or not isinstance(metadata.get("name"), str) or not metadata["name"]:
+                raise InstallError("Maintenance resource response contains an invalid identity")
+            key = (kind, metadata.get("name"))
+            if kind not in permitted or key in objects or not isinstance(metadata.get("uid"), str) or not metadata["uid"]:
+                raise InstallError("Maintenance resource response contains duplicate or unexpected objects")
+            namespace = metadata.get("namespace")
+            if ((kind in ("Namespace", "StorageClass") and namespace not in (None, ""))
+                    or (kind not in ("Namespace", "StorageClass") and namespace != self.config["kube_namespace"])):
+                raise InstallError("Maintenance resource response escaped the selected namespace")
+            expected_api = {"Deployment": "apps/v1", "StorageClass": "storage.k8s.io/v1", "NetworkPolicy": "networking.k8s.io/v1"}.get(kind, "v1")
+            if obj.get("apiVersion") != expected_api:
+                raise InstallError("Maintenance resource API identity changed")
+            objects[key] = obj
+            return key
+        for obj in items(self.kube("get", *refs, "--ignore-not-found", "-o", "json", capture=True)):
+            if record(obj, {kind for kind, _ in explicit}) not in explicit:
+                raise InstallError("Maintenance resource response contains an unrequested object")
+        if set(objects) != explicit:
+            raise InstallError("An expected maintenance resource is missing")
+        # Do not label-filter this list: foreign pods using the PVC and extra
+        # policies must remain visible to the existing stopped-writer fence.
+        pods, policies = [], []
+        for obj in items(self.kube("get", "pods,networkpolicies", "-o", "json", capture=True)):
+            record(obj, {"Pod", "NetworkPolicy"})
+            (pods if obj["kind"] == "Pod" else policies).append(obj)
+        if not requested.issubset(objects) or ("Pod", helper["name"]) not in objects:
+            raise InstallError("An expected maintenance policy or helper is missing")
+        return {"objects": objects, "pods": pods, "policies": policies, "cluster_identity": cluster_identity}
+
     def maintenance_run(self, argv, *, input=None, capture=False, timeout=7200):
-        self.assert_writers_stopped()
         helper = self.journal.document["completed"].get("kube-helper")
         if not helper:
             self.maintenance_open()
             helper = self.journal.document["completed"]["kube-helper"]
+        read_view = self._maintenance_read_view(helper)
+        self.assert_writers_stopped(read_view=read_view)
+        observed = self.get("pod", helper["name"], read_view=read_view)
+        # Keep a final fresh helper read immediately before exec, in addition
+        # to the bulk fence, so a replacement/restart cannot inherit evidence.
         current = self.get("pod", helper["name"])
         desired = json.loads(regular_bytes(self.base / "kube-helper.json"))
         if (not current or current["metadata"].get("uid") != helper["uid"]
-                or helper.get("sha256") != digest(self.base / "kube-helper.json") or not _contains(current, desired)):
+                or observed["metadata"].get("uid") != helper["uid"]
+                or helper.get("sha256") != digest(self.base / "kube-helper.json")
+                or not _contains(observed, desired) or not _contains(current, desired)
+                or _container_incarnation(current, "iris") != _container_incarnation(observed, "iris")):
             raise InstallError("Maintenance helper UID changed")
         return self.kube("exec", "-i", helper["name"], "-c", "iris", "--", *argv, input=input, capture=capture, timeout=timeout)
 

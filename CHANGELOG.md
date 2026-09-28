@@ -30,7 +30,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   active BitTorrent listener during installation checks. Bind credential-use
   evidence to the exact running consumer and recover interrupted Kubernetes
   token publication only under its original operation. Batch small PVC backup
-  reads within fixed limits while retaining ownership, identity and digest checks.
+  reads and bulk resource lookups within each check while retaining ownership,
+  identity and digest verification; do not cache checks between transfers.
 
 - Add planned single-Docker credential maintenance in the Console for management
   and device TLS, peer CA, offline signing roots, server age identity and seeder
