@@ -167,6 +167,7 @@ def _contains(actual, expected):
             if any(actual.get(field, {}) != expected.get(field, {}) for field in ("data", "binaryData", "stringData")):
                 return False
         if expected.get("kind") in ("Pod", "Deployment"):
+            actual = copy.deepcopy(actual)
             want = expected["spec"] if expected["kind"] == "Pod" else expected["spec"]["template"]["spec"]
             have = actual.get("spec", {}) if expected["kind"] == "Pod" else actual.get("spec", {}).get("template", {}).get("spec", {})
             for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"):
@@ -179,6 +180,14 @@ def _contains(actual, expected):
                 if len(wanted) != len(actuals):
                     return False
                 for a, b in zip(actuals, wanted):
+                    # EnvVar.value has omitempty serialization. Normalize
+                    # only an explicitly declared empty literal; valueFrom,
+                    # nonempty literals and additional entries stay exact.
+                    for actual_env, wanted_env in zip(a.get("env", []), b.get("env", [])):
+                        if (wanted_env.get("value") == "" and "valueFrom" not in wanted_env
+                                and "value" not in actual_env and "valueFrom" not in actual_env
+                                and actual_env.get("name") == wanted_env.get("name")):
+                            actual_env["value"] = ""
                     for field in ("env", "envFrom", "command", "args", "securityContext", "lifecycle"):
                         if a.get(field) != b.get(field):
                             return False
@@ -998,6 +1007,8 @@ print(json.dumps(proof))
             container["env"] = [{"name": name, "value": value} for name, value in {
                 "IRIS_MAINTENANCE_SEEDER_ONLY": "1", "IRIS_TRACKER_ANNOUNCE": "https://127.0.0.1:6969/announce",
                 "IRIS_TELEMETRY_CA": "/run/iris/tls/maintenance-crt.pem", "IRIS_INSTALLER_SHUTDOWN_PROOF": ""}.items()]
+            container["readinessProbe"] = {"exec": {"command": ["test", "-f", "/run/iris/maintenance-ready"]},
+                "periodSeconds": 1, "timeoutSeconds": 2, "failureThreshold": 180}
         else:
             container["command"] = ["python3", "-I", "-B", "-c",
                                     MAINTENANCE_IDLE, "/run/iris/instr"]
@@ -1091,11 +1102,14 @@ print(json.dumps(proof))
         current = self.get("pod", helper["name"])
         desired = json.loads(regular_bytes(self.base / "kube-helper.json"))
         if (not current or current["metadata"].get("uid") != helper["uid"]
-                or observed["metadata"].get("uid") != helper["uid"]
-                or helper.get("sha256") != digest(self.base / "kube-helper.json")
-                or not _contains(observed, desired) or not _contains(current, desired)
-                or _container_incarnation(current, "iris") != _container_incarnation(observed, "iris")):
+                or observed["metadata"].get("uid") != helper["uid"]):
             raise InstallError("Maintenance helper UID changed")
+        if helper.get("sha256") != digest(self.base / "kube-helper.json"):
+            raise InstallError("Maintenance helper manifest custody changed")
+        if not _contains(observed, desired) or not _contains(current, desired):
+            raise InstallError("Maintenance helper execution or storage specification changed")
+        if _container_incarnation(current, "iris") != _container_incarnation(observed, "iris"):
+            raise InstallError("Maintenance helper container restarted during verification")
         return self.kube("exec", "-i", helper["name"], "-c", "iris", "--", *argv, input=input, capture=capture, timeout=timeout)
 
     def maintenance_close(self):

@@ -32,6 +32,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   token publication only under its original operation. Batch small PVC backup
   reads and bulk resource lookups within each check while retaining ownership,
   identity and digest verification; do not cache checks between transfers.
+  Wait for shutdown-safe seeder-helper readiness and accept Kubernetes' omitted
+  empty environment values without weakening checks for other runtime changes.
 
 - Add planned single-Docker credential maintenance in the Console for management
   and device TLS, peer CA, offline signing roots, server age identity and seeder

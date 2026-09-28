@@ -27,6 +27,10 @@ IRIS_STATE="${IRIS_STATE:-/var/lib/iris}"
 IRIS_CONFIG="${IRIS_CONFIG:-/etc/iris}"
 IRIS_LOG="${IRIS_LOG:-/var/log/iris}"
 IRIS_RUN="${IRIS_RUN:-/run/iris}"
+# PID 1 must also handle termination before the full supervisor is ready.
+# Startup interruption never earns a clean-writer shutdown proof.
+trap 'exit 1' TERM INT
+rm -f "$IRIS_RUN/maintenance-ready"
 IRIS_AGE_BIN="${IRIS_AGE_BIN:-age}"
 IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
 # TLS trust + console-cert override (console-managed; absent = today's behavior)
@@ -440,6 +444,9 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
 # maintenance authorization; the host worker owns those deployment checks.
 if [ "${IRIS_MAINTENANCE_SEEDER_ONLY:-0}" = "1" ]; then
   PIDS=("$T" "$S")
+  # Kubernetes must not admit maintenance exec/cleanup while PID 1 is still
+  # bootstrapping. This marker is on fresh runtime tmpfs, never the data PVC.
+  : > "$IRIS_RUN/maintenance-ready"
   echo "iris maintenance: tracker and seeder only; normal writers are not started"
   wait -n "$T" "$S" || true
   stop_services

@@ -59,6 +59,26 @@ def test_api_omitted_empty_policy_lists_remain_deny_all():
     assert not kube._contains(actual, expected)
 
 
+@pytest.mark.parametrize("kind", ["Pod", "Deployment"])
+def test_api_omitted_empty_env_literal_preserves_exact_execution_intent(kind):
+    spec = {"containers": [{"name": "iris", "env": [{"name": "IRIS_INSTALLER_SHUTDOWN_PROOF", "value": ""}]}]}
+    expected = {"kind": kind, "spec": spec if kind == "Pod" else {"template": {"spec": spec}}}
+    actual = copy.deepcopy(expected)
+    actual_spec = actual["spec"] if kind == "Pod" else actual["spec"]["template"]["spec"]
+    entry = actual_spec["containers"][0]["env"][0]
+    del entry["value"]
+    assert kube._contains(actual, expected)
+    assert "value" not in entry  # normalization never changes observed input
+    entry["valueFrom"] = {"secretKeyRef": {"name": "unapproved", "key": "value"}}
+    assert not kube._contains(actual, expected)
+    del entry["valueFrom"]
+    entry["value"] = "enabled"
+    assert not kube._contains(actual, expected)
+    entry["value"] = ""
+    actual_spec["containers"][0]["env"].append({"name": "EXTRA", "value": "unexpected"})
+    assert not kube._contains(actual, expected)
+
+
 def install(tmp_path):
     obj = object.__new__(kube.KubeInstall)
     obj.base = tmp_path
@@ -409,7 +429,8 @@ def test_unowned_allow_policy_cannot_silently_broaden_isolation(tmp_path):
         obj.verify_resource_ownership()
 
 
-def test_helper_create_crash_recovers_only_exact_durable_intent(tmp_path):
+@pytest.mark.parametrize("seeder_operation", [None, "33eaaec9-a7e8-42bc-a425-c746518ced40"])
+def test_helper_create_crash_recovers_only_exact_durable_intent(tmp_path, seeder_operation):
     obj = install(tmp_path)
     obj.assert_writers_stopped = lambda: None
     obj._ensure_maintenance_isolation = lambda: None
@@ -420,16 +441,26 @@ def test_helper_create_crash_recovers_only_exact_durable_intent(tmp_path):
         if args[0] == "create":
             current = json.loads(kwargs["input"])
             current["metadata"]["uid"] = "created-helper"
+            if seeder_operation:
+                for entry in current["spec"]["containers"][0]["env"]:
+                    if entry.get("value") == "":
+                        entry.pop("value")
             raise InstallError("response lost")
         return b""
     obj.kube = command
     with pytest.raises(InstallError, match="response lost"):
-        obj.maintenance_open()
+        obj.maintenance_open(seeder_operation=seeder_operation)
     assert obj.journal.document["completed"]["kube-helper"]["uid"] is None
-    name = obj.maintenance_open()
+    name = obj.maintenance_open(seeder_operation=seeder_operation)
     assert name == current["metadata"]["name"]
     assert obj.journal.document["completed"]["kube-helper"]["uid"] == "created-helper"
-    assert current["spec"]["containers"][0]["command"] == ["python3", "-I", "-B", "-c", kube.MAINTENANCE_IDLE, "/run/iris/instr"]
+    container = current["spec"]["containers"][0]
+    if seeder_operation:
+        assert container["command"] == ["/opt/iris/server/docker-entrypoint.sh"]
+        assert container["readinessProbe"]["exec"]["command"] == ["test", "-f", "/run/iris/maintenance-ready"]
+        assert not {"startupProbe", "livenessProbe"}.intersection(container)
+    else:
+        assert container["command"] == ["python3", "-I", "-B", "-c", kube.MAINTENANCE_IDLE, "/run/iris/instr"]
     assert current["spec"]["restartPolicy"] == "Never"
 
 
