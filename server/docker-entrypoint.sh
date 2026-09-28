@@ -95,7 +95,8 @@ elif [ -L "$instruction_key_enc" ] || [ ! -f "$instruction_key_enc" ]; then
   echo "FATAL: instruction signing key ciphertext must be a regular non-symlink file (fail closed)" >&2
   exit 1
 else
-  mkdir -p "$IRIS_RUN/instr"
+  mkdir -p -m 700 "$IRIS_RUN/instr"
+  chmod 700 "$IRIS_RUN/instr"
   rm -f "$instruction_key_out" "$instruction_key_out.pub" \
     "$instruction_runtime_cert"
   IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$script_dir" python3 - \

@@ -171,6 +171,9 @@ teardown() { rm -rf "$TMP"; }
   [ "$(cat "$TMP/run/instr/signing-key")" = \
     "fixture-runtime-content" ]
   [ "$(stat -c '%a' "$TMP/run/instr/signing-key")" = "600" ]
+  # Fresh tmpfs recreation must retain the private runtime required by TLS
+  # candidates, not mkdir's default 0755 under the container umask.
+  [ "$(stat -c '%a' "$TMP/run/instr")" = "700" ]
   [ ! -e "$TMP/config/instr/signing-key" ]
 }
 
