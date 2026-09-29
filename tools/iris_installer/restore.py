@@ -517,6 +517,8 @@ class Transaction:
                     raise InstallError('Interrupted restore requires explicit same-ID recovery')
             elif recovery and not pre_authority_recovery:
                 raise InstallError('There is no restore operation to recover')
+            else:
+                self.record = None
             guard(self.base, operation_id=self.id if self.record is not None else None,
                   instance_id=journal.document['id'])
             install.restore_operation_id = self.id
@@ -546,11 +548,22 @@ class Transaction:
             if self.record is None:
                 self.directory.parent.mkdir(mode=0o700, exist_ok=True)
                 backup_archive.private_directory(self.directory.parent)
-                self.directory.mkdir(mode=0o700)
                 self.record = dict(schema=1, operation_id=self.id, backup_id=self.backup_id,
                     instance_id=journal.document['id'], phase='verified', started_at=int(time.time()),
                     mutations_admitted=False, published=False, initial_clean_stop=False,
                     data_sha256=envelope['payload_sha256'])
+                # Publish the FIRST authority directory only after its full
+                # record is durable. A crash in atomic_write may leave a
+                # partial temporary file, but it remains outside the authority
+                # tree and cannot strand an accepted preflight-only request.
+                initial = Path(tempfile.mkdtemp(prefix='restore-initial-' + self.id + '-', dir=self.base))
+                atomic_write(initial / 'record.json', json.dumps(self.record, sort_keys=True).encode())
+                storage.sync(initial)
+                if self.directory.exists() or self.directory.is_symlink():
+                    raise InstallError('Restore authority appeared during locked initialization')
+                os.rename(initial, self.directory)
+                storage.sync(self.directory.parent)
+                storage.sync(self.base)
                 self.save('verified')
             elif self.record['data_sha256'] != envelope['payload_sha256']:
                 raise InstallError('Approved restore backup bytes changed')

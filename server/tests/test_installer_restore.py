@@ -534,6 +534,39 @@ def test_handoff_failure_prevents_any_writer_fence(transaction):
     assert tx.run(recovery=True, pre_authority_recovery=True)['state'] == 'restored'
 
 
+@pytest.mark.parametrize('boundary', ['initial-write', 'directory-renamed'])
+def test_initial_authority_directory_is_published_whole_or_not_at_all(transaction, monkeypatch, boundary):
+    tx, sources, calls, install = transaction
+    write, rename = restore.atomic_write, restore.os.rename
+    def interrupted_write(path, data, *args, **kwargs):
+        if boundary == 'initial-write' and path.parent.name.startswith('restore-initial-'):
+            write(path.parent / '.iris-injected-partial', b'partial-record')
+            raise OSError('injected initial authority interruption')
+        return write(path, data, *args, **kwargs)
+    def interrupted_rename(source, destination):
+        result = rename(source, destination)
+        if boundary == 'directory-renamed' and destination == tx.directory:
+            raise OSError('injected initial authority interruption')
+        return result
+    monkeypatch.setattr(restore, 'atomic_write', interrupted_write)
+    monkeypatch.setattr(restore.os, 'rename', interrupted_rename)
+    with pytest.raises(OSError, match='initial authority interruption'):
+        tx.run()
+    assert not calls
+    if boundary == 'initial-write':
+        assert not tx.directory.exists()
+        retained, = tx.base.glob('restore-initial-*')
+        assert (retained / '.iris-injected-partial').read_bytes() == b'partial-record'
+        restore.guard(tx.base)
+    else:
+        assert json.loads((tx.directory / 'record.json').read_bytes())['phase'] == 'verified'
+        assert not (tx.base / 'restore-operation.json').exists()
+    monkeypatch.setattr(restore, 'atomic_write', write)
+    monkeypatch.setattr(restore.os, 'rename', rename)
+    assert tx.run(recovery=True, pre_authority_recovery=True)['state'] == 'restored'
+    restore.guard(tx.base)
+
+
 @pytest.mark.parametrize('damage', ['started-missing', 'corrupt-record', 'lost-record-with-pointer', 'key-loss', 'other-pending'])
 def test_preflight_recovery_never_relaxes_started_or_corrupt_authority(transaction, damage):
     tx, sources, calls, install = transaction
