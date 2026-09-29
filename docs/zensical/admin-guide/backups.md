@@ -32,9 +32,11 @@ the trusted public backup key to independently protected storage.
 Open **Deployment recovery** on the installer host to check service and storage
 status, start or restart the worker, and select recovery access. Select a
 protected recovery identity held outside the deployment and backup directories.
-The window checks its public recipient and keeps the private file on the host.
-Remove recovery access when the operation is complete. Keep the independent
-copy available for recovery from host loss.
+The window checks its public recipient. When you select a file owned by your
+desktop account, confirming access retains a protected private copy on this host.
+Disable recovery access when the operation is complete. Retained keys remain
+available for older backups. Keep the independent copy available for recovery
+from host loss.
 
 Choose separate mounted storage during installation when required. The worker
 records those mounts and refuses new work if they disappear or change. Reconnect

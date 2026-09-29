@@ -44,6 +44,7 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(managed, 'UNIT_DIRECTORY', units)
     monkeypatch.setattr(managed, 'BACKUP_ROOT', tmp_path / 'backups')
     monkeypatch.setattr(managed, 'RECOVERY_ROOT', tmp_path / 'recovery')
+    monkeypatch.setattr(managed, 'RECOVERY_ACCESS_ROOT', tmp_path / 'host-recovery')
     # Other contributor tasks may edit the shared checkout while these tests
     # run. Test a stable installer payload, as an installed package provides.
     source = tmp_path / 'installer-payload'
@@ -194,7 +195,7 @@ def test_identity_enable_disable_preserves_history_and_never_copies_key(host, tm
     managed.setup(host.args)
     identity = tmp_path / 'independent-key'
     atomic_write(identity, b'private fixture identity')
-    monkeypatch.setattr(maintenance_gui, 'recovery_identity', lambda value: (Path(value), host.config['recovery_recipient']))
+    monkeypatch.setattr(maintenance_gui, 'recovery_identity', lambda value, **_kwargs: (Path(value), host.config['recovery_recipient']))
     managed.configure_recovery(host.state, identity)
     authority = json.loads((host.state / 'recovery-access.json').read_bytes())
     assert authority['active'] == str(identity)
@@ -213,7 +214,7 @@ def test_recovery_custody_restart_rolls_forward_interrupted_record(host, tmp_pat
     managed.setup(host.args)
     identity = tmp_path / 'independent-key'
     atomic_write(identity, b'fixture')
-    monkeypatch.setattr(maintenance_gui, 'recovery_identity', lambda value: (Path(value), host.config['recovery_recipient']))
+    monkeypatch.setattr(maintenance_gui, 'recovery_identity', lambda value, **_kwargs: (Path(value), host.config['recovery_recipient']))
     write = managed.atomic_write
     failed = False
 
@@ -310,3 +311,44 @@ def test_public_signer_is_independent_and_pinned(host, tmp_path):
         managed.configure_restore_signer(host.state, host.state / 'restore-custody/signer.pub')
     with pytest.raises(InstallError, match='public backup signer'):
         managed.configure_restore_signer(host.state, key)
+
+
+def test_explicit_desktop_identity_import_survives_source_removal(host, tmp_path, monkeypatch):
+    source = tmp_path / 'desktop-recovery.age'
+    managed.command(['age-keygen', '-o', str(source)])
+    recipient = managed.command(['age-keygen', '-y', str(source)]).decode().strip()
+    os.chown(source, 1000, 1000)
+    monkeypatch.setenv('SUDO_UID', '1000')
+    document = json.loads((host.state / 'installation.json').read_bytes())
+    document['config']['recovery_recipient'] = recipient
+    atomic_write(host.state / 'installation.json', json.dumps(document).encode())
+    managed.setup(host.args)
+    assert not managed.RECOVERY_ACCESS_ROOT.exists()
+    managed.configure_recovery(host.state, source)
+    retained = Path(managed._load(host.state)['recovery_identity'])
+    assert retained != source
+    assert retained.stat().st_uid == 0 and retained.stat().st_mode & 0o777 == 0o600
+    assert host.state not in retained.parents
+    assert retained.read_bytes() == source.read_bytes()
+    original_inode = retained.stat().st_ino
+    managed.configure_recovery(host.state, source)
+    assert retained.stat().st_ino == original_inode
+    source.unlink()
+    managed.setup(host.args)
+    assert managed.command(['age-keygen', '-y', str(retained)]).decode().strip() == recipient
+    managed.configure_recovery(host.state)
+    assert retained.exists()
+    assert managed._load(host.state)['recovery_identity'] is None
+
+
+def test_desktop_public_signer_import_needs_no_manual_chown(host, tmp_path, monkeypatch):
+    managed.setup(host.args)
+    key = tmp_path / 'desktop-signer'
+    managed.command(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)])
+    source = key.with_suffix('.pub')
+    os.chown(source, 1000, 1000)
+    monkeypatch.setenv('SUDO_UID', '1000')
+    assert managed.configure_restore_signer(host.state, source)['configured'] is True
+    pinned = host.state / 'restore-custody/signer.pub'
+    assert pinned.stat().st_uid == 0
+    assert pinned.read_bytes().split()[:2] == source.read_bytes().split()[:2]

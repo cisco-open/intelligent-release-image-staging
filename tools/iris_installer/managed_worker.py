@@ -19,6 +19,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from .state import InstallError, Journal, atomic_write, regular_bytes
 UNIT_DIRECTORY = Path('/etc/systemd/system')
 BACKUP_ROOT = Path('/var/lib/iris-backups')
 RECOVERY_ROOT = Path('/var/lib/iris-recovery')
+RECOVERY_ACCESS_ROOT = Path('/var/lib/iris-worker-recovery')
 RECORD = 'worker-service.json'
 PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
@@ -262,8 +264,50 @@ def _default_root(path):
     return private_directory(path)
 
 
+def _select_recovery_identity(state, identifier, config, roots, value):
+    """Explicit desktop selection permits a protected host copy, never export."""
+    from .maintenance_gui import recovery_identity, _identity_source_uids
+    source, recipient = recovery_identity(value, allow_desktop_owner=True)
+    if recipient != config['recovery_recipient']:
+        raise InstallError('Select the independent identity matching the installed recovery recipient')
+    if any(source == path or path in source.parents for path in (state, *roots)):
+        raise InstallError('Keep recovery identity outside deployment and backup custody')
+    if source.stat().st_uid == 0:
+        _path(source.parent)
+        return source
+    # The desktop account can change its selected file. Read its bounded native
+    # age identity into protected host custody, then validate that exact copy.
+    # No key is copied unless the operator explicitly selected recovery access.
+    root = _default_root(RECOVERY_ACCESS_ROOT)
+    directory = root / identifier
+    directory.mkdir(mode=0o700, exist_ok=True)
+    private_directory(directory)
+    destination = directory / (recipient + '.age')
+    if destination.exists() or destination.is_symlink():
+        if recovery_identity(destination)[1] != recipient:
+            raise InstallError('Protected recovery identity changed; preserve it for inspection')
+        return destination
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in _identity_source_uids()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 8192):
+            raise InstallError('Recovery source changed after selection')
+        private = stream.read(8193)
+    if len(private) > 8192:
+        raise InstallError('Recovery identity exceeds its size limit')
+    atomic_write(destination, private)
+    try:
+        if recovery_identity(destination)[1] != recipient:
+            raise InstallError('Recovery identity changed after selection')
+    except BaseException:
+        destination.unlink()
+        raise
+    return destination
+
+
 def _setup(args):
-    """Create/resume one service. Never copy, generate or export a private identity."""
+    """Create/resume one service; private recovery access requires explicit selection."""
     _root()
     state = private_directory(args.state_dir)
     _path(state)
@@ -277,7 +321,10 @@ def _setup(args):
                 raise InstallError('Resume uses the recorded backup targets; a different target requires a reviewed migration')
         for name in ('recovery_identity', 'listen_address'):
             supplied = getattr(args, name, None)
-            if supplied is not None and str(supplied) != record.get(name):
+            accepted = {record.get(name)}
+            if name == 'recovery_identity':
+                accepted.add(record.get('recovery_identity_source'))
+            if supplied is not None and str(supplied) not in accepted:
                 raise InstallError('Resume uses the recorded worker custody and listener')
         if getattr(args, 'refresh_runtime', False) and record['runtime'] != _runtime_manifest():
             _check_unit(state, record)
@@ -318,16 +365,12 @@ def _setup(args):
                 raise InstallError('Network binding applies only to Kubernetes')
         identity = getattr(args, 'recovery_identity', None)
         if identity is not None:
-            from .maintenance_gui import recovery_identity
-            identity, recipient = recovery_identity(identity)
-            if recipient != config['recovery_recipient']:
-                raise InstallError('Recovery identity must match the separately held public recovery recipient')
-            if any(identity == path or path in identity.parents for path in (state, *roots.values())):
-                raise InstallError('Keep the independent recovery identity outside deployment and backup custody')
+            identity = _select_recovery_identity(state, identifier, config, list(roots.values()), identity)
         record = {'schema': 1, 'instance_id': identifier, 'target': config['target'],
                   'state_dir': str(state), 'lifecycle_url': config.get('lifecycle_url'),
                   'unit': 'iris-lifecycle-' + identifier + '.service',
                   'listen_address': listen, 'recovery_identity': str(identity) if identity else None,
+                  'recovery_identity_source': str(getattr(args, 'recovery_identity', None)) if identity else None,
                   'storage_layout': ('separate-filesystems' if roots['backup'].stat().st_dev !=
                                      roots['recovery'].stat().st_dev else 'colocated-filesystem'),
                   'phase': 'provisioning', 'storage': {},
@@ -496,14 +539,9 @@ def _configure_recovery(state, identity_path):
     check_storage(state, record)
     selected = None
     if identity_path is not None:
-        from .maintenance_gui import recovery_identity
-        selected, recipient = recovery_identity(identity_path)
         _identifier, config = _installation(state)
-        if recipient != config['recovery_recipient']:
-            raise InstallError('Select the independent identity matching the installed recovery recipient')
-        roots = [state, *(Path(row['root']) for row in record['storage'].values())]
-        if any(selected == path or path in selected.parents for path in roots):
-            raise InstallError('Keep recovery identity outside deployment and backup custody')
+        roots = [Path(row['root']) for row in record['storage'].values()]
+        selected = _select_recovery_identity(state, _identifier, config, roots, identity_path)
     command(['systemctl', 'stop', record['unit']], timeout=3600)
     custody = state / 'recovery-access.json'
     archived = state / 'worker-disabled-recovery-access.json'
@@ -519,7 +557,8 @@ def _configure_recovery(state, identity_path):
         access['identities'] = list(dict.fromkeys([*access['identities'], str(selected)]))
         if len(access['identities']) > 101:
             raise InstallError('Recovery custody history is full; preserve access to existing backups')
-    replacement = dict(record, recovery_identity=str(selected) if selected else None)
+    replacement = dict(record, recovery_identity=str(selected) if selected else None,
+                       recovery_identity_source=str(identity_path) if selected else None)
     old_access = _file(custody) if custody.exists() or custody.is_symlink() else None
     intent = {'instance_id': record['instance_id'], 'record': replacement, 'access': access,
               'old_record_sha256': hashlib.sha256(_file(state / RECORD)).hexdigest(),
@@ -579,15 +618,19 @@ def _configure_restore_signer(state, public_key_path):
     if source.resolve() != source or source == state or state in source.parents:
         raise InstallError('Select the independently held public backup signer outside deployment state')
     info = source.lstat()
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+    from .maintenance_gui import _identity_source_uids
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid not in _identity_source_uids() or info.st_nlink != 1
             or info.st_mode & 0o022):
-        raise InstallError('Public signer must be a protected root-owned regular file')
+        raise InstallError('Public signer must be a protected root or desktop-owned regular file')
     data = regular_bytes(source, 4096)
     # Validate the wire encoding through OpenSSH as well as the textual type.
     if len(data.splitlines()) != 1 or len(data.split()) < 2 or data.split()[0] != b'ssh-ed25519':
         raise InstallError('Choose one OpenSSH Ed25519 public backup signer')
-    command(['ssh-keygen', '-l', '-f', str(source)], timeout=15)
     canonical = b' '.join(data.split()[:2]) + b'\n'
+    with tempfile.TemporaryDirectory(prefix='public-signer-', dir=state) as scratch:
+        candidate = Path(scratch) / 'signer.pub'
+        atomic_write(candidate, canonical)
+        command(['ssh-keygen', '-l', '-f', str(candidate)], timeout=15)
     installed = state / 'backup-custody/signer.pub'
     if installed.exists() and regular_bytes(installed, 4096).split()[:2] != canonical.split():
         raise InstallError('Independent public signer does not match this deployment backup signer')

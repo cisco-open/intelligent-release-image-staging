@@ -275,12 +275,15 @@ URL or certificate names.
 
 To permit verification, restoration or credential rotation, use Deployment
 recovery to select a separately provisioned age recovery identity. The host
-validates its public recipient and references the protected file in place.
-It never copies or generates an independent private recovery identity. Its
-directory must remain outside installation state and the backup storage roots.
+validates its public recipient. Root-owned protected files are referenced in
+place. Explicitly selected desktop-owned identities are copied into root-only
+`/var/lib/iris-worker-recovery/<instance-id>`, outside deployment state and
+backup storage. The original independent copy remains with its holder. Default
+setup never copies or generates a recovery identity. Its directory must remain
+outside installation state and the backup storage roots.
 Enabling or removing this access is an explicit host custody decision with a
-durable intent and restart recovery. Previous identity references remain available
-for older backup operations. Remove temporary private material after use; never
+durable intent and restart recovery. Disabling access retains protected keys and
+previous references for older backup operations. Remove temporary private material after use; never
 upload it or an offline signing root through the Console. Select the independently
 held public backup signer in the same window before authorizing restoration.
 Signer trust never comes from an archive selected for restoration.

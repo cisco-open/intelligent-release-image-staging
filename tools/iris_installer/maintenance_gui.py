@@ -286,10 +286,15 @@ class MaintenanceWindow:
         service_box = ttk.LabelFrame(outer, text="Host maintenance service", padding=8)
         service_box.pack(fill="x", pady=(0, 12))
         self.service_buttons = []
-        for label, action in (("Set up service", "setup"), ("Restart service", "restart"),
+        service_controls = ttk.Frame(service_box)
+        service_controls.pack(fill="x")
+        custody_controls = ttk.Frame(service_box)
+        custody_controls.pack(fill="x", pady=(6, 0))
+        for index, (label, action) in enumerate((("Set up service", "setup"), ("Restart service", "restart"),
                               ("Service status", "status"), ("Recovery key access", "identity"),
-                              ("Trust backup signer", "signer")):
-            button = ttk.Button(service_box, text=label, command=lambda action=action: self.manage_service(action))
+                              ("Disable recovery access", "disable-identity"), ("Trust backup signer", "signer"))):
+            button = ttk.Button(service_controls if index < 3 else custody_controls,
+                                text=label, command=lambda action=action: self.manage_service(action))
             button.pack(side="left", padx=(0, 6))
             self.service_buttons.append(button)
         self.tree = ttk.Treeview(outer, columns=("operation", "family", "state"), show="headings", height=4 if getattr(client, "transport_supported", False) else 6, selectmode="browse")
@@ -453,7 +458,8 @@ class MaintenanceWindow:
         if action != "status" and not messagebox.askokcancel("Host maintenance service",
                 {"setup": "Provision the managed worker and private local backup directories? Local copies do not protect against host loss.",
                  "restart": "Restart only this deployment's maintenance worker? An active operation must finish first.",
-                 "identity": "Allow the worker to use this independent recovery identity for verification and restore? The key is not uploaded to the Console.",
+                 "identity": "Allow the worker to use this independent recovery identity for verification and restore? A protected private copy is retained on this host when selected from your desktop account. Keep your independent copy. The key is not uploaded to the Console.",
+                 "disable-identity": "Disable recovery-key access for new operations? Previously imported keys and their history are retained for old backups; this does not delete your keys.",
                  "signer": "Pin this independently trusted public signer for deployment restore? Do not select a key supplied only by an untrusted backup."}[action], parent=self.window):
             return
         def operate():
@@ -463,6 +469,8 @@ class MaintenanceWindow:
                 managed_worker.action(SimpleNamespace(state_dir=self.client.state_dir, action="restart"))
             elif action == "identity":
                 managed_worker.configure_recovery(self.client.state_dir, path)
+            elif action == "disable-identity":
+                managed_worker.configure_recovery(self.client.state_dir, None)
             elif action == "signer":
                 managed_worker.configure_restore_signer(self.client.state_dir, path)
             status = managed_worker.inspect(self.client.state_dir)
