@@ -97,8 +97,76 @@ class Worker:
                     'storage': 'operator-configured-host-directories',
                     'can_verify': self.identity is not None,
                     'can_extract': self.identity is not None and self.extract_dir is not None,
+                    'can_restore': self.identity is not None and (self.state_dir / 'restore-custody/signer.pub').is_file(),
+                    'restore_scope': 'same-deployment-same-security-generation',
                     'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] not in ('rotate', 'renew-transport')])),
-                    'note': 'Keep encrypted copies and pinned backup signer trust off this host. Extraction does not start services or authorize cutover.'}
+                    'note': 'Keep encrypted copies and pinned backup signer trust off this host. Restore requires the existing owned deployment, unchanged credentials and current producer replay authority.'}
+
+    def submit_restore(self, request):
+        from . import restore
+        if (set(request) != {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'}
+                or request['allow_downtime'] is not True or request['confirm_restore'] is not True):
+            raise InstallError('Confirm downtime and replacement of deployment data for restore')
+        request_id, backup_id = restore.identifier(request['request_id']), restore.identifier(request['backup_id'])
+        if self.identity is None:
+            raise InstallError('Provision independent recovery custody before restore')
+        restore.custody(self.state_dir, self.identity)
+        recovery = request['action'] == 'recover-restore'
+        with self.lock:
+            prior = next((job for job in self.jobs if job['id'] == request_id), None)
+            if prior:
+                if prior['action'] != 'restore' or prior['backup_id'] != backup_id:
+                    raise InstallError('Request ID belongs to a different operation')
+                if not recovery:
+                    return {'job_id': request_id}
+                if prior['state'] != 'recovery-required':
+                    raise InstallError('Choose an interrupted restore operation')
+            elif recovery:
+                raise InstallError('There is no restore operation to recover')
+            if any(job['id'] != request_id and job['state'] in ('running', 'recovery-required') for job in self.jobs):
+                raise InstallError('Finish the active lifecycle operation first')
+            if prior is None:
+                if len(self.jobs) >= 100:
+                    raise InstallError('Lifecycle history limit reached')
+                if not any(job['action'] == 'backup' and job.get('backup_id') == backup_id
+                           and job['state'] == 'captured' for job in self.jobs):
+                    raise InstallError('Choose a captured backup from this deployment')
+                prior = dict(id=request_id, action='restore', backup_id=backup_id, state='running',
+                             started_at=int(time.time()), detail='', proof=None)
+                self.operation_identities[request_id] = str(self.identity)
+                self.save_custody()
+                self.jobs.append(prior)
+            else:
+                prior.update(state='running', detail='Recovering the explicitly approved restore')
+            self.save()
+            self.thread = threading.Thread(target=self.perform_restore, args=(prior,),
+                kwargs={'recovery': recovery}, daemon=False)
+            self.thread.start()
+            return {'job_id': request_id}
+
+    def perform_restore(self, job, *, recovery=False):
+        from . import restore
+        try:
+            result = restore.restore(self.state_dir, self.backup_dir, self.recovery_dir,
+                operation_id=job['id'], backup_id=job['backup_id'],
+                recovery_identity=Path(self.operation_identities.get(job['id'], str(self.identity))), recovery=recovery)
+            state, proof = 'restored', result['proof']
+            detail = 'Deployment restored; current replay floors preserved, services healthy and Console authenticated.'
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, InstallError) else type(exc).__name__
+            print('Restore failed: ' + reason, file=sys.stderr, flush=True)
+            record = self.state_dir / 'restore-operations' / job['id'] / 'record.json'
+            state, proof = ('recovery-required' if record.exists() else 'failed'), None
+            detail = 'Restore incomplete. Preserve the operation and use explicit same-ID recovery; inspect protected host diagnostics.'
+            try:
+                if record.exists() and json.loads(regular_bytes(record)).get('phase') == 'refused':
+                    state = 'failed'
+                    detail = 'Restore refused before data replacement. Original services resumed. ' + reason
+            except (OSError, ValueError, InstallError):
+                pass
+        with self.lock:
+            job.update(state=state, detail=detail, proof=proof, finished_at=int(time.time()))
+            self.save()
 
     def rotation_status(self):
         with self.lock:
@@ -301,6 +369,8 @@ class Worker:
             self.save()
 
     def submit(self, request):
+        if isinstance(request, dict) and request.get('action') in ('restore', 'recover-restore'):
+            return self.submit_restore(request)
         if isinstance(request, dict) and request.get('action') == 'sync-management':
             return self.sync_management(request)
         if isinstance(request, dict) and request.get('action') in ('rotate', 'recover-rotation'):

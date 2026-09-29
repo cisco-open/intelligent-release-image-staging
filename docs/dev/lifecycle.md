@@ -8,9 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 
 The current candidate implements same-key instruction certificate renewal and
 guided online signer rotation in the Console, and a topology-aware
-cold-backup worker with file verification and isolated extraction. It does not
-yet implement production recovery cutover or scheduled retention. These are still
-release gates, not optional production follow-ups. Scheduled signer preparation,
+cold-backup worker with file verification, isolated extraction and explicitly
+approved same-deployment restoration. Restore requires current security authority;
+replacement-host recovery and scheduled retention are separate scope. Scheduled signer preparation,
 device instruction-key rotation and management-token rotation now have
 opt-in adapters. Browser TLS and telemetry credentials have operator-driven UI
 workflows; their schedules remain review reminders. Installer-owned Docker,
@@ -230,34 +230,60 @@ socket or cluster-admin access. Owner session and CSRF checks happen at the
 existing management boundary. RPC accepts fixed operations and backup IDs, never
 shell commands, host paths, private keys or arbitrary resource names.
 
-Provision private backup and identity-recovery directories on operator-approved
-storage, then run on the installer host:
+The installer provisions an enabled systemd service after deployment startup.
+It creates private per-instance backup directories beneath
+`/var/lib/iris-backups` and `/var/lib/iris-recovery`, and an isolated extraction
+workspace inside installation state. These are separate directories, not proof
+of independent or off-host storage. The public status states when both archives
+share a filesystem and never claims off-host protection.
+
+Choose mounted storage through `--backup-root` and `--recovery-root` during
+installation, or through Deployment recovery before first worker setup. Initial
+choices survive the offline signing pause and resume. Existing installations can
+provision the managed service through that window or on the installer host:
 
 ```bash
-sudo irisctl lifecycle-worker \
-  --state-dir /var/lib/iris-installer/my-instance \
-  --backup-dir /protected-backups/iris-data \
-  --recovery-dir /protected-recovery/iris-identity
+sudo irisctl worker-setup --state-dir /var/lib/iris-installer/my-instance
 ```
 
-Directories must already exist, be root-owned, mode 0700, without symlink
-components. Place the two sets in separate protected directories. A directory
-on the same host is not off-host protection. Storage provisioning and a system
-service for this foreground worker are not yet installer-managed. Earlier
-candidate instances without the control mount are not silently modified/adopted.
+Setup records the deployment ID, immutable worker runtime hashes, service unit,
+storage mount identities and endpoint. Its private journal resumes after directory,
+runtime, unit, reload or start failures. It refuses changed units, replaced storage,
+symlinks, foreign archive directories and deployment identity changes. A missing
+mount cannot silently redirect captures into its underlying local directory.
+Earlier instances without the control mount are not silently adopted.
 
-For Kubernetes, the same command also serves the installation's recorded
+The service runs as root with a private umask, a fixed environment, systemd
+filesystem protections and no new privileges. It starts at boot and restarts
+after process failure. Graceful stop waits for accepted operations and their
+children. A process crash retains the operation journal for explicit recovery.
+Unix endpoint readiness controls systemd startup; Kubernetes setup also proves
+an actual authenticated TLS request. Expired network credentials leave local
+recovery available. Deployment recovery shows service, storage, Unix endpoint
+and Kubernetes TLS status and provides start, stop and restart controls.
+
+Package replacement does not silently replace an executing worker. Explicit
+`worker-setup --refresh-runtime` stops it gracefully, snapshots the reviewed
+runtime into a new immutable directory, journals the unit transition and
+restarts it. Previous runtime bytes remain available for inspection.
+
+For Kubernetes, the service also serves the installation's recorded
 `--lifecycle-url`; allow the server pod to reach that controller address and port.
 The listener binds that address by default. Use the worker's `--listen-address`
 only when the local bind address must differ; this does not change the recorded
 URL or certificate names.
 
-To permit verification or isolated extraction, temporarily provision the
-independently held age recovery identity on the worker and pass
-`--recovery-identity /protected/recovery-key`. For extraction also pass
-`--extract-dir /protected/isolated-restores` (a private existing directory).
-This is an explicit custody decision. Remove temporary private recovery material
-after use; never upload it or an offline signing root through the Console.
+To permit verification, restoration or credential rotation, use Deployment
+recovery to select a separately provisioned age recovery identity. The host
+validates its public recipient and references the protected file in place.
+It never copies or generates an independent private recovery identity. Its
+directory must remain outside installation state and the backup storage roots.
+Enabling or removing this access is an explicit host custody decision with a
+durable intent and restart recovery. Previous identity references remain available
+for older backup operations. Remove temporary private material after use; never
+upload it or an offline signing root through the Console. Select the independently
+held public backup signer in the same window before authorizing restoration.
+Signer trust never comes from an archive selected for restoration.
 
 Only one worker and one conflicting installer operation can run per instance.
 Request IDs are journalled so retrying an accepted request returns the same job,
@@ -346,6 +372,36 @@ and reconcile post-backup revocations and replay floors. Restoring an old epoch
 or merely selecting a higher wall-clock value cannot prove safety.
 
 ## Verification scope
+
+`restore.py` implements same-deployment restoration, not archive extraction as
+cutover. Independent signer trust comes from `restore-custody/signer.pub`,
+provisioned through the host window. Both encrypted sets must match the existing
+deployment, immutable images and storage identity. Service age identity,
+configuration plaintext, roots, deployment inputs, management credentials,
+split Console identity and Kubernetes Secret/transport authority must remain in
+the same security generation. Changed quarantine/ACL policy, principal roles,
+ownership records, account credentials or external trust refuse admission.
+
+Native installed-runtime schemas validate current signing, revocation, producer,
+disclosure and schedule state. Restore keeps current instruction epoch and complete
+producer state, handout disclosures, schedule execution/retirement receipts and
+report replay evidence. Current serial/keylist floors must dominate the archive;
+valid empty admissions permit an absent initial serial store. Historical inventory,
+jobs, assignments, images and other ordinary state come from the backup.
+
+All writers remain fenced while ownership-preserving filesystem candidates are
+published. Fsynced operation records resume both rename boundaries and retain
+the original directories. Docker uses the owned volume paths; Kubernetes streams
+bounded chunks into its isolated, UID-pinned PVC helper. Publication is durably
+complete before any normal writer restarts. Failure after restart never reapplies
+old bytes over a newer producer. Completion requires server health, Console health
+and authenticated management access from each Console consumer. Console restart
+invalidates sessions. Device acceptance remains a separate qualification.
+
+Unit tests use real age/OpenSSH archives and real filesystem publication, inject
+rename and consumer-proof failures, and execute the actual Kubernetes transfer
+scripts against isolated storage. Adapter mocks in transaction tests are not live
+Docker/Kubernetes evidence. Preserve actual topology qualification separately.
 
 Tests cover real age/OpenSSH round trips, malformed archives, untrusted signers,
 wrong recovery identities, byte limits, peer-credential checks and owner-session/

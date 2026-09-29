@@ -1974,7 +1974,13 @@ def _request_body(route):
              'required': ['action', 'backup_id', 'request_id'],
              'properties': {'action': {'enum': ['verify', 'extract']},
                             'backup_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'},
-                            'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}}]}
+                            'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}},
+            {'type': 'object', 'additionalProperties': False,
+             'required': ['action', 'backup_id', 'request_id', 'allow_downtime', 'confirm_restore'],
+             'properties': {'action': {'enum': ['restore', 'recover-restore']},
+                            'backup_id': {'type': 'string', 'format': 'uuid'},
+                            'request_id': {'type': 'string', 'format': 'uuid'},
+                            'allow_downtime': {'const': True}, 'confirm_restore': {'const': True}}}]}
     if suffix == "/settings/peer-tls":
         schema["additionalProperties"] = False
         for field in ("mode", "expected_mode"):
@@ -2299,7 +2305,7 @@ def _json_success_example(route):
             "note": "Server-side evidence; confirm device acceptance separately."},
         "/settings/backups": {
             "available": False, "target": "unavailable", "storage": "unavailable",
-            "can_verify": False, "can_extract": False, "jobs": [],
+            "can_verify": False, "can_extract": False, "can_restore": False, "jobs": [],
             "note": "Configure the lifecycle worker on the installer host."},
         '/settings/deployment-rotation': {
             'available': False, 'target': 'unavailable', 'can_rotate': False,
@@ -2869,16 +2875,18 @@ def _success(route):
                         'root_sha256': {'type': 'object', 'additionalProperties': {'type': 'string'}},
                         'keylist_seq': {'type': 'integer'}}}}}}})
     elif suffix == "/settings/backups" and route.method == "GET":
+        schema['properties']['restore_scope'] = {'type': 'string', 'enum': ['same-deployment-same-security-generation']}
         schema["properties"]["jobs"]["items"] = {
             "type": "object", "additionalProperties": False,
             "required": ["id", "action", "backup_id", "state", "started_at", "detail"],
             "properties": {
                 "id": {"type": "string"}, "backup_id": {"type": "string"},
-                "action": {"enum": ["backup", "verify", "extract"]},
+                "action": {"enum": ["backup", "verify", "extract", "restore"]},
                 "state": {"enum": ["running", "recovery-required", "captured", "failed",
-                                   "verified-files", "verified-isolated-files"]},
+                                   "verified-files", "verified-isolated-files", "restored", "refused"]},
                 "started_at": {"type": "integer"}, "finished_at": {"type": "integer"},
-                "detail": {"type": "string"}}}
+                "detail": {"type": "string"},
+                "proof": {"type": ["object", "null"], "additionalProperties": True}}}
     elif suffix == "/settings/certificates":
         item = schema["properties"]["items"]["items"]
         for field in ("valid_from", "expires_at", "renew_at", "refuse_at"):

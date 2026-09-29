@@ -4,8 +4,9 @@
 
 """Cold backups of installer-owned Docker and Kubernetes deployments.
 
-The two encrypted sets preserve data and the service identity separately. Restore
-currently verifies/extracts isolated files; it never authorizes fleet cutover.
+The two encrypted sets preserve data and the service identity separately.
+The restore module admits explicit same-deployment recovery only after current
+security authority is verified. Capture alone never authorizes fleet cutover.
 Topology adapters resolve owned storage and prove stopped writers before capture.
 """
 

@@ -6781,6 +6781,10 @@
     var chosen = Boolean(document.getElementById('backup-selected').value);
     document.getElementById('backup-verify').disabled = blocked || !chosen || !backupStatus.can_verify;
     document.getElementById('backup-extract').disabled = blocked || !chosen || !backupStatus.can_extract;
+    document.getElementById('backup-restore').disabled = blocked || !chosen || !backupStatus.can_restore;
+    document.getElementById('backup-recover').disabled = !active || backupBusy || !backupStatus.jobs.some(function (job) {
+      return job.action === 'restore' && job.state === 'recovery-required';
+    });
   }
   async function refreshBackups() {
     var generation = ++backupRead;
@@ -6816,11 +6820,22 @@
     if (backupBusy || !backupStatus || !backupStatus.available) return;
     if (action === 'backup' && !confirm('Stop IRIS and the Console briefly to capture a consistent encrypted backup? Active transfers and management requests will be interrupted.')) return;
     if (action === 'extract' && !confirm('Extract both sets into a new protected recovery directory? This includes secret recovery material. No services will be started.')) return;
+    if ((action === 'restore' || action === 'recover-restore') && !confirm('Restore this deployment from the selected backup? IRIS and the Console will stop. Saved content replaces current content only after security checks pass. The worker preserves current instruction counters and retains the previous files for recovery.')) return;
     var selectedBackup = document.getElementById('backup-selected').value;
     if (!backupPending || backupPending.action !== action || (action !== 'backup' && backupPending.backup_id !== selectedBackup)) {
       var requestId = maintenanceRequestId();
       backupPending = action === 'backup' ? {action: action, allow_downtime: true, request_id: requestId}
         : {action: action, backup_id: selectedBackup, request_id: requestId};
+      if (action === 'restore' || action === 'recover-restore') {
+        backupPending.allow_downtime = true;
+        backupPending.confirm_restore = true;
+        if (action === 'recover-restore') {
+          var interrupted = backupStatus.jobs.find(function (job) { return job.action === 'restore' && job.state === 'recovery-required'; });
+          if (!interrupted) { backupPending = null; return; }
+          backupPending.request_id = interrupted.id;
+          backupPending.backup_id = interrupted.backup_id;
+        }
+      }
     }
     backupBusy = true; backupControls();
     var result = document.getElementById('backup-operation-result');
@@ -6832,16 +6847,16 @@
       var data = await r.json();
       if (!r.ok || typeof data.job_id !== 'string') throw new Error(data.error || data.detail || 'Request was not confirmed. Refresh history before retrying.');
       backupPending = null;
-      result.textContent = 'Accepted. Refresh history to check the result. Capture temporarily takes the Console offline; the host worker continues running.';
+      result.textContent = 'Accepted. Refresh history to check the result. Backup and restore temporarily take the Console offline; the host worker continues running.';
       await refreshBackups();
     } catch (error) { result.textContent = error.message || 'Request was not confirmed. Refresh history before retrying.'; }
     finally { backupBusy = false; backupControls(); }
   }
   document.getElementById('backup-refresh').addEventListener('click', refreshBackups);
   document.getElementById('backup-selected').addEventListener('change', backupControls);
-  ['create', 'verify', 'extract'].forEach(function (name) {
+  ['create', 'verify', 'extract', 'restore', 'recover'].forEach(function (name) {
     document.getElementById('backup-' + name).addEventListener('click', function () {
-      requestBackupAction(name === 'create' ? 'backup' : name);
+      requestBackupAction(name === 'create' ? 'backup' : name === 'recover' ? 'recover-restore' : name);
     });
   });
   // ---- End deployment backup workflow ----

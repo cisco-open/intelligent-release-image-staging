@@ -20,9 +20,14 @@ python3 tools/build-installer-package.py --out /path/to/candidate-output
 
 The package includes only allowlisted committed source, both committed aria2c
 architectures, notices and a file inventory. It has no maintainer hooks that
-deploy services, generate keys or create accounts. The adjacent checksum is
-local corruption detection, NOT a release signature. An approved release
-signing/distribution process is still required before public production use.
+deploy services, generate keys or create accounts. Local output is unauthenticated.
+The public `release.yml` workflow builds the tagged commit and authenticates every
+asset with GitHub artifact attestations. It publishes the `.deb`, its committed
+source inventory, the source archive and member manifest, matching aria2 binaries
+and corresponding source, and an authenticated release inventory. Follow
+[download and authentication](../zensical/install/managed-package.md#download-and-authenticate)
+before installing a public package. The publisher identity is the public GitHub
+repository and tagged release workflow, separate from deployment instruction roots.
 
 On an isolated Ubuntu 24.04 amd64 test host, install the reviewed package with
 `sudo apt install ./iris-installer_<version>_amd64.deb`. Then:
@@ -92,11 +97,16 @@ verified SSH and noninteractive root sudo. Missing Docker, Compose and OpenSSL
 dependencies are provisioned there. Kubernetes uses an existing cluster; the
 controller preserves an installed client or provisions the pinned `kubectl`.
 Client/API-server minor versions must differ by no more than one.
-These adapters require their own live qualification; a passing single-Docker
-test does not qualify another topology. A prebuilt/offline kit,
-fully recoverable initial reservation, upgrade/uninstall and automated recovery
-cutover remain unfinished. Topology-aware cold backup, verification and isolated
-extraction are implemented as described in [Lifecycle development](lifecycle.md).
+Each adapter requires its own live qualification; a passing single-Docker
+test does not qualify another topology. The installer provisions a persistent
+maintenance service and separate private backup directories after approval.
+Host recovery controls manage service availability, independently provided
+recovery-key access and trusted public backup signers. Topology-aware cold
+backup, verification, isolated extraction and same-deployment restore cutover
+are implemented as described in [Lifecycle development](lifecycle.md).
+Restore requires current security authority and the same credential generation;
+it does not adopt a replacement host or reset missing replay history.
+The source-build package needs network access and is not an offline kit.
 The same scoped worker supports planned credential maintenance, with a verified
 backup prerequisite and `irisctl maintenance-ui` for interrupted-operation
 recovery when the Console is stopped.

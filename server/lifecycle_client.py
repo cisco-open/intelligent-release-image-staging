@@ -58,6 +58,8 @@ def call(request):
               'rotate': {'action', 'request_id', 'family', 'allow_downtime'},
               'recover-rotation': {'action', 'request_id', 'family', 'allow_downtime'},
               'backup': {'action', 'request_id', 'allow_downtime'},
+              'restore': {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'},
+              'recover-restore': {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'},
               'verify': {'action', 'request_id', 'backup_id'}, 'extract': {'action', 'request_id', 'backup_id'}}
     if not isinstance(action, str) or action not in fields or set(request) != fields[action]:
         raise ValueError('Unsupported maintenance request')
@@ -66,10 +68,13 @@ def call(request):
         raise ValueError('Provide a bounded maintenance request ID')
     if action in ('backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
         raise ValueError('Confirm IRIS downtime before capture')
+    if action in ('restore', 'recover-restore') and (request['allow_downtime'] is not True
+            or request['confirm_restore'] is not True):
+        raise ValueError('Confirm deployment replacement and IRIS downtime before restoring')
     if action in ('rotate', 'recover-rotation') and request['family'] not in ROTATION_FAMILIES:
         raise ValueError('Choose a supported credential family')
-    if action in ('verify', 'extract') and (not isinstance(request['backup_id'], str)
-            or not re.fullmatch(r'[0-9a-f-]{36}', request['backup_id'])):
+    if action in ('verify', 'extract', 'restore', 'recover-restore') and (not isinstance(request['backup_id'], str)
+            or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['backup_id'])):
         raise ValueError('Choose a captured backup')
     endpoint = os.environ.get('IRIS_LIFECYCLE_SOCKET', '/run/iris-lifecycle/control.sock')
     try:
@@ -101,7 +106,7 @@ def status():
         return call({'action': 'status'})
     except LifecycleUnavailable:
         return {'available': False, 'target': 'unavailable', 'storage': 'unavailable',
-                'can_verify': False, 'can_extract': False, 'jobs': [],
+                'can_verify': False, 'can_extract': False, 'can_restore': False, 'jobs': [],
                 'note': 'Configure the lifecycle worker on the installer host. No backup or recovery verification is attested.'}
 
 

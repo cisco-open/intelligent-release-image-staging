@@ -15,6 +15,22 @@ check.
 
 ## Before you cut a release
 
+Complete the release qualification record before creating `v<VERSION>`. The
+tag starts `.github/workflows/release.yml` on a GitHub-hosted Ubuntu runner. The
+workflow checks the tag against `VERSION`, builds the Ubuntu installer and
+source archive, verifies the pinned aria2 corresponding source and binaries,
+and creates GitHub artifact attestations for every publication asset. It verifies
+the attestations against the exact repository, workflow, tag and source commit
+before creating the public release. Publication refuses an existing release;
+changed bytes require a new version. It needs repository `contents: write`,
+`attestations: write` and GitHub OIDC `id-token: write` workflow permissions.
+
+After publication, download all assets into a fresh directory and follow
+[download and authentication](../zensical/install/managed-package.md#download-and-authenticate).
+Record the workflow run URL, tag, commit, installer digest and verification
+result with the release evidence. A locally built package or checksum alone
+does not complete authenticated delivery.
+
 Treat these as four separate kinds of evidence. None of them substitutes for
 another:
 

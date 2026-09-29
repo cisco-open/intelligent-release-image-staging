@@ -475,6 +475,11 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
     assert "Exec=/usr/bin/irisctl custody-ui" in desktop
     assert "Terminal=false" in desktop
     assert "python3-tk" in subprocess.check_output(["dpkg-deb", "-f", str(artifact), "Depends"], text=True)
+    inventory = json.loads(artifact.with_suffix(".deb.source.json").read_text())
+    assert inventory["commit"] == subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    assert inventory["files"] == json.loads(
+        (extracted / "usr/lib/iris-installer/source/INSTALLER-SOURCE.json").read_text())
     control = subprocess.check_output(["dpkg-deb", "--ctrl-tarfile", str(artifact)])
     import io, tarfile
     with tarfile.open(fileobj=io.BytesIO(control)) as archive:

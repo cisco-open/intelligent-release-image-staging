@@ -23,14 +23,33 @@ both sets. **Extract for isolated recovery** writes to a new protected directory
 The operator must provision recovery access on the worker first. Keep encrypted
 copies and the trusted backup public key off the deployment host.
 
-!!! warning "Installer candidate scope"
+The Ubuntu installer starts the worker as a managed host service for all three
+layouts. It restarts at boot and after a process failure. Data archives and
+identity archives use separate private directories created by the installer.
+The default directories share the host's storage. Copy both encrypted sets and
+the trusted public backup key to independently protected storage.
+
+Open **Deployment recovery** on the installer host to check service and storage
+status, start or restart the worker, and select recovery access. Select a
+protected recovery identity held outside the deployment and backup directories.
+The window checks its public recipient and keeps the private file on the host.
+Remove recovery access when the operation is complete. Keep the independent
+copy available for recovery from host loss.
+
+Choose separate mounted storage during installation when required. The worker
+records those mounts and refuses new work if they disappear or change. Reconnect
+the recorded storage before restarting the service. For Kubernetes, the same
+window shows the authenticated connection status and remains available locally
+when the worker's connection certificates need renewal.
+
+!!! warning "Recovery scope"
 
     These controls require an installer-owned deployment and its recorded topology.
-    Isolated extraction does not start a restored deployment or authorize
-    cutover. Scheduled retention and automated
-    recovery cutover remain under development. Use the layout-specific manual
-    procedure below for existing installations. Worker setup and qualification
-    are documented in the [installer lifecycle development guide](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md).
+    Restore requires current security records from the same deployment.
+    Missing records, changed credentials or changed sharing rules block restoration.
+    Keep separate copies for recovery from host loss. Scheduled retention remains
+    a separate operation. See
+    [Install the Ubuntu package](../install/managed-package.md) for managed deployment setup.
 
 Split Docker also captures encrypted Console custody from the recorded remote
 host. Kubernetes stops every Console replica and the server, checks clean writer
@@ -78,12 +97,42 @@ Keep the age identity in its separate protected backup. After a loss, see
 
 ## Restore a backup
 
-1. Stop the server.
-2. Restore the state, the configuration, and the images from one point in time.
-3. Put the age identity back where `IRIS_AGE_KEY_FILE_HOST` points.
-4. Restore the credentials and certificates on the host or cluster that owns them.
-5. Start the stack with the same files, project names, and volume paths.
-6. Check file ownership on the restored volumes, and repair it if it changed. Sign in to the Console: it lists what was in the backup.
+For an installer-owned deployment:
+
+1. Open **Deployment recovery** on the installer host. Select **Recovery key
+   access** and **Trust backup signer** using your independently held files.
+2. In **Settings → Backup & restore**, select the captured backup and choose
+   **Restore**. Alternatively, choose **Restore selected backup** in the host window.
+3. Review the selected backup and confirm downtime and replacement of deployment
+   data. Keep the same hosts, storage, deployment configuration and service images.
+4. Wait for `restored`. The worker checks both encrypted sets, stops every writer,
+   restores file ownership and data, and starts the server followed by the Console.
+   Completion includes an authenticated management request from the Console.
+5. Sign in again. Restarting the Console invalidates existing sessions. Check the
+   restored inventory, jobs, assignments and images before continuing operations.
+
+The worker preserves current instruction counters, revocations, disclosure records
+and completed-operation evidence. It requires matching credentials, sharing rules,
+device ownership, account data, image quarantine decisions and external trust.
+A refusal before replacement resumes the original services. Original data remains
+available in protected directories beside restored storage after publication.
+
+!!! warning
+
+    An old backup cannot prove current revocations or instruction counters.
+    Missing current authority blocks restoration. Never bypass this refusal by
+    deleting journals, resetting counters or choosing a later timestamp.
+    Recovery onto a replacement host or cluster requires separate security review.
+
+If publication or restart fails, use **Recover approved operation** with the same
+operation ID in [Deployment recovery](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
+The worker keeps affected services stopped and resumes its approved publication.
+It preserves newer data written after a restart attempt.
+
+For deployments configured manually, stop all writers and restore matching state,
+configuration, images and identity together. Establish current revocation and
+instruction-counter authority before starting services. Use the same deployment
+files, project names and volume paths, then verify ownership and Console access.
 
 ## Repair volume ownership after a restore
 

@@ -16,18 +16,18 @@ private state directory as the configured lifecycle worker:
 sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/iris
 ```
 
-1. Select **Refresh operations**. Choose the rotation marked
-   `recovery-required` and review its operation ID, credential family and
+1. Select **Refresh operations**. Choose the rotation or restore marked
+   `recovery-required` and review its operation ID, selected backup or credential family, and
    recorded evidence.
 2. Select **Recover approved operation** and confirm the deployment downtime.
    The worker resumes the same approved operation from its protected journal.
 3. Watch the operation state and evidence. The window refreshes every ten
    seconds. A submitted request is not proof of completion.
 
-The worker must remain available outside the containers or pods. If it is
-unavailable, restart it with the recorded installation and custody settings,
-then refresh. Worker service setup is operator-managed; see
-[worker setup](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md#deployment-side-worker).
+The installer manages the worker as a host service outside the containers or pods.
+If it is unavailable, use **Service status** and **Restart worker** in the host
+window, then refresh. Reconnect recorded backup storage before restarting a worker
+that reports missing or changed storage.
 The recovery window requires a
 desktop display and the installer package's `python3-tk` dependency.
 
@@ -35,8 +35,15 @@ desktop display and the installer package's `python3-tk` dependency.
 
     Preserve the operation journal and encrypted backup. Recovery refuses
     changed authority; do not delete the journal or reset keys to bypass that
-    refusal. This control resumes credential rotations, not interrupted backup
-    captures or a restore cutover.
+    refusal. Restore requires the same owned deployment, matching credentials
+    and current instruction counters and revocations. A lost host or missing
+    current security records requires separate review before service startup.
+
+Restore recovery resumes the recorded replacements and verifies server health
+and authenticated Console access. A failed restart may have written newer state;
+the worker preserves it when resuming. Use the same operation ID and retain its
+original data directories. For a new restore, follow
+[Restore a backup](backups.md#restore-a-backup).
 
 ## Replace the independent recovery recipient
 

@@ -11,11 +11,45 @@ architectures, IOS-XR RPM and Guest Shell bundles. It provisions build dependenc
 creates deployment identities, and pauses for offline instruction-signing approval.
 It never creates or signs in to your Console account.
 
-This is a development candidate, not an authenticated public production release.
-Obtain a reviewed `.deb` and its source inventory through your approved delivery
-process. A checksum alone does not authenticate its publisher. Build instructions
-and remaining release gates are in the
-[development guide](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/installer.md).
+Published packages carry GitHub artifact attestations from the public IRIS
+release workflow. Verify the package before installation using the procedure
+below. A checksum alone does not authenticate its publisher.
+
+## Download and authenticate
+
+Use GitHub CLI with `gh attestation verify` support. Select the release tag and
+its full source commit from the
+[public releases](https://github.com/cisco-open/intelligent-release-image-staging/releases).
+Replace both placeholders before running:
+
+```bash
+tag=vYYYY.MM.DD
+commit=<full-40-character-source-commit>
+repo=cisco-open/intelligent-release-image-staging
+mkdir iris-download
+gh release download "$tag" --repo "$repo" --dir iris-download
+gh attestation verify iris-download/release-auth.py --repo "$repo" \
+  --bundle iris-download/attestations.jsonl \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --cert-identity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag" \
+  --signer-workflow "$repo/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$tag" --source-digest "$commit" \
+  --signer-digest "$commit" --deny-self-hosted-runners
+```
+
+Continue only after verification succeeds. Then authenticate the complete
+inventory and every asset, including the `.deb` itself:
+
+```bash
+python3 iris-download/release-auth.py verify --directory iris-download \
+  --tag "$tag" --commit "$commit"
+```
+
+Stop if verification fails. The attestation binds the downloaded bytes to the
+GitHub-hosted release workflow and the selected source commit. The release also
+includes the matching aria2 source archive, licenses, both client binaries,
+and source inventories. See GitHub's
+[verification reference](https://cli.github.com/manual/gh_attestation_verify).
 
 ## Prepare once
 
@@ -25,7 +59,7 @@ provide only their public files and an independently held age recovery recipient
 `irisctl custody-ui` provides the offline signing window.
 
 ```bash
-sudo apt install ./iris-installer_<version>_amd64.deb
+sudo apt install ./iris-download/iris-installer_<version>_amd64.deb
 ```
 
 Choose a new instance name and an empty state directory. Existing deployments
@@ -154,14 +188,25 @@ Exit `22` means the running deployment still needs production review, not that
 it is production-ready. Complete root attestations, backup access and renewal
 arrangements using the [certificate workflows](../admin-guide/rotations.md).
 
-Start the lifecycle worker separately using the
-[worker setup procedure](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/lifecycle.md#deployment-side-worker).
-The installer does not install a worker service or provision backup storage.
+The installer provisions a persistent maintenance service after signing approval
+and package verification. It starts automatically at boot and creates private,
+separate data-backup and encrypted identity-set directories. Local directories
+do not protect against loss of the host. Use `--backup-root` and `--recovery-root`
+to select existing protected storage, or copy both encrypted sets to independent
+storage. Initial storage choices are retained across signing approval.
+
+Use `sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/my-iris`
+to inspect or restart the service, grant recovery-key access and pin an
+independently trusted public backup signer. Private keys are not uploaded to the
+Console. `irisctl worker-status` reports the recorded service and storage health.
 
 Use [Backup & restore](../admin-guide/backups.md) and
 [deployment rotation](../admin-guide/deployment-rotation.md) for managed
 maintenance. Keep encrypted copies and recovery custody off the controller.
-Isolated recovery extraction is not an automated restore or service cutover.
+**Restore selected backup** performs cutover for this same deployment after
+checking current security authority. It preserves current instruction counters
+and refuses changed credential generations. Isolated extraction remains a
+separate operation that does not start services.
 
 ## If maintenance stops
 

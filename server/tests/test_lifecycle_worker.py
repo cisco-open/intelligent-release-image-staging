@@ -27,6 +27,53 @@ def worker(tmp_path):
     return worker_module.Worker(tmp_path / 'state', tmp_path / 'backups', tmp_path / 'recovery')
 
 
+def test_restore_requires_explicit_confirmation_and_pinned_custody(worker, monkeypatch):
+    from iris_installer import restore
+    request = dict(action='restore', request_id=str(uuid.uuid4()), backup_id=str(uuid.uuid4()),
+                   allow_downtime=True, confirm_restore=True)
+    for field in ('allow_downtime', 'confirm_restore'):
+        with pytest.raises(InstallError, match='Confirm downtime'):
+            worker.submit(dict(request, **{field: False}))
+    with pytest.raises(InstallError, match='independent recovery'):
+        worker.submit(request)
+    worker.identity = worker.state_dir / 'independent'
+    worker.identity_history = [worker.identity]
+    def missing(*args):
+        raise InstallError('independent signer required')
+    monkeypatch.setattr(restore, 'custody', missing)
+    with pytest.raises(InstallError, match='independent signer'):
+        worker.submit(request)
+    assert worker.jobs == []
+
+
+def test_worker_restore_observes_duplicate_and_requires_explicit_recovery(worker, monkeypatch):
+    from iris_installer import restore
+    worker.identity = worker.state_dir / 'independent'
+    worker.identity_history = [worker.identity]
+    monkeypatch.setattr(restore, 'custody', lambda *args: worker.state_dir / 'trusted-signer')
+    backup_id, operation = str(uuid.uuid4()), str(uuid.uuid4())
+    worker.jobs.append(dict(id=str(uuid.uuid4()), action='backup', backup_id=backup_id, state='captured'))
+    calls = []
+    def perform(*args, **kwargs):
+        calls.append(kwargs)
+        return {'state': 'restored', 'proof': {'management_https': 'verified'}}
+    monkeypatch.setattr(restore, 'restore', perform)
+    request = dict(action='restore', request_id=operation, backup_id=backup_id,
+                   allow_downtime=True, confirm_restore=True)
+    assert worker.submit(request) == {'job_id': operation}
+    worker.thread.join(3)
+    assert worker.jobs[-1]['state'] == 'restored'
+    assert worker.submit(request) == {'job_id': operation}
+    assert len(calls) == 1
+    with pytest.raises(InstallError, match='interrupted'):
+        worker.submit(dict(request, action='recover-restore'))
+    worker.jobs[-1]['state'] = 'recovery-required'
+    worker.submit(dict(request, action='recover-restore'))
+    worker.thread.join(3)
+    assert calls[-1]['recovery'] is True
+    assert worker.jobs[-1]['state'] == 'restored'
+
+
 @pytest.mark.parametrize('state', ['running', 'recovery-required'])
 def test_management_sync_refuses_unfinished_lifecycle(worker, state):
     worker.jobs = [{'state': state}]
@@ -138,7 +185,7 @@ def test_real_unix_socket_client_and_peer_credentials(worker, tmp_path, monkeypa
         with pytest.raises(ValueError):
             lifecycle_client.call({'action': 'backup', 'allow_downtime': True, 'command': 'anything'})
         with pytest.raises(lifecycle_client.LifecycleUnavailable):
-            lifecycle_client.call({'action': 'verify', 'backup_id': '0' * 36, 'request_id': str(uuid.uuid4())})
+            lifecycle_client.call({'action': 'verify', 'backup_id': str(uuid.uuid4()), 'request_id': str(uuid.uuid4())})
     finally:
         server.shutdown()
         server.server_close()

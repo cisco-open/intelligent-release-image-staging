@@ -17,6 +17,24 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.29]
+
+- Authenticate public release assets, including the Ubuntu installer, with
+  GitHub-hosted workflow attestations bound to the release tag and source commit.
+  Publish source inventories, both aria2 clients and their corresponding source.
+
+- Provision a persistent, deployment-bound maintenance service and separate
+  private backup directories during installation. Preserve operator storage
+  choices across offline signing approval. Add host controls for service health,
+  recovery-key access and independently trusted public backup signers.
+
+- Add confirmed restore cutover for an existing managed Docker, split Docker or
+  Kubernetes deployment. Verify both encrypted backup sets, fence writers,
+  reject changed security authority and preserve current instruction replay
+  floors before replacing saved data. Retain original files and recover an
+  interrupted cutover under the same operation ID. Verify restarted services
+  and every Console consumer before reporting completion.
+
 - Extend the Ubuntu installer candidate to split Docker and Kubernetes with
   explicit remote custody, cluster/resource ownership, native package builds,
   topology-aware cold backups and seven deployment credential workflows.
@@ -63,22 +81,19 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   in the Ubuntu installer candidate.
 
 - Add Console certificate/key inventory and guarded same-key instruction
-  certificate renewal. Add candidate single-host Docker encrypted cold backups,
-  signed manifests, isolated file recovery and scoped Console worker controls.
-  Automated cutover, scheduled retention and other deployment layouts remain
-  under development.
+  certificate renewal, encrypted cold backups, signed manifests, isolated file
+  recovery and scoped Console worker controls.
 
-- Add an Ubuntu 24.04 installer `.deb` candidate with managed host dependencies,
+- Add an Ubuntu 24.04 installer `.deb` with managed host dependencies,
   isolated single-host source builds, an installation journal, offline signing
   approval/resume, required peer TLS by default and automatic IOx/ARM64/XR
-  package builds. Keep account claim explicit. All-topology deployment,
-  authenticated offline delivery and lifecycle qualification remain unfinished.
+  package builds. Keep account claim explicit. Source builds require network
+  access; this package is not an offline kit.
 
 - Start the production installer foundation with scoped runtime package checks
   for Docker and Kubernetes. Check package/certificate readability as the server
   identity instead of accepting host-root reads, and publish public IOx artifacts
-  with explicit modes under restrictive umasks. Automated installation and
-  lifecycle operations remain under development.
+  with explicit modes under restrictive umasks.
 
 - Retain signature-verified offline hash feeds for later image imports for seven
   days, rechecking signatures on every use. Explain uninitialized instruction

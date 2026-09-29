@@ -31669,6 +31669,9 @@
                     "can_extract": {
                       "type": "boolean"
                     },
+                    "can_restore": {
+                      "type": "boolean"
+                    },
                     "jobs": {
                       "type": "array",
                       "items": {
@@ -31693,7 +31696,8 @@
                             "enum": [
                               "backup",
                               "verify",
-                              "extract"
+                              "extract",
+                              "restore"
                             ]
                           },
                           "state": {
@@ -31703,7 +31707,9 @@
                               "captured",
                               "failed",
                               "verified-files",
-                              "verified-isolated-files"
+                              "verified-isolated-files",
+                              "restored",
+                              "refused"
                             ]
                           },
                           "started_at": {
@@ -31714,12 +31720,25 @@
                           },
                           "detail": {
                             "type": "string"
+                          },
+                          "proof": {
+                            "type": [
+                              "object",
+                              "null"
+                            ],
+                            "additionalProperties": true
                           }
                         }
                       }
                     },
                     "note": {
                       "type": "string"
+                    },
+                    "restore_scope": {
+                      "type": "string",
+                      "enum": [
+                        "same-deployment-same-security-generation"
+                      ]
                     }
                   },
                   "required": [
@@ -31728,6 +31747,7 @@
                     "storage",
                     "can_verify",
                     "can_extract",
+                    "can_restore",
                     "jobs",
                     "note"
                   ],
@@ -31739,6 +31759,7 @@
                   "storage": "unavailable",
                   "can_verify": false,
                   "can_extract": false,
+                  "can_restore": false,
                   "jobs": [],
                   "note": "Configure the lifecycle worker on the installer host."
                 }
@@ -32284,6 +32305,39 @@
                       "request_id": {
                         "type": "string",
                         "pattern": "^[0-9a-f-]{36}$"
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "action",
+                      "backup_id",
+                      "request_id",
+                      "allow_downtime",
+                      "confirm_restore"
+                    ],
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "restore",
+                          "recover-restore"
+                        ]
+                      },
+                      "backup_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "allow_downtime": {
+                        "const": true
+                      },
+                      "confirm_restore": {
+                        "const": true
                       }
                     }
                   }
@@ -69582,6 +69636,9 @@
                     "can_extract": {
                       "type": "boolean"
                     },
+                    "can_restore": {
+                      "type": "boolean"
+                    },
                     "jobs": {
                       "type": "array",
                       "items": {
@@ -69606,7 +69663,8 @@
                             "enum": [
                               "backup",
                               "verify",
-                              "extract"
+                              "extract",
+                              "restore"
                             ]
                           },
                           "state": {
@@ -69616,7 +69674,9 @@
                               "captured",
                               "failed",
                               "verified-files",
-                              "verified-isolated-files"
+                              "verified-isolated-files",
+                              "restored",
+                              "refused"
                             ]
                           },
                           "started_at": {
@@ -69627,12 +69687,25 @@
                           },
                           "detail": {
                             "type": "string"
+                          },
+                          "proof": {
+                            "type": [
+                              "object",
+                              "null"
+                            ],
+                            "additionalProperties": true
                           }
                         }
                       }
                     },
                     "note": {
                       "type": "string"
+                    },
+                    "restore_scope": {
+                      "type": "string",
+                      "enum": [
+                        "same-deployment-same-security-generation"
+                      ]
                     }
                   },
                   "required": [
@@ -69641,6 +69714,7 @@
                     "storage",
                     "can_verify",
                     "can_extract",
+                    "can_restore",
                     "jobs",
                     "note"
                   ],
@@ -69652,6 +69726,7 @@
                   "storage": "unavailable",
                   "can_verify": false,
                   "can_extract": false,
+                  "can_restore": false,
                   "jobs": [],
                   "note": "Configure the lifecycle worker on the installer host."
                 }
@@ -70096,6 +70171,39 @@
                       "request_id": {
                         "type": "string",
                         "pattern": "^[0-9a-f-]{36}$"
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "action",
+                      "backup_id",
+                      "request_id",
+                      "allow_downtime",
+                      "confirm_restore"
+                    ],
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "restore",
+                          "recover-restore"
+                        ]
+                      },
+                      "backup_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "allow_downtime": {
+                        "const": true
+                      },
+                      "confirm_restore": {
+                        "const": true
                       }
                     }
                   }

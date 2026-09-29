@@ -975,13 +975,15 @@
             </table></div>
           </div>
           <div class="card">
-            <h3>Verify recovery</h3>
+            <h3>Restore deployment</h3>
             <p>Verify decrypts and checks both sets. Isolated extraction writes to a new protected host directory. It does not start IRIS or contact devices.</p>
             <label for="backup-selected">Captured backup</label>
             <select id="backup-selected" disabled><option value="">Choose a backup</option></select>
             <p><button class="btn ghost" id="backup-verify" disabled>Verify backup</button>
-              <button class="btn ghost" id="backup-extract" disabled>Extract for isolated recovery</button></p>
-            <p class="muted">The operator provisions recovery access on the host worker. Service cutover requires fencing the former primary and reconciling instruction history and revocations; automated cutover is pending.</p>
+              <button class="btn ghost" id="backup-extract" disabled>Extract for isolated recovery</button>
+              <button class="btn" id="backup-restore" disabled>Restore selected backup</button>
+              <button class="btn ghost" id="backup-recover" disabled>Resume interrupted restore</button></p>
+            <p class="muted">Restore stops this deployment, verifies the backup against current security authority, replaces its saved content and checks the restarted services. Changed credentials or missing instruction history prevent cutover. Use the host recovery window if the Console is offline.</p>
           </div>
         </div>
         <div id="settings-pane-certificates" hidden>

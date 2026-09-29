@@ -6482,8 +6482,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 data = self._json_body(raw)
                 if data is None:
                     return
-                if data.get('action') not in ('backup', 'verify', 'extract'):
-                    self._json(400, {"error": "Choose backup, verify or isolated extraction"}); return
+                if data.get('action') not in ('backup', 'verify', 'extract', 'restore', 'recover-restore'):
+                    self._json(400, {"error": "Choose backup, verify, extraction or deployment restore"}); return
                 try:
                     result = lifecycle_client.call(data)
                 except ValueError as exc:

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""First installer building block: scoped, read-only runtime diagnostics."""
+"""Installer deployment, managed maintenance and scoped runtime diagnostics."""
 
 import argparse
 import json
@@ -33,7 +33,7 @@ def positive_timeout(value):
 
 def parser():
     result = argparse.ArgumentParser(
-        description="IRIS Ubuntu installer candidate. Explicit Docker or Kubernetes deployment and maintenance.")
+        description="IRIS Ubuntu installer. Explicit Docker or Kubernetes deployment and maintenance.")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("custody-ui", help="open the local offline signing window on the key holder's desktop")
     maintenance = commands.add_parser("maintenance-ui", help="open host-side recovery even while the Console is stopped")
@@ -74,6 +74,21 @@ def parser():
     resume = commands.add_parser("resume", help="resume without regenerating identity or resetting state")
     resume.add_argument("--state-dir", type=Path, required=True)
     resume.add_argument("--certificate", type=Path)
+    setup = commands.add_parser("worker-setup", help="provision this deployment's persistent maintenance service")
+    setup.add_argument("--state-dir", type=Path, required=True)
+    setup.add_argument("--refresh-runtime", action="store_true", help="explicitly approve this installer's maintenance runtime update")
+    for operation in (install, resume, setup):
+        operation.add_argument("--backup-root", type=Path, help="private backup storage root; local storage by default")
+        operation.add_argument("--recovery-root", type=Path, help="separate encrypted identity-set storage root")
+        operation.add_argument("--recovery-identity", type=Path, help="optional independently held recovery identity made available on this host")
+        operation.add_argument("--listen-address", help="explicit bind address for the recorded Kubernetes worker endpoint")
+    worker_status = commands.add_parser("worker-status", help="inspect the pinned maintenance service and storage")
+    worker_status.add_argument("--state-dir", type=Path, required=True)
+    worker_service = commands.add_parser("worker-service", help="control only this deployment's maintenance service")
+    worker_service.add_argument("--state-dir", type=Path, required=True)
+    worker_service.add_argument("--action", choices=("start", "stop", "restart"), required=True)
+    managed = commands.add_parser("managed-worker", help=argparse.SUPPRESS)
+    managed.add_argument("--state-dir", type=Path, required=True)
     approve = commands.add_parser("approve-signing", help="run ONLY on the offline custodian machine")
     approve.add_argument("--public-key", type=Path, required=True)
     approve.add_argument("--root-key", type=Path, required=True)
@@ -128,7 +143,7 @@ def install_questions(args, command_parser):
         command_parser.error("interactive installation needs a terminal; otherwise supply --host, --roots-dir and --recovery-recipient")
     if missing:
         print("Ubuntu installation: dependencies, builds and a new isolated deployment.")
-        print("Private signing roots stay on the custodians' machines. This candidate is not a qualified production release.")
+        print("Private signing roots stay on the custodians' machines. Authenticate the release before installation.")
         args.host = args.host or input("Device-facing IPv4 address: ").strip()
         args.roots_dir = args.roots_dir or Path(input("Directory containing the two approved PUBLIC roots: ").strip())
         args.recovery_recipient = args.recovery_recipient or input("Separately held age recovery PUBLIC recipient: ").strip()
@@ -249,6 +264,11 @@ def main(argv=None):
             if args.command == "lifecycle-worker":
                 from .lifecycle_worker import serve
                 return serve(args)
+            if args.command in ("worker-setup", "worker-status", "worker-service", "managed-worker"):
+                from . import managed_worker
+                handler = {"worker-setup": managed_worker.setup, "worker-status": managed_worker.status,
+                           "worker-service": managed_worker.action, "managed-worker": managed_worker.serve_managed}
+                return handler[args.command](args)
             if args.command in ("backup", "verify-backup", "extract-backup"):
                 from .backup import create, verify
                 return create(args) if args.command == "backup" else verify(args)
@@ -258,8 +278,16 @@ def main(argv=None):
             if args.command == "approve-keylist":
                 from .custody import approve_keylist
                 return approve_keylist(args)
-            from .deploy import start, resume
-            return start(args) if args.command == "install" else resume(args)
+            from .deploy import start, resume, OWNER_CLAIM, PRODUCTION_REVIEW
+            result = start(args) if args.command == "install" else resume(args)
+            from .managed_worker import remember_options
+            remember_options(args)
+            if result in (OWNER_CLAIM, PRODUCTION_REVIEW):
+                # Deployment locks have been released. Provision before returning
+                # success so maintenance does not depend on an open terminal.
+                from .managed_worker import setup
+                setup(args)
+            return result
         except (InstallError, OSError, ValueError) as exc:
             # Known validation errors do not contain private key contents.
             print("Installation stopped: " + (str(exc) if isinstance(exc, InstallError)

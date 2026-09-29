@@ -139,6 +139,10 @@ def prepare_recovery_candidate(client, path, approved_recipient, *, independent_
 
 
 def recovery_request(job):
+    if isinstance(job, dict) and job.get("action") == "restore":
+        if job.get("state") != "recovery-required":
+            raise InstallError("Select an interrupted deployment restore")
+        return restore_request(job, recover=True)
     if isinstance(job, dict) and job.get("action") == "renew-transport":
         if (job.get("state") != "recovery-required" or not isinstance(job.get("id"), str)
                 or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", job["id"])):
@@ -152,6 +156,19 @@ def recovery_request(job):
             "family": job["family"], "allow_downtime": True}
 
 
+def restore_request(job, *, recover=False):
+    """Select recorded backup/job identifiers, never paths or archive authority."""
+    pattern = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    expected = ("restore", "recovery-required") if recover else ("backup", "captured")
+    if (not isinstance(job, dict) or (job.get("action"), job.get("state")) != expected
+            or not isinstance(job.get("backup_id"), str) or not re.fullmatch(pattern, job["backup_id"])
+            or recover and (not isinstance(job.get("id"), str) or not re.fullmatch(pattern, job["id"]))):
+        raise InstallError("Select a captured backup or its interrupted restore")
+    return {"action": "recover-restore" if recover else "restore",
+            "request_id": job["id"] if recover else str(uuid.uuid4()),
+            "backup_id": job["backup_id"], "allow_downtime": True, "confirm_restore": True}
+
+
 class MaintenanceClient:
     def __init__(self, state_dir):
         self.state_dir = private_directory(state_dir)
@@ -159,6 +176,7 @@ class MaintenanceClient:
         self.transport_supported = (installation.exists()
             and json.loads(regular_bytes(installation)).get("config", {}).get("target") == "kubernetes")
         self.transport_state = None
+        self.backup_state = None
 
     def call(self, request):
         if isinstance(request, dict) and request.get("action") in ("renew-transport", "recover-transport"):
@@ -166,6 +184,13 @@ class MaintenanceClient:
                     or not isinstance(request["request_id"], str)
                     or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", request["request_id"])):
                 raise InstallError("Unsupported connection certificate maintenance request")
+        elif isinstance(request, dict) and request.get("action") in ("restore", "recover-restore"):
+            if (set(request) != {"action", "request_id", "backup_id", "allow_downtime", "confirm_restore"}
+                    or request["allow_downtime"] is not True or request["confirm_restore"] is not True
+                    or any(not isinstance(request[name], str) or not re.fullmatch(
+                        r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", request[name])
+                        for name in ("request_id", "backup_id"))):
+                raise InstallError("Unsupported deployment restore request")
         elif request not in ({"action": "status"}, {"action": "rotation-status"}, {"action": "transport-status"}):
             if not isinstance(request, dict) or set(request) != {"action", "request_id", "family", "allow_downtime"}:
                 raise InstallError("Unsupported maintenance request")
@@ -217,6 +242,7 @@ class MaintenanceClient:
 
     def snapshot(self):
         ordinary = self.call({"action": "status"})
+        self.backup_state = ordinary
         rotations = self.call({"action": "rotation-status"})
         jobs = []
         responses = [ordinary, rotations]
@@ -240,8 +266,8 @@ class MaintenanceWindow:
         self.busy = False
         self.jobs = {}
         window.title("IRIS · Deployment recovery")
-        window.geometry("920x760" if getattr(client, "transport_supported", False) else "920x700")
-        window.minsize(720, 700 if getattr(client, "transport_supported", False) else 650)
+        window.geometry("980x850")
+        window.minsize(760, 760)
         style = ttk.Style(window)
         style.theme_use("clam")
         style.configure("TFrame", background="#ffffff")
@@ -256,7 +282,16 @@ class MaintenanceWindow:
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="Deployment recovery", style="Heading.TLabel").pack(anchor="w")
         ttk.Label(outer, text=str(client.state_dir), wraplength=830).pack(anchor="w", pady=(8, 16))
-        ttk.Label(outer, text="Recover an approved rotation even while the Console is stopped.").pack(anchor="w", pady=(0, 12))
+        ttk.Label(outer, text="Manage the host worker and recover this deployment while the Console is stopped.").pack(anchor="w", pady=(0, 12))
+        service_box = ttk.LabelFrame(outer, text="Host maintenance service", padding=8)
+        service_box.pack(fill="x", pady=(0, 12))
+        self.service_buttons = []
+        for label, action in (("Set up service", "setup"), ("Restart service", "restart"),
+                              ("Service status", "status"), ("Recovery key access", "identity"),
+                              ("Trust backup signer", "signer")):
+            button = ttk.Button(service_box, text=label, command=lambda action=action: self.manage_service(action))
+            button.pack(side="left", padx=(0, 6))
+            self.service_buttons.append(button)
         self.tree = ttk.Treeview(outer, columns=("operation", "family", "state"), show="headings", height=4 if getattr(client, "transport_supported", False) else 6, selectmode="browse")
         for name, width in (("operation", 150), ("family", 190), ("state", 180)):
             self.tree.heading(name, text=name.capitalize())
@@ -272,6 +307,8 @@ class MaintenanceWindow:
         self.refresh_button.pack(side="left")
         self.recover_button = ttk.Button(controls, text="Recover approved operation", command=self.recover, state="disabled")
         self.recover_button.pack(side="right")
+        self.restore_button = ttk.Button(controls, text="Restore selected backup", command=self.restore, state="disabled")
+        self.restore_button.pack(side="right", padx=8)
         recipient_box = ttk.LabelFrame(outer, text="Replace the independent recovery recipient", padding=8)
         recipient_box.pack(fill="x", pady=(12, 0))
         self.new_identity = tk.StringVar()
@@ -316,6 +353,14 @@ class MaintenanceWindow:
             self.details.insert("1.0", json.dumps(job, indent=2, sort_keys=True))
         self.details.configure(state="disabled")
         self.recover_button.state(["disabled"])
+        self.restore_button.state(["disabled"])
+        if (not self.busy and (getattr(self.client, "backup_state", None) or {}).get("can_restore")
+                and not any(item.get("state") in ("running", "recovery-required") for item in self.jobs.values())):
+            try:
+                restore_request(job)
+                self.restore_button.state(["!disabled"])
+            except InstallError:
+                pass
         self.recipient_button.state(["disabled"] if self.busy or any(
             item.get("state") in ("running", "recovery-required") for item in self.jobs.values()) else ["!disabled"])
         if self.transport_button is not None:
@@ -334,6 +379,9 @@ class MaintenanceWindow:
         self.busy = True
         self.refresh_button.state(["disabled"])
         self.recover_button.state(["disabled"])
+        self.restore_button.state(["disabled"])
+        for button in self.service_buttons:
+            button.state(["disabled"])
         self.recipient_button.state(["disabled"])
         if self.transport_button is not None:
             self.transport_button.state(["disabled"])
@@ -358,7 +406,8 @@ class MaintenanceWindow:
         except InstallError as exc:
             self.status.set(str(exc))
             return
-        if not messagebox.askokcancel("Recover approved rotation", "Recover " + request.get("family", "connection certificate renewal") +
+        description = "deployment restore" if request["action"] == "recover-restore" else request.get("family", "connection certificate renewal")
+        if not messagebox.askokcancel("Recover approved operation", "Recover " + description +
                 " for operation " + request["request_id"] + "?\n\nThis can stop and restart this deployment. "
                 "The worker reuses its approved journal and refuses changed authority. Preserve the backup."
                 + (" Expired pending connection certificates will be renewed again using the same private keys; previous certificates are retained."
@@ -370,6 +419,59 @@ class MaintenanceWindow:
             return self.client.snapshot(), "Recovery requested. Completion requires the worker's recorded evidence."
 
         self.start(recover)
+
+    def restore(self):
+        from tkinter import messagebox
+        if self.busy:
+            return
+        try:
+            request = restore_request(self.selected())
+        except InstallError as exc:
+            self.status.set(str(exc))
+            return
+        if not messagebox.askokcancel("Restore selected backup", "Restore backup " + request["backup_id"] +
+                "?\n\nIRIS and the Console will stop. The worker checks current security authority, replaces saved content, "
+                "preserves current instruction counters and verifies the restarted services. Previous files are retained for recovery.", parent=self.window):
+            return
+        def submit():
+            self.client.call(request)
+            return self.client.snapshot(), "Restore requested. Check the recorded result before resuming normal work."
+        self.start(submit)
+
+    def manage_service(self, action):
+        from tkinter import filedialog, messagebox
+        from types import SimpleNamespace
+        from . import managed_worker
+        if self.busy:
+            return
+        path = None
+        if action in ("identity", "signer"):
+            title = "Independent recovery identity (private; retained on this host)" if action == "identity" else "Independently trusted backup signer (PUBLIC key)"
+            path = filedialog.askopenfilename(parent=self.window, title=title)
+            if not path:
+                return
+        if action != "status" and not messagebox.askokcancel("Host maintenance service",
+                {"setup": "Provision the managed worker and private local backup directories? Local copies do not protect against host loss.",
+                 "restart": "Restart only this deployment's maintenance worker? An active operation must finish first.",
+                 "identity": "Allow the worker to use this independent recovery identity for verification and restore? The key is not uploaded to the Console.",
+                 "signer": "Pin this independently trusted public signer for deployment restore? Do not select a key supplied only by an untrusted backup."}[action], parent=self.window):
+            return
+        def operate():
+            if action == "setup":
+                managed_worker.configure(self.client.state_dir)
+            elif action == "restart":
+                managed_worker.action(SimpleNamespace(state_dir=self.client.state_dir, action="restart"))
+            elif action == "identity":
+                managed_worker.configure_recovery(self.client.state_dir, path)
+            elif action == "signer":
+                managed_worker.configure_restore_signer(self.client.state_dir, path)
+            status = managed_worker.inspect(self.client.state_dir)
+            try:
+                jobs = self.client.snapshot()
+            except (InstallError, OSError, ValueError):
+                jobs = list(self.jobs.values())
+            return jobs, json.dumps(status, sort_keys=True)
+        self.start(operate)
 
     def replace_recipient(self):
         from tkinter import messagebox
@@ -419,6 +521,8 @@ class MaintenanceWindow:
             self.busy = False
             self.refresh_button.state(["!disabled"])
             self.recipient_button.state(["!disabled"])
+            for button in self.service_buttons:
+                button.state(["!disabled"])
             if success:
                 jobs, message = result
                 selected = self.tree.selection()

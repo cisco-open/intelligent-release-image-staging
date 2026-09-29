@@ -68,6 +68,8 @@
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh \
     iris/tools/irisctl \
+    iris/tools/iris-custody-askpass \
+    iris/tools/release-auth.py \
     iris/tools/iris_installer/cli.py \
     iris/tools/iris_installer/probe.py \
     iris/tools/check-host-time.sh \
@@ -139,6 +141,8 @@ _make_release_fixture() {
   done
   cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
   cp "$repo/tools/irisctl" "$FIX/tools/irisctl"
+  cp "$repo/tools/iris-custody-askpass" "$FIX/tools/iris-custody-askpass"
+  cp "$repo/tools/release-auth.py" "$FIX/tools/release-auth.py"
   cp "$repo/tools/build-installer-package.py" "$FIX/tools/build-installer-package.py"
   mkdir -p "$FIX/tools/iris_installer"
   cp "$repo/tools/iris_installer/"*.py "$FIX/tools/iris_installer/"

@@ -3,11 +3,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build the Ubuntu installer candidate from committed, allowlisted inputs.
+"""Build the Ubuntu installer from committed, allowlisted inputs.
 
 No root/deployment keys are generated. No maintainer hooks start a deployment.
-Artifacts are not official authenticated releases until signed by the approved
-release authority. Outputs carry a committed source inventory for drift checks.
+The public release workflow authenticates outputs through GitHub attestations.
+Local builds are unauthenticated. Outputs carry a committed source inventory.
 """
 
 import argparse
@@ -76,9 +76,9 @@ def build(repo, output):
             "Package: iris-installer\nVersion: " + version + "\nArchitecture: amd64\n"
             "Maintainer: IRIS contributors\nSection: admin\nPriority: optional\n"
             "Depends: python3 (>= 3.12), python3-tk, age, ca-certificates, openssh-client\n"
-            "Description: IRIS Ubuntu installer candidate\n"
+            "Description: IRIS Ubuntu deployment installer\n"
             " Source-build deployment with managed Ubuntu dependencies and offline signing approval.\n"
-            " Candidate: not yet a qualified all-topology production release.\n")
+            " Authenticate published packages with the repository release attestation.\n")
         applications = root / "usr/share/applications"
         applications.mkdir(parents=True)
         (applications / "iris-offline-signing.desktop").write_text(
@@ -107,8 +107,10 @@ def build(repo, output):
         # A local integrity checksum is not a release signature or trust root.
         checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
         artifact.with_suffix(".deb.sha256").write_text(checksum + "  " + artifact.name + "\n")
+        artifact.with_suffix(".deb.source.json").write_text(json.dumps(
+            {"schema": 1, "commit": commit, "files": inventory}, sort_keys=True, indent=2) + "\n")
         print("Built candidate from commit " + commit + ": " + str(artifact))
-        print("Not an authenticated public release; release-authority signing remains required.")
+        print("Local build: authenticate published packages with the GitHub release attestation.")
         return artifact
 
 
