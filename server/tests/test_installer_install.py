@@ -115,6 +115,51 @@ def test_snapshot_copies_only_manifested_source_and_detects_drift(tmp_path):
         deploy.snapshot(source, tmp_path / "bad")
 
 
+def test_snapshot_public_directories_ignore_restrictive_umask(tmp_path):
+    source = tmp_path / 'input'
+    (source / 'device/agent/nested').mkdir(parents=True)
+    code = source / 'device/agent/nested/code.py'
+    code.write_bytes(b'public source bytes\n')
+    manifest = {'device/agent/nested/code.py': hashlib.sha256(code.read_bytes()).hexdigest()}
+    (source / 'INSTALLER-SOURCE.json').write_text(json.dumps(manifest))
+    old = os.umask(0o077)
+    try:
+        output = tmp_path / 'snapshot'
+        deploy.snapshot(source, output)
+    finally:
+        os.umask(old)
+    assert all(path.stat().st_mode & 0o777 == 0o755
+               for path in (output, output / 'device', output / 'device/agent', output / 'device/agent/nested'))
+    assert (output / 'device/agent/nested/code.py').stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason='real installer ownership requires root')
+def test_new_install_public_roots_remain_readable_with_private_umask(tmp_path, monkeypatch):
+    source, roots, state = tmp_path / 'input', tmp_path / 'approved-roots', tmp_path / 'state'
+    source.mkdir()
+    roots.mkdir(mode=0o700)
+    (source / 'code').write_bytes(b'public code')
+    (source / 'INSTALLER-SOURCE.json').write_text(json.dumps({
+        'code': hashlib.sha256(b'public code').hexdigest()}))
+    (roots / 'a.pub').write_bytes(b'ssh-ed25519 AAAA a\n')
+    (roots / 'b.pub').write_bytes(b'ssh-ed25519 BBBB b\n')
+    monkeypatch.setattr(ubuntu, 'provision', lambda *_args: None)
+    monkeypatch.setattr(deploy, 'port_preflight', lambda *_args: None)
+    monkeypatch.setattr(deploy, 'run', lambda *_args, **_kwargs: b'')
+    monkeypatch.setattr(deploy, 'installation', lambda _journal: SimpleNamespace(resume=lambda: 20))
+    args = SimpleNamespace(**config(), state_dir=state, source=source, roots_dir=roots, accept_changes=True)
+    previous = os.umask(0o077)
+    try:
+        assert deploy.start(args) == 20
+    finally:
+        os.umask(previous)
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert (state / 'installation.json').stat().st_mode & 0o777 == 0o600
+    assert (state / 'roots').stat().st_mode & 0o777 == 0o755
+    assert (state / 'source').stat().st_mode & 0o777 == 0o755
+    assert roots.stat().st_mode & 0o777 == 0o700
+
+
 @pytest.mark.parametrize("name", ["/etc/passwd", "../outside", "a/../outside", "a//file"])
 def test_snapshot_rejects_path_traversal(tmp_path, name):
     source = tmp_path / "input"
@@ -172,7 +217,8 @@ def test_package_gate_includes_fresh_guestshell_evidence(installation, monkeypat
     assert calls == [('/opt/iris/server/provision-served.sh',)]
 
 
-def test_prepare_uses_scoped_names_and_does_not_publish_management(installation):
+@pytest.mark.parametrize('mask', [0o022, 0o077])
+def test_prepare_uses_scoped_names_and_does_not_publish_management(installation, mask):
     calls = []
 
     def runner(command, **kwargs):
@@ -190,7 +236,11 @@ def test_prepare_uses_scoped_names_and_does_not_publish_management(installation)
         return b""
 
     installation.runner = runner
-    installation.prepare()
+    previous = os.umask(mask)
+    try:
+        installation.prepare()
+    finally:
+        os.umask(previous)
     result = json.loads(installation.compose_file.read_text())
     assert result["name"] == "iris-test"
     assert result["services"]["iris"]["container_name"] == "iris-test-server"
@@ -198,8 +248,23 @@ def test_prepare_uses_scoped_names_and_does_not_publish_management(installation)
     assert all(p["target"] != 9443 for s in result["services"].values() for p in s["ports"])
     assert "private" not in installation.compose_file.read_text()
     assert (installation.base / "age.txt").stat().st_mode & 0o777 == 0o600
+    assert installation.base.stat().st_mode & 0o777 == 0o700
+    assert all((installation.base / name).stat().st_mode & 0o777 == 0o755
+               for name in ('images', 'artifacts'))
+    if mask == 0o077:
+        assert (installation.base / 'build-home/.docker').stat().st_mode & 0o777 == 0o700
     installation.prepare()
     assert sum(command[:2] == ["age-keygen", "-o"] for command, _ in calls) == 1
+
+
+def test_public_directory_permissions_never_follow_external_symlink(installation, tmp_path):
+    outside = tmp_path / 'owner-directory'
+    outside.mkdir(mode=0o700)
+    (installation.base / 'images').symlink_to(outside, target_is_directory=True)
+    with pytest.raises(InstallError, match='symlinks'):
+        installation.prepare()
+    assert outside.stat().st_mode & 0o777 == 0o700
+    assert not (installation.base / 'age.txt').exists()
 
 
 def test_signing_pause_reuses_existing_key_and_never_initializes_producer(installation):

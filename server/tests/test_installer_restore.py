@@ -279,6 +279,62 @@ def test_restore_guard_rejects_lost_or_mismatched_authority(tmp_path, damage):
         restore.guard(tmp_path, operation_id=operation, instance_id=instance)
 
 
+@pytest.mark.parametrize('damage', ['missing-record', 'wrong-instance', 'corrupt-record', 'corrupt-pointer'])
+def test_explicit_recovery_never_repairs_invalid_authority(tmp_path, damage):
+    operation, instance = str(uuid.uuid4()), str(uuid.uuid4())
+    record = dict(operation_id=operation, instance_id=instance, phase='verified')
+    pointer, saved = tmp_path / 'restore-operation.json', tmp_path / 'restore-operations' / operation / 'record.json'
+    put(saved, record)
+    if damage == 'missing-record':
+        saved.unlink()
+    elif damage == 'wrong-instance':
+        put(saved, dict(record, instance_id=str(uuid.uuid4())))
+    elif damage == 'corrupt-record':
+        atomic_write(saved, b'not-json')
+    else:
+        atomic_write(pointer, b'not-json')
+    with pytest.raises(InstallError, match='authority is unreadable'):
+        restore.guard(tmp_path, operation_id=operation, instance_id=instance, recovery_record=record)
+
+
+def test_generated_management_certificate_renewal_keeps_identical_trust(tmp_path):
+    if not shutil.which('openssl'):
+        pytest.skip('openssl is required')
+    current, archived = tmp_path / 'current', tmp_path / 'archive'
+    sources = {name: current / name for name in ('volume-iris-config', 'volume-iris-management-ca',
+                                                'volume-iris-tier-auth')}
+    for root in (current, archived):
+        for name in sources:
+            (root / name).mkdir(parents=True)
+    config = sources['volume-iris-config'] / 'tls'
+    config.mkdir()
+    sources['deployment'] = current / 'compose.json'
+    put(sources['deployment'], {'services': {'iris': {'environment': {'IRIS_MANAGEMENT_API_GENERATE_CERT': '1'}}}})
+    def command(argv, **kwargs):
+        return subprocess.check_output(list(map(str, argv)), stderr=subprocess.DEVNULL)
+    command(['openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-out', tmp_path / 'key'])
+    def certificate(path, serial, subject='iris'):
+        command(['openssl', 'req', '-x509', '-new', '-key', tmp_path / 'key', '-days', '2',
+                 '-subj', '/CN=' + subject, '-set_serial', serial,
+                 '-addext', 'subjectAltName=DNS:iris,DNS:localhost', '-out', path])
+    certificate(config / 'crt.pem', '1')
+    certificate(sources['volume-iris-management-ca'] / 'ca.pem', '2')
+    certificate(archived / 'volume-iris-management-ca/ca.pem', '3')
+    install = SimpleNamespace(config={'target': 'docker'}, command=command)
+    assert restore._management_generation(install, sources, archived) is True
+    certificate(archived / 'volume-iris-management-ca/ca.pem', '4', 'other')
+    with pytest.raises(InstallError, match='trust properties'):
+        restore._management_generation(install, sources, archived)
+    certificate(archived / 'volume-iris-management-ca/ca.pem', '3')
+    atomic_write(config / 'management-crt.pem', b'durable identity')
+    with pytest.raises(InstallError, match='credential generation'):
+        restore._management_generation(install, sources, archived)
+    (config / 'management-crt.pem').unlink()
+    atomic_write(sources['volume-iris-tier-auth'] / 'current.json', b'changed-token')
+    with pytest.raises(InstallError, match='credential generation'):
+        restore._management_generation(install, sources, archived)
+
+
 def test_direct_capture_credential_and_resume_refuse_pending_restore(tmp_path, monkeypatch):
     from iris_installer import backup, credential_maintenance, deploy
     operation, instance = str(uuid.uuid4()), str(uuid.uuid4())
@@ -404,6 +460,24 @@ def test_complete_transaction_restores_data_restarts_and_authenticates_console(t
     assert calls[0] == 'fenced'
     assert [call[-1] for call in calls if isinstance(call, tuple) and call[0] == 'up'] == ['iris', 'console']
     assert tx.run(recovery=True) == result
+
+
+def test_explicit_recovery_repairs_first_record_pointer_crash_window(transaction, monkeypatch):
+    tx, sources, calls, install = transaction
+    write = restore.atomic_write
+    def crash(path, value, *args, **kwargs):
+        if path == tx.base / 'restore-operation.json':
+            raise OSError('injected process loss before pointer publication')
+        return write(path, value, *args, **kwargs)
+    monkeypatch.setattr(restore, 'atomic_write', crash)
+    with pytest.raises(OSError, match='injected process loss'):
+        tx.run()
+    assert not calls
+    with pytest.raises(InstallError, match='authority is unreadable'):
+        restore.guard(tx.base)
+    monkeypatch.setattr(restore, 'atomic_write', write)
+    assert tx.run(recovery=True)['state'] == 'restored'
+    restore.guard(tx.base)
 
 
 def test_failed_post_start_proof_stops_services_and_recovery_never_replays_backup(transaction, monkeypatch):

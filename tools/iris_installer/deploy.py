@@ -191,7 +191,14 @@ class DockerInstall:
                 raise InstallError("Generated Compose configuration changed")
             return
         for directory in ("build-home", "build-home/.docker", "cache", "bin", "requests", "images", "artifacts"):
+            if (self.base / directory).resolve() != self.base / directory:
+                raise InstallError("Public installer directories must not traverse symlinks")
             (self.base / directory).mkdir(mode=0o755, exist_ok=True)
+            # Mounted public inputs must remain readable by the fixed
+            # unprivileged container uid even with a private invoking umask.
+            # Host-only build caches, state and secrets keep their private modes.
+            if directory in ("images", "artifacts"):
+                (self.base / directory).chmod(0o755)
         (self.base / 'control').mkdir(mode=0o750, exist_ok=True)
         if (self.base / 'control').is_symlink():
             raise InstallError("Lifecycle control directory must not be a symlink")
@@ -406,6 +413,7 @@ def snapshot(source, destination):
     if not isinstance(manifest, dict) or not manifest:
         raise InstallError("Invalid source inventory")
     destination.mkdir(mode=0o755)
+    destination.chmod(0o755)
     for name, expected in manifest.items():
         relative = Path(name)
         if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
@@ -416,6 +424,10 @@ def snapshot(source, destination):
             raise InstallError("Source inventory mismatch: " + name)
         output = destination / relative
         output.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        directory = output.parent
+        while directory != destination:
+            directory.chmod(0o755)
+            directory = directory.parent
         shutil.copyfile(path, output)
         output.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
         if digest(output) != expected:
@@ -482,6 +494,7 @@ def start(args):
                 raise InstallError("Compose instance already has resources; adoption is not implemented")
         manifest = snapshot(args.source, journal.directory / "source")
         (journal.directory / "roots").mkdir(mode=0o755)
+        (journal.directory / "roots").chmod(0o755)
         for name, data in roots.items():
             atomic_write(journal.directory / "roots" / name, data, 0o644)
             run(["ssh-keygen", "-lf", str(journal.directory / "roots" / name)], capture=True)

@@ -26,6 +26,9 @@ from . import backup, backup_archive, restore_storage as storage, restore_topolo
 from .credential_maintenance import _consumer_proof, _memory, _pin_runtime, _stop
 from .state import InstallError, Journal, atomic_write, regular_bytes
 
+PHASES = {'verified', 'stopping', 'stopped', 'staged', 'publishing', 'published',
+          'restarting', 'restored', 'refused', 'recovery-required'}
+
 
 def identifier(value):
     try:
@@ -40,40 +43,59 @@ def signer_path(state_dir):
     return Path(state_dir) / 'restore-custody' / 'signer.pub'
 
 
-def guard(state_dir, *, operation_id=None, instance_id=None):
+def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None):
     """Other maintenance entry points must respect an interrupted restore."""
     base = Path(state_dir)
     path, directory = base / 'restore-operation.json', base / 'restore-operations'
     try:
         operations = list(directory.iterdir()) if directory.exists() else []
-        if not path.exists() and not path.is_symlink():
-            if operations:
-                raise ValueError()
+        missing = not path.exists() and not path.is_symlink()
+        if missing and not operations:
             return
-        record = json.loads(regular_bytes(path))
+        if missing:
+            if recovery_record is None:
+                raise ValueError()
+            record = {key: recovery_record[key] for key in ('operation_id', 'instance_id', 'phase')}
+        else:
+            record = json.loads(regular_bytes(path))
         if not isinstance(record, dict) or set(record) != {'operation_id', 'instance_id', 'phase'}:
+            raise ValueError()
+        if record['phase'] not in PHASES:
             raise ValueError()
         identifier(record['operation_id'])
         if instance_id is not None and record['instance_id'] != instance_id:
             raise ValueError()
-        seen = False
+        seen, recovery_seen = False, False
         for operation in operations:
             identifier(operation.name)
             if operation.resolve() != operation or not operation.is_dir():
                 raise ValueError()
             saved = json.loads(regular_bytes(operation / 'record.json', backup_archive.MAX_MANIFEST))
             if (not isinstance(saved, dict) or saved.get('operation_id') != operation.name
-                    or saved.get('instance_id') != record['instance_id']):
+                    or saved.get('instance_id') != record['instance_id']
+                    or saved.get('phase') not in PHASES):
                 raise ValueError()
             if operation.name == record['operation_id']:
                 seen = True
+            if recovery_record is not None and operation.name == operation_id:
+                if saved != recovery_record or saved['instance_id'] != instance_id:
+                    raise ValueError()
+                recovery_seen = True
             if saved.get('phase') not in ('restored', 'refused') and operation.name != operation_id:
                 raise InstallError('Recover the interrupted deployment restore before other maintenance')
         if not seen:
             raise ValueError()
         if record['phase'] not in ('restored', 'refused') and record['operation_id'] != operation_id:
             raise InstallError('Recover the interrupted deployment restore before other maintenance')
-    except (OSError, ValueError, TypeError):
+        if recovery_record is not None:
+            if not recovery_seen:
+                raise ValueError()
+            # Only the explicit same-ID backend, holding Journal.locked(),
+            # can repair the record->pointer crash window. Validate every
+            # saved operation first; never replace corrupt/mismatched custody.
+            atomic_write(path, json.dumps({key: recovery_record[key] for key in
+                ('operation_id', 'instance_id', 'phase')}, sort_keys=True).encode())
+    except (OSError, ValueError, TypeError, KeyError):
         raise InstallError('Restore authority is unreadable; preserve state and recover the approved operation') from None
 
 
@@ -120,6 +142,44 @@ def _content_records(records):
 
 def _same_tree(left, right):
     return _content_records(storage.inventory(left)) == _content_records(storage.inventory(right))
+
+
+def _management_generation(install, sources, archived):
+    """Recognize only Compose's bootstrap certificate renewal, never a key change."""
+    token, ca = 'volume-iris-tier-auth', 'volume-iris-management-ca'
+    if token in sources and not _same_tree(sources[token], archived / token):
+        raise InstallError('Management credential generation changed since this backup')
+    if ca not in sources or _same_tree(sources[ca], archived / ca):
+        return False
+    config = sources['volume-iris-config'] / 'tls'
+    deployment = json.loads(regular_bytes(sources['deployment']))
+    env = deployment.get('services', {}).get('iris', {}).get('environment', {})
+    if (install.config['target'] != 'docker' or env.get('IRIS_MANAGEMENT_API_GENERATE_CERT') != '1'
+            or any((config / name).exists() or (config / name).is_symlink()
+                   for name in ('management-key.pem.age', 'management-crt.pem'))):
+        raise InstallError('Management credential generation changed since this backup')
+    certificates = [sources[ca] / 'ca.pem', archived / ca / 'ca.pem']
+    for directory in (sources[ca], archived / ca):
+        if {row['name'] for row in storage.inventory(directory)} != {'', 'ca.pem'}:
+            raise InstallError('Unexpected generated management trust files')
+    def public(path):
+        return install.command(['openssl', 'x509', '-in', path, '-noout', '-pubkey'], capture=True)
+    expected = public(config / 'crt.pem')
+    properties = []
+    for path in certificates:
+        value = regular_bytes(path, 65536)
+        if (not re.fullmatch(rb'\s*-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*', value)
+                or public(path) != expected):
+            raise InstallError('Generated management certificate key changed since this backup')
+        # Verify self-signature and validity, and compare EVERY extension and
+        # identity property. Only generated serial, validity and signature
+        # bytes may differ; the durable device key was checked independently.
+        install.command(['openssl', 'verify', '-check_ss_sig', '-CAfile', path, path], capture=True)
+        properties.append(install.command(['openssl', 'x509', '-in', path, '-noout', '-text',
+            '-certopt', 'no_header,no_version,no_serial,no_validity,no_sigdump,no_aux'], capture=True))
+    if properties[0] != properties[1]:
+        raise InstallError('Generated management certificate trust properties changed since this backup')
+    return True
 
 
 def _kubernetes_resources(path):
@@ -406,10 +466,21 @@ class Transaction:
             if self.directory.exists():
                 backup_archive.private_directory(self.directory)
                 self.record = json.loads(regular_bytes(self.directory / 'record.json', backup_archive.MAX_MANIFEST))
+                if (not isinstance(self.record, dict) or self.record.get('schema') != 1
+                        or self.record.get('phase') not in PHASES
+                        or any(type(self.record.get(key)) is not bool for key in
+                               ('mutations_admitted', 'published', 'initial_clean_stop'))
+                        or not re.fullmatch(r'[0-9a-f]{64}', str(self.record.get('data_sha256', '')))):
+                    raise InstallError('Restore recovery record is invalid; preserve approved operation custody')
                 if any(self.record.get(key) != value for key, value in (
                         ('operation_id', self.id), ('backup_id', self.backup_id),
                         ('instance_id', journal.document['id']))):
                     raise InstallError('Restore recovery does not match the approved operation')
+                if recovery:
+                    guard(self.base, operation_id=self.id, instance_id=journal.document['id'],
+                          recovery_record=self.record)
+                else:
+                    guard(self.base, instance_id=journal.document['id'])
                 if self.record['phase'] == 'restored':
                     self.save('restored')
                     return self.record['result']
@@ -542,9 +613,7 @@ class Transaction:
                 if _kubernetes_resources(sources['kubernetes-resources']) != _kubernetes_resources(extracted / 'kubernetes-resources'):
                     raise InstallError('Kubernetes topology or Secret authority changed since this backup')
             _config_generation(install, sources['volume-iris-config'], extracted / 'volume-iris-config', keys / 'service-identity')
-            for name in ('volume-iris-tier-auth', 'volume-iris-management-ca'):
-                if name in sources and not _same_tree(sources[name], extracted / name):
-                    raise InstallError('Management credential generation changed since this backup')
+            generated_ca = _management_generation(install, sources, extracted)
             # Restore original archive custody before adding live producer
             # members, so old metadata cannot overwrite the overlay's modes.
             storage.apply_metadata(extracted / 'volume-iris-state', _records(extracted, 'volume-iris-state'))
@@ -553,6 +622,10 @@ class Transaction:
             proof.update(authority)
             plan = []
             components = [name for name in sources if name.startswith('volume-') or name in ('images', 'artifacts')]
+            if generated_ca:
+                # This public projection is regenerated from the unchanged
+                # durable key at startup; keep its current verified copy.
+                components.remove('volume-iris-management-ca')
             for name in components:
                 source = extracted / name
                 records = _records(extracted, name)
