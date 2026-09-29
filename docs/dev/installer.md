@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Production installer development
 
 The Ubuntu 24.04 amd64 `.deb` contains the source-build installation engine,
-managed maintenance service, desktop custody and recovery tools, and runtime
+managed maintenance service, terminal key and recovery tools, and runtime
 diagnostics. It supports single-host Docker, split Docker and Kubernetes.
 
 ## Build the Ubuntu installer
@@ -86,8 +86,8 @@ The installer does not complete those approvals automatically. See
 and [backup controls](../zensical/admin-guide/backups.md#console-backup-controls).
 Neither status is a production READY declaration.
 
-The packaged `irisctl custody-ui` desktop application generates encrypted offline
-roots and approves public requests without uploading private roots. See
+The packaged `iris-key-setup` script guides offline key holders through creating
+protected keys, approving public requests and copying only public files. See
 [offline approval](../zensical/install/offline-approval.md).
 
 The installer also has explicit `docker-split` and `kubernetes` targets; see the
@@ -108,7 +108,7 @@ Restore requires current security authority and the same credential generation;
 it does not adopt a replacement host or reset missing replay history.
 The source-build package needs network access and is not an offline kit.
 The same scoped worker supports planned credential maintenance, with a verified
-backup prerequisite and `irisctl maintenance-ui` for interrupted-operation
+backup prerequisite and `irisctl maintenance` for interrupted-operation
 recovery when the Console is stopped.
 The Kubernetes doctor below is a separate read-only diagnostic command.
 Keep live qualification evidence separate from unit tests and build results.

@@ -447,6 +447,29 @@ def test_noninteractive_install_refuses_to_guess_inputs(monkeypatch):
     assert error.value.code == 2
 
 
+def test_install_questions_show_selected_console_address(monkeypatch):
+    answers = iter(["192.0.2.10", "/public-roots", "age1" + "q" * 58, "", "", "INSTALL"])
+    prompts = []
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    parser = cli.parser()
+    args = cli.install_questions(parser.parse_args(["install", "--console-bind", "192.0.2.10"]), parser)
+    assert args.console_bind == "192.0.2.10"
+    assert any("Console listen address [192.0.2.10;" in prompt for prompt in prompts)
+
+
+@pytest.mark.parametrize("command", ["custody-ui", "maintenance-ui"])
+def test_removed_desktop_commands_are_not_available(command):
+    with pytest.raises(SystemExit) as error:
+        cli.parser().parse_args([command])
+    assert error.value.code == 2
+
+
 def test_package_allowlist_excludes_agent_notes_and_credentials():
     spec = importlib.util.spec_from_file_location("installer_package", REPO / "tools/build-installer-package.py")
     module = importlib.util.module_from_spec(spec)
@@ -511,7 +534,7 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
     shutil.copytree(REPO / "tools/iris_installer", repo / "tools/iris_installer",
                     ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(REPO / "tools/irisctl", repo / "tools/irisctl")
-    shutil.copy2(REPO / "tools/iris-custody-askpass", repo / "tools/iris-custody-askpass")
+    shutil.copy2(REPO / "tools/iris-key-setup", repo / "tools/iris-key-setup")
     (repo / "docs/dev").mkdir(parents=True)
     (repo / "docs/dev/installer.md").write_text("Candidate installer\n")
     for name, content in (("VERSION", "2026.09.23"), ("LICENSE", "Apache-2.0"), ("NOTICE", "Notices")):
@@ -535,11 +558,21 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 0
     assert "--recovery-recipient" in result.stdout
-    assert (extracted / "usr/lib/iris-installer/iris-custody-askpass").stat().st_mode & 0o777 == 0o755
-    desktop = (extracted / "usr/share/applications/iris-offline-signing.desktop").read_text()
-    assert "Exec=/usr/bin/irisctl custody-ui" in desktop
-    assert "Terminal=false" in desktop
-    assert "python3-tk" in subprocess.check_output(["dpkg-deb", "-f", str(artifact), "Depends"], text=True)
+    helper = extracted / "usr/bin/iris-key-setup"
+    assert helper.stat().st_mode & 0o777 == 0o755
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS")}
+    result = subprocess.run([str(helper), "--help"], env=environment,
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert not (extracted / "usr/lib/iris-installer/iris-custody-askpass").exists()
+    assert not (extracted / "usr/share/applications/iris-offline-signing.desktop").exists()
+    assert "python3-tk" not in subprocess.check_output(["dpkg-deb", "-f", str(artifact), "Depends"], text=True)
+    result = subprocess.run([str(extracted / "usr/bin/irisctl"), "--help"],
+                            env=environment, capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "custody-ui" not in result.stdout and "maintenance-ui" not in result.stdout
+    assert "maintenance" in result.stdout
     inventory = json.loads(artifact.with_suffix(".deb.source.json").read_text())
     assert inventory["commit"] == subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()

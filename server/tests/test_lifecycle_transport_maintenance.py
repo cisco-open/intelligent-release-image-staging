@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from iris_installer import lifecycle_network as network
 from iris_installer import lifecycle_transport_maintenance as renewal
-from iris_installer import maintenance_gui as gui
+from iris_installer import maintenance as gui
 from iris_installer import lifecycle_worker
 from iris_installer.state import InstallError, atomic_write
 
@@ -403,32 +403,21 @@ def test_expiring_pending_candidate_has_explicit_journalled_reissue(deployment, 
     assert (base / "lifecycle-transport-operations" / identifier / "previous-0-client.crt").is_file()
 
 
-@pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="local display or Xvfb required")
-def test_host_window_expiry_and_renewal_confirmation(deployment, monkeypatch):
-    import tkinter as tk
-    from tkinter import messagebox
+def test_headless_transport_renewal_keeps_fixed_request(deployment, monkeypatch):
+    from iris_installer import cli
     base, custody, server, install, before, url = deployment
     client = gui.MaintenanceClient(base)
-    client.transport_state = dict(renewal.status(base, url, runner), can_renew=True)
+    client.transport_supported = True
     calls = []
-    monkeypatch.setattr(client, "snapshot", lambda: [])
-    monkeypatch.setattr(client, "call", lambda request: calls.append(request) or {"job_id": request.get("request_id")})
-    window = tk.Tk()
-    try:
-        app = gui.MaintenanceWindow(window, client)
-        app.events.put(app.events.get(timeout=3))
-        app.poll()
-        assert "Worker" in app.transport_expiry.cget("text")
-        assert "Ca" in app.transport_expiry.cget("text")
-        assert "disabled" not in app.transport_button.state()
-        monkeypatch.setattr(messagebox, "askokcancel", lambda *args, **kwargs: False)
-        app.renew_transport()
-        assert calls == []
-        monkeypatch.setattr(messagebox, "askokcancel", lambda *args, **kwargs: True)
-        app.renew_transport()
-        app.events.put(app.events.get(timeout=3))
-        app.poll()
-        assert len(calls) == 1 and calls[0]["action"] == "renew-transport"
-        assert set(calls[0]) == {"action", "request_id", "allow_downtime"}
-    finally:
-        window.destroy()
+    def call(request):
+        calls.append(request)
+        return {"can_renew": True} if request["action"] == "transport-status" else {"job_id": request["request_id"]}
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui, "MaintenanceClient", lambda *_: client)
+    monkeypatch.setattr(client, "call", call)
+    assert cli.main(["maintenance", "--state-dir", str(base), "renew-transport",
+                     "--allow-downtime", "--yes"]) == 0
+    assert calls[0] == {"action": "transport-status"}
+    assert calls[1]["action"] == "renew-transport"
+    assert set(calls[1]) == {"action", "request_id", "allow_downtime"}

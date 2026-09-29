@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 # Install with the managed package
 
 The Ubuntu 24.04 amd64 installer builds the server, Console, both IOx
-architectures, IOS-XR RPM and Guest Shell bundles. It provisions build dependencies,
-creates deployment identities, and pauses for offline instruction-signing approval.
-It never creates or signs in to your Console account.
+architectures, IOS-XR RPM and Guest Shell bundles. It installs the tools it needs,
+creates the server's keys, and pauses for your signing-key holder's approval.
+Run it over SSH or in a local terminal. You create your Console account yourself.
 
 Published packages carry GitHub artifact attestations from the public IRIS
 release workflow. Verify the package before installation using the procedure
@@ -53,14 +53,18 @@ and source inventories. See GitHub's
 
 ## Prepare once
 
-Use a synchronized Ubuntu controller with network access for source builds and
-dependencies. Keep the two offline private roots on the custodian's machine;
-provide only their public files and an independently held age recovery recipient.
-`irisctl custody-ui` provides the offline signing window.
+Use an Ubuntu host with a synchronized clock and network access for builds and
+dependencies. Keep the two private signing keys on their holders' separate
+offline machines. Provide only their public files and the public recovery
+recipient. Keep a separate copy of the private recovery key away from the server.
 
 ```bash
 sudo apt install ./iris-download/iris-installer_<version>_amd64.deb
 ```
+
+Each key holder runs `iris-key-setup` in a terminal on their own machine.
+Its menu guides key creation, request approval and copying public files.
+Follow [Create keys and approve signing requests](offline-approval.md).
 
 Choose a new instance name and an empty state directory. Existing deployments
 are refused, not adopted. Restrict access to the Console before exposing its
@@ -109,7 +113,7 @@ Provision a dedicated SSH key and verify its host key independently.
 Local transport files must be root-owned;
 the private key must be mode `0600`. The remote state parent must already exist
 and be root-owned; the instance directory must be new. The installer pins the
-SSH custody and immutable Console image for later maintenance.
+SSH settings and exact Console image for later maintenance.
 
 Allow the Console to reach the server's device-facing address on authenticated
 HTTPS 9443. Only the Console's credentials, public management CA and browser
@@ -155,9 +159,9 @@ mutual-TLS connection, so it can remain available while pods are stopped.
 Allow the server pod to reach the recorded controller address and port.
 The server pod receives the public CA and client certificate/key; the CA private
 key and worker private key remain on the controller, never in Console pods.
-Use the controller's **Deployment recovery** window to review this connection's
-certificate expiries and renew them before expiry. This renews certificates
-without replacing their private keys; it is not compromised-key recovery.
+Use `irisctl maintenance` on the controller to check connection certificates.
+The `renew-transport` action renews them without replacing their private keys.
+See [Rotate deployment trust and keys](../admin-guide/deployment-rotation.md).
 
 For a local single-node k3s lab, replace `--kube-registry` with
 `--kube-image-import k3s --kube-node <exact-local-node-name>`. This imports the
@@ -166,13 +170,17 @@ administrator-provisioned PV bound to this namespace's `iris-data` claim.
 
 ## Approve and resume
 
-Exit `20` means the installer is waiting for offline approval. Take only
-`requests/online.pub` from the state directory to the custodian. Approve it in
-the custody window or run there:
+Exit `20` means the installer is waiting for offline approval. Transfer only
+`requests/online.pub` from the state directory to a key holder. Record its SHA256
+value and share that value separately so the holder can check the request.
+On the holder's machine, run:
 
 ```bash
-irisctl approve-signing --public-key online.pub --root-key /offline/root-a
+iris-key-setup
 ```
+
+Choose **Approve server request**, then **Copy public file** to return the
+approved certificate. Private signing keys stay on the holder's machine.
 
 Return only the public certificate to the controller:
 
@@ -188,25 +196,26 @@ Exit `22` means the running deployment still needs production review, not that
 it is production-ready. Complete root attestations, backup access and renewal
 arrangements using the [certificate workflows](../admin-guide/rotations.md).
 
-The installer provisions a persistent maintenance service after signing approval
+The installer starts a maintenance service after signing approval
 and package verification. It starts automatically at boot and creates private,
 separate data-backup and encrypted identity-set directories. Local directories
 do not protect against loss of the host. Use `--backup-root` and `--recovery-root`
 to select existing protected storage, or copy both encrypted sets to independent
 storage. Initial storage choices are retained across signing approval.
 
-Use `sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/my-iris`
-to inspect or restart the service, grant recovery-key access and pin an
-independently trusted public backup signer. Private keys are not uploaded to the
-Console. `irisctl worker-status` reports the recorded service and storage health.
+Use `sudo irisctl maintenance --state-dir /var/lib/iris-installer/my-iris`
+to check the worker and its recorded jobs. Its terminal commands also set
+recovery-key access and the trusted public backup signer. See
+[Back up and restore](../admin-guide/backups.md#console-backup-controls).
+`irisctl worker-status` reports service and storage health.
 
 Use [Backup & restore](../admin-guide/backups.md) and
 [deployment rotation](../admin-guide/deployment-rotation.md) for managed
-maintenance. Keep encrypted copies and recovery custody off the controller.
-**Restore selected backup** performs cutover for this same deployment after
-checking current security authority. It preserves current instruction counters
-and refuses changed credential generations. Isolated extraction remains a
-separate operation that does not start services.
+maintenance. Keep encrypted copies and a separate recovery key off the controller.
+**Restore selected backup** replaces saved data in this same deployment after
+checking its current keys and security records. It preserves instruction counters
+and stops if the keys have changed. **Extract for isolated recovery** copies
+the saved files to a separate folder for inspection.
 
 ## If maintenance stops
 
@@ -215,7 +224,7 @@ separate operation that does not start services.
 | A resource differs from recorded installation intent | Check the exact instance, cluster and namespace. Preserve the journal and investigate changes outside the installer; do not delete ownership records to adopt a resource. |
 | Writers did not stop cleanly | Keep the failed operation and backup evidence. Inspect the stopped service and outstanding work; forced termination is not a consistent backup. |
 | Management credential synchronization needs intervention | Keep the previous credential active. Restore worker/Console connectivity and use the schedule's reconciliation control before retirement. |
-| The Kubernetes worker connection certificate expired | Use the controller's local Deployment recovery window to renew or recover the recorded operation. Do not regenerate its private custody directory. |
+| The Kubernetes worker connection certificate expired | Use `irisctl maintenance` on the controller to renew the connection or recover the recorded operation. Preserve its private keys and operation records. |
 
 For interrupted credential replacement, use the
 [host recovery procedure](../admin-guide/recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).

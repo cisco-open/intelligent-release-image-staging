@@ -64,29 +64,22 @@ def build(repo, output):
         (source / "INSTALLER-SOURCE.json").write_text(json.dumps(inventory, sort_keys=True, indent=2) + "\n")
         shutil.copytree(source / "tools/iris_installer", lib / "iris_installer")
         shutil.copy2(source / "tools/irisctl", lib / "irisctl")
-        shutil.copy2(source / "tools/iris-custody-askpass", lib / "iris-custody-askpass")
-        (lib / "iris-custody-askpass").chmod(0o755)
+        shutil.copy2(source / "tools/iris-key-setup", lib / "iris-key-setup")
+        (lib / "iris-key-setup").chmod(0o755)
         binary = root / "usr/bin"
         binary.mkdir(parents=True)
         (binary / "irisctl").symlink_to("../lib/iris-installer/irisctl")
+        (binary / "iris-key-setup").symlink_to("../lib/iris-installer/iris-key-setup")
         version = (source / "VERSION").read_text().strip() + "+installer.0.g" + commit[:12]
         control = root / "DEBIAN"
         control.mkdir()
         (control / "control").write_text(
             "Package: iris-installer\nVersion: " + version + "\nArchitecture: amd64\n"
             "Maintainer: IRIS contributors\nSection: admin\nPriority: optional\n"
-            "Depends: python3 (>= 3.12), python3-tk, age, ca-certificates, openssh-client\n"
+            "Depends: python3 (>= 3.12), age, ca-certificates, openssh-client\n"
             "Description: IRIS Ubuntu deployment installer\n"
             " Source-build deployment with managed Ubuntu dependencies and offline signing approval.\n"
             " Authenticate published packages with the repository release attestation.\n")
-        applications = root / "usr/share/applications"
-        applications.mkdir(parents=True)
-        (applications / "iris-offline-signing.desktop").write_text(
-            "# Copyright 2026 Cisco Systems, Inc. and its affiliates\n"
-            "# SPDX-License-Identifier: Apache-2.0\n"
-            "[Desktop Entry]\nType=Application\nName=IRIS Offline signing\n"
-            "Comment=Approve public requests with a root kept on this machine\n"
-            "Exec=/usr/bin/irisctl custody-ui\nTerminal=false\nCategories=System;Security;\n")
         doc = root / "usr/share/doc/iris-installer"
         doc.mkdir(parents=True)
         shutil.copy2(source / "LICENSE", doc / "copyright")

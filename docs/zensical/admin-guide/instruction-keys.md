@@ -35,12 +35,12 @@ To change the key itself, use [Rotate the online signer](signer-rotation.md).
 1. Open **Settings → Certificates & keys**. Check the renewal date and the
    **Signing stops** deadline, which is seven days before expiry.
 2. Select **Download public renewal request**. Send `iris-online.pub` to the
-   offline key holder, who selects **Online signing certificate** in
-   [IRIS Offline signing](../install/offline-approval.md#approve-a-public-request).
-   The terminal alternative is:
+   offline key holder, who selects **Approve server request** in
+   [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
+   To provide the filenames directly:
 
    ```bash
-   irisctl approve-signing --public-key iris-online.pub \
+   iris-key-setup approve --request iris-online.pub \
      --root-key /offline/root-a --output online-cert.pub
    ```
 

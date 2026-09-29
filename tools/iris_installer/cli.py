@@ -33,11 +33,11 @@ def positive_timeout(value):
 
 def parser():
     result = argparse.ArgumentParser(
-        description="IRIS Ubuntu installer. Explicit Docker or Kubernetes deployment and maintenance.")
+        description="Install and manage IRIS on Ubuntu with Docker or Kubernetes.")
     commands = result.add_subparsers(dest="command", required=True)
-    commands.add_parser("custody-ui", help="open the local offline signing window on the key holder's desktop")
-    maintenance = commands.add_parser("maintenance-ui", help="open host-side recovery even while the Console is stopped")
-    maintenance.add_argument("--state-dir", type=Path, required=True)
+    maintenance = commands.add_parser("maintenance", help="check or repair this deployment from the terminal")
+    from .maintenance import add_arguments as maintenance_arguments
+    maintenance_arguments(maintenance)
     install = commands.add_parser("install", help="install a new owned deployment from Ubuntu 24.04")
     install.add_argument("--target", choices=("docker", "docker-split", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
@@ -142,12 +142,12 @@ def install_questions(args, command_parser):
     if missing and not sys.stdin.isatty():
         command_parser.error("interactive installation needs a terminal; otherwise supply --host, --roots-dir and --recovery-recipient")
     if missing:
-        print("Ubuntu installation: dependencies, builds and a new isolated deployment.")
-        print("Private signing roots stay on the custodians' machines. Authenticate the release before installation.")
-        args.host = args.host or input("Device-facing IPv4 address: ").strip()
-        args.roots_dir = args.roots_dir or Path(input("Directory containing the two approved PUBLIC roots: ").strip())
-        args.recovery_recipient = args.recovery_recipient or input("Separately held age recovery PUBLIC recipient: ").strip()
-        console = input("Console bind address [127.0.0.1; remote exposure requires access restrictions]: ").strip()
+        print("This will install the required tools, build IRIS and set up a new deployment.")
+        print("Keep private signing keys off this server. Check the package's release signature first.")
+        args.host = args.host or input("Server IPv4 address that devices can reach: ").strip()
+        args.roots_dir = args.roots_dir or Path(input("Folder with the two public signing keys (root-a.pub and root-b.pub): ").strip())
+        args.recovery_recipient = args.recovery_recipient or input("Public backup recovery key (starts with age1): ").strip()
+        console = input("Console listen address [" + args.console_bind + "; allow access only from your management network]: ").strip()
         if console:
             args.console_bind = console
         port = input("Console port [" + str(args.console_port) + "]: ").strip()
@@ -158,9 +158,9 @@ def install_questions(args, command_parser):
                 command_parser.error("Console port must be an integer")
     args.state_dir = args.state_dir or Path("/var/lib/iris-installer") / args.instance
     if not args.accept_changes and sys.stdin.isatty():
-        print("Instance: " + args.instance + "; state: " + str(args.state_dir))
+        print("Deployment: " + args.instance + "; settings folder: " + str(args.state_dir))
         print("Peer TLS: " + args.peer_tls + "; Console: " + args.console_bind + ":" + str(args.console_port))
-        args.accept_changes = input("Allow Ubuntu dependency setup, builds and new services? Type INSTALL: ") == "INSTALL"
+        args.accept_changes = input("Install the required tools, build IRIS and start its services? Type INSTALL: ") == "INSTALL"
     return args
 
 
@@ -255,12 +255,9 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
-            if args.command == "custody-ui":
-                from .custody_gui import main as custody_window
-                return custody_window()
-            if args.command == "maintenance-ui":
-                from .maintenance_gui import main as maintenance_window
-                return maintenance_window(args)
+            if args.command == "maintenance":
+                from .maintenance import main as maintenance_command
+                return maintenance_command(args)
             if args.command == "lifecycle-worker":
                 from .lifecycle_worker import serve
                 return serve(args)

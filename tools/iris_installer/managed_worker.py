@@ -278,9 +278,9 @@ def _default_root(path):
 
 
 def _select_recovery_identity(state, identifier, config, roots, value):
-    """Explicit desktop selection permits a protected host copy, never export."""
-    from .maintenance_gui import recovery_identity, _identity_source_uids
-    source, recipient = recovery_identity(value, allow_desktop_owner=True)
+    """Explicit file selection permits a protected host copy, never export."""
+    from .maintenance import recovery_identity, _identity_source_uids
+    source, recipient = recovery_identity(value, allow_invoking_user=True)
     if recipient != config['recovery_recipient']:
         raise InstallError('Select the independent identity matching the installed recovery recipient')
     if any(source == path or path in source.parents for path in (state, *roots)):
@@ -288,7 +288,7 @@ def _select_recovery_identity(state, identifier, config, roots, value):
     if source.stat().st_uid == 0:
         _path(source.parent)
         return source
-    # The desktop account can change its selected file. Read its bounded native
+    # The calling account can change its selected file. Read its bounded native
     # age identity into protected host custody, then validate that exact copy.
     # No key is copied unless the operator explicitly selected recovery access.
     root = _default_root(RECOVERY_ACCESS_ROOT)
@@ -427,7 +427,7 @@ def _setup(args):
 
 
 def _probe(state, record, *, network=True):
-    from .maintenance_gui import MaintenanceClient
+    from .maintenance import MaintenanceClient
     result = MaintenanceClient(state).call({'action': 'status'})
     if result.get('available') is not True:
         raise InstallError('Managed worker has not become ready')
@@ -513,7 +513,7 @@ def status(args):
 
 def configure(state_dir, *, backup_root=None, recovery_root=None,
               recovery_identity=None, listen_address=None, refresh_runtime=False):
-    """Host desktop helper: selected paths stay local and never enter web RPC."""
+    """Host terminal helper: selected paths stay local and never enter web RPC."""
     setup(SimpleNamespace(state_dir=state_dir, backup_root=backup_root,
         recovery_root=recovery_root, recovery_identity=recovery_identity,
         listen_address=listen_address, refresh_runtime=refresh_runtime))
@@ -635,10 +635,10 @@ def _configure_restore_signer(state, public_key_path):
     if source.resolve() != source or source == state or state in source.parents:
         raise InstallError('Select the independently held public backup signer outside deployment state')
     info = source.lstat()
-    from .maintenance_gui import _identity_source_uids
+    from .maintenance import _identity_source_uids
     if (not stat.S_ISREG(info.st_mode) or info.st_uid not in _identity_source_uids() or info.st_nlink != 1
             or info.st_mode & 0o022):
-        raise InstallError('Public signer must be a protected root or desktop-owned regular file')
+        raise InstallError('Public signer must be a protected root or caller-owned regular file')
     data = regular_bytes(source, 4096)
     # Validate the wire encoding through OpenSSH as well as the textual type.
     if len(data.splitlines()) != 1 or len(data.split()) < 2 or data.split()[0] != b'ssh-ed25519':

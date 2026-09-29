@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Local recovery window: fixed requests, pinned socket and explicit recovery."""
+"""Terminal recovery: fixed requests, pinned socket and explicit confirmation."""
 
 import json
 import os
@@ -18,7 +18,7 @@ import uuid
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from iris_installer import cli, maintenance_gui as gui
+from iris_installer import cli, maintenance as gui
 from iris_installer.state import InstallError
 
 
@@ -129,9 +129,177 @@ def test_main_requires_root_before_opening_files(monkeypatch):
         gui.main(SimpleNamespace(state_dir=Path("/should/not/read")))
 
 
-def test_cli_dispatches_recovery_ui_with_explicit_state(monkeypatch, tmp_path):
+def test_cli_dispatches_maintenance_with_explicit_state(monkeypatch, tmp_path):
     monkeypatch.setattr(gui, "main", lambda args: 7 if args.state_dir == tmp_path else 8)
-    assert cli.main(["maintenance-ui", "--state-dir", str(tmp_path)]) == 7
+    assert cli.main(["maintenance", "--state-dir", str(tmp_path)]) == 7
+
+
+def arguments(tmp_path, *options):
+    return cli.parser().parse_args(["maintenance", "--state-dir", str(tmp_path), *options])
+
+
+@pytest.fixture
+def terminal_client(client, monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui, "MaintenanceClient", lambda _path: client)
+    monkeypatch.setattr(client, "snapshot", lambda: [])
+    return client
+
+
+def test_status_is_headless_and_read_only(terminal_client, tmp_path, monkeypatch, capsys):
+    original = job()
+    monkeypatch.setattr(terminal_client, "snapshot", lambda: [original])
+    monkeypatch.setattr(terminal_client, "call", lambda *_: pytest.fail("status mutated worker"))
+    assert gui.main(arguments(tmp_path)) == 0
+    assert json.loads(capsys.readouterr().out.split("\n", 1)[1])["jobs"] == [original]
+
+
+@pytest.mark.parametrize("options", [
+    ["recover"], ["recover", "--job-id", "../other", "--allow-downtime"],
+    ["restore", "--job-id", str(uuid.uuid4())],
+    ["replace-recovery", "--identity", "/no/read", "--allow-downtime"],
+    ["configure-recovery", "--identity", "/no/read"],
+    ["trust-signer"], ["status", "--identity", "/no/read"], ["status", "--yes"],
+    ["disable-recovery", "--allow-downtime"],
+])
+def test_invalid_arguments_have_no_side_effects(tmp_path, monkeypatch, options):
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui, "MaintenanceClient", lambda *_: pytest.fail("opened state"))
+    monkeypatch.setattr(gui, "_confirm", lambda *_: pytest.fail("asked for invalid operation"))
+    with pytest.raises(InstallError):
+        gui.main(arguments(tmp_path, *options))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("answer", ["no", "yes", ""])
+def test_refused_confirmation_never_opens_state(tmp_path, monkeypatch, answer):
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: answer)
+    monkeypatch.setattr(gui, "MaintenanceClient", lambda *_: pytest.fail("opened state"))
+    with pytest.raises(InstallError, match="No changes made"):
+        gui.main(arguments(tmp_path, "renew-transport", "--allow-downtime"))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_noninteractive_mutation_requires_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(gui, "MaintenanceClient", lambda *_: pytest.fail("opened state"))
+    with pytest.raises(InstallError, match="--yes"):
+        gui.main(arguments(tmp_path, "renew-transport", "--allow-downtime"))
+
+
+@pytest.mark.parametrize("action", ["rotate", "restore", "renew-transport"])
+def test_headless_recovery_keeps_original_id(terminal_client, tmp_path, monkeypatch, action):
+    original = job(action=action, backup_id=str(uuid.uuid4()))
+    calls = []
+    monkeypatch.setattr(terminal_client, "snapshot", lambda: [original])
+    monkeypatch.setattr(terminal_client, "call", lambda request: calls.append(request) or {})
+    assert gui.main(arguments(tmp_path, "recover", "--job-id", original["id"],
+                              "--allow-downtime", "--yes")) == 0
+    assert calls == [gui.recovery_request(original)]
+
+
+def test_headless_restore_uses_recorded_backup(terminal_client, tmp_path, monkeypatch):
+    original = job(action="backup", state="captured", backup_id=str(uuid.uuid4()))
+    terminal_client.backup_state = {"can_restore": True}
+    calls = []
+    monkeypatch.setattr(terminal_client, "snapshot", lambda: [original])
+    monkeypatch.setattr(terminal_client, "call", lambda request: calls.append(request) or {})
+    assert gui.main(arguments(tmp_path, "restore", "--job-id", original["id"],
+                              "--allow-downtime", "--yes")) == 0
+    assert calls[0]["backup_id"] == original["backup_id"]
+    assert calls[0]["action"] == "restore"
+    assert calls[0]["request_id"] != original["id"]
+
+
+@pytest.mark.parametrize("jobs", [[], [job(state="running")]])
+def test_headless_recovery_rejects_absent_or_running_job(terminal_client, tmp_path, monkeypatch, jobs):
+    identifier = jobs[0]["id"] if jobs else str(uuid.uuid4())
+    monkeypatch.setattr(terminal_client, "snapshot", lambda: jobs)
+    monkeypatch.setattr(terminal_client, "call", lambda *_: pytest.fail("mutated worker"))
+    with pytest.raises(InstallError):
+        gui.main(arguments(tmp_path, "recover", "--job-id", identifier, "--allow-downtime", "--yes"))
+
+
+@pytest.mark.parametrize("action,flags", [
+    ("configure-recovery", ["--identity", "/private/key.age", "--independent-copy"]),
+    ("disable-recovery", []), ("trust-signer", ["--signer", "/public/signer.pub"]),
+])
+def test_host_key_settings_work_without_display(tmp_path, monkeypatch, action, flags):
+    from iris_installer import managed_worker
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    calls = []
+    monkeypatch.setattr(gui, "recovery_identity", lambda path, **_kwargs: (Path(path), "age1" + "q" * 58))
+    monkeypatch.setattr(managed_worker, "configure_recovery", lambda *args: calls.append(args))
+    monkeypatch.setattr(managed_worker, "configure_restore_signer", lambda *args: calls.append(args))
+    monkeypatch.setattr(managed_worker, "inspect", lambda *_: {"available": True})
+    assert gui.main(arguments(tmp_path, action, *flags, "--yes")) == 0
+    assert calls == [(tmp_path, Path(flags[1]) if flags else None)]
+
+
+@pytest.mark.parametrize("action", ["configure-recovery", "replace-recovery"])
+def test_key_review_precedes_confirmation_without_mutation(tmp_path, monkeypatch, capsys, action):
+    from iris_installer import managed_worker
+    recipient = "age1" + "q" * 58
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui, "recovery_identity", lambda path, **kwargs: (Path(path), recipient))
+    monkeypatch.setattr(gui.sys.stdin, "isatty", lambda: True)
+    def refuse(_prompt):
+        assert recipient in capsys.readouterr().out
+        return "NO"
+    monkeypatch.setattr("builtins.input", refuse)
+    monkeypatch.setattr(gui, "MaintenanceClient", lambda *_: pytest.fail("opened socket state before approval"))
+    monkeypatch.setattr(gui, "prepare_recovery_candidate", lambda *_a, **_k: pytest.fail("imported key before approval"))
+    monkeypatch.setattr(managed_worker, "configure_recovery", lambda *_: pytest.fail("changed key access before approval"))
+    options = [action, "--identity", "/private/key.age", "--independent-copy"]
+    if action == "replace-recovery":
+        options += ["--allow-downtime"]
+    with pytest.raises(InstallError, match="No changes made"):
+        gui.main(arguments(tmp_path, *options))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_key_changed_after_review_is_not_configured(tmp_path, monkeypatch):
+    from iris_installer import managed_worker
+    recipients = iter(["age1" + "q" * 58, "age1" + "p" * 58])
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui, "recovery_identity", lambda path, **kwargs: (Path(path), next(recipients)))
+    monkeypatch.setattr(managed_worker, "configure_recovery", lambda *_: pytest.fail("changed key was accepted"))
+    with pytest.raises(InstallError, match="changed after review"):
+        gui.main(arguments(tmp_path, "configure-recovery", "--identity", "/private/key.age",
+                           "--independent-copy", "--yes"))
+
+
+def test_replacement_passes_only_reviewed_recipient_to_protected_import(terminal_client, tmp_path, monkeypatch):
+    identity, recipient = Path("/private/key.age"), "age1" + "q" * 58
+    expected = {"action": "rotate", "family": "age-recovery",
+                "request_id": str(uuid.uuid4()), "allow_downtime": True}
+    monkeypatch.setattr(gui, "recovery_identity", lambda path, **kwargs: (Path(path), recipient))
+    imported, requests = [], []
+    def prepare(client, path, approved, **kwargs):
+        imported.append((client, path, approved, kwargs))
+        return expected
+    monkeypatch.setattr(gui, "prepare_recovery_candidate", prepare)
+    monkeypatch.setattr(terminal_client, "call", lambda request: requests.append(request) or {})
+    assert gui.main(arguments(tmp_path, "replace-recovery", "--identity", str(identity),
+                              "--independent-copy", "--allow-downtime", "--yes")) == 0
+    assert imported == [(terminal_client, identity, recipient, {"independent_copy": True})]
+    assert requests == [expected]
+
+
+def test_terminal_accepts_explicit_confirmation(terminal_client, tmp_path, monkeypatch):
+    original = job()
+    calls = []
+    monkeypatch.setattr(gui.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: "YES")
+    monkeypatch.setattr(terminal_client, "snapshot", lambda: [original])
+    monkeypatch.setattr(terminal_client, "call", lambda request: calls.append(request) or {})
+    assert gui.main(arguments(tmp_path, "recover", "--job-id", original["id"], "--allow-downtime")) == 0
+    assert calls == [gui.recovery_request(original)]
 
 
 @pytest.fixture
@@ -232,7 +400,7 @@ def test_recipient_refuses_unsafe_identity_permissions_and_symlinks(client, reco
         gui.recovery_identity(alias)
 
 
-def test_desktop_owner_is_only_accepted_from_root_sudo_context(monkeypatch):
+def test_caller_owner_is_only_accepted_from_root_sudo_context(monkeypatch):
     monkeypatch.setenv("SUDO_UID", "4321")
     monkeypatch.setattr(gui.os, "geteuid", lambda: 1000)
     assert gui._identity_source_uids() == {1000}
@@ -248,33 +416,4 @@ def test_identity_size_checked_before_starting_key_reader(tmp_path, monkeypatch)
     path.chmod(0o600)
     monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: pytest.fail("must reject before spawning"))
     with pytest.raises(InstallError, match="size limit"):
-        gui.recovery_identity(path, allow_desktop_owner=True)
-
-
-@pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="local display or Xvfb required")
-def test_real_window_recovery_requires_confirmation(client, monkeypatch):
-    import tkinter as tk
-    from tkinter import messagebox
-    original = job()
-    calls = []
-    monkeypatch.setattr(client, "snapshot", lambda: [original])
-    monkeypatch.setattr(client, "call", lambda request: calls.append(request) or {"job_id": original["id"]})
-    window = tk.Tk()
-    try:
-        app = gui.MaintenanceWindow(window, client)
-        app.events.put(app.events.get(timeout=3))
-        app.poll()
-        app.tree.selection_set("0")
-        app.select()
-        assert "disabled" not in app.recover_button.state()
-        monkeypatch.setattr(messagebox, "askokcancel", lambda *a, **k: False)
-        app.recover()
-        assert calls == []
-        monkeypatch.setattr(messagebox, "askokcancel", lambda *a, **k: True)
-        app.recover()
-        app.events.put(app.events.get(timeout=3))
-        app.poll()
-        assert calls == [gui.recovery_request(original)]
-        assert "Completion requires" in app.status.get()
-    finally:
-        window.destroy()
+        gui.recovery_identity(path, allow_invoking_user=True)

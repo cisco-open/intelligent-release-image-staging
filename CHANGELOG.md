@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Replace installer desktop windows with terminal commands for setup and host
+  recovery. Add `iris-key-setup` to guide key holders through creating protected
+  signing keys, creating recovery keys, approving requests and copying public
+  files. Private signing roots stay off the server.
+
 ## [2026.09.29]
 
 - Remove the active IOS-XR peer identity during verified agent teardown, while

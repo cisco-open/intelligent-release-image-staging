@@ -191,11 +191,11 @@ def test_pinned_deployment_id_cannot_be_rebound(host):
 
 
 def test_identity_enable_disable_preserves_history_and_never_copies_key(host, tmp_path, monkeypatch):
-    from iris_installer import maintenance_gui
+    from iris_installer import maintenance
     managed.setup(host.args)
     identity = tmp_path / 'independent-key'
     atomic_write(identity, b'private fixture identity')
-    monkeypatch.setattr(maintenance_gui, 'recovery_identity', lambda value, **_kwargs: (Path(value), host.config['recovery_recipient']))
+    monkeypatch.setattr(maintenance, 'recovery_identity', lambda value, **_kwargs: (Path(value), host.config['recovery_recipient']))
     managed.configure_recovery(host.state, identity)
     authority = json.loads((host.state / 'recovery-access.json').read_bytes())
     assert authority['active'] == str(identity)
@@ -210,11 +210,11 @@ def test_identity_enable_disable_preserves_history_and_never_copies_key(host, tm
 
 
 def test_recovery_custody_restart_rolls_forward_interrupted_record(host, tmp_path, monkeypatch):
-    from iris_installer import maintenance_gui
+    from iris_installer import maintenance
     managed.setup(host.args)
     identity = tmp_path / 'independent-key'
     atomic_write(identity, b'fixture')
-    monkeypatch.setattr(maintenance_gui, 'recovery_identity', lambda value, **_kwargs: (Path(value), host.config['recovery_recipient']))
+    monkeypatch.setattr(maintenance, 'recovery_identity', lambda value, **_kwargs: (Path(value), host.config['recovery_recipient']))
     write = managed.atomic_write
     failed = False
 
@@ -279,7 +279,7 @@ def test_managed_worker_real_unix_restart_preserves_job_recovery(host, monkeypat
     job = {'id': str(uuid.uuid4()), 'action': 'backup', 'state': 'running'}
     atomic_write(host.state / 'lifecycle-jobs.json', json.dumps([job]).encode())
     launch = managed._runtime_directory(host.state, record) / 'launch.py'
-    from iris_installer.maintenance_gui import MaintenanceClient
+    from iris_installer.maintenance import MaintenanceClient
     for _attempt in range(2):
         process = subprocess.Popen(['/usr/bin/python3', '-I', '-B', str(launch), str(host.state)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -306,7 +306,7 @@ def test_managed_worker_real_unix_restart_preserves_job_recovery(host, monkeypat
 
 
 def test_kubernetes_readiness_uses_actual_mutual_tls(host, monkeypatch):
-    from iris_installer import lifecycle_network, maintenance_gui
+    from iris_installer import lifecycle_network, maintenance
     managed.setup(host.args)
     record = managed._load(host.state)
     runner = lambda argv, **_kwargs: managed.command([str(part) for part in argv])
@@ -316,7 +316,7 @@ def test_kubernetes_readiness_uses_actual_mutual_tls(host, monkeypatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     record.update(target='kubernetes', lifecycle_url='https://127.0.0.1:' + str(server.server_address[1]))
-    monkeypatch.setattr(maintenance_gui.MaintenanceClient, 'call', lambda *_args: {'available': True})
+    monkeypatch.setattr(maintenance.MaintenanceClient, 'call', lambda *_args: {'available': True})
     try:
         assert REAL_PROBE(host.state, record)['available'] is True
         record['lifecycle_url'] = 'https://127.0.0.2:' + str(server.server_address[1])

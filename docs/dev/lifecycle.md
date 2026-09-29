@@ -74,9 +74,9 @@ Public tracker
 validation still refuses loopback outside this explicit maintenance process mode.
 
 The worker accepts fixed UUID/family requests, not browser-provided paths or
-commands. `irisctl maintenance-ui` reaches the same protected Unix socket when
-the Console is stopped. `irisctl custody-ui` handles offline approvals separately.
-Neither UI transports offline private roots. See the
+commands. `irisctl maintenance` reaches the same protected Unix socket when
+the Console is stopped. `iris-key-setup` handles offline approvals separately.
+Neither command transfers offline private roots. See the
 [operator procedure](../zensical/admin-guide/deployment-rotation.md).
 
 ### Topology adapters
@@ -224,7 +224,7 @@ Installer-owned Docker deployments mount their dedicated `control/` directory
 into the server, read-only. An external root worker listens on its Unix socket;
 the socket accepts root or the server's uid 10001. Kubernetes instead connects
 the server to that external worker over the recorded mutual-TLS endpoint, with
-no host control-directory mount. Its host desktop still uses the local Unix
+no host control-directory mount. The host terminal command uses the local Unix
 socket. The Console has no Docker
 socket or cluster-admin access. Owner session and CSRF checks happen at the
 existing management boundary. RPC accepts fixed operations and backup IDs, never
@@ -238,9 +238,9 @@ of independent or off-host storage. The public status states when both archives
 share a filesystem and never claims off-host protection.
 
 Choose mounted storage through `--backup-root` and `--recovery-root` during
-installation, or through Deployment recovery before first worker setup. Initial
-choices survive the offline signing pause and resume. Existing installations can
-provision the managed service through that window or on the installer host:
+installation, or with `irisctl worker-setup` before first worker setup. Initial
+choices survive the offline signing pause and resume. Existing managed installations can
+provision the service on the installer host:
 
 ```bash
 sudo irisctl worker-setup --state-dir /var/lib/iris-installer/my-instance
@@ -259,8 +259,9 @@ after process failure. Graceful stop waits for accepted operations and their
 children. A process crash retains the operation journal for explicit recovery.
 Unix endpoint readiness controls systemd startup; Kubernetes setup also proves
 an actual authenticated TLS request. Expired network credentials leave local
-recovery available. Deployment recovery shows service, storage, Unix endpoint
-and Kubernetes TLS status and provides start, stop and restart controls.
+recovery available. `irisctl worker-status` shows service, storage and Unix endpoint
+status. `irisctl maintenance` shows Kubernetes TLS status and recorded operations;
+`irisctl worker-service` provides start, stop and restart controls.
 
 Package replacement does not silently replace an executing worker. Explicit
 `worker-setup --refresh-runtime` stops it gracefully, snapshots the reviewed
@@ -273,10 +274,10 @@ The listener binds that address by default. Use the worker's `--listen-address`
 only when the local bind address must differ; this does not change the recorded
 URL or certificate names.
 
-To permit verification, restoration or credential rotation, use Deployment
-recovery to select a separately provisioned age recovery identity. The host
+To permit verification, restoration or credential rotation, use
+`irisctl maintenance configure-recovery` to select a separately provisioned age recovery identity. The host
 validates its public recipient. Root-owned protected files are referenced in
-place. Explicitly selected desktop-owned identities are copied into root-only
+place. Explicitly selected user-owned identities are copied into root-only
 `/var/lib/iris-worker-recovery/<instance-id>`, outside deployment state and
 backup storage. The original independent copy remains with its holder. Default
 setup never copies or generates a recovery identity. Its directory must remain
@@ -285,7 +286,7 @@ Enabling or removing this access is an explicit host custody decision with a
 durable intent and restart recovery. Disabling access retains protected keys and
 previous references for older backup operations. Remove temporary private material after use; never
 upload it or an offline signing root through the Console. Select the independently
-held public backup signer in the same window before authorizing restoration.
+held public backup signer with `irisctl maintenance trust-signer` before authorizing restoration.
 Signer trust never comes from an archive selected for restoration.
 
 Only one worker and one conflicting installer operation can run per instance.
@@ -378,7 +379,7 @@ or merely selecting a higher wall-clock value cannot prove safety.
 
 `restore.py` implements same-deployment restoration, not archive extraction as
 cutover. Independent signer trust comes from `restore-custody/signer.pub`,
-provisioned through the host window. Both encrypted sets must match the existing
+provided through the host terminal command. Both encrypted sets must match the existing
 deployment, immutable images and storage identity. Service age identity,
 configuration plaintext, roots, deployment inputs, management credentials,
 split Console identity and Kubernetes Secret/transport authority must remain in

@@ -14,6 +14,13 @@ import sys
 from .state import InstallError, regular_bytes
 
 
+def signing_environment():
+    """Use the holder's terminal, never a caller-selected passphrase program."""
+    env = {name: os.environ[name] for name in ("HOME", "LANG", "LC_ALL", "TERM") if name in os.environ}
+    env.update(PATH="/usr/local/bin:/usr/bin:/bin", SSH_ASKPASS_REQUIRE="never")
+    return env
+
+
 def approve(args):
     public = regular_bytes(args.public_key, 16384)
     if not public.startswith(b"ssh-ed25519 ") or b"PRIVATE" in public:
@@ -32,7 +39,8 @@ def approve(args):
         request = Path(directory) / "online.pub"
         request.write_bytes(public)
         result = subprocess.run(["ssh-keygen", "-s", str(root), "-I", "iris-online",
-                                 "-n", "iris-server", "-V", "+0s:+30d", str(request)], check=False)
+                                 "-n", "iris-server", "-V", "+0s:+30d", str(request)],
+                                env=signing_environment(), check=False)
         if result.returncode:
             raise InstallError("Custodian signing failed; no certificate was published")
         data = regular_bytes(Path(directory) / "online-cert.pub", 65536)
@@ -70,7 +78,8 @@ def approve_keylist(args):
         request = Path(directory) / 'keylist.payload'
         request.write_bytes(payload)
         result = subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(root),
-                                 '-n', keys.KEYLIST_NAMESPACE, str(request)], check=False)
+                                 '-n', keys.KEYLIST_NAMESPACE, str(request)],
+                                env=signing_environment(), check=False)
         if result.returncode:
             raise InstallError('Custodian signing failed; no approval published')
         artifact = keys.assemble_keylist_artifact(payload, regular_bytes(str(request) + '.sig', keys.MAX_SIGNATURE_BYTES))

@@ -15,7 +15,7 @@ stops the server and Console, captures encrypted data and a separate identity
 recovery set, then starts the services that were running. Confirm the downtime
 before proceeding. The host worker continues while the Console is unavailable.
 For an interrupted credential rotation, use the
-[host recovery window](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped)
+[host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped)
 even while the Console is stopped.
 
 **Verify backup** checks the signature, decryption and every captured file in
@@ -29,20 +29,24 @@ identity archives use separate private directories created by the installer.
 The default directories share the host's storage. Copy both encrypted sets and
 the trusted public backup key to independently protected storage.
 
-Open **Deployment recovery** on the installer host to check service and storage
-status, start or restart the worker, and select recovery access. Select a
-protected recovery identity held outside the deployment and backup directories.
-The window checks its public recipient. When you select a file owned by your
-desktop account, confirming access retains a protected private copy on this host.
-Disable recovery access when the operation is complete. Retained keys remain
-available for older backups. Keep the independent copy available for recovery
-from host loss.
+Use `irisctl worker-status --state-dir <installation-state-directory>` on the
+installer host to check service and storage health. Set recovery access with:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris configure-recovery \
+  --identity /protected/path/recovery.age --independent-copy
+```
+
+Keep that recovery key outside deployment and backup folders. The command
+checks its public recipient and retains protected access on this host.
+Keep an independent copy away from the host. Use the `disable-recovery` action
+when finished; retained keys remain available for older backups.
 
 Choose separate mounted storage during installation when required. The worker
 records those mounts and refuses new work if they disappear or change. Reconnect
-the recorded storage before restarting the service. For Kubernetes, the same
-window shows the authenticated connection status and remains available locally
-when the worker's connection certificates need renewal.
+the recorded storage before restarting the service. For Kubernetes,
+`irisctl maintenance` also shows connection status and works locally when
+the connection certificates need renewal.
 
 !!! warning "Recovery scope"
 
@@ -101,10 +105,13 @@ Keep the age identity in its separate protected backup. After a loss, see
 
 For an installer-owned deployment:
 
-1. Open **Deployment recovery** on the installer host. Select **Recovery key
-   access** and **Trust backup signer** using your independently held files.
+1. Set recovery access on the installer host as described above. Set the trusted
+   backup signer with `irisctl maintenance --state-dir <installation-state-directory>
+   trust-signer --signer /protected/path/backup-signer.pub`, using `sudo`.
+   Check this public key against your independently held record.
 2. In **Settings → Backup & restore**, select the captured backup and choose
-   **Restore selected backup**. The same control is available in the host window.
+   **Restore selected backup**. From the host terminal, use the maintenance
+   action `restore --job-id <backup-job-id> --allow-downtime` instead.
 3. Review the selected backup and confirm downtime and replacement of deployment
    data. Keep the same hosts, storage, deployment configuration and service images.
 4. Wait for `restored`. The worker checks both encrypted sets, stops every writer,
@@ -127,7 +134,7 @@ available in protected directories beside restored storage after publication.
     Recovery onto a replacement host or cluster requires separate security review.
 
 If publication or restart fails, use **Recover approved operation** with the same
-operation ID in [Deployment recovery](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
+operation ID with the [host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
 The worker keeps affected services stopped and resumes its approved publication.
 It preserves newer data written after a restart attempt.
 

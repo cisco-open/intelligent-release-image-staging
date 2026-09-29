@@ -23,9 +23,9 @@ holders for the two `.pub` files and put them in the roots directory below.
 
 ## Create the keys
 
-For a desktop workflow, each holder can use
-[IRIS Offline signing](offline-approval.md#create-your-root). The commands below
-provide the same key creation operation from a terminal.
+For guided prompts, each holder can run
+[iris-key-setup](offline-approval.md#create-your-root). The commands below
+create the same keys directly with OpenSSH.
 
 ### Holder A: on the first custody machine
 

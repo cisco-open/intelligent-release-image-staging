@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Installer service handoff and explicit, bounded deployment restore controls."""
+"""Installer CLI service handoff and explicit, bounded deployment restore controls."""
 
 from pathlib import Path
 import sys
@@ -11,7 +11,7 @@ import uuid
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
-from iris_installer import cli, deploy, managed_worker, maintenance_gui
+from iris_installer import cli, deploy, managed_worker, maintenance
 from iris_installer.state import InstallError
 import lifecycle_client
 
@@ -50,11 +50,11 @@ def test_managed_cli_dispatch(monkeypatch, tmp_path, command, handler):
 def test_restore_selection_reuses_interrupted_job_identity():
     identifier, backup = str(uuid.uuid4()), str(uuid.uuid4())
     job = {'id': identifier, 'backup_id': backup, 'action': 'restore', 'state': 'recovery-required'}
-    assert maintenance_gui.recovery_request(job) == {
+    assert maintenance.recovery_request(job) == {
         'action': 'recover-restore', 'request_id': identifier, 'backup_id': backup,
         'allow_downtime': True, 'confirm_restore': True}
     job.update(action='backup', state='captured')
-    request = maintenance_gui.restore_request(job)
+    request = maintenance.restore_request(job)
     assert request['request_id'] != identifier
     assert request['action'] == 'restore' and request['backup_id'] == backup
 
@@ -64,7 +64,7 @@ def test_restore_selection_reuses_interrupted_job_identity():
 def test_restore_selection_refuses_unqualified_backups(patch):
     job = dict({'action': 'backup', 'state': 'captured', 'backup_id': str(uuid.uuid4())}, **patch)
     with pytest.raises(InstallError):
-        maintenance_gui.restore_request(job)
+        maintenance.restore_request(job)
 
 
 @pytest.mark.parametrize('action', ['restore', 'recover-restore'])
@@ -79,7 +79,7 @@ def test_restore_rpc_rejects_unconfirmed_or_unbounded_request(action, patch):
 
 @pytest.mark.parametrize('action', ['restore', 'recover-restore'])
 def test_host_restore_request_uses_fixed_schema(tmp_path, monkeypatch, action):
-    client = maintenance_gui.MaintenanceClient(tmp_path)
+    client = maintenance.MaintenanceClient(tmp_path)
     request = {'action': action, 'request_id': str(uuid.uuid4()), 'backup_id': str(uuid.uuid4()),
                'allow_downtime': True, 'confirm_restore': True}
     for field in ('allow_downtime', 'confirm_restore'):

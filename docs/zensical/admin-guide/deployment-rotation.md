@@ -9,20 +9,17 @@ SPDX-License-Identifier: Apache-2.0
 Open **Settings > Certificates & keys > Rotate deployment trust and keys**.
 Credential replacement uses the Ubuntu installer's host worker. It supports an
 installer-owned Docker, split Docker and Kubernetes deployments. The worker
-reports the recorded topology and available maintenance families; it does not
-adopt an existing manually provisioned deployment. Use the
+shows the saved layout and the keys it can maintain. Use the
 [topology-specific procedures](rotations.md) for deployments without that worker.
 Root attestations use the Console directly and do not require this host worker.
 
 For Kubernetes, the worker connection has its own CA and client/server
-certificates. On the installer controller, open
-`sudo irisctl maintenance-ui --state-dir <installation-state-directory>`.
-The connection panel shows expiry and provides **Renew connection certificates**
-and recovery of an interrupted renewal. This is same-key certificate renewal,
-not replacement of compromised private keys. It restarts the server, verifies
-the new connection, then retires the old client certificate. The host window
-uses its local Unix socket, so an expired network certificate does not prevent
-recovery. These controls are not exposed to the browser or network worker API.
+certificates. Check them on the installer host with
+`sudo irisctl maintenance --state-dir <installation-state-directory> status`.
+Renew them with the `renew-transport --allow-downtime` action and confirm when
+asked. This keeps the existing private keys. It restarts the server, checks
+the new connection, then retires the old client certificate. The command
+connects locally, so it also works after the network certificate has expired.
 
 ## Before starting
 
@@ -42,8 +39,8 @@ available for recovery. Do not delete an operation journal to clear an error.
 | Device-pinned server TLS identity | Server key, certificate and distributed onboarding pin | Remove IRIS deployments first, then onboard and verify devices. |
 | Private swarm issuing CA | Encrypted peer issuer and newly issued origin identity | Remove IRIS deployments first, then onboard and verify peers. |
 | Offline instruction signing roots | Both public roots, approved online certificate and preserved revocation list | Approve offline, remove deployments, rebuild packages, then onboard devices. |
-| Server encryption identity | Service age identity and encrypted configuration | Independent recovery recipient stays unchanged; existing backups retain their original custody. |
-| Independent recovery recipient | Recovery recipient for encrypted configuration; service identity stays unchanged | Import the protected identity through the host window and retain original keys for older backups. |
+| Server encryption identity | Service age identity and encrypted configuration | Independent recovery recipient stays unchanged; existing backups still need their original keys. |
+| Independent recovery recipient | Recovery recipient for encrypted configuration; service identity stays unchanged | Import the protected identity through the host terminal and retain original keys for older backups. |
 | Seeder announce credential | Seeder token and canonical torrent announces | Worker proves serving on an isolated tracker and again after normal restart. |
 
 ## Rotate management TLS, encryption identity or seeder credentials
@@ -60,11 +57,10 @@ available for recovery. Do not delete an operation journal to clear an error.
 Encryption identity rotation changes the server's service recipient, not the
 external recovery recipient. It refuses unresolved encrypted candidates so
 they cannot become unreadable. Finish or cancel pending browser, signer and
-trust requests first. To change external recovery custody, use **Create recovery
-identity** in the offline desktop application. Retain an independent off-host
-copy, then use **Replace recovery identity** in the host maintenance window to
-import it and confirm the change. No private identity crosses the browser API.
-The worker verifies both old and new custody, changes the configured recipient,
+trust requests first. To change the recovery key, follow
+[Replace the independent recovery recipient](recovery.md#replace-the-independent-recovery-recipient).
+Keep an independent copy away from the host. The worker checks both old and new
+keys, changes the configured recipient,
 and retains access to older backup sets. Keep their original keys until those
 sets are retired under your backup policy.
 
@@ -93,13 +89,13 @@ all native packages.
 
 ## Replace the offline signing roots
 
-1. Each root holder uses **IRIS Offline signing** on their separate custodian
+1. Each root holder uses `iris-key-setup` on their separate offline
    machine to generate a replacement root. Follow
    [offline approval](../install/offline-approval.md); private roots stay there.
 2. Select **Offline instruction signing roots** in the Console. Keep the
    existing root names and choose both replacement public `.pub` files.
 3. Select **Prepare replacement trust**, then **Download public approval files**.
-4. In the offline application, approve the online public key with either new
+4. In the key script, approve the online public key with either new
    root. Approve the prepared revocation-list payload with the first root named
    in the Console. The payload preserves existing revocations and advances the sequence.
 5. Import both public approvals and select **Validate public approval**.
@@ -110,7 +106,7 @@ all native packages.
    the Console. Check evidence, onboard devices and verify their acceptance.
 8. Under **Confirm each offline root's custody**, select the second root and
    download its attestation request. Its holder approves that payload in the
-   offline application. Import the signed revocation list and select **Validate
+   key script. Import the signed revocation list and select **Validate
    root attestation**. Check that both root names have fresh signed evidence.
    Repeat independent attestations before their 180-day freshness expires.
 
@@ -126,8 +122,8 @@ Complete or cancel any pending trust replacement first.
 
 1. Select **Offline instruction signing roots**. Under **Confirm each offline
    root's custody**, select the first root and **Download root attestation request**.
-2. Its holder opens **IRIS Offline signing** on their separate offline machine,
-   selects **Retirement list**, and approves that public request with the matching
+2. Its holder runs `iris-key-setup` on their separate offline machine,
+   chooses **Approve server request**, and approves that retirement-list request with the matching
    private root. Follow the fingerprint checks in
    [offline approval](../install/offline-approval.md).
 3. Return only the signed public file. Choose it under **Approved public
@@ -144,16 +140,16 @@ Online certificate renewal remains a [separate approval](instruction-keys.md#ren
 ## Recover an interrupted operation
 
 If the Console is reachable, use **Recover approved operation** beside the
-interrupted job. When the server is intentionally left stopped, use the host
-desktop tool:
+interrupted job. When the server is left stopped, connect to the installer host
+over SSH and list the saved operations:
 
 ```bash
-sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/my-instance
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/my-instance status
 ```
 
-It needs a local graphical session and the lifecycle worker running for that
-installation. Select the interrupted operation and **Recover approved
-operation**. Recovery revalidates the independent backup and checks original or
+Run the same command with `recover --job-id <operation-id> --allow-downtime`
+and confirm when asked. The worker must be running. Recovery checks the
+independent backup and original or
 already-approved replacement bytes. For encryption identity or recovery-recipient
 changes, it can preserve newer encrypted state written after restart only when
 the service identity matches the approved transition and both that identity and
@@ -162,8 +158,8 @@ It does not approve new trust, wipe conflicting state or claim that devices have
 migrated.
 
 If recovery refuses a conflict, preserve the protected installation directory
-and backups. Resolve the reported custody problem before retrying the same
+and backups. Resolve the reported key or access problem before retrying the same
 operation. Do not reset, delete or start a second rotation around it.
 
 Schedules for these families remain review reminders. They do not automatically
-start downtime, approve new trust or change recovery custody.
+start downtime, approve new trust or replace recovery keys.

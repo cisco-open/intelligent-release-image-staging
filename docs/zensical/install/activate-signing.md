@@ -33,7 +33,7 @@ The steps are the same in every layout. Only the way you reach the container
 changes.
 
 For each offline approval below, the key holder can use
-[IRIS Offline signing](offline-approval.md#approve-a-public-request) instead of
+[iris-key-setup](offline-approval.md#approve-a-public-request) instead of
 the `ssh-keygen` command. Choose **Online signing certificate**, select
 `iris-online.pub`, and save the public approval as `iris-online-cert.pub`.
 

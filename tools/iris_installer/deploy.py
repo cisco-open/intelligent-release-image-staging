@@ -315,8 +315,9 @@ class DockerInstall:
         status = json.loads(self.execute("iris-instructions", "--status", capture=True))
         if not status.get("enabled") or status.get("signing_refused") or status.get("state") in ("error", "invalid"):
             self.journal.pause("WAITING_FOR_SIGNING_APPROVAL")
-            print("Awaiting offline custodian approval. Public request: " + str(self.base / "requests/online.pub"))
-            print("On the custody machine: irisctl approve-signing --public-key online.pub --root-key /offline/root-a")
+            print("Setup is paused until a signing key holder approves the server's public key.")
+            print("Public request file: " + str(self.base / "requests/online.pub"))
+            print("On the key holder's machine, run iris-key-setup and choose Approve server request.")
             print("Then: irisctl resume --state-dir " + str(self.base) + " --certificate /path/online-cert.pub")
             return False
         # Never reinitialize an existing producer on resume; validate it instead.

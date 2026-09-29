@@ -8,28 +8,30 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Recover a deployment rotation while the Console is stopped
 
-For an installer-owned Docker, split Docker or Kubernetes deployment, open **Deployment
-recovery** on the installer host's authorized desktop display. Use the same
-private state directory as the configured lifecycle worker:
+For an installer-owned Docker, split Docker or Kubernetes deployment, connect
+to the installer host over SSH. Use the same private state directory as the
+maintenance worker:
 
 ```bash
-sudo irisctl maintenance-ui --state-dir /var/lib/iris-installer/iris
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris status
 ```
 
-1. Select **Refresh operations**. Choose the rotation or restore marked
-   `recovery-required` and review its operation ID, selected backup or credential family, and
-   recorded evidence.
-2. Select **Recover approved operation** and confirm the deployment downtime.
-   The worker resumes the same approved operation from its protected journal.
-3. Watch the operation state and evidence. The window refreshes every ten
-   seconds. A submitted request is not proof of completion.
+Find the rotation or restore marked `recovery-required`. Check its operation ID,
+backup or key type, and recorded results. Resume that operation:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris recover \
+  --job-id <operation-id> --allow-downtime
+```
+
+Confirm when asked, then run `status` again to check completion. The worker uses
+the saved operation record. An accepted request is not proof of completion.
 
 The installer manages the worker as a host service outside the containers or pods.
-If it is unavailable, use **Service status** and **Restart worker** in the host
-window, then refresh. Reconnect recorded backup storage before restarting a worker
-that reports missing or changed storage.
-The recovery window requires a
-desktop display and the installer package's `python3-tk` dependency.
+If it is unavailable, check `irisctl worker-status` and use
+`irisctl worker-service --action restart` with `sudo`. Pass the same `--state-dir` to both.
+Reconnect recorded backup storage before restarting a worker that reports
+missing or changed storage.
 
 !!! warning
 
@@ -47,19 +49,20 @@ original data directories. For a new restore, follow
 
 ## Replace the independent recovery recipient
 
-1. Create the replacement with
-   [IRIS Offline signing](../install/offline-approval.md#create-an-independent-recovery-identity).
-   Keep an independent private copy off the deployment host.
-2. On the installer host, open **Deployment recovery** with the command above.
-   Under **Replace the independent recovery recipient**, select the private
-   age identity through **Browse**. It must have private file permissions and
-   belong to root or the desktop account that launched the window with `sudo`.
-3. Confirm **I hold an independent off-host copy and will retain keys for older
-   backups**. Select **Review replacement**, compare the public recipient with
-   your independent copy, and confirm downtime.
-4. Review the matching operation's state and evidence. The application imports
-   a protected host copy and keeps the request ID when you retry. Its private
-   file and local path never pass through the Console.
+Create the replacement with
+[iris-key-setup](../install/offline-approval.md#create-an-independent-recovery-identity).
+Keep an independent private copy off the deployment host. Put a protected copy
+of this recovery key on the installer host, outside deployment and backup folders.
+Then run:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris replace-recovery \
+  --identity /protected/path/recovery.age --independent-copy --allow-downtime
+```
+
+Compare the public recipient with your independent copy and confirm when asked.
+Use `status` to check the operation. This private recovery key stays outside the
+Console. Private signing roots must remain on their holders' machines.
 
 Finish an active rotation before preparing another recipient. Existing backups
 still require their original recovery keys. Retain those keys and your
