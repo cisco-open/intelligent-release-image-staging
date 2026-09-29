@@ -85,4 +85,3 @@ def test_host_restore_request_uses_fixed_schema(tmp_path, monkeypatch, action):
     for field in ('allow_downtime', 'confirm_restore'):
         with pytest.raises(InstallError, match='Unsupported deployment restore'):
             client.call(dict(request, **{field: 1}))
-

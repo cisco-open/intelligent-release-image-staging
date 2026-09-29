@@ -43,15 +43,18 @@ def signer_path(state_dir):
 def custody(state_dir, identity):
     """Trust is explicitly provisioned outside the backup being restored."""
     signer = signer_path(state_dir)
-    backup_archive.private_directory(signer.parent)
-    for path in (signer, Path(identity)):
-        info = path.lstat()
-        if (path.resolve() != path or not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.geteuid() or info.st_nlink != 1
-                or info.st_mode & 0o022):
-            raise InstallError('Unsafe independently provisioned restore custody')
-    if Path(identity).stat().st_mode & 0o077:
-        raise InstallError('Recovery identity must be private')
+    try:
+        backup_archive.private_directory(signer.parent)
+        for path in (signer, Path(identity)):
+            info = path.lstat()
+            if (path.resolve() != path or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or info.st_mode & 0o022):
+                raise InstallError('Unsafe independently provisioned restore custody')
+        if Path(identity).stat().st_mode & 0o077:
+            raise InstallError('Recovery identity must be private')
+    except OSError:
+        raise InstallError('Provision the independent recovery identity and trusted backup signer on this host') from None
     return signer
 
 
@@ -76,6 +79,20 @@ def _content_records(records):
 
 def _same_tree(left, right):
     return _content_records(storage.inventory(left)) == _content_records(storage.inventory(right))
+
+
+def _kubernetes_resources(path):
+    resources = []
+    for obj in json.loads(regular_bytes(path, 8 * 1024 * 1024)):
+        if obj['kind'] == 'NetworkPolicy' and obj['metadata']['name'] == 'iris-maintenance-isolation':
+            continue
+        if obj['kind'] == 'Deployment':
+            # Clean-stop journals deliberately persist replicas=0. Recovery
+            # proves stopped pods independently and restores the configured
+            # replica counts only after all storage publication is complete.
+            obj['spec'].pop('replicas', None)
+        resources.append(obj)
+    return resources
 
 
 def state_authority(current, archived):
@@ -477,10 +494,7 @@ class Transaction:
             if target == 'kubernetes':
                 if not _same_tree(sources['lifecycle-custody'], extracted / 'lifecycle-custody'):
                     raise InstallError('Kubernetes lifecycle trust changed since this backup')
-                def resources(path):
-                    return [obj for obj in json.loads(regular_bytes(path, 8 * 1024 * 1024))
-                            if not (obj['kind'] == 'NetworkPolicy' and obj['metadata']['name'] == 'iris-maintenance-isolation')]
-                if resources(sources['kubernetes-resources']) != resources(extracted / 'kubernetes-resources'):
+                if _kubernetes_resources(sources['kubernetes-resources']) != _kubernetes_resources(extracted / 'kubernetes-resources'):
                     raise InstallError('Kubernetes topology or Secret authority changed since this backup')
             _config_generation(install, sources['volume-iris-config'], extracted / 'volume-iris-config', keys / 'service-identity')
             for name in ('volume-iris-tier-auth', 'volume-iris-management-ca'):

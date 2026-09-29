@@ -236,7 +236,7 @@ def test_kubernetes_chunk_transport_stages_and_publishes_real_files(tmp_path, mo
 def test_restore_requires_separately_provisioned_signer(tmp_path):
     identity = tmp_path / 'identity'
     atomic_write(identity, b'private')
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(InstallError, match='Provision the independent'):
         restore.custody(tmp_path, identity)
     trust = tmp_path / 'restore-custody'
     trust.mkdir(mode=0o700)
@@ -245,6 +245,25 @@ def test_restore_requires_separately_provisioned_signer(tmp_path):
     identity.chmod(0o644)
     with pytest.raises(InstallError, match='private'):
         restore.custody(tmp_path, identity)
+
+
+def test_kubernetes_recovery_matches_stopped_replica_state_but_not_changed_authority(tmp_path):
+    original = [dict(kind='Deployment', metadata={'name': 'iris-server'}, spec={'replicas': 1,
+                     'template': {'spec': {'containers': [{'image': 'sha256:original'}]}}}),
+                dict(kind='Secret', metadata={'name': 'iris-management'}, data={'key': 'original'})]
+    current = json.loads(json.dumps(original))
+    current[0]['spec']['replicas'] = 0
+    current.append(dict(kind='NetworkPolicy', metadata={'name': 'iris-maintenance-isolation'}, spec={}))
+    prior, live = tmp_path / 'prior', tmp_path / 'live'
+    put(prior, original); put(live, current)
+    assert restore._kubernetes_resources(prior) == restore._kubernetes_resources(live)
+    current[1]['data']['key'] = 'changed'
+    put(live, current)
+    assert restore._kubernetes_resources(prior) != restore._kubernetes_resources(live)
+    current[1]['data']['key'] = 'original'
+    current[0]['spec']['template']['spec']['containers'][0]['image'] = 'sha256:changed'
+    put(live, current)
+    assert restore._kubernetes_resources(prior) != restore._kubernetes_resources(live)
 
 
 @pytest.fixture
