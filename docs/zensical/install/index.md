@@ -6,11 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Install IRIS
 
-Read this guide once, in order. At the end you have a running server and Console, device packages the server serves, and one device staging one image.
+On Ubuntu 24.04 amd64, start with the [managed package procedure](managed-package.md).
+It handles dependencies, builds, deployment identities and the maintenance service,
+with explicit offline signing approval and first-account setup.
 
-For the Ubuntu source-build installer candidate, use the
-[managed package procedure](managed-package.md). The pages below describe
-manual provisioning and remain applicable to deployments not owned by the installer.
+The pages below describe manual provisioning for deployments not owned by the
+installer. Read them in order to deploy the services and stage your first image.
 
 ## Choose a layout
 

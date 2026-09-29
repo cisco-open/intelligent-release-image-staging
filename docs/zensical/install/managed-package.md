@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Install with the managed package
 
-The Ubuntu 24.04 amd64 installer candidate builds the server, Console, both IOx
+The Ubuntu 24.04 amd64 installer builds the server, Console, both IOx
 architectures, IOS-XR RPM and Guest Shell bundles. It provisions build dependencies,
 creates deployment identities, and pauses for offline instruction-signing approval.
 It never creates or signs in to your Console account.

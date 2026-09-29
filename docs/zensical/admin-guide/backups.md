@@ -104,7 +104,7 @@ For an installer-owned deployment:
 1. Open **Deployment recovery** on the installer host. Select **Recovery key
    access** and **Trust backup signer** using your independently held files.
 2. In **Settings → Backup & restore**, select the captured backup and choose
-   **Restore**. Alternatively, choose **Restore selected backup** in the host window.
+   **Restore selected backup**. The same control is available in the host window.
 3. Review the selected backup and confirm downtime and replacement of deployment
    data. Keep the same hosts, storage, deployment configuration and service images.
 4. Wait for `restored`. The worker checks both encrypted sets, stops every writer,

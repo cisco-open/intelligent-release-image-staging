@@ -208,7 +208,7 @@ SPDX-License-Identifier: Apache-2.0
             The server and web Console run in separate containers on one Docker host, separate Docker hosts, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
           </p>
           <p>
-            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. An operator can turn on TLS with mutual certificates for peer transfers between devices; that setting is off by default.
+            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. The Ubuntu managed installer requires mutual TLS for peer transfers by default; manually provisioned deployments can enable it explicitly.
           </p>
         </div>
       </section>

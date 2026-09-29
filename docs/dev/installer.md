@@ -6,11 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Production installer development
 
-The production installer is under development. An Ubuntu 24.04 amd64 `.deb`
-candidate now contains the source-build installation engine as well as runtime
-diagnostics. It is not yet the qualified all-topology production release.
+The Ubuntu 24.04 amd64 `.deb` contains the source-build installation engine,
+managed maintenance service, desktop custody and recovery tools, and runtime
+diagnostics. It supports single-host Docker, split Docker and Kubernetes.
 
-## Ubuntu installation candidate
+## Build the Ubuntu installer
 
 Build from a reviewed commit (uncommitted working-tree changes are NOT included):
 
@@ -45,7 +45,7 @@ sudo irisctl install --state-dir /var/lib/iris-installer/my-instance \
 Dependencies are installer-managed: Ubuntu tools, missing engine/plugins and
 ARM64 emulation. An existing engine is not replaced. Host time must already be
 synchronized with the organization's approved source; the installer does not
-select an NTP source or rewrite firewall policy. This source-build candidate
+select an NTP source or rewrite firewall policy. The source-build installer
 needs network access for dependency/image/tool downloads. It is NOT an offline
 kit. Source manifests detect later drift but do not authenticate a publisher.
 
@@ -90,7 +90,7 @@ The packaged `irisctl custody-ui` desktop application generates encrypted offlin
 roots and approves public requests without uploading private roots. See
 [offline approval](../zensical/install/offline-approval.md).
 
-The candidate also has explicit `docker-split` and `kubernetes` targets; see the
+The installer also has explicit `docker-split` and `kubernetes` targets; see the
 [managed installation procedure](../zensical/install/managed-package.md).
 The split Console host must also run Ubuntu 24.04 amd64 and provide Python 3,
 verified SSH and noninteractive root sudo. Missing Docker, Compose and OpenSSL
@@ -111,7 +111,7 @@ The same scoped worker supports planned credential maintenance, with a verified
 backup prerequisite and `irisctl maintenance-ui` for interrupted-operation
 recovery when the Console is stopped.
 The Kubernetes doctor below is a separate read-only diagnostic command.
-Do not use this candidate as evidence that all production release gates passed.
+Keep live qualification evidence separate from unit tests and build results.
 
 ## Implemented: native-package runtime checks
 
@@ -153,19 +153,21 @@ The existing Docker freshness helper still performs its separate live versus
 distributed certificate comparison. Errors from transport clients are not
 echoed because they can contain authentication material.
 
-## Delivery contract and next implementation slices
+## Delivery and qualification contract
 
-Production is the default design target. First-release qualification requires
+Production is the design target. Release qualification covers
 single/split Docker and single-/multi-node Kubernetes, prebuilt and managed
 source-build paths, both device architectures, custody/signing activation,
 resumable operations, upgrades, renewal, backup/restore and failure recovery.
 The server remains single-replica; multi-node scheduling is not multi-writer HA.
 Optional demo mode cannot satisfy production acceptance gates.
 
-Next work is completion of the authenticated release/build kit, initial-install
-transaction recovery and topology/lifecycle qualification. Existing crypto operations remain the
-authority; builders receive public roots only. No install command is exposed
-as production-complete until the required qualification gates pass.
+The authenticated release workflow publishes the reviewed source and installer.
+Installation resumes from its protected journal after offline approval; the
+managed worker performs backup, credential maintenance and approved restore.
+Existing crypto operations remain the authority; builders receive public roots
+only. Publication requires passing tests and recorded live topology and device
+qualification, not just a successful package build.
 
 ## Tests
 
@@ -180,4 +182,4 @@ an existing, trusted server image's immutable `sha256:` image ID. It starts one
 isolated container, exposes no ports, mounts only disposable test fixtures,
 tests real service-user EACCES and removes its container afterward. It does not
 contact inventory devices or an existing IRIS deployment. Docker transport
-evidence does not qualify Kubernetes; its live test matrix remains outstanding.
+evidence does not qualify Kubernetes; record its live tests separately.

@@ -35,7 +35,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   interrupted cutover under the same operation ID. Verify restarted services
   and every Console consumer before reporting completion.
 
-- Extend the Ubuntu installer candidate to split Docker and Kubernetes with
+- Extend the Ubuntu installer to split Docker and Kubernetes with
   explicit remote custody, cluster/resource ownership, native package builds,
   topology-aware cold backups and seven deployment credential workflows.
   Verify every Console consumer, preserve management-token overlap on failed
@@ -78,7 +78,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   offline public approvals, crash-safe activation and signed retirement of the
   previous key. Preserve device roots and replay state. Include fresh Guest
   Shell publication verification alongside both IOx packages and the XR RPM
-  in the Ubuntu installer candidate.
+  in the Ubuntu installer.
 
 - Add Console certificate/key inventory and guarded same-key instruction
   certificate renewal, encrypted cold backups, signed manifests, isolated file

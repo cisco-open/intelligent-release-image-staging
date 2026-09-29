@@ -22,7 +22,7 @@ https://cisco-open.github.io/intelligent-release-image-staging/docs/.
 - [Documentation](docs/zensical/index.md) — start of the manual, with a reading
   order for each guide.
 - [Installation Guide](docs/zensical/install/index.md) — deploy IRIS and stage
-  your first image.
+  your first image, using the Ubuntu managed package or manual provisioning.
 - [Administration Guide](docs/zensical/admin-guide/index.md) — upgrades,
   backups, credentials, signing keys, and recovery.
 - [User Guide](docs/zensical/user-guide/index.md) — everyday tasks,
@@ -38,8 +38,8 @@ families include Catalyst, Industrial Ethernet, Cisco 8000, and NCS;
 prerequisites vary by model and software.
 
 Control services use HTTPS. Image pieces move between devices over the
-private swarm, and an operator can turn on TLS with mutual certificates for
-those peer transfers; see
+private swarm. The managed installer requires mutual TLS for peer transfers by
+default; manually provisioned deployments can enable it explicitly. See
 [Security model and trust boundaries](docs/zensical/architecture/security-model.md)
 for how that setting works.
 
