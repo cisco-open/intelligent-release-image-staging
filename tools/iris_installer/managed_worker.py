@@ -199,10 +199,11 @@ def _runtime(state, record):
         atomic_write(target, launcher)
 
 
-def _quote(value):
+def _quote(value, *, environment=True):
     # systemd unit syntax is not a shell. Escape its specifier and environment
     # expansion as well as quotes; filenames are never interpreted as commands.
-    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$') + '"'
+    value = str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+    return '"' + (value.replace('$', '$$') if environment else value) + '"'
 
 
 def unit_bytes(state, record):
@@ -211,10 +212,10 @@ def unit_bytes(state, record):
              '# SPDX-License-Identifier: Apache-2.0', '[Unit]',
              'Description=IRIS lifecycle worker ' + record['instance_id'],
              'Wants=network-online.target', 'After=network-online.target',
-             'RequiresMountsFor=' + ' '.join(_quote(path) for path in (str(state), *roots)),
+             'RequiresMountsFor=' + ' '.join(_quote(path, environment=False) for path in (str(state), *roots)),
              'StartLimitIntervalSec=60', 'StartLimitBurst=5', '', '[Service]',
              'Type=notify', 'NotifyAccess=main', 'User=root', 'Group=root',
-             'UMask=0077', 'WorkingDirectory=' + _quote(state),
+             'UMask=0077',
              'ExecStart=/usr/bin/python3 -I -B ' + _quote(_runtime_directory(state, record) / 'launch.py') + ' ' + _quote(state),
              'Environment="PATH=' + PATH + '"', 'Environment=PYTHONDONTWRITEBYTECODE=1',
              'Restart=on-failure', 'RestartSec=5', 'TimeoutStartSec=90',
@@ -229,8 +230,20 @@ def unit_bytes(state, record):
 
 
 def _check_unit(state, record):
-    if _file(UNIT_DIRECTORY / record['unit'], mode=0o644) != unit_bytes(state, record):
+    if _file(UNIT_DIRECTORY / record['unit'], mode=0o644) not in {
+            unit_bytes(state, record), _legacy_unit_bytes(state, record)}:
         raise InstallError('Managed system service changed; preserve its unit for inspection')
+
+
+def _legacy_unit_bytes(state, record):
+    # The first managed-service candidate incorrectly used ExecStart's quoting
+    # for this single-path directive. Admit only those exact installer bytes
+    # for repair; a changed or foreign unit remains an error.
+    roots = [record['storage'][kind]['root'] for kind in ('backup', 'recovery')]
+    correct_mounts = 'RequiresMountsFor=' + ' '.join(_quote(path, environment=False) for path in (str(state), *roots))
+    former_mounts = 'RequiresMountsFor=' + ' '.join(_quote(path) for path in (str(state), *roots))
+    return unit_bytes(state, record).replace(correct_mounts.encode(), former_mounts.encode(), 1).replace(b'UMask=0077\n',
+        ('UMask=0077\nWorkingDirectory=' + _quote(state) + '\n').encode(), 1)
 
 
 @contextmanager
@@ -329,8 +342,11 @@ def _setup(args):
         if getattr(args, 'refresh_runtime', False) and record['runtime'] != _runtime_manifest():
             _check_unit(state, record)
             # Stop waits for accepted work before changing executable custody.
-            command(['systemctl', 'stop', record['unit']], timeout=3600)
-            record['previous_unit_sha256'] = hashlib.sha256(unit_bytes(state, record)).hexdigest()
+            active = command(['systemctl', 'show', record['unit'], '--property=ActiveState']).decode()
+            if 'ActiveState=inactive' not in active.splitlines() and 'ActiveState=failed' not in active.splitlines():
+                command(['systemctl', 'stop', record['unit']], timeout=3600)
+            record['previous_unit_sha256'] = hashlib.sha256(
+                _file(UNIT_DIRECTORY / record['unit'], mode=0o644)).hexdigest()
             record['runtime'] = _runtime_manifest()
             record['phase'] = 'runtime-update'
             _save(state, record)
@@ -391,7 +407,8 @@ def _setup(args):
     if unit.exists() or unit.is_symlink():
         actual = _file(unit, mode=0o644)
         if actual != unit_bytes(state, record):
-            if hashlib.sha256(actual).hexdigest() != record.get('previous_unit_sha256'):
+            if (hashlib.sha256(actual).hexdigest() != record.get('previous_unit_sha256')
+                    and actual != _legacy_unit_bytes(state, record)):
                 raise InstallError('Managed system service changed; preserve its unit for inspection')
             atomic_write(unit, unit_bytes(state, record), 0o644)
     else:

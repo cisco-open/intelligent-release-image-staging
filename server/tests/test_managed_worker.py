@@ -238,6 +238,39 @@ def test_unit_escapes_systemd_expansions_without_shell():
     assert managed._quote('/tmp/space $thing%thing"') == '"/tmp/space $$thing%%thing\\""'
 
 
+def test_real_systemd_parser_accepts_managed_unit(host):
+    managed.setup(host.args)
+    record = managed._load(host.state)
+    result = subprocess.run(['systemd-analyze', 'verify', str(host.units / record['unit'])],
+                            capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr.decode()
+    # Exercise the systemd parser with paths containing spaces and specifiers,
+    # separately from the shell-free argument quoting assertion above.
+    special = host.state.parent / 'space $literal%instance'
+    special.mkdir(mode=0o700)
+    special_record = dict(record, state_dir=str(special))
+    runtime = managed._runtime_directory(special, special_record)
+    runtime.mkdir(mode=0o700, parents=True)
+    atomic_write(runtime / 'launch.py', b'pass\n')
+    atomic_write(host.units / record['unit'], managed.unit_bytes(special, special_record), 0o644)
+    result = subprocess.run(['systemd-analyze', 'verify', str(host.units / record['unit'])],
+                            capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr.decode()
+
+
+def test_exact_legacy_unit_repaired_without_adopting_foreign_bytes(host):
+    managed.setup(host.args)
+    record = managed._load(host.state)
+    unit = host.units / record['unit']
+    atomic_write(unit, managed._legacy_unit_bytes(host.state, record), 0o644)
+    managed.setup(host.args)
+    assert unit.read_bytes() == managed.unit_bytes(host.state, record)
+    assert b'WorkingDirectory=' not in unit.read_bytes()
+    atomic_write(unit, managed._legacy_unit_bytes(host.state, record) + b'Environment=FOREIGN=1\n', 0o644)
+    with pytest.raises(InstallError, match='service changed'):
+        managed.setup(host.args)
+
+
 def test_managed_worker_real_unix_restart_preserves_job_recovery(host, monkeypatch):
     # A real privileged worker process, real Unix peer credentials and an actual
     # service restart; systemctl itself remains intercepted by the fixture.
