@@ -74,6 +74,56 @@ def test_worker_restore_observes_duplicate_and_requires_explicit_recovery(worker
     assert worker.jobs[-1]['state'] == 'restored'
 
 
+@pytest.mark.parametrize('handoff', [False, True, None])
+def test_restore_worker_restart_obeys_private_durable_handoff(worker, monkeypatch, handoff):
+    from iris_installer import restore
+    worker.identity = worker.state_dir / 'independent'
+    worker.identity_history = [worker.identity]
+    monkeypatch.setattr(restore, 'custody', lambda *args: worker.state_dir / 'trusted-signer')
+    operation, backup_id = str(uuid.uuid4()), str(uuid.uuid4())
+    job = dict(id=operation, action='restore', backup_id=backup_id, state='running')
+    if handoff is not None:
+        job['restore_authority_started'] = handoff
+    worker.jobs = [job]
+    worker.save()
+    restarted = worker_module.Worker(worker.state_dir, worker.backup_dir, worker.recovery_dir,
+                                      identity=worker.identity)
+    assert restarted.jobs[0]['state'] == 'recovery-required'
+    assert 'restore_authority_started' not in restarted.status()['jobs'][0]
+    def backend(*args, **kwargs):
+        assert kwargs['recovery'] is True
+        assert kwargs['pre_authority_recovery'] is (handoff is False)
+        kwargs['on_authority_started']()
+        assert json.loads(restarted.record.read_bytes())[0]['restore_authority_started'] is True
+        return {'state': 'restored', 'proof': {}}
+    monkeypatch.setattr(restore, 'restore', backend)
+    restarted.submit(dict(action='recover-restore', request_id=operation, backup_id=backup_id,
+                          allow_downtime=True, confirm_restore=True))
+    restarted.thread.join(3)
+    assert restarted.jobs[0]['state'] == 'restored'
+    assert 'restore_authority_started' not in restarted.status()['jobs'][0]
+
+
+def test_failed_recovery_of_lost_started_authority_keeps_lifecycle_fenced(worker, monkeypatch):
+    from iris_installer import restore
+    worker.identity = worker.state_dir / 'independent'
+    worker.identity_history = [worker.identity]
+    monkeypatch.setattr(restore, 'custody', lambda *args: worker.state_dir / 'trusted-signer')
+    operation, backup_id = str(uuid.uuid4()), str(uuid.uuid4())
+    worker.jobs = [dict(id=operation, action='restore', backup_id=backup_id,
+                       state='recovery-required', restore_authority_started=True)]
+    def backend(*args, **kwargs):
+        assert kwargs['pre_authority_recovery'] is False
+        raise InstallError('Restore authority is missing')
+    monkeypatch.setattr(restore, 'restore', backend)
+    worker.submit(dict(action='recover-restore', request_id=operation, backup_id=backup_id,
+                       allow_downtime=True, confirm_restore=True))
+    worker.thread.join(3)
+    assert worker.jobs[0]['state'] == 'recovery-required'
+    with pytest.raises(InstallError, match='maintenance operation is active'):
+        worker.submit(dict(action='backup', request_id=str(uuid.uuid4()), allow_downtime=True))
+
+
 @pytest.mark.parametrize('state', ['running', 'recovery-required'])
 def test_management_sync_refuses_unfinished_lifecycle(worker, state):
     worker.jobs = [{'state': state}]

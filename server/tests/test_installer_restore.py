@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -297,7 +298,8 @@ def test_explicit_recovery_never_repairs_invalid_authority(tmp_path, damage):
         restore.guard(tmp_path, operation_id=operation, instance_id=instance, recovery_record=record)
 
 
-def test_generated_management_certificate_renewal_keeps_identical_trust(tmp_path):
+@pytest.mark.parametrize('target', ['docker', 'docker-split'])
+def test_generated_management_certificate_renewal_keeps_identical_trust(tmp_path, target):
     if not shutil.which('openssl'):
         pytest.skip('openssl is required')
     current, archived = tmp_path / 'current', tmp_path / 'archive'
@@ -320,7 +322,7 @@ def test_generated_management_certificate_renewal_keeps_identical_trust(tmp_path
     certificate(config / 'crt.pem', '1')
     certificate(sources['volume-iris-management-ca'] / 'ca.pem', '2')
     certificate(archived / 'volume-iris-management-ca/ca.pem', '3')
-    install = SimpleNamespace(config={'target': 'docker'}, command=command)
+    install = SimpleNamespace(config={'target': target}, command=command)
     assert restore._management_generation(install, sources, archived) is True
     certificate(archived / 'volume-iris-management-ca/ca.pem', '4', 'other')
     with pytest.raises(InstallError, match='trust properties'):
@@ -333,6 +335,26 @@ def test_generated_management_certificate_renewal_keeps_identical_trust(tmp_path
     atomic_write(sources['volume-iris-tier-auth'] / 'current.json', b'changed-token')
     with pytest.raises(InstallError, match='credential generation'):
         restore._management_generation(install, sources, archived)
+
+
+def test_split_console_allows_only_matching_verified_server_ca_projection(tmp_path):
+    current, archived = tmp_path / 'current', tmp_path / 'archived'
+    ca = 'volume-iris-management-ca'
+    for root, value in ((current, b'current-verified-ca'), (archived, b'archived-verified-ca')):
+        (root / ca).mkdir(parents=True)
+        atomic_write(root / ca / 'ca.pem', value)
+    prior = dict(**{'current.json': 'unchanged-token', 'previous.json': 'unchanged-overlap',
+                   'tls.crt': 'unchanged-browser-certificate', 'tls.key': 'unchanged-browser-key',
+                   'ca.pem': base64.b64encode(b'archived-verified-ca').decode()})
+    live = dict(prior, **{'ca.pem': base64.b64encode(b'current-verified-ca').decode()})
+    sources = {ca: current / ca}
+    restore._console_generation(live, prior, sources, archived, True)
+    with pytest.raises(InstallError, match='Console credentials'):
+        restore._console_generation(live, prior, sources, archived, False)
+    for field in prior:
+        changed = dict(live, **{field: 'different'})
+        with pytest.raises(InstallError, match='Console credentials'):
+            restore._console_generation(changed, prior, sources, archived, True)
 
 
 def test_direct_capture_credential_and_resume_refuse_pending_restore(tmp_path, monkeypatch):
@@ -478,6 +500,64 @@ def test_explicit_recovery_repairs_first_record_pointer_crash_window(transaction
     monkeypatch.setattr(restore, 'atomic_write', write)
     assert tx.run(recovery=True)['state'] == 'restored'
     restore.guard(tx.base)
+
+
+@pytest.mark.parametrize('empty_directory', [False, True])
+def test_accepted_preflight_loss_repeats_archive_verification_before_handoff(transaction, monkeypatch, empty_directory):
+    tx, sources, calls, install = transaction
+    if empty_directory:
+        tx.directory.parent.mkdir(mode=0o700)
+        tx.directory.mkdir(mode=0o700)
+    read, reads = restore.backup_archive.read, []
+    def observed(*args, **kwargs):
+        reads.append(args[0])
+        return read(*args, **kwargs)
+    monkeypatch.setattr(restore.backup_archive, 'read', observed)
+    def handoff():
+        assert not calls
+        assert len(reads) == 2  # independently verified data AND identity sets
+        assert json.loads((tx.directory / 'record.json').read_bytes())['phase'] == 'verified'
+        assert json.loads((tx.base / 'restore-operation.json').read_bytes())['operation_id'] == tx.id
+        calls.append('durable-handoff')
+    assert tx.run(recovery=True, pre_authority_recovery=True, on_authority_started=handoff)['state'] == 'restored'
+    assert calls[:2] == ['durable-handoff', 'fenced']
+
+
+def test_handoff_failure_prevents_any_writer_fence(transaction):
+    tx, sources, calls, install = transaction
+    def failed():
+        raise OSError('handoff persistence interrupted')
+    with pytest.raises(OSError, match='handoff persistence'):
+        tx.run(on_authority_started=failed)
+    assert not calls
+    assert tx.record['phase'] == 'verified'
+    assert tx.run(recovery=True, pre_authority_recovery=True)['state'] == 'restored'
+
+
+@pytest.mark.parametrize('damage', ['started-missing', 'corrupt-record', 'lost-record-with-pointer', 'key-loss', 'other-pending'])
+def test_preflight_recovery_never_relaxes_started_or_corrupt_authority(transaction, damage):
+    tx, sources, calls, install = transaction
+    if damage == 'started-missing':
+        enabled = False
+    else:
+        enabled = True
+        if damage == 'corrupt-record':
+            tx.directory.mkdir(mode=0o700, parents=True)
+            atomic_write(tx.directory / 'record.json', b'broken')
+        elif damage == 'lost-record-with-pointer':
+            put(tx.base / 'restore-operation.json', dict(operation_id=tx.id,
+                instance_id=json.loads((tx.base / 'installation.json').read_bytes())['id'], phase='verified'))
+        elif damage == 'key-loss':
+            tx.identity.unlink()
+        else:
+            operation = str(uuid.uuid4())
+            record = dict(operation_id=operation,
+                instance_id=json.loads((tx.base / 'installation.json').read_bytes())['id'], phase='publishing')
+            put(tx.base / 'restore-operation.json', record)
+            put(tx.directory.parent / operation / 'record.json', record)
+    with pytest.raises((InstallError, ValueError, OSError)):
+        tx.run(recovery=True, pre_authority_recovery=enabled)
+    assert not calls
 
 
 def test_failed_post_start_proof_stops_services_and_recovery_never_replays_backup(transaction, monkeypatch):

@@ -12,6 +12,7 @@ producer authority refuse admission; no epoch or account is manufactured.
 """
 
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -154,7 +155,8 @@ def _management_generation(install, sources, archived):
     config = sources['volume-iris-config'] / 'tls'
     deployment = json.loads(regular_bytes(sources['deployment']))
     env = deployment.get('services', {}).get('iris', {}).get('environment', {})
-    if (install.config['target'] != 'docker' or env.get('IRIS_MANAGEMENT_API_GENERATE_CERT') != '1'
+    if (install.config['target'] not in ('docker', 'docker-split')
+            or env.get('IRIS_MANAGEMENT_API_GENERATE_CERT') != '1'
             or any((config / name).exists() or (config / name).is_symlink()
                    for name in ('management-key.pem.age', 'management-crt.pem'))):
         raise InstallError('Management credential generation changed since this backup')
@@ -180,6 +182,22 @@ def _management_generation(install, sources, archived):
     if properties[0] != properties[1]:
         raise InstallError('Generated management certificate trust properties changed since this backup')
     return True
+
+
+def _console_generation(current, prior, sources, archived, generated_ca):
+    if current == prior:
+        return
+    if generated_ca and isinstance(current, dict) and isinstance(prior, dict):
+        try:
+            ca = 'volume-iris-management-ca'
+            if (base64.b64decode(current['ca.pem'], validate=True) == regular_bytes(sources[ca] / 'ca.pem', 65536)
+                    and base64.b64decode(prior['ca.pem'], validate=True) == regular_bytes(archived / ca / 'ca.pem', 65536)
+                    and {k: v for k, v in current.items() if k != 'ca.pem'} ==
+                        {k: v for k, v in prior.items() if k != 'ca.pem'}):
+                return
+        except (ValueError, TypeError, KeyError):
+            pass
+    raise InstallError('Console credentials changed since this backup')
 
 
 def _kubernetes_resources(path):
@@ -457,12 +475,23 @@ class Transaction:
         atomic_write(self.base / 'restore-operation.json', json.dumps({key: self.record[key]
             for key in ('operation_id', 'instance_id', 'phase')}, sort_keys=True).encode())
 
-    def run(self, *, recovery=False):
+    def run(self, *, recovery=False, pre_authority_recovery=False, on_authority_started=None):
         with Journal(self.base).locked() as journal:
             if journal.document is None:
                 raise InstallError('Restore requires an existing owned deployment')
             install = backup._installation(journal)
             _pin_runtime(install)
+            if (recovery and pre_authority_recovery and self.directory.exists()
+                    and not (self.directory / 'record.json').exists()):
+                backup_archive.private_directory(self.directory)
+                # mkdir can precede the first atomic record write. The
+                # protected false handoff marker proves no fence ever began.
+                # Reuse only a truly empty owned directory, never lost or
+                # damaged record contents or partial publication artifacts.
+                if any(self.directory.iterdir()):
+                    raise InstallError('Preflight restore custody is incomplete; preserve the operation')
+                self.directory.rmdir()
+                storage.sync(self.directory.parent)
             if self.directory.exists():
                 backup_archive.private_directory(self.directory)
                 self.record = json.loads(regular_bytes(self.directory / 'record.json', backup_archive.MAX_MANIFEST))
@@ -486,8 +515,10 @@ class Transaction:
                     return self.record['result']
                 if not recovery:
                     raise InstallError('Interrupted restore requires explicit same-ID recovery')
-            elif recovery:
+            elif recovery and not pre_authority_recovery:
                 raise InstallError('There is no restore operation to recover')
+            guard(self.base, operation_id=self.id if self.record is not None else None,
+                  instance_id=journal.document['id'])
             install.restore_operation_id = self.id
             sources, volumes, containers = backup.capture_plan(install)
             # Both authenticated sets and topology are checked before downtime.
@@ -523,6 +554,8 @@ class Transaction:
                 self.save('verified')
             elif self.record['data_sha256'] != envelope['payload_sha256']:
                 raise InstallError('Approved restore backup bytes changed')
+            if on_authority_started is not None:
+                on_authority_started()
             install.credential_transaction = self
             install.credential_recovery = recovery
             self.save('stopping')
@@ -599,21 +632,21 @@ class Transaction:
             for name in ('deployment', 'environment', 'source', 'roots'):
                 if not _same_tree(sources[name], extracted / name):
                     raise InstallError('Restore requires the same deployment and source generation')
+            _config_generation(install, sources['volume-iris-config'], extracted / 'volume-iris-config', keys / 'service-identity')
+            generated_ca = _management_generation(install, sources, extracted)
             if target == 'docker-split':
                 for name in ('console-deployment', 'console-build'):
                     if not _same_tree(sources[name], extracted / name):
                         raise InstallError('Console topology changed since this backup')
                 payload = install.command(['age', '-d', '-i', self.identity,
                                            extracted / 'remote-console-custody'], capture=True)
-                if json.loads(payload) != json.loads(install.console_custody_snapshot()):
-                    raise InstallError('Console credentials changed since this backup')
+                _console_generation(json.loads(install.console_custody_snapshot()), json.loads(payload),
+                                    sources, extracted, generated_ca)
             if target == 'kubernetes':
                 if not _same_tree(sources['lifecycle-custody'], extracted / 'lifecycle-custody'):
                     raise InstallError('Kubernetes lifecycle trust changed since this backup')
                 if _kubernetes_resources(sources['kubernetes-resources']) != _kubernetes_resources(extracted / 'kubernetes-resources'):
                     raise InstallError('Kubernetes topology or Secret authority changed since this backup')
-            _config_generation(install, sources['volume-iris-config'], extracted / 'volume-iris-config', keys / 'service-identity')
-            generated_ca = _management_generation(install, sources, extracted)
             # Restore original archive custody before adding live producer
             # members, so old metadata cannot overwrite the overlay's modes.
             storage.apply_metadata(extracted / 'volume-iris-state', _records(extracted, 'volume-iris-state'))
@@ -654,6 +687,8 @@ class Transaction:
 
 
 def restore(state_dir, backup_dir, recovery_dir, *, operation_id, backup_id,
-            recovery_identity, recovery=False):
+            recovery_identity, recovery=False, pre_authority_recovery=False, on_authority_started=None):
     return Transaction(state_dir, backup_dir, recovery_dir, operation_id=operation_id,
-                       backup_id=backup_id, recovery_identity=recovery_identity).run(recovery=recovery)
+                       backup_id=backup_id, recovery_identity=recovery_identity).run(recovery=recovery,
+                           pre_authority_recovery=pre_authority_recovery,
+                           on_authority_started=on_authority_started)

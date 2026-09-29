@@ -99,7 +99,9 @@ class Worker:
                     'can_extract': self.identity is not None and self.extract_dir is not None,
                     'can_restore': self.identity is not None and (self.state_dir / 'restore-custody/signer.pub').is_file(),
                     'restore_scope': 'same-deployment-same-security-generation',
-                    'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] not in ('rotate', 'renew-transport')])),
+                    'jobs': json.loads(json.dumps([{key: value for key, value in job.items()
+                        if key != 'restore_authority_started'} for job in self.jobs
+                        if job['action'] not in ('rotate', 'renew-transport')])),
                     'note': 'Keep encrypted copies and pinned backup signer trust off this host. Restore requires the existing owned deployment, unchanged credentials and current producer replay authority.'}
 
     def submit_restore(self, request):
@@ -132,7 +134,8 @@ class Worker:
                            and job['state'] == 'captured' for job in self.jobs):
                     raise InstallError('Choose a captured backup from this deployment')
                 prior = dict(id=request_id, action='restore', backup_id=backup_id, state='running',
-                             started_at=int(time.time()), detail='', proof=None)
+                             started_at=int(time.time()), detail='', proof=None,
+                             restore_authority_started=False)
                 self.operation_identities[request_id] = str(self.identity)
                 self.save_custody()
                 self.jobs.append(prior)
@@ -146,17 +149,26 @@ class Worker:
 
     def perform_restore(self, job, *, recovery=False):
         from . import restore
+        def authority_started():
+            # Durable one-way handoff: no writer fence can happen until this
+            # marker and the backend operation authority are both persisted.
+            with self.lock:
+                job['restore_authority_started'] = True
+                self.save()
         try:
             result = restore.restore(self.state_dir, self.backup_dir, self.recovery_dir,
                 operation_id=job['id'], backup_id=job['backup_id'],
-                recovery_identity=Path(self.operation_identities.get(job['id'], str(self.identity))), recovery=recovery)
+                recovery_identity=Path(self.operation_identities.get(job['id'], str(self.identity))), recovery=recovery,
+                pre_authority_recovery=job.get('restore_authority_started') is False,
+                on_authority_started=authority_started)
             state, proof = 'restored', result['proof']
             detail = 'Deployment restored; current replay floors preserved, services healthy and Console authenticated.'
         except Exception as exc:
             reason = str(exc) if isinstance(exc, InstallError) else type(exc).__name__
             print('Restore failed: ' + reason, file=sys.stderr, flush=True)
             record = self.state_dir / 'restore-operations' / job['id'] / 'record.json'
-            state, proof = ('recovery-required' if record.exists() else 'failed'), None
+            state, proof = ('recovery-required' if (record.exists() or recovery
+                or job.get('restore_authority_started') is True) else 'failed'), None
             detail = 'Restore incomplete. Preserve the operation and use explicit same-ID recovery; inspect protected host diagnostics.'
             try:
                 if record.exists() and json.loads(regular_bytes(record)).get('phase') == 'refused':
