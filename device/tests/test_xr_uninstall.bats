@@ -344,7 +344,7 @@ case "$cmds" in
     echo "__IRIS_XR_VERIFY_PEERROOT__"
     printf '%s\n' "${FAKE_PEER_ROOT-Directory of harddisk:/}"
     echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
-    printf '%s\n' "${FAKE_PEER_BEFORE-Directory of harddisk:/peer-tls}"
+    printf '%s\n' "${FAKE_PEER_BEFORE-%Error opening harddisk:/peer-tls (No such file or directory)}"
     echo "__IRIS_XR_VERIFY_PEERMANIFEST__"
     printf '%s\n' "${FAKE_PEER_MANIFEST-No such file}"
     echo "__IRIS_XR_VERIFY_PEERCUSTODY_END__"
@@ -400,7 +400,7 @@ No files in directory
     fi
     if [ "${FAKE_OMIT_PEER_AFTER:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
-      printf '%s\n' "${FAKE_PEER_AFTER-Directory of harddisk:/peer-tls}"
+      printf '%s\n' "${FAKE_PEER_AFTER-%Error opening harddisk:/peer-tls (No such file or directory)}"
     fi
     if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
       exit "$FAKE_VERIFY_RC"
@@ -500,7 +500,7 @@ case "$cmds" in
     echo "__IRIS_XR_VERIFY_PEERROOT__"
     printf '%s\n' "${FAKE_PEER_ROOT-Directory of harddisk:/}"
     echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
-    printf '%s\n' "${FAKE_PEER_BEFORE-Directory of harddisk:/peer-tls}"
+    printf '%s\n' "${FAKE_PEER_BEFORE-%Error opening harddisk:/peer-tls (No such file or directory)}"
     echo "__IRIS_XR_VERIFY_PEERMANIFEST__"
     printf '%s\n' "${FAKE_PEER_MANIFEST-No such file}"
     echo "__IRIS_XR_VERIFY_PEERCUSTODY_END__"
@@ -560,7 +560,7 @@ No files in directory
 41968752 kbytes total (39714572 kbytes free)}"
     fi
     echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
-    printf '%s\n' "${FAKE_PEER_AFTER-Directory of harddisk:/peer-tls}"
+    printf '%s\n' "${FAKE_PEER_AFTER-%Error opening harddisk:/peer-tls (No such file or directory)}"
     echo "__IRIS_XR_VERIFY_DONE__"
     ;;
   *)
@@ -614,7 +614,7 @@ case "$cmds" in
     printf '%s! __IRIS_XR_VERIFY_PEERROOT__\n' "$PROMPT"
     printf 'Directory of harddisk:/\n'
     printf '%s! __IRIS_XR_VERIFY_PEERCUSTODY__\n' "$PROMPT"
-    printf 'Directory of harddisk:/peer-tls\n'
+    printf '%%Error opening harddisk:/peer-tls (No such file or directory)\n'
     printf '%s! __IRIS_XR_VERIFY_PEERMANIFEST__\n' "$PROMPT"
     printf 'No such file\n'
     printf '%s! __IRIS_XR_VERIFY_PEERCUSTODY_END__\n' "$PROMPT"
@@ -631,7 +631,7 @@ case "$cmds" in
     printf '%s! __IRIS_XR_VERIFY_WORKDIR__\n' "$PROMPT"
     printf 'Directory of harddisk:/iris-work\n'
     printf '%s! __IRIS_XR_VERIFY_PEERCUSTODY__\n' "$PROMPT"
-    printf 'Directory of harddisk:/peer-tls\n'
+    printf '%%Error opening harddisk:/peer-tls (No such file or directory)\n'
     printf '%s! __IRIS_XR_VERIFY_DONE__\n' "$PROMPT"
     ;;
   *)
@@ -1723,4 +1723,46 @@ _xr_peer_fixture() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"undeploy complete:"* ]] || return 1
   done
+}
+
+@test "peer identity: absent root row never overrides a successful child listing or foreign identity" {
+  for custody in 'Directory of harddisk:/peer-tls' \
+      'Directory of harddisk:/peer-tls
+101 -rw-------. 1 227 Sep 29 06:17 node.key' \
+      '%Error opening harddisk:/peer-tls (No such file or directory)
+101 -rw-------. 1 227 Sep 29 06:17 node.key'; do
+    _xr_uninstall_stub_setup
+    FAKE_PEER_BEFORE="$custody" run _xr_uninstall_run_live
+    [ "$status" -ne 0 ]
+    ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+  done
+}
+
+@test "peer identity: absent root with a readable foreign manifest refuses cleanup" {
+  _xr_uninstall_stub_setup
+  FAKE_PEER_MANIFEST='{"foreign":"identity"}' run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: directory listing without active rows cannot overrule a present manifest" {
+  _xr_peer_fixture
+  FAKE_PEER_BEFORE="$FAKE_PEER_AFTER" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: incomplete final root listing cannot hide surviving child identity" {
+  _xr_peer_fixture
+  FAKE_DIR_HARDDISK='Directory of harddisk:/' FAKE_PEER_AFTER="$FAKE_PEER_BEFORE" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"undeploy complete:"* ]]
+}
+
+@test "peer identity: manifest refusal cannot be hidden by valid JSON in the same response" {
+  _xr_peer_fixture
+  FAKE_PEER_MANIFEST="$FAKE_PEER_MANIFEST
+Command authorization failed." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
 }

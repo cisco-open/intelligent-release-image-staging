@@ -427,15 +427,26 @@ files_line_match() {
 peer_custody_safe() {
   python3 -c 'import re, sys
 import json
-root, contents, manifest = sys.argv[1:]
+root, contents, manifest, phase = sys.argv[1:]
 if not re.search(r"^Directory of harddisk:/?\s*$", root, re.M):
     sys.exit(1)
 def rows(text, name):
     return [line for line in text.splitlines()
             if "#" not in line and re.search(r"(?:^|\s)" + re.escape(name) + r"(?:\s|$)", line)]
+def missing(text, path):
+    lines = [line.strip() for line in text.splitlines() if line.strip()
+             and "#" not in line and line.strip() != "!"
+             and not re.fullmatch(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC", line.strip())]
+    return len(lines) == 1 and re.fullmatch(
+        r"(?:%?Error opening harddisk:/?" + re.escape(path) +
+        r" \(No such file or directory\)|No such file(?: or directory)?)", lines[0])
 found = rows(root, "peer-tls")
 if not found:
-    sys.exit(0)
+    # A truncated root listing cannot overrule a successful child listing.
+    # Both independent reads must agree on absence, with no positive rows,
+    # directory header or unexplained error mixed into the response.
+    sys.exit(0 if missing(contents, "peer-tls") and
+             (phase == "after" or missing(manifest, "peer-tls/current.json")) else 1)
 if len(found) != 1 or not re.search(r"(?:^|\s)drwx------[.+]?(?:\s|$)", found[0]):
     sys.exit(1)
 if not re.search(r"^Directory of harddisk:/?peer-tls\s*$", contents, re.M):
@@ -445,7 +456,7 @@ for name in ("current.json", "node.key", "enrollment.lock"):
     if len(entries) > 1 or any(not re.search(r"(?:^|\s)-[rwx-]{9}[.+]?(?:\s|$)", line) for line in entries):
         sys.exit(1)
 if not any(rows(contents, name) for name in ("current.json", "node.key", "enrollment.lock")):
-    sys.exit(0)
+    sys.exit(0 if phase == "after" or missing(manifest, "peer-tls/current.json") else 1)
 documents = [line.strip() for line in manifest.splitlines() if line.strip().startswith("{")]
 try:
     if len(documents) != 1:
@@ -460,7 +471,7 @@ try:
 except (ValueError, TypeError, KeyError):
     sys.exit(1)
 print(generation)
-' "$1" "$2" "$3"
+' "$1" "$2" "$3" "${4:-before}"
 }
 
 # Run-4/5/6 fix wave: distinguishes an EMPTY iris-work directory (inert
@@ -695,6 +706,7 @@ if ! printf '%s' "$SETUP_OUT" | end_after_start "${VERIFY_MARKER}PEERROOT__" "${
    || ! section_has_device_output "$PEERROOT" "$SETUP_REQ" \
    || ! section_has_device_output "$PEERCUSTODY" "$SETUP_REQ" \
    || xr_command_rejected "$PEERROOT" || xr_command_rejected "$PEERCUSTODY" \
+   || xr_command_rejected "$PEERMANIFEST" \
    || ! PEER_GENERATION="$(peer_custody_safe "$PEERROOT" "$PEERCUSTODY" "$PEERMANIFEST")"; then
   echo "ERROR: peer identity custody could not be safely verified; refusing file cleanup on $DEVICE_IP" >&2
   exit 1
@@ -798,7 +810,7 @@ for _section_name in APPS SOURCES FILES PEERCUSTODY; do
 done
 
 forbidden=""
-if ! peer_custody_safe "$FILES" "$PEERCUSTODY" "" >/dev/null \
+if ! peer_custody_safe "$FILES" "$PEERCUSTODY" "" after >/dev/null \
    || files_line_match "$PEERCUSTODY" '(^|[[:space:]])(current\.json|node\.key|enrollment\.lock)([[:space:]]|$)'; then
   forbidden="active peer identity in $PEER_DIR_PATH"
 fi
