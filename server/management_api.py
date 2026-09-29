@@ -3675,7 +3675,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             exactly what device/xr-uninstall.sh removes: the appmgr
             application, its registered package source, the RPM staged at
             harddisk: root, and the agent's iris-work/ control-file
-            directory. Every other management type here is IOS-XE and runs its
+            directory, plus the three active peer identity files after their
+            IRIS manifest/layout ownership is verified. Public certificate
+            generation directories remain untouched. Every other management type here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
             iox = resolved.get("platform") == "iox"
@@ -3703,6 +3705,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                      "path": "harddisk:iris-xr.rpm"},
                     {"kind": "agent-work-dir", "ownership": "iris-created",
                      "path": "harddisk:iris-work"},
+                    {"kind": "agent-peer-identity", "ownership": "iris-created",
+                     "paths": ["harddisk:peer-tls/current.json",
+                               "harddisk:peer-tls/node.key",
+                               "harddisk:peer-tls/enrollment.lock"]},
                 ]
             resources = [{"kind": "guestshell", "ownership": "iris-created"}]
             if management_type == "routed":

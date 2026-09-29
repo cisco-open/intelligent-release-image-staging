@@ -19,6 +19,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [2026.09.29]
 
+- Remove the active IOS-XR peer identity during verified agent teardown, while
+  preserving staged images and public certificate generations. Re-onboarding
+  can enroll against the selected deployment without retaining the previous CA.
+
 - Authenticate public release assets, including the Ubuntu installer, with
   GitHub-hosted workflow attestations bound to the release tag and source commit.
   Publish source inventories, both aria2 clients and their corresponding source.

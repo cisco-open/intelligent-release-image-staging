@@ -3466,7 +3466,7 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
             {"management_type": "xr-host"})
         kinds = [r["kind"] for r in resources]
         assert kinds == ["appmgr-application", "appmgr-source",
-                          "agent-rpm", "agent-work-dir"]
+                          "agent-rpm", "agent-work-dir", "agent-peer-identity"]
         assert "guestshell" not in kinds
         assert all(r["ownership"] == "iris-created" for r in resources)
         # Names are gui_onboard's own constants, not re-hardcoded here, so a
@@ -3474,6 +3474,9 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
         by_kind = {r["kind"]: r for r in resources}
         assert by_kind["appmgr-application"]["name"] == gui_onboard._XR_APPID
         assert by_kind["appmgr-source"]["name"] == gui_onboard._XR_SOURCE_NAME
+        assert by_kind["agent-peer-identity"]["paths"] == [
+            "harddisk:peer-tls/current.json", "harddisk:peer-tls/node.key",
+            "harddisk:peer-tls/enrollment.lock"]
     finally:
         srv.server_close()
 

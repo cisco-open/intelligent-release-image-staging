@@ -62,10 +62,13 @@ seeder. See [Network ports and flows](../architecture/network-ports.md).
 | `iris-xr.rpm` | The appmgr package that carries the device agent. |
 | `iris-catalog.pem` | The certificate the agent trusts. |
 | `iris-work/` | The agent's own working directory. |
+| `peer-tls/` | The peer identity and public certificate generations when peer TLS is required. |
 | Staged images and sidecar files | Each assigned image and its transfer files. |
 
-The agent writes only to `harddisk:`. Undeploy removes the application, the
-package, and these files. See
+The agent writes only to `harddisk:`. Undeploy removes the application, package,
+runtime certificate, working files, active peer identity and transfer sidecars.
+It preserves staged images and public peer-certificate generations. A later
+onboarding enrolls a fresh peer identity with the selected deployment. See
 [Undeploy, retire and clean up devices](../user-guide/undeploy.md).
 
 ## How the transfer is verified

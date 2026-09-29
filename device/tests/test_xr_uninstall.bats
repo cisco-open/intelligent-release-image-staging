@@ -341,6 +341,20 @@ case "$cmds" in
     echo "Mon Aug 31 14:24:09.221 UTC"
     printf '%s\n' "$(next_app_row)"
     echo "__IRIS_XR_VERIFY_RECHECK_END__"
+    echo "__IRIS_XR_VERIFY_PEERROOT__"
+    printf '%s\n' "${FAKE_PEER_ROOT-Directory of harddisk:/}"
+    echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
+    printf '%s\n' "${FAKE_PEER_BEFORE-Directory of harddisk:/peer-tls}"
+    echo "__IRIS_XR_VERIFY_PEERMANIFEST__"
+    printf '%s\n' "${FAKE_PEER_MANIFEST-No such file}"
+    echo "__IRIS_XR_VERIFY_PEERCUSTODY_END__"
+    ;;
+  *"__IRIS_XR_VERIFY_PEERGENERATION__"*)
+    echo "__IRIS_XR_VERIFY_PEERGENERATION__"
+    printf '%s\n' "${FAKE_PEER_GENERATION-Directory of harddisk:/peer-tls/${FAKE_PEER_ID}
+101 -rw-------. 1 800 Sep 29 06:17 node.crt
+102 -rw-------. 1 800 Sep 29 06:17 ca.crt}"
+    echo "__IRIS_XR_VERIFY_PEERGENERATION_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     # session 2/2 (sweep+verify): the destructive commands (when composed at
@@ -383,6 +397,10 @@ case "$cmds" in
 No files in directory
 
 41968752 kbytes total (39714572 kbytes free)}"
+    fi
+    if [ "${FAKE_OMIT_PEER_AFTER:-no}" != "yes" ]; then
+      echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
+      printf '%s\n' "${FAKE_PEER_AFTER-Directory of harddisk:/peer-tls}"
     fi
     if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
       exit "$FAKE_VERIFY_RC"
@@ -479,6 +497,13 @@ case "$cmds" in
     echo "Mon Aug 31 14:24:09.221 UTC"
     printf '%s\n' "$(next_app_row)"
     echo "__IRIS_XR_VERIFY_RECHECK_END__"
+    echo "__IRIS_XR_VERIFY_PEERROOT__"
+    printf '%s\n' "${FAKE_PEER_ROOT-Directory of harddisk:/}"
+    echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
+    printf '%s\n' "${FAKE_PEER_BEFORE-Directory of harddisk:/peer-tls}"
+    echo "__IRIS_XR_VERIFY_PEERMANIFEST__"
+    printf '%s\n' "${FAKE_PEER_MANIFEST-No such file}"
+    echo "__IRIS_XR_VERIFY_PEERCUSTODY_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     # Session 1 succeeds normally; only the sweep+verify session comes back
@@ -534,6 +559,8 @@ No files in directory
 
 41968752 kbytes total (39714572 kbytes free)}"
     fi
+    echo "__IRIS_XR_VERIFY_PEERCUSTODY__"
+    printf '%s\n' "${FAKE_PEER_AFTER-Directory of harddisk:/peer-tls}"
     echo "__IRIS_XR_VERIFY_DONE__"
     ;;
   *)
@@ -584,6 +611,13 @@ case "$cmds" in
     printf '%s! __IRIS_XR_VERIFY_RECHECK__\n' "$PROMPT"
     printf 'Mon Aug 31 14:24:09.221 UTC\n'
     printf '%s! __IRIS_XR_VERIFY_RECHECK_END__\n' "$PROMPT"
+    printf '%s! __IRIS_XR_VERIFY_PEERROOT__\n' "$PROMPT"
+    printf 'Directory of harddisk:/\n'
+    printf '%s! __IRIS_XR_VERIFY_PEERCUSTODY__\n' "$PROMPT"
+    printf 'Directory of harddisk:/peer-tls\n'
+    printf '%s! __IRIS_XR_VERIFY_PEERMANIFEST__\n' "$PROMPT"
+    printf 'No such file\n'
+    printf '%s! __IRIS_XR_VERIFY_PEERCUSTODY_END__\n' "$PROMPT"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     printf '%s! __IRIS_XR_VERIFY_APPS__\n' "$PROMPT"
@@ -596,6 +630,8 @@ case "$cmds" in
     printf 'Directory of harddisk:/\n'
     printf '%s! __IRIS_XR_VERIFY_WORKDIR__\n' "$PROMPT"
     printf 'Directory of harddisk:/iris-work\n'
+    printf '%s! __IRIS_XR_VERIFY_PEERCUSTODY__\n' "$PROMPT"
+    printf 'Directory of harddisk:/peer-tls\n'
     printf '%s! __IRIS_XR_VERIFY_DONE__\n' "$PROMPT"
     ;;
   *)
@@ -1558,4 +1594,133 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
     bash "$STUBDIR/device/xr-uninstall.sh" >/dev/null
   forced_log="$(cat "$FAKE_COMMAND_LOG")"
   [ "$plain_log" = "$forced_log" ]
+}
+
+_xr_peer_fixture() {
+  _xr_uninstall_stub_setup
+  export FAKE_PEER_ID="$(printf '%064d' 0)"
+  export FAKE_PEER_ROOT="Directory of harddisk:/
+1835009 drwx------. 5 4096 Sep 29 06:17 peer-tls"
+  export FAKE_PEER_BEFORE="Directory of harddisk:/peer-tls
+101 -rw-------. 1 227 Sep 29 06:17 node.key
+102 -rw-------. 1 82 Sep 29 06:17 current.json
+103 -rw-------. 1 0 Sep 29 06:17 enrollment.lock
+104 drwx------. 2 4096 Sep 29 06:17 $FAKE_PEER_ID"
+  export FAKE_PEER_MANIFEST="{\"generation\":\"$FAKE_PEER_ID\"}"
+  export FAKE_DIR_HARDDISK="$FAKE_PEER_ROOT
+105 -rw-r--r--. 1 800 Sep 29 06:17 operator-image.iso"
+  export FAKE_PEER_AFTER="Directory of harddisk:/peer-tls
+104 drwx------. 2 4096 Sep 29 06:17 $FAKE_PEER_ID
+106 -rw-r--r--. 1 20 Sep 29 06:17 operator-notes.txt"
+}
+
+@test "peer identity: ownership-proven reset deletes three exact files and retains images and public generations" {
+  _xr_peer_fixture
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '=== CALL START ===' "$FAKE_COMMAND_LOG")" -eq 3 ]
+  probe="$(_xr_call_body 2)"
+  [[ "$probe" == *"dir harddisk:/peer-tls/$FAKE_PEER_ID"* ]] || return 1
+  [[ "$probe" != *delete* ]] || return 1
+  sweep="$(_xr_call_body 3)"
+  for path in current.json node.key enrollment.lock; do
+    [[ "$sweep" == *"delete /noprompt harddisk:/peer-tls/$path"* ]] || return 1
+  done
+  [ "$(printf '%s\n' "$sweep" | grep -c '^delete /noprompt harddisk:/peer-tls/')" -eq 3 ]
+  [ "$(printf '%s\n' "$sweep" | grep '^delete /noprompt harddisk:/peer-tls/' | tail -1)" = \
+    'delete /noprompt harddisk:/peer-tls/current.json' ]
+  [[ "$sweep" != *"peer-tls/*"* ]] || return 1
+  [[ "$sweep" != *"delete /noprompt harddisk:/peer-tls/$FAKE_PEER_ID"* ]] || return 1
+  [[ "$sweep" != *"delete /noprompt harddisk:/operator-image.iso"* ]] || return 1
+  [[ "$sweep" != *"delete /noprompt harddisk:/peer-tls/operator-notes.txt"* ]]
+}
+
+@test "peer identity: absent directory accepts canonical missing-file output" {
+  _xr_uninstall_stub_setup
+  FAKE_PEER_BEFORE="%Error opening harddisk:/peer-tls (No such file or directory)" \
+  FAKE_PEER_AFTER="%Error opening harddisk:/peer-tls (No such file or directory)" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ]
+}
+
+@test "peer identity: root listing refusal fails before any file deletion" {
+  _xr_peer_fixture
+  FAKE_PEER_ROOT="Command authorization failed." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: incomplete root listing cannot prove absence" {
+  _xr_peer_fixture
+  FAKE_PEER_ROOT="Mon Sep 29 06:17:01.000 UTC" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: refused custody listing fails before any file deletion" {
+  _xr_peer_fixture
+  FAKE_PEER_BEFORE="% This command is not authorized" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: symlink directory or identity files are never followed" {
+  _xr_peer_fixture
+  FAKE_PEER_ROOT="Directory of harddisk:/
+1835009 lrwx------. 1 20 Sep 29 06:17 peer-tls -> operator" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+  _xr_peer_fixture
+  FAKE_PEER_BEFORE="${FAKE_PEER_BEFORE/-rw-------./lrwx------.}" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: malformed absent or foreign manifest cannot authorize private key removal" {
+  for manifest in 'No such file' '{"generation":"../../operator"}' \
+      '{"generation":42}' '{"unrelated":"record"}'; do
+    _xr_peer_fixture
+    FAKE_PEER_MANIFEST="$manifest" run _xr_uninstall_run_live
+    [ "$status" -ne 0 ]
+    ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+  done
+}
+
+@test "peer identity: missing or symlink generation certificates refuse all file cleanup" {
+  for listing in 'No such file or directory' 'Command authorization failed.' \
+      "Directory of harddisk:/peer-tls/$(printf '%064d' 0)
+101 lrwx------. 1 20 Sep 29 06:17 node.crt -> other
+102 -rw-------. 1 800 Sep 29 06:17 ca.crt"; do
+    _xr_peer_fixture
+    FAKE_PEER_GENERATION="$listing" run _xr_uninstall_run_live
+    [ "$status" -ne 0 ]
+    ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+  done
+}
+
+@test "peer identity: failed or truncated final cleanup is never declared complete" {
+  _xr_peer_fixture
+  FAKE_PEER_AFTER="$FAKE_PEER_BEFORE" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"active peer identity"* ]] || return 1
+  _xr_peer_fixture
+  FAKE_OMIT_PEER_AFTER=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"undeploy complete:"* ]]
+}
+
+@test "peer identity: retained public generations allow repeat teardown without a manifest" {
+  _xr_peer_fixture
+  FAKE_PEER_BEFORE="$FAKE_PEER_AFTER" FAKE_PEER_MANIFEST="No such file" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '=== CALL START ===' "$FAKE_COMMAND_LOG")" -eq 2 ]
+}
+
+@test "peer identity: interrupted key and lock removal resumes using the retained manifest" {
+  for removed in 'node.key' 'node.key|enrollment.lock'; do
+    _xr_peer_fixture
+    remaining="$(printf '%s\n' "$FAKE_PEER_BEFORE" | grep -vE "$removed")"
+    FAKE_PEER_BEFORE="$remaining" run _xr_uninstall_run_live
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"undeploy complete:"* ]] || return 1
+  done
 }
