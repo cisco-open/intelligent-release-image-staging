@@ -95,6 +95,14 @@ _TRIPWIRE_TEST_ANCHORS = (
 # allowlisted when it contains one of its file's anchors. Keep anchors narrow
 # enough that they could not accidentally cover a NEW violation.
 ALLOWLIST = [
+    ("tools/iris_installer/restore.py",
+     ("'schedule-occurrences', 'schedule-receipts', 'report_ledger',",
+      'outcomes=schedules.ReceiptStore(q.state_dir)'),
+     "restoration preserves the existing distinct schedule outcome storage "
+     "and validates it with its established class, not deployment/peer terminology"),
+    ("server/tests/test_installer_restore.py",
+     ("'schedule-receipts/record.d/00.json'",),
+     "pins preservation of the existing schedule outcome path across restoration"),
     ("tools/aria2c-source/COPYING3", None,
      "unmodified GNU GPL version 3 text; legal receipt is not IRIS terminology"),
     ("tools/api_exercise_fixtures.py",

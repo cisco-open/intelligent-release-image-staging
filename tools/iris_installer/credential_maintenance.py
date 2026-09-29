@@ -248,6 +248,8 @@ class Transaction:
             pre_apply_check=None):
         # Do not hold Journal's lock across backup.create (it acquires its own).
         with Journal(self.base).locked() as journal:
+            from .restore import assert_no_pending_restore
+            assert_no_pending_restore(journal)
             install = _installation(journal)
             _pin_runtime(install)
             recipient = install.command(['age-keygen', '-y', self.identity], capture=True).decode().strip()

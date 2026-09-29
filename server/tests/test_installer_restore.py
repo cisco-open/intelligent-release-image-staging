@@ -11,6 +11,7 @@ import shutil
 import sys
 from types import SimpleNamespace
 import uuid
+from contextlib import contextmanager
 
 import pytest
 
@@ -73,7 +74,7 @@ def test_other_changed_security_authorities_refuse_restore(tmp_path, authority):
         restore.state_authority(current, archived)
 
 
-def test_current_disclosure_and_execution_receipts_are_preserved(tmp_path):
+def test_current_disclosure_and_execution_records_are_preserved(tmp_path):
     current, archived = tmp_path / 'current', tmp_path / 'archived'
     producer(current); producer(archived)
     for name in ('peer-handouts.d/00.json', 'schedule-receipts/record.d/00.json',
@@ -245,6 +246,62 @@ def test_restore_requires_separately_provisioned_signer(tmp_path):
     identity.chmod(0o644)
     with pytest.raises(InstallError, match='private'):
         restore.custody(tmp_path, identity)
+
+
+@pytest.mark.parametrize('phase', ['verified', 'stopping', 'stopped', 'publishing', 'restarting', 'recovery-required'])
+def test_interrupted_restore_blocks_other_maintenance_entry_points(tmp_path, phase):
+    operation = str(uuid.uuid4())
+    record = dict(operation_id=operation, instance_id=str(uuid.uuid4()), phase=phase)
+    put(tmp_path / 'restore-operation.json', record)
+    put(tmp_path / 'restore-operations' / operation / 'record.json', record)
+    with pytest.raises(InstallError, match='interrupted deployment restore'):
+        restore.guard(tmp_path)
+    with pytest.raises(InstallError, match='interrupted deployment restore'):
+        restore.guard(tmp_path, operation_id=str(uuid.uuid4()))
+    restore.guard(tmp_path, operation_id=operation)
+
+
+@pytest.mark.parametrize('damage', ['missing-pointer', 'missing-record', 'wrong-instance', 'corrupt-record'])
+def test_restore_guard_rejects_lost_or_mismatched_authority(tmp_path, damage):
+    operation, instance = str(uuid.uuid4()), str(uuid.uuid4())
+    record = dict(operation_id=operation, instance_id=instance, phase='publishing')
+    pointer, saved = tmp_path / 'restore-operation.json', tmp_path / 'restore-operations' / operation / 'record.json'
+    put(pointer, record); put(saved, record)
+    if damage == 'missing-pointer':
+        pointer.unlink()
+    elif damage == 'missing-record':
+        saved.unlink()
+    elif damage == 'wrong-instance':
+        put(saved, dict(record, instance_id=str(uuid.uuid4())))
+    else:
+        atomic_write(saved, b'not-json')
+    with pytest.raises(InstallError, match='authority is unreadable'):
+        restore.guard(tmp_path, operation_id=operation, instance_id=instance)
+
+
+def test_direct_capture_credential_and_resume_refuse_pending_restore(tmp_path, monkeypatch):
+    from iris_installer import backup, credential_maintenance, deploy
+    operation, instance = str(uuid.uuid4()), str(uuid.uuid4())
+    record = dict(operation_id=operation, instance_id=instance, phase='publishing')
+    put(tmp_path / 'restore-operation.json', record)
+    put(tmp_path / 'restore-operations' / operation / 'record.json', record)
+    journal = SimpleNamespace(directory=tmp_path, document={'id': instance})
+    @contextmanager
+    def locked(*args, **kwargs):
+        yield journal
+    factory = lambda *args: SimpleNamespace(locked=locked)
+    monkeypatch.setattr(credential_maintenance, 'Journal', factory)
+    monkeypatch.setattr(deploy, 'Journal', factory)
+    monkeypatch.setattr(deploy.os, 'geteuid', lambda: 0)
+    adapter = SimpleNamespace(base=tmp_path, capture_plan=lambda: pytest.fail('must not capture'))
+    with pytest.raises(InstallError, match='interrupted deployment restore'):
+        backup.capture_plan(adapter)
+    transaction = credential_maintenance.Transaction.__new__(credential_maintenance.Transaction)
+    transaction.base = tmp_path
+    with pytest.raises(InstallError, match='interrupted deployment restore'):
+        transaction.run(None, None)
+    with pytest.raises(InstallError, match='interrupted deployment restore'):
+        deploy.resume(SimpleNamespace(state_dir=tmp_path, certificate=None))
 
 
 def test_kubernetes_recovery_matches_stopped_replica_state_but_not_changed_authority(tmp_path):

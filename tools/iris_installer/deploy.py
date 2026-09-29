@@ -369,6 +369,8 @@ class DockerInstall:
         return OWNER_CLAIM if claimed == b"False" else PRODUCTION_REVIEW
 
     def resume(self, certificate=None):
+        from .restore import assert_no_pending_restore
+        assert_no_pending_restore(self.journal)
         operation = self.base / 'credential-operation.json'
         if operation.exists() or operation.is_symlink():
             try:
@@ -498,4 +500,6 @@ def resume(args):
     with Journal(args.state_dir).locked() as journal:
         if journal.document is None:
             raise InstallError("No installation journal exists")
+        from .restore import assert_no_pending_restore
+        assert_no_pending_restore(journal)
         return installation(journal).resume(args.certificate)

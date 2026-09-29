@@ -40,6 +40,47 @@ def signer_path(state_dir):
     return Path(state_dir) / 'restore-custody' / 'signer.pub'
 
 
+def guard(state_dir, *, operation_id=None, instance_id=None):
+    """Other maintenance entry points must respect an interrupted restore."""
+    base = Path(state_dir)
+    path, directory = base / 'restore-operation.json', base / 'restore-operations'
+    try:
+        operations = list(directory.iterdir()) if directory.exists() else []
+        if not path.exists() and not path.is_symlink():
+            if operations:
+                raise ValueError()
+            return
+        record = json.loads(regular_bytes(path))
+        if not isinstance(record, dict) or set(record) != {'operation_id', 'instance_id', 'phase'}:
+            raise ValueError()
+        identifier(record['operation_id'])
+        if instance_id is not None and record['instance_id'] != instance_id:
+            raise ValueError()
+        seen = False
+        for operation in operations:
+            identifier(operation.name)
+            if operation.resolve() != operation or not operation.is_dir():
+                raise ValueError()
+            saved = json.loads(regular_bytes(operation / 'record.json', backup_archive.MAX_MANIFEST))
+            if (not isinstance(saved, dict) or saved.get('operation_id') != operation.name
+                    or saved.get('instance_id') != record['instance_id']):
+                raise ValueError()
+            if operation.name == record['operation_id']:
+                seen = True
+            if saved.get('phase') not in ('restored', 'refused') and operation.name != operation_id:
+                raise InstallError('Recover the interrupted deployment restore before other maintenance')
+        if not seen:
+            raise ValueError()
+        if record['phase'] not in ('restored', 'refused') and record['operation_id'] != operation_id:
+            raise InstallError('Recover the interrupted deployment restore before other maintenance')
+    except (OSError, ValueError, TypeError):
+        raise InstallError('Restore authority is unreadable; preserve state and recover the approved operation') from None
+
+
+def assert_no_pending_restore(journal):
+    guard(journal.directory, instance_id=journal.document['id'])
+
+
 def custody(state_dir, identity):
     """Trust is explicitly provisioned outside the backup being restored."""
     signer = signer_path(state_dir)
@@ -98,7 +139,7 @@ def _kubernetes_resources(path):
 def state_authority(current, archived):
     """Keep policy, ownership and external trust in the approved generation.
 
-    Execution/disclosure receipts are monotonic authority, while descriptive
+    Execution and disclosure records are monotonic authority, while descriptive
     inventory, assignments, job history and content remain backup-authoritative.
     """
     unchanged = ('peer-policy', 'deployment_records', 'ca-trust-settings',
@@ -293,8 +334,8 @@ if policy is None: raise RuntimeError('current policy authority unavailable')
 schedule=schedules.ScheduleStore(q.state_dir)
 schedule._rows.snapshot(); schedule._progress.snapshot(); schedule._retired.snapshot()
 occurrences=schedules.OccurrenceStore(q.state_dir)._rows.snapshot()
-receipts=schedules.ReceiptStore(q.state_dir)
-for identifier in occurrences: receipts._rows(identifier).snapshot()
+outcomes=schedules.ReceiptStore(q.state_dir)
+for identifier in occurrences: outcomes._rows(identifier).snapshot()
 with tempfile.TemporaryDirectory(dir=p.run_dir) as directory:
  path=os.path.join(directory,'restore-secrets.json')
  secretfs.decrypt_to(os.path.join(p.config_dir,'secrets.json.age'),path,os.environ['IRIS_AGE_KEY_FILE'])
@@ -353,6 +394,8 @@ class Transaction:
     def save(self, phase):
         self.record['phase'] = phase
         atomic_write(self.directory / 'record.json', json.dumps(self.record, sort_keys=True).encode())
+        atomic_write(self.base / 'restore-operation.json', json.dumps({key: self.record[key]
+            for key in ('operation_id', 'instance_id', 'phase')}, sort_keys=True).encode())
 
     def run(self, *, recovery=False):
         with Journal(self.base).locked() as journal:
@@ -368,11 +411,13 @@ class Transaction:
                         ('instance_id', journal.document['id']))):
                     raise InstallError('Restore recovery does not match the approved operation')
                 if self.record['phase'] == 'restored':
+                    self.save('restored')
                     return self.record['result']
                 if not recovery:
                     raise InstallError('Interrupted restore requires explicit same-ID recovery')
             elif recovery:
                 raise InstallError('There is no restore operation to recover')
+            install.restore_operation_id = self.id
             sources, volumes, containers = backup.capture_plan(install)
             # Both authenticated sets and topology are checked before downtime.
             data = backup_archive.read(self.backups / self.backup_id, self.identity, self.signer)

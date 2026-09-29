@@ -280,9 +280,10 @@ def test_remote_consumer_proof_is_still_strictly_validated():
     assert cm._consumer_proof(SimpleNamespace(lifecycle_consumer_proof=lambda: expected)) == expected
 
 
-def test_topology_hooks_preserve_transport_and_stopped_writer_checks():
+def test_topology_hooks_preserve_transport_and_stopped_writer_checks(tmp_path):
     calls = []
     adapter = SimpleNamespace(
+        base=tmp_path,
         pin_runtime=lambda: calls.append('pin'),
         stop_writers=lambda c, **kw: calls.append(('stop', c, kw)),
         assert_writers_stopped=lambda: calls.append('assert'),

@@ -53,6 +53,8 @@ def initialize(journal, installation):
 
 
 def capture_plan(installation):
+    from .restore import guard
+    guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None))
     hook = getattr(installation, 'capture_plan', None)
     return hook() if hook is not None else docker_capture_plan(installation)
 

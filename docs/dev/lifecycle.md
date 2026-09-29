@@ -387,7 +387,7 @@ ownership records, account credentials or external trust refuse admission.
 
 Native installed-runtime schemas validate current signing, revocation, producer,
 disclosure and schedule state. Restore keeps current instruction epoch and complete
-producer state, handout disclosures, schedule execution/retirement receipts and
+producer state, handout disclosures, schedule execution and retirement records, and
 report replay evidence. Current serial/keylist floors must dominate the archive;
 valid empty admissions permit an absent initial serial store. Historical inventory,
 jobs, assignments, images and other ordinary state come from the backup.
