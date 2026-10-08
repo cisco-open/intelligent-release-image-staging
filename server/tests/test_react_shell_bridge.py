@@ -42,9 +42,27 @@ def test_assignment_dialogs_have_only_react_dom_owners():
     assert "mountAssignments();" in entry
     assert "assignments.acceptImages(result, ticket)" in legacy
     assert "assignments.hide();" in legacy
-    assert "el.closest('[data-inventory-react], [data-assignments-react]')" in legacy
+    assert "[data-inventory-react], [data-assignments-react], [data-inventory-actions-react]" in legacy
     assert "dangerouslySetInnerHTML" not in component
     assert "setInterval(" not in component and "setInterval(" not in controller
+
+
+def test_inventory_action_roots_have_only_react_dom_owners():
+    legacy = APP.read_text()
+    html = APP.with_name("index.html").read_text()
+    source = APP.parent.parent / "console-ui/src"
+    entry = (source / "main.jsx").read_text()
+    component = (source / "inventory-actions.jsx").read_text()
+    for identifier in ("csv-file", "csv-import-status", "onboard-telemetry",
+                       "undeploy-force", "onboard-confirm", "undeploy-confirm"):
+        assert "getElementById('%s')" % identifier not in legacy
+        assert 'id="%s"' % identifier not in html
+    for identifier in ("iris-csv-root", "iris-inventory-actions-root"):
+        assert 'id="%s" data-inventory-actions-react' % identifier in html
+    assert "mountInventoryActions();" in entry
+    assert "inventoryActions.hide();" in legacy
+    assert "dangerouslySetInnerHTML" not in component
+    assert "setInterval(" not in component
 
 
 def test_session_status_and_logout_bridge_preserves_csrf_and_idle_semantics():

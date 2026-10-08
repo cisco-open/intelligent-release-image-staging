@@ -172,7 +172,7 @@ function Inventory({controller, selectionRoot, tableRoot}) {
     <button className="btn ghost" type="button" id="dev-activity" aria-controls="activity-panel" onClick={action(controller, 'dev-activity')}>{state.activityLabel}</button>
     <div className="menu-wrap"><button className="btn ghost dropdown" id="csv-menu-btn" type="button" aria-expanded={state.menu === 'csv'} aria-haspopup="true" onClick={() => menu('csv')}>CSV<Caret /></button>
       <div className="menu right" id="csv-menu" hidden={state.menu !== 'csv'}>{[['import-csv', 'Import CSV…'], ['export-csv', 'Export CSV'], ['example-csv', 'Download example']].map(([id, label]) => <button key={id} type="button" className="menu-item menu-close" id={id}
-        disabled={state.actionBusy.has(id) || (id === 'import-csv' && state.csvBusy)} onClick={action(controller, id)}>{label}</button>)}</div>
+        disabled={state.actionBusy.has(id) || (id === 'import-csv' && (state.csvBusy || state.bulkBusy || state.rowBusy.size > 0))} onClick={action(controller, id)}>{label}</button>)}</div>
     </div>
     {[['manage-creds', 'Manage credentials'], ['manage-schedules', 'Schedules'], ['add-dev', 'Add device']].map(([id, label]) => <button key={id} className={id === 'add-dev' ? 'btn' : 'btn ghost'} type="button" id={id} onClick={action(controller, id)}>{label}</button>)}
   </div></div>{createPortal(selection, selectionRoot)}{createPortal(table, tableRoot)}</>;

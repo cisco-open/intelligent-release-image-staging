@@ -634,9 +634,10 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
 def test_devices_toolbar_regrouped():
     html, component, js = _webroot("index.html"), _react_shell("inventory.jsx"), _webroot("app.js")
     assert 'className="selbar" id="sel-bar" hidden={!state.selected.size}' in component
-    modal = html.split('id="onboard-modal"')[1].split('id="undeploy-modal"')[0]
-    for cid in ('onboard-telemetry', 'onboard-telemetry-stream', 'onboard-confirm'):
-        assert 'id="%s"' % cid in modal
+    modal = _react_shell('inventory-actions.jsx')
+    for cid in ('onboard-telemetry', 'onboard-telemetry-stream'):
+        assert "'%s'" % cid in modal
+    assert "id={action + '-confirm'}" in modal
     assert 'id="onboard-pop"' not in html and 'id="undeploy-pop"' not in html
     assert "bulkButton('delete-selected', 'Delete…', 'menu-item danger menu-close')" in component
     headers = component.split("{['Device',", 1)[1].split('].map(label', 1)[0]
@@ -718,7 +719,8 @@ def test_bulk_row_actions_wired():
         js = f.read()
     assert "'adopt-selected'" in js and "'delete-selected'" in js
     assert "'apply-cred-selected'" in js
-    assert "/adopt'" in js and "acknowledge_adopt: true" in js
+    controller = _react_shell('inventory-actions-controller.mjs')
+    assert "/adopt'" in controller and "acknowledge_adopt: true" in controller
     # the per-row credential dropdown still uses the single-device route...
     assert "controller.edit(id, 'credential', event.target.value)" in _react_shell('inventory.jsx')
     # ...but the bulk credential action (issue #125) posts ONE request
@@ -727,10 +729,9 @@ def test_bulk_row_actions_wired():
     assert "'/api/v1/devices/bulk-credential'" in _react_shell('assignments-controller.mjs')
     assert "bulkCredentialResult(response" in _react_shell('assignments-controller.mjs')
     # the single delete path confirms first
-    assert "function delWarning(" in js
-    assert js.count("confirm(delWarning(") == 1
+    assert controller.count("confirm(actionConfirmation(action, ids))") == 1
     # the warning must say deletion is not an undeploy — the dangerous part
-    assert "does NOT " in js and "undeploy" in js
+    assert "does NOT undeploy" in _react_shell('inventory-actions-model.mjs')
     # creating or deleting a profile re-renders the device rows, so a device
     # imported before any profile existed becomes assignable immediately
     assert "await this.refreshCredentials(); await this.refreshInventory();" in _react_shell('device-forms-controller.mjs')
@@ -766,13 +767,17 @@ def test_all_selected_actions_share_one_busy_lock():
     # action cannot be added without also claiming the lock -- quarantine and
     # release are the two exceptions, guarded inside bulkQuarantine instead.
     claimers = [a for a in actions
-                if a not in ("quarantine-selected", "release-selected", "assign-images-selected", "apply-cred-selected")]
-    assert js.count("claimSelection()") == len(claimers), (
-        "%d actions but %d claim the lock"
-        % (len(claimers), js.count("claimSelection()")))
+                if a not in ("quarantine-selected", "release-selected", "assign-images-selected", "apply-cred-selected",
+                             "onboard-confirm", "undeploy-confirm", "adopt-selected", "delete-selected")]
+    assert js.count("claimSelection()") == len(claimers) + 1, (
+        "%d legacy actions but %d calls claim the lock (excluding its definition)"
+        % (len(claimers), js.count("claimSelection()") - 1))
     assert "onBtn.disabled" not in js and "unBtn.disabled" not in js
-    # a declined confirmation must release the lock, not wedge the toolbar
-    assert js.count("setBulkBusy(false); return;") >= 2
+    # Migrated actions all claim the same lock through their controller.
+    controller = _react_shell('inventory-actions-controller.mjs')
+    assert "this.services.claimBulk()" in controller and "this.services.releaseBulk()" in controller
+    assert "inventoryActions.act('delete', selectedIds())" in js
+    assert "inventoryActions.act('adopt', selectedIds())" in js
 
 
 def test_batch_onboard_panel_wired():
@@ -812,8 +817,8 @@ def test_undeploy_and_status_ui_wired():
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "undeploy-selected" in js
-    assert "startBatch('undeploy')" in js        # button fires the undeploy action
-    assert "confirm(" in js                      # destructive: must confirm
+    assert "inventoryActions.open('undeploy', selectedIds())" in js
+    assert "action === 'undeploy' && !await this.services.confirm" in _react_shell('activity-controller.mjs')
     assert "actionLabel(job.action)" in _react_shell("activity.jsx")
     assert "queued.indexOf(job) + 1" in _react_shell("activity-model.mjs")
     assert "deployed" in js                      # devices tab staged indicator
@@ -8783,9 +8788,8 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
     Staged-file retention describes undeploy only, not agent republishing.
     Per-platform file inventories belong in the manual, not this popup.
     """
-    html = _webroot("index.html")
-    modal = html.split('id="undeploy-modal"', 1)[1].split(
-        'class="modal-foot"', 1)[0]
+    component = _react_shell("inventory-actions.jsx")
+    modal = component.split("</> : <>", 1)[1].split("</>}", 1)[0]
     confirm = _react_shell("activity-controller.mjs").split("async start(action,", 1)[1].split(
         "this.invalidateRead();", 1)[0]
     for text in (modal, confirm):
@@ -10753,13 +10757,10 @@ def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
     assert "e.key === 'Escape'" in wire
     assert "trapDialogFocus(overlay);" in wire
     # every modal still offers an explicit close control, per Magnetic Modal
-    html = _webroot("index.html")
-    for mid, closers in (("onboard-modal", ("onboard-cancel", "onboard-modal-x")),
-                         ("undeploy-modal", ("undeploy-cancel", "undeploy-modal-x"))):
-        block = html.split('id="%s"' % mid, 1)[1].split("<!--", 1)[0]
-        for cid in closers:
-            assert 'id="%s"' % cid in block, "%s must offer %s" % (mid, cid)
-        assert "wireModal('%s', ['%s', '%s']);" % (mid, closers[0], closers[1]) in js
+    component = _react_shell('inventory-actions.jsx')
+    assert "id={action + '-cancel'}" in component and "id={action + '-modal-x'}" in component
+    assert "controller.close()" in component and "event.key === 'Escape'" in component
+    assert "opener.current.focus()" in component and "first?.focus()" in component
 
 
 def test_nav_divider_grid_spacing_and_compact_anatomy_comment():

@@ -42,6 +42,11 @@ Read the file before you import it. Check the `management_type` of each row,
 and for inband rows check that the VLAN, the SVI (switch virtual interface) and
 the gateway you name already exist.
 
+In **Inventory → CSV**, choose **Import CSV** and select the file. The result
+stays below the toolbar while the table refreshes. Device edits wait until the
+import finishes. If the result is uncertain, check Inventory before retrying.
+**Export CSV** saves your inventory; **Download example** saves a template.
+
 !!! warning
 
     Keep passwords, tokens and image binaries out of `fleet/devices.csv`.
@@ -140,6 +145,10 @@ starting** Onboard or Undeploy, or send `{"log": true}` through the API. The
 job confirms `Detailed logs enabled.`, and `aria2c.log` is turned on for IOx
 and IOS-XR. Guest Shell logging is set through `iris_log`; see
 [Device agent configuration](../reference/device-configuration.md).
+
+The Onboard and Undeploy dialogs keep the devices you reviewed when you opened
+them. Expand **reviewed devices** to check the list. Start uses those devices
+and the options shown, even if the table selection changes.
 
 ### Device activity
 

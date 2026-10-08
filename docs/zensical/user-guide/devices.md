@@ -141,6 +141,8 @@ under this name is labeled **previous device**.
 
 A bulk action reports each success and refusal instead of failing the whole
 batch. The status line counts the successes and names the devices that refused.
+Delete also names partial or unknown results and keeps those devices selected;
+see [Undeploy, retire and clean up devices](undeploy.md#retire-a-device-from-the-inventory).
 HTTP 207 means partial cleanup. HTTP 429 means the server rejected the request
 on admission, and the response carries `Retry-After`. Those limits are in
 [Console API](../reference/console-api.md). For a refusal you cannot place, see

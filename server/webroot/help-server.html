@@ -119,6 +119,13 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       For an image conflict or unknown result, choose <strong>Review current
       assignments</strong> and check the new selection before applying again.
       Closing a dialog does not cancel submitted changes.</li>
+      <li>CSV import results stay below the Inventory toolbar. Device edits
+      wait until an import finishes. If its response is uncertain, check
+      Inventory before retrying.</li>
+      <li>Delete reports incomplete cleanup separately from a completed
+      retirement. Partial or unknown targets stay selected, even if their
+      rows have left Inventory. Read the named cleanup steps and audit trail
+      before retrying.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>

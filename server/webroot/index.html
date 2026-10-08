@@ -245,12 +245,11 @@
         </div>
         <p class="policy-warning" id="inventory-role-capability-banner" role="status" aria-live="polite" hidden></p>
         <div id="iris-inventory-root" data-inventory-react></div>
-        <input type="file" id="csv-file" accept=".csv" hidden>
         <!-- Job/action feedback gets its own line under the controls instead of
              competing for width inside them (Magnetic Filter bar: elements
              sharing the bar's row reduce the space its filters get). -->
         <div class="dev-status-line muted" id="dev-status" role="status" aria-live="polite"></div>
-        <p id="csv-import-status" role="status" aria-live="polite" hidden></p>
+        <div id="iris-csv-root" data-inventory-actions-react></div>
         <div id="iris-inventory-selection-root" data-inventory-react></div>
         <div id="iris-device-forms-root" data-device-forms-react></div>
         <!-- Schedules (Phase 2, Task 25): a list and one action, deliberately
@@ -274,47 +273,7 @@
         </div>
         <div id="iris-inventory-table-root" data-inventory-react></div>
         <div id="iris-device-details-root"></div>
-        <!-- Job-option and role dialogs still use the shared application
-             controller. Image and bulk credential dialogs mount separately
-             under iris-assignments-root. -->
-        <div id="onboard-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="onboard-modal-title">
-          <div class="modal">
-            <div class="modal-head">
-              <span id="onboard-modal-title">Onboard devices <span id="onboard-modal-count" class="muted"></span></span>
-              <button class="btn ghost icon-only" type="button" id="onboard-modal-x" aria-label="Close">&#10005;</button>
-            </div>
-            <div class="modal-body">
-              <p class="muted">Adds the IRIS agent and starts staging assigned images. Device software is not upgraded.</p>
-              <label class="check-row"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
-              <label class="check-row"><input type="checkbox" id="onboard-telemetry-stream"> Live telemetry</label>
-              <label class="check-row"><input type="checkbox" id="onboard-log" aria-describedby="onboard-log-help"> Detailed logs</label>
-              <p class="muted" id="onboard-log-help">Show extra troubleshooting details and IOx/IOS-XR download logs.</p>
-            </div>
-            <div class="modal-foot">
-              <button class="btn ghost" type="button" id="onboard-cancel">Cancel</button>
-              <button class="btn" type="button" id="onboard-confirm">Start onboard</button>
-            </div>
-          </div>
-        </div>
-        <div id="undeploy-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="undeploy-modal-title">
-          <div class="modal">
-            <div class="modal-head">
-              <span id="undeploy-modal-title">Undeploy devices <span id="undeploy-modal-count" class="muted"></span></span>
-              <button class="btn ghost icon-only" type="button" id="undeploy-modal-x" aria-label="Close">&#10005;</button>
-            </div>
-            <div class="modal-body">
-              <p class="muted">Removes the IRIS agent and resources listed as IRIS-owned. Keeps staged images in device storage. Does not stop running jobs.</p>
-              <label class="check-row"><input type="checkbox" id="undeploy-force" aria-describedby="undeploy-force-help"> Force cleanup</label>
-              <p class="muted" id="undeploy-force-help">For a missing or unusable deployment record. Skips record and device identity checks. Removes only the IRIS agent files and services; keeps VirtualPortGroup and NAT settings. Retires the old record on success.</p>
-              <label class="check-row"><input type="checkbox" id="undeploy-log" aria-describedby="undeploy-log-help"> Detailed logs</label>
-              <p class="muted" id="undeploy-log-help">Show extra troubleshooting details. Errors are always shown.</p>
-            </div>
-            <div class="modal-foot">
-              <button class="btn ghost" type="button" id="undeploy-cancel">Cancel</button>
-              <button class="btn danger" type="button" id="undeploy-confirm">Start undeploy</button>
-            </div>
-          </div>
-        </div>
+        <div id="iris-inventory-actions-root" data-inventory-actions-react></div>
         <div id="role-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="role-modal-title" aria-describedby="role-modal-help">
           <div class="modal">
             <div class="modal-head">

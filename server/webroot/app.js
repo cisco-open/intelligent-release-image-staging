@@ -108,6 +108,7 @@
   var inventory = window.irisInventory;
   var deviceForms = window.irisDeviceForms;
   var assignments = window.irisAssignments;
+  var inventoryActions = window.irisInventoryActions;
   var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
   function deviceFilterState() {
@@ -760,7 +761,7 @@
     scheduled: function (id) { return pendingScheduleText(id, SCHEDULES); }
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); }
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); }
     else if (!document.getElementById('view-devices').hidden) deviceForms.resume();
   });
 
@@ -820,33 +821,8 @@
   document.addEventListener('visibilitychange', function () {
     activityCommand('visibility', {visible: !document.hidden && !document.getElementById('view-devices').hidden});
   });
-  // Telemetry flags for onboard job bodies (reports default on, streaming
-  // default off — the server treats an absent key the same way).
-  function telemetryFlags() {
-    var t = document.getElementById('onboard-telemetry');
-    var s = document.getElementById('onboard-telemetry-stream');
-    return { telemetry: !t || t.checked,
-             telemetry_stream: !!(s && s.checked) };
-  }
-  function jobFlags(action, forced) {
-    var flags = action === 'onboard' ? telemetryFlags()
-      : (forced ? { force: true } : {});
-    var log = document.getElementById(action + '-log');
-    flags.log = !!(log && log.checked);
-    return flags;
-  }
   function closeMenus() { inventory.update({menu: ''}); }
-  // ---- bulk-action modals -------------------------------------------------
-  // Onboard / Undeploy / Set credential used to be .menu popovers hanging off
-  // caret buttons in the bulk bar, each carrying form controls and its own
-  // nested submit button. Magnetic Dropdown rules that shape out -- "Selecting
-  // an item from the menu starts an action without requiring the use of
-  // another button to submit or apply" -- and names the replacement in the
-  // same breath: "provide features in bulk action bar that open modals".
-  // Magnetic Modal > Usage agrees ("Use modals for simple tasks that inform,
-  // confirm, or complete a simple action"). Every control id inside moved
-  // unchanged, so telemetryFlags(), startBatch() and the credential handler
-  // read exactly what they read before.
+  // Remaining policy and schedule dialogs retain their existing controller.
   var modalOpener = null;
   function openModal(id) {
     var overlay = document.getElementById(id);
@@ -905,54 +881,20 @@
     });
     trapDialogFocus(overlay);
   }
-  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'role-modal'];
-  wireModal('onboard-modal', ['onboard-cancel', 'onboard-modal-x']);
-  wireModal('undeploy-modal', ['undeploy-cancel', 'undeploy-modal-x']);
+  var BULK_MODALS = ['role-modal'];
   wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
   wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
   wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
   wireModal('sched-modal', ['sched-modal-cancel', 'sched-modal-x']);
-  onInventoryAction('onboard-selected', function () {
-    openModal('onboard-modal');
-  });
-  onInventoryAction('undeploy-selected', function () {
-    openModal('undeploy-modal');
-  });
+  onInventoryAction('onboard-selected', function () { inventoryActions.open('onboard', selectedIds()); });
+  onInventoryAction('undeploy-selected', function () { inventoryActions.open('undeploy', selectedIds()); });
   onInventoryAction('set-cred-selected', function () { assignments.openCredentials(selectedIds()); });
   function updateSelBar() {
-    var n = selectedIds().length;
-    ['onboard', 'undeploy'].forEach(function (key) {
-      var el = document.getElementById(key + '-modal-count');
-      if (el) el.textContent = n + ' selected';
-    });
-    if (!n) {
+    if (!selectedIds().length) {
       if (inventory.snapshot().menu === 'more') closeMenus();
       BULK_MODALS.forEach(closeModal);
     }
   }
-  // Existing option forms/selection are passed to the React batch controller.
-  // Hold the shared bulk lock until every submission has a known or unknown
-  // outcome; closing the viewer never aborts or replays an accepted request.
-  async function startBatch(action) {
-    var ids = claimSelection();
-    if (!ids) return;
-    var forceEl = document.getElementById('undeploy-force');
-    var options = jobFlags(action, action === 'undeploy' && forceEl && forceEl.checked);
-    try {
-      await activityCommand('start', {jobAction: action, ids: ids, options: options});
-    } catch (e) {
-      devStatus.textContent = 'Unable to start ' + action + '. Check Activity before trying again.';
-      devStatus.classList.add('err');
-    } finally { setBulkBusy(false); }
-  }
-  document.getElementById('onboard-confirm').addEventListener('click', function () {
-    closeModal('onboard-modal');
-    startBatch('onboard');
-  });
-  document.getElementById('undeploy-confirm').addEventListener('click', function () {
-    closeModal('undeploy-modal');
-    startBatch('undeploy');
-  });
 
   // Dialogs capture explicit IDs from the same model as the table.
   function selectedIds() { return inventory.selectedIds(); }
@@ -980,7 +922,7 @@
     inventory.update({bulkBusy: busy});
     BULK_BTNS.concat(BULK_OPENERS).forEach(function (id) {
       var el = document.getElementById(id);
-      if (el && !el.closest('[data-inventory-react], [data-assignments-react]')) el.disabled = busy;
+      if (el && !el.closest('[data-inventory-react], [data-assignments-react], [data-inventory-actions-react]')) el.disabled = busy;
     });
     syncRoleActionAvailability();
   }
@@ -1030,67 +972,25 @@
   }
   // Both entry points use the same React picker and captured-target controller.
   function openRowAssign(id) { return assignments.openImages([id], true); }
-  function delWarning(ids) {
-    // Removing inventory does NOT undeploy: an onboarded device keeps running
-    // its agent with no Console inventory entry for it, so say so before it
-    // happens.
-    return 'Delete ' + ids.length + ' device(s) from the inventory?\n\n' +
-      ids.join(', ') + '\n\nThis does NOT undeploy the agent or remove staged images. ' +
-      'Undeploy first if you want to remove IRIS from the device.' +
-      '\n\nOld deployment records can no longer be used for cleanup. ' +
-      'Re-adding a device starts fresh. This cannot be undone.';
-  }
-  // Run *fn* for each selected id, reporting per-device refusals rather than
-  // failing the whole batch — same shape as startBatch's error handling.
-  //
-  // opts.ownsBulkLock (default true) says whether this call is the
-  // selected-action holding the shared bulk lock. It is false for the ONE
-  // caller that is not a selected-action at all: the per-row assign button,
-  // which shares this helper for its status-line reporting. Releasing the
-  // lock there re-enabled every bulk button in the middle of someone else's
-  // batch — a delete could then fire while an onboard was still starting,
-  // which is the exact thing the lock exists to prevent.
-  async function forSelected(label, ids, fn, opts) {
-    opts = opts || {};
-    var failed = [], failedIds = [];
-    try {
-      await Promise.all(ids.map(async function (id) {
-        try {
-          var r = await fn(id);
-          if (!r.ok) {
-            var reason = '';
-            try { reason = (await r.json()).error || ''; } catch (e2) { }
-            failed.push(reason ? id + ' (' + reason + ')' : id);
-            failedIds.push(id);
-          }
-        } catch (e) { failed.push(id); failedIds.push(id); }
-      }));
-    } finally {
-      if (opts.ownsBulkLock !== false) setBulkBusy(false);
-    }
-    devStatus.textContent = label + ' ' + (ids.length - failed.length) + '/' +
-      ids.length + ' device(s)' + (failed.length ? '; failed: ' + failed.join(', ') : '');
-    refreshDevices();
-    // Bare ids that did NOT succeed -- callers that need to know which of
-    // `ids` actually went through (delete-selected, so a removed device
-    // does not linger in SELECTED forever) diff `ids` against this.
-    return failedIds;
-  }
-  onInventoryAction('delete-selected', async function () {
-    var ids = claimSelection();
-    if (!ids) return;
-    if (!confirm(delWarning(ids))) { setBulkBusy(false); return; }
-    var failedIds = await forSelected('Deleted', ids, function (id) {
-      return fetch('/api/v1/devices/' + encodeURIComponent(id),
-                   { method: 'DELETE', headers: csrfHdr() });
-    });
-    // A deleted device cannot stay "selected" forever -- SELECTED is keyed
-    // by device_id and outlives paging/filtering/refresh (issue #112
-    // prerequisite 2), so nothing else would ever clear it. Ids that failed
-    // to delete stay selected; the operator can see them in the status line
-    // and retry.
-    inventory.removeSelection(ids.filter(function (id) { return failedIds.indexOf(id) === -1; }));
+  inventoryActions.connect({
+    fetch: fetch, post: jpost, headers: csrfHdr,
+    confirm: function (message) { return confirm(message); },
+    isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
+    report: function (message, failed) { inventory.report(message, failed); },
+    refreshInventory: refreshDevices,
+    claimBulk: function () {
+      if (bulkBusy || inventory.snapshot().rowBusy.size) return false;
+      cancelSelectAllMatching(); setBulkBusy(true); return true;
+    },
+    releaseBulk: function () { setBulkBusy(false); },
+    startJobs: function (action, ids, options) { return activityCommand('start', {jobAction: action, ids: ids, options: options}); },
+    csvBusy: function (busy) { inventory.update({csvBusy: busy}); },
+    removeSelection: function (ids) { inventory.removeSelection(ids); },
+    saveCsv: inventoryActions.saveCsv
   });
+  inventory.subscribe(function () { inventoryActions.prerequisites(inventory.snapshot()); });
+  inventoryActions.prerequisites(inventory.snapshot());
+  onInventoryAction('delete-selected', function () { return inventoryActions.act('delete', selectedIds()); });
   // ---- Role workflow ----
   // Consume the count-only view explicitly. Never render arbitrary policy or
   // status objects: role member counts are the only dynamic keyed collection.
@@ -1958,18 +1858,7 @@
     bulkQuarantine(false);
   });
 
-  onInventoryAction('adopt-selected', async function () {
-    var ids = claimSelection();
-    if (!ids) return;
-    if (!confirm('Adopt ' + ids.length + ' device(s)?\n\n' + ids.join(', ') +
-      '\n\nMarks existing resources as IRIS-owned: undeploy may then remove them, ' +
-      'even if IRIS did not create them. Verify the inventory matches the device. ' +
-      'Onboarding again is safer. Routers cannot be adopted.')) { setBulkBusy(false); return; }
-    await forSelected('Adopted', ids, function (id) {
-      return jpost('/api/v1/devices/' + encodeURIComponent(id) + '/adopt',
-                   { acknowledge_adopt: true });
-    });
-  });
+  onInventoryAction('adopt-selected', function () { return inventoryActions.act('adopt', selectedIds()); });
   onInventoryAction('assign-images-selected', function () { assignments.openImages(selectedIds()); });
   function deviceSeriesLabel(series, model) {
     var labels = { IE3x00: 'IE Switches', IR1x00: 'IR Routers',
@@ -1996,80 +1885,10 @@
   // controller's cancellable read runs, including close and immediate reopen.
   onInventoryAction('add-dev', function () { deviceForms.toggleDevice(); });
   onInventoryAction('manage-creds', function () { deviceForms.toggleCredentials(); });
-  // ---- Device CSV import ----
-  // A dedicated status survives inventory polls. Never replay an uncertain
-  // write automatically, and clear the input so the same file can be retried.
-  var csvImportBusy = false;
-  function csvImportStatus(message, failed) {
-    var status = document.getElementById('csv-import-status');
-    status.hidden = false;
-    status.textContent = message;
-    status.className = failed ? 'err' : 'muted';
-  }
-  function csvImportProblem(body, status) {
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'HTTP ' + status;
-    var detail = [body.detail, body.message, body.error].find(function (value) {
-      return typeof value === 'string' && value.trim();
-    }) || ('HTTP ' + status);
-    ['role', 'device_id'].forEach(function (key) {
-      if (typeof body[key] === 'string') detail += ' · ' + key + ': ' + body[key];
-    });
-    if (body.error === 'role_not_found') detail += '. Define the role in Policies before importing.';
-    return detail.slice(0, 1200);
-  }
-  onInventoryAction('import-csv', function () { document.getElementById('csv-file').click(); });
-  document.getElementById('csv-file').addEventListener('change', async function (e) {
-    var f = e.target.files[0];
-    e.target.value = '';
-    if (!f || csvImportBusy) return;
-    if (f.size > 8 * 1024 * 1024) { csvImportStatus('Import failed: CSV exceeds 8 MiB. No request sent.', true); return; }
-    csvImportBusy = true;
-    inventory.update({csvBusy: true});
-    csvImportStatus('Reading CSV…', false);
-    try {
-      var csv;
-      try { csv = await f.text(); }
-      catch (e) { csvImportStatus('Cannot read this CSV file. No import request sent.', true); return; }
-      csvImportStatus('Importing CSV…', false);
-      var r, body = null;
-      try {
-        r = await fetch('/api/v1/devices/import-csv', { method: 'POST', headers: csrfHdr({ 'Content-Type': 'text/csv' }), body: csv });
-        var text = await r.text();
-        try { body = JSON.parse(text); } catch (e) { /* Never display a proxy HTML page. */ }
-      } catch (e) {
-        csvImportStatus('Import response unavailable. The import may have completed; refresh inventory before retrying.', true);
-        return;
-      }
-      if (!r.ok) {
-        csvImportStatus('Import failed: ' + csvImportProblem(body, r.status) +
-          (r.status >= 500 ? '. Refresh inventory before retrying; the outcome may be uncertain.' : ''), true);
-        return;
-      }
-      if (!body || !Number.isSafeInteger(body.imported) || body.imported < 0) {
-        csvImportStatus('Import response could not be confirmed. Refresh inventory before retrying.', true);
-        return;
-      }
-      csvImportStatus('Imported ' + body.imported + ' device(s).', false);
-      try { await refreshDevices(); }
-      catch (e) { csvImportStatus('Import completed; inventory refresh unavailable. Refresh the page.', false); }
-    } finally {
-      csvImportBusy = false;
-      inventory.update({csvBusy: false});
-    }
-  });
-  // ---- End device CSV import ----
-  // fetch + blob download (not a plain <a download> nav): Chrome blocks
-  // download-attribute navigations over connections with certificate errors
-  // (self-signed labs), which made these buttons appear dead.
-  async function downloadCsv(url, filename) {
-    var r = await fetch(url);                      // same-origin, session cookie rides along
-    if (!r.ok) { devStatus.textContent = 'Download failed (' + r.status + ')'; return; }
-    var blob = new Blob([await r.text()], { type: 'text/csv' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(a.href);
-  }
+  // CSV state, validation and async lifetimes belong to React. Role export
+  // reuses the same checked download path until the role editor migrates.
+  onInventoryAction('import-csv', function () { inventoryActions.chooseFile(); });
+  function downloadCsv(url, filename) { return inventoryActions.download(url, filename); }
   onInventoryAction('export-csv', function () { return downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
   onInventoryAction('example-csv', function () { return downloadCsv('/api/v1/devices/example-csv', 'devices-example.csv'); });
   // ---- schedules panel and the "Schedule…" action ----
@@ -4635,7 +4454,7 @@
       closeModal('role-def-modal');
       closeModal('policy-advanced-modal');
     }
-    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); }
+    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); }
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });

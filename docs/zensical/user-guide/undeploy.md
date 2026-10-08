@@ -23,16 +23,18 @@ Undeploy runs from the deployment record, the record of what IRIS applied.
 ### Undeploy one device
 
 1. Open **Inventory** and check the device's row.
-2. Choose **Undeploy** in the toolbar. The teardown job starts.
-3. Follow the job to the end and read its result.
+2. Choose **Undeploy** in the toolbar and check **reviewed devices**.
+3. Choose **Start undeploy** and confirm. Follow the job in **Activity**.
 
 ### Adopt an agent that has no deployment record
 
 A device running an agent with no record cannot run a record-driven undeploy.
 Adopt it first, or use Force undeploy instead.
 
-1. Choose **Adopt** and confirm.
-2. IRIS audits the device, writes a fresh record, and undeploy then runs from it.
+1. Select the device, choose **More actions → Adopt** and confirm.
+2. IRIS records the action in the audit trail and creates a deployment record
+   from the saved inventory. Check that inventory against the device first;
+   adoption does not inspect the device.
 
 Catalyst 8000 series routers use Force instead (see
 [Supported devices](../install/supported-devices.md)).
@@ -54,6 +56,11 @@ IRIS-named artifacts only, never your network configuration.
 ### Retire a device from the inventory
 
 Delete revokes the device's credentials first. If that write fails, the delete stops and nothing else changes. The rest of the cleanup is best effort, and a partial cleanup is reported.
+
+Select the devices, choose **More actions → Delete** and confirm the named
+targets. Completed retirements leave the selection. Partial cleanup and unknown
+results stay selected for review, even when the row has left Inventory. Check
+the named cleanup steps and the audit trail before retrying.
 
 The device's address rows are deliberately **retained** until they age out, so
 a revoked device stays denied whatever the sharing policy says, and the order

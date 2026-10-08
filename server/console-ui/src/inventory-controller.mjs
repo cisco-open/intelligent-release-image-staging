@@ -27,7 +27,7 @@ export class InventoryController {
   onAction(id, action) { this.actions.set(id, action); }
   async action(id, event) {
     const handler = this.actions.get(id);
-    if (!handler || this.state.actionBusy.has(id) || (id === 'import-csv' && this.state.csvBusy)
+    if (!handler || this.state.actionBusy.has(id) || (id === 'import-csv' && (this.state.csvBusy || this.state.bulkBusy || this.state.rowBusy.size))
       || (id.endsWith('-selected') && (this.state.bulkBusy || this.state.rowBusy.size))) return;
     const busy = new Set(this.state.actionBusy); busy.add(id); this.update({actionBusy: busy});
     try {

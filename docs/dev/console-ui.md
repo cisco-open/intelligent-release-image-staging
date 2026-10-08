@@ -18,7 +18,8 @@ Console](../zensical/user-guide/console.md) for that.
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
-image and bulk credential dialogs, device-details and Activity drawers
+image and bulk credential dialogs, CSV and basic device actions, device-details
+and Activity drawers
 with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
@@ -74,8 +75,8 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. CSV import, job-option, role and
-schedule dialogs still use the older controller.
+write result is reported without retrying. Role and schedule dialogs still use
+the older controller.
 
 The Add Device and credential forms use `device-forms-controller.mjs`, a shared
 model and `device-forms.jsx`. Model lookups only narrow the chosen management
@@ -96,6 +97,15 @@ or unknown results require an explicit review, never an automatic resend.
 Bulk credentials use one checked request and distinguish a named profile from
 clearing the assignment. Row and bulk locks survive closing the dialog;
 closing stops preview reads but leaves submitted writes running.
+
+CSV import/export, Onboard/Undeploy options, Adopt and Delete use
+`inventory-actions-controller.mjs`, its model and `inventory-actions.jsx`.
+Job dialogs capture reviewed IDs; Start snapshots the options and hands the
+batch to Activity. CSV imports share the device mutation lock. Separate status
+lines survive Inventory polling. Downloads check the content type and reject
+late bodies after navigation. Adopt/Delete run at most four requests together,
+check response bodies and report partial cleanup or unknown results. Only
+confirmed complete retirements are removed from the selection.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -160,6 +170,12 @@ confirmation, conflicts, unknown responses and pending-write focus.
 a temporary authenticated management server for assignment conflicts and partial
 credential updates. This fixture uses HTTP and no live devices; it does not
 qualify the Console proxy or TLS.
+Inventory action checks cover default and captured job options through Activity,
+shared import locks, CSV file and response failures, download cancellation,
+partial retirement, retained selections and unknown writes.
+`server/tests/test_inventory_actions_api.py` uses the shipped controller with
+real temporary stores to check CSV import/export and HTTP 207 retirement.
+It deliberately fails record cleanup to verify the remaining work is reported.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console

@@ -287,7 +287,7 @@ test('action adapter locks duplicate dialog reads but allows Activity during a b
   await controller.action('assign-images-selected', {currentTarget: opener}); assert.equal(opened, 2);
 });
 
-test('legacy assignment and CSV adapters share state locks without touching React controls', async t => {
+test('assignment and CSV adapters share row and bulk locks without touching React controls', async t => {
   const {controller, writes} = await fixture(t);
   assert.equal(controller.claimRow('a'), true); assert.equal(controller.claimRow('a'), false);
   await controller.edit('a', 'credential', 'other'); assert.equal(writes.length, 0);
@@ -295,5 +295,7 @@ test('legacy assignment and CSV adapters share state locks without touching Reac
   controller.update({bulkBusy: true}); assert.equal(controller.claimRow('a'), false);
   let opens = 0; controller.onAction('import-csv', () => opens++);
   controller.update({csvBusy: true}); await controller.action('import-csv', {currentTarget: {}}); assert.equal(opens, 0);
-  controller.update({csvBusy: false}); await controller.action('import-csv', {currentTarget: {}}); assert.equal(opens, 1);
+  controller.update({csvBusy: false}); await controller.action('import-csv', {currentTarget: {}}); assert.equal(opens, 0);
+  controller.update({bulkBusy: false, rowBusy: new Set(['a'])}); await controller.action('import-csv', {currentTarget: {}}); assert.equal(opens, 0);
+  controller.releaseRow('a'); await controller.action('import-csv', {currentTarget: {}}); assert.equal(opens, 1);
 });

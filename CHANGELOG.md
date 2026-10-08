@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move inventory CSV, Onboard/Undeploy options, Adopt and Delete actions into
+  React. Keep job targets and options fixed after review, serialize CSV imports
+  with other device edits, and reject stale downloads. Report incomplete
+  retirement separately from success and keep those targets selected.
+
 - Move image and bulk credential dialogs into React. Keep Apply tied to the
   reviewed devices and require a complete, current image preview. Preserve
   assignment conflict checks, validate results and bound parallel requests.

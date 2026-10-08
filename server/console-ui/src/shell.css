@@ -88,6 +88,9 @@
 .iris-react-shell [data-assignments-react] .modal-foot { flex-wrap: wrap; }
 .iris-react-shell [data-assignments-react] .modal-backdrop { z-index: 210; }
 .iris-react-shell [data-assignments-react] .modal-body { overflow-wrap: anywhere; }
+.iris-react-shell [data-inventory-actions-react] .modal-backdrop { z-index: 210; }
+.iris-react-shell [data-inventory-actions-react] .modal-body { overflow-wrap: anywhere; }
+.iris-react-shell [data-inventory-actions-react] .modal-foot { flex-wrap: wrap; }
 .iris-react-shell .assignment-targets { margin-bottom: 12px; }
 .iris-react-shell .drawer, .iris-react-shell #dl-drawer { top: 56px; z-index: 105; }
 .iris-react-shell #activity-panel { width: min(880px, 96vw); }
