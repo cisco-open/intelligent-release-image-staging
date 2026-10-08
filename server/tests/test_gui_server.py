@@ -4,6 +4,7 @@
 import inspect
 import json
 import os
+from pathlib import Path
 import re
 
 import management_api as gui_server
@@ -8892,7 +8893,9 @@ def test_telemetry_health_badge_lives_on_overview_not_monitoring():
         js = f.read()
     # the badge is declared inside the Overview heading
     overview = html.split('id="view-overview"', 1)[1].split("</section>", 1)[0]
-    assert 'id="telemetry-health"' in overview
+    assert 'id="iris-overview-root"' in overview
+    component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
+    assert 'id="telemetry-health"' in component
     # ...and no longer anywhere in the Monitoring section
     monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
     assert 'id="telemetry-health"' not in monitoring
@@ -10459,7 +10462,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("ov-rollout", "importable", "images", "devices",
+    table_ids = ("importable", "images", "devices",
                  "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
                  "setup-pkg-table", "settings-info", "trust-tbl",
                  "audit-tbl", "dl-tbl")
@@ -10477,6 +10480,9 @@ def test_every_operational_table_gets_a_scroll_wrapper():
             "%s's table-scroll wrapper closed before the table opened" % tid
     # the two unnamed tables (credential list, onboarding batch) get one too
     assert html.count('<div class="table-scroll"') == html.count("<table")
+    component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
+    assert '<div className="table-scroll" tabIndex={0} role="region" aria-label="Image rollout">' in component
+    assert '<table className="tbl" id="ov-rollout">' in component
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10780,11 +10786,10 @@ def test_overview_fetches_devices_and_images_alongside_overview():
 def test_overview_fleet_totals_carry_precise_denominators():
     """Brief Step 4, band 3: fleet totals with precise denominators. Every
     ratio card names what it is a fraction OF, not a bare count."""
-    js = _webroot("app.js")
-    fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
-    assert "'Waiting for heartbeat'" in fn  # pinned card label, unchanged
-    for sub in ("'of ' + ov.devices", "'of ' + ov.assigned"):
-        assert sub in fn, sub
+    model = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview-model.mjs").read_text()
+    assert "'Waiting for heartbeat'" in model
+    for sub in ("of ${ov.devices}", "of ${ov.assigned}"):
+        assert sub in model, sub
 
 
 def test_card_component_matches_spec_padding_radius_and_elevation():
@@ -10797,40 +10802,24 @@ def test_card_component_matches_spec_padding_radius_and_elevation():
 
 
 def test_overview_attention_band_distinguishes_no_data_from_all_clear():
-    """Fix wave 2 (reviewer-confirmed truthfulness defect): a failed
-    /api/devices or /api/images fetch used to render the byte-identical
-    green "All clear" card genuine health renders -- "no data to report a
-    problem from" and "confirmed no problem" must be distinguishable.
-    renderOverviewAttention() now takes a fourth `fleetDataUnavailable`
-    argument and gates the all-clear branch behind its absence."""
-    js = _webroot("app.js")
-    fn = js.split(
-        "function renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable) {",
-        1)[1].split("\n  }", 1)[0]
-    assert "Fleet status unavailable" in fn
-    assert "attention-card is-inactive" in fn
-    assert "i-minus-circle" in fn
-    # the failure branch is neutral, not a repaint of the positive one --
-    # no check-circle/positive class anywhere in its own pushed markup
-    unavailable_card = fn.split("if (fleetDataUnavailable) {", 1)[1].split(
-        "} else if (!cards.length) {", 1)[0]
-    assert "i-check-circle" not in unavailable_card
-    assert "is-positive" not in unavailable_card
-    assert "All clear" not in unavailable_card
-    # the all-clear branch is the OTHER arm of the same if/else -- reachable
-    # only when fleet data was NOT reported unavailable
-    assert "} else if (!cards.length) {" in fn
-    all_clear_card = fn.split("} else if (!cards.length) {", 1)[1]
-    assert "All clear" in all_clear_card
+    """The controller reports each failed secondary; React renders it neutrally.
 
-    # refreshOverview() marks BOTH degraded shapes (a rejected fetch and a
-    # resolved-but-non-2xx response) with failed:true, ORs them together,
-    # and threads the result into the renderer as its 4th argument.
-    overview_fn = js.split("async function refreshOverview() {", 1)[1].split(
-        "\n  }", 1)[0]
+    Executable model/browser checks also cover failed, clean and mixed results.
+    """
+    js = _webroot("app.js")
+    model = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview-model.mjs").read_text()
+    unavailable_card = model.split("if (unavailable) cards.push(", 1)[1].split("else if (!cards.length)", 1)[0]
+    assert "level: 'inactive'" in unavailable_card
+    assert "Fleet status unavailable" in unavailable_card
+    assert "positive" not in unavailable_card and "All clear" not in unavailable_card
+    assert "else if (!cards.length)" in model
+
+    overview_fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
     assert "failed: true" in overview_fn
     assert "dbody.failed || imgsBody.failed" in overview_fn
     assert "renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable)" in overview_fn
+    bridge = js.split("function renderOverviewAttention(", 1)[1].split("\n  }", 1)[0]
+    assert "unavailable: fleetDataUnavailable" in bridge
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move dashboard rendering into React while keeping the current layout and
+  refresh behavior. Preserve keyboard focus across refreshes and prevent late
+  telemetry-health responses from replacing newer results.
+
 - Accept merged or cherry-picked build sources when their checked files match
   the reference branch. Continue refusing genuinely stale device sources.
 

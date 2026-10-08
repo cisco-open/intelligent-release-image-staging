@@ -4696,53 +4696,20 @@
     var count = imgs.filter(function (i) { return !!i.quarantined; }).length;
     return { count: count, level: count ? 'negative' : null };
   }
-  function attentionCardHTML(kind, level, count, label, hint) {
-    var icon = STATUS_ICONS[level] || STATUS_ICONS.inactive;
-    // level/kind are both closed sets (ATTENTION_LEVEL_RANK's values,
-    // 'devices'/'images') -- esc() here is belt-and-suspenders consistency
-    // with every other interpolation, not a guard against untrusted input.
-    return '<button type="button" class="attention-card is-' + esc(level) + '" data-attn="' + esc(kind) + '">' +
-      '<svg aria-hidden="true"><use href="#' + icon + '"></use></svg>' +
-      '<span class="attention-text"><span class="attention-count">' + esc(count) +
-      '</span><span class="attention-label">' + esc(label) + '</span>' +
-      '<span class="attention-hint">' + esc(hint) + '</span></span></button>';
+  function publishOverview(detail) {
+    window.dispatchEvent(new CustomEvent('iris:overview-state', {detail: detail}));
   }
   function renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable) {
-    var devAttn = overviewDeviceAttention(devs, devNow);
-    var imgAttn = overviewImageAttention(imgs);
-    var cards = [];
-    if (devAttn.count) {
-      cards.push(attentionCardHTML('devices', devAttn.level, devAttn.count,
-        devAttn.count === 1 ? 'device needs attention' : 'devices need attention',
-        'View filtered devices'));
-    }
-    if (imgAttn.count) {
-      cards.push(attentionCardHTML('images', imgAttn.level, imgAttn.count,
-        imgAttn.count === 1 ? 'image quarantined' : 'images quarantined',
-        'View filtered images'));
-    }
-    // "No data to report a problem from" and "confirmed no problem" are
-    // different claims -- rendering the same green all-clear card either
-    // way would silently lie about which one happened. A real attention
-    // card from whichever fetch DID succeed (above) still renders
-    // alongside this: only the OTHER half degrades.
-    if (fleetDataUnavailable) {
-      cards.push('<div class="attention-card is-inactive">' +
-        '<svg aria-hidden="true"><use href="#i-minus-circle"></use></svg>' +
-        '<span class="attention-text"><span class="attention-label">Fleet status unavailable</span>' +
-        '<span class="attention-hint">Device or image data could not be loaded; retrying.</span></span></div>');
-    } else if (!cards.length) {
-      cards.push('<div class="attention-card is-positive">' +
-        '<svg aria-hidden="true"><use href="#i-check-circle"></use></svg>' +
-        '<span class="attention-text"><span class="attention-label">All clear</span>' +
-        '<span class="attention-hint">No devices or images need attention.</span></span></div>');
-    }
-    document.getElementById('ov-attention').innerHTML = cards.join('');
-    var devBtn = document.querySelector('#ov-attention [data-attn="devices"]');
-    if (devBtn) devBtn.addEventListener('click', function () { goToDevicesFiltered('__attention'); });
-    var imgBtn = document.querySelector('#ov-attention [data-attn="images"]');
-    if (imgBtn) imgBtn.addEventListener('click', goToImagesFiltered);
+    publishOverview({attention: {
+      devices: overviewDeviceAttention(devs, devNow),
+      images: overviewImageAttention(imgs),
+      unavailable: fleetDataUnavailable
+    }});
   }
+  window.addEventListener('iris:overview-action', function (event) {
+    if (event.detail.kind === 'devices') goToDevicesFiltered('__attention');
+    else if (event.detail.kind === 'images') goToImagesFiltered();
+  });
 
   // ---- Overview ----
   // Same stale-response hazard refreshDevices() already guards against
@@ -4759,54 +4726,24 @@
     // Finish before the 10-second view poll, otherwise each new poll could
     // abort its predecessor forever while old inventory still looked current.
     var timer = setTimeout(function () { controller.abort(); }, 8000);
-    var layout = document.getElementById('deployment-layout');
-    var table = document.getElementById('deployment-table');
-    var note = document.getElementById('deployment-note');
     try {
       var response = await fetch('/api/v1/deployment', {signal: controller.signal});
       if (!response.ok) throw new Error('unavailable');
       var data = await response.json();
-      if (!Array.isArray(data.components) || data.components.length > 64) throw new Error('invalid');
+      if (!data || !Array.isArray(data.components) || data.components.length > 64 ||
+          ['layout', 'instance', 'namespace', 'note'].some(function (key) {
+            return data[key] != null && typeof data[key] !== 'string';
+          }) || data.components.some(function (item) {
+            return !item || typeof item !== 'object' || Array.isArray(item) ||
+              ['role', 'kind', 'name', 'host', 'address', 'os', 'architecture', 'image', 'kernel', 'state'].some(function (key) {
+                return item[key] != null && typeof item[key] !== 'string';
+              });
+          })) throw new Error('invalid');
       if (deploymentRefreshController !== controller) return;
-      var labels = {docker: 'Docker · one host', 'docker-split': 'Docker · separate hosts',
-        kubernetes: 'Kubernetes', 'single-container': 'Single container', unknown: 'Layout not reported'};
-      layout.textContent = labels[data.layout] || labels.unknown;
-      var context = document.getElementById('deployment-context');
-      context.textContent = [data.instance && ('Instance: ' + data.instance), data.namespace && ('Namespace: ' + data.namespace)].filter(Boolean).join(' · ');
-      context.hidden = !context.textContent;
-      document.getElementById('deployment-observed').textContent = Number.isFinite(data.observed_at)
-        ? 'Observed ' + new Date(data.observed_at * 1000).toLocaleTimeString() : 'Observation time unavailable';
-      var rows = document.getElementById('deployment-rows');
-      rows.replaceChildren();
-      data.components.forEach(function (item) {
-        var row = document.createElement('tr');
-        function cell(main, details) {
-          var td = document.createElement('td');
-          td.textContent = main || 'Not reported';
-          (details || []).filter(Boolean).forEach(function (value) {
-            var small = document.createElement('small'); small.textContent = value; td.appendChild(small);
-          });
-          row.appendChild(td);
-        }
-        cell(item.role === 'server' ? 'Tracker / distribution' : item.role === 'console' ? 'Console' : 'Component',
-          [(item.kind === 'pod' ? 'Pod: ' : item.kind === 'container' ? 'Container: ' : 'Runtime: ') + (item.name || 'Not reported')]);
-        cell(item.host, [item.address && ((item.kind === 'pod' ? 'Pod IP: ' : 'Host address: ') + item.address)]);
-        cell([item.os, item.architecture].filter(Boolean).join(' · ') || (item.kind === 'pod' ? 'Pod container' : 'Container'),
-          [[item.image && ('Image: ' + item.image), item.kernel && ('Kernel: ' + item.kernel)].filter(Boolean).join(' · ')]);
-        cell(item.state);
-        rows.appendChild(row);
-      });
-      table.hidden = !data.components.length;
-      note.textContent = data.note || '';
-      note.hidden = !note.textContent;
+      publishOverview({deployment: data});
     } catch (error) {
       if (deploymentRefreshController !== controller) return;
-      layout.textContent = 'Unavailable';
-      table.hidden = true;
-      document.getElementById('deployment-context').hidden = true;
-      document.getElementById('deployment-observed').textContent = '';
-      note.hidden = false;
-      note.textContent = 'Deployment information could not be refreshed. Retrying automatically.';
+      publishOverview({deployment: {unavailable: true}});
     } finally { clearTimeout(timer); }
   }
   var overviewRefreshGeneration = 0, overviewRefreshController = null;
@@ -4870,32 +4807,7 @@
 
     renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable);
 
-    var devicesWord = ov.devices === 1 ? 'device' : 'devices';
-    var cards = [
-      { lbl: 'Images', num: ov.images },
-      { lbl: 'Devices', num: ov.devices },
-      { lbl: 'Assigned', num: ov.assigned, sub: 'of ' + ov.devices + ' ' + devicesWord },
-      { lbl: 'Staged', num: ov.staged, sub: 'of ' + ov.assigned + ' assigned' },
-      { lbl: 'Staging now', num: ov.staging_now, sub: 'of ' + ov.assigned + ' assigned' },
-      { lbl: 'Waiting for heartbeat', num: ov.awaiting_heartbeat || 0, sub: 'of ' + ov.devices + ' ' + devicesWord }
-    ];
-    document.getElementById('ov-cards').innerHTML = cards.map(function (c) {
-      return '<div class="card"><div class="lbl">' + esc(c.lbl) +
-        '</div><div class="num">' + esc(c.num) + '</div>' +
-        (c.sub ? '<div class="sub">' + esc(c.sub) + '</div>' : '') + '</div>';
-    }).join('');
-    document.getElementById('ov-rows').innerHTML = (ov.rollout || []).map(function (x) {
-      var pct = x.assigned ? Math.round(x.staged / x.assigned * 100) : 0;
-      return '<tr><td class="machine">' + esc(x.image_id) + '</td><td>' + esc(x.assigned) + '</td><td>' +
-        esc(x.staged) + '</td><td><div class="pbar" role="progressbar" aria-valuemin="0" ' +
-        'aria-valuemax="100" aria-valuenow="' + pct + '" aria-label="' + esc(x.image_id) +
-        ' staged"><span data-pct="' + pct +
-        '"></span></div></td></tr>';
-    }).join('');
-    // set widths via JS property (CSP forbids inline style= attributes)
-    document.querySelectorAll('#ov-rows .pbar > span').forEach(function (s) {
-      s.style.width = s.getAttribute('data-pct') + '%';
-    });
+    publishOverview({overview: ov});
   }
   async function refreshSwarm() {
     var [or_, sr] = await Promise.all([fetch('/api/v1/overview'), fetch('/api/v1/swarm')]);
@@ -7647,34 +7559,29 @@
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
+  var telemetryRefreshGeneration = 0;
   async function refreshTelemetryHealth() {
-    var el = document.getElementById('telemetry-health');
-    if (!el) return;
-    var state = 'unknown';
-    el.title = '';
+    var mine = ++telemetryRefreshGeneration;
+    var state = 'unknown', detail = '';
     try {
       var r = await fetch('/api/v1/telemetry/health');
-      if (!r.ok) throw new Error('health proxy ' + r.status);   // unknown, never "off"
+      if (!r.ok) throw new Error('health proxy ' + r.status);
       var d = await r.json();
       if (d && d.otlp_export && d.otlp_export.signals) {
         var signals = d.otlp_export.signals;
         state = d.otlp_export.state || 'unknown';
-        var detail = ['logs', 'metrics'].map(function (name) {
+        detail = ['logs', 'metrics'].map(function (name) {
           var signal = signals[name] || {};
           var text = name + ': ' + (signal.state || 'unknown');
           if (name === 'logs') text += ', queued ' + (signal.queued || 0) + ', dropped ' + (signal.dropped_total || 0);
           return text;
         }).join('; ');
-        el.title = detail;
       } else if (d && d.otlp_export && d.otlp_export.state) state = d.otlp_export.state;
       else if (d && d.ok === false) state = 'unknown';
       else state = 'off';
     } catch (e) { state = 'unknown'; }
-    el.hidden = false;
-    el.textContent = 'Telemetry export: ' + state;
-    el.className = 'badge ' + (state === 'ok' ? 'badge-ok'
-                               : state === 'degraded' ? 'badge-cancelled'
-                               : 'badge-queued');
+    if (mine !== telemetryRefreshGeneration) return;
+    publishOverview({telemetry: {state: state, detail: detail}});
   }
 
   async function loadOlderAudit() {

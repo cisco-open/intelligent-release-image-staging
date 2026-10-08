@@ -15,18 +15,18 @@ Console](../zensical/user-guide/console.md) for that.
 
 ## The shell and the legacy app
 
-`server/console-ui/` builds three parts of the Console page with React: the
-header, which includes the help and account controls, the primary
-navigation, and the Settings section navigation bar. Every other screen,
-including the operational views, the working forms, and the dedicated
-Policies page, still renders from the older `server/webroot/app.js`. This is
-a partial migration, not a full rewrite, and the two parts of the interface
-run side by side.
+`server/console-ui/` renders the header, primary navigation, Settings section
+navigation, simple Policies overview and the full Overview dashboard with React.
+Other operational views and working forms still render from
+`server/webroot/app.js`. This is a partial migration, not a full rewrite.
 
-The React entry point mounts before the older application loads. It passes
-shell state to that older code through an `iris:shell-state` event, and it
-listens for an `iris:logout` event so signing out works the same way from
-either part of the page. Settings pages keep their existing
+The React entry point mounts before the older application loads. The controller
+publishes `iris:shell-state` and listens for React's `iris:logout` action.
+Overview uses `iris:overview-state` for rendering and `iris:overview-action`
+for attention-card navigation. The controller keeps authenticated requests,
+shared device-status calculations and the single visible-view refresh timer;
+it never writes into the React-owned Overview subtree. Request generation
+checks prevent older responses from replacing newer state. Settings pages keep their existing
 `#settings/<section>` routes, so a link into a specific Settings section
 still lands there. Settings itself keeps one navigation-rail link and its own
 in-page section bar.

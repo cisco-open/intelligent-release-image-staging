@@ -119,47 +119,7 @@
         <button class="linkish" id="setup-nudge-dismiss">dismiss</button>
       </div>
       <section id="view-overview" hidden>
-        <div class="page-header">
-          <h2 class="page-title">Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
-        </div>
-        <section class="deployment-panel" aria-labelledby="deployment-heading">
-          <div class="deployment-heading">
-            <h3 id="deployment-heading">Deployment</h3>
-            <span id="deployment-layout" class="deployment-layout">Loading…</span>
-            <span id="deployment-observed" class="muted"></span>
-          </div>
-          <p id="deployment-context" class="muted" hidden></p>
-          <div class="table-scroll" id="deployment-table" hidden>
-            <table class="tbl deployment-table" aria-label="IRIS containers and pods">
-              <thead><tr><th scope="col">Component</th><th scope="col">Host / node</th><th scope="col">Environment</th><th scope="col">State</th></tr></thead>
-              <tbody id="deployment-rows"></tbody>
-            </table>
-          </div>
-          <p id="deployment-note" class="muted" role="status">Reading deployment information…</p>
-        </section>
-        <!-- Band 1: worst-of-group rollups, clickable into a filtered
-             Devices/Images view (spec: "Overview rollups = combined
-             worst-of-group"). -->
-        <div class="ov-band">
-          <h3>Needs attention</h3>
-          <div class="attention-cards" id="ov-attention"></div>
-        </div>
-        <!-- Band 2: fleet totals, precise denominators, plus the concrete
-             in-progress-transfer evidence (the Rollout table) -- the
-             fleet-wide Staging Boundary that used to sit above this
-             (Active staging) was removed per operator decision; the
-             per-device instance still lives in the device detail drawer. -->
-        <div class="ov-band">
-          <h3>Fleet totals</h3>
-          <div class="cards" id="ov-cards"></div>
-          <h3>Rollout</h3>
-          <div class="table-scroll">
-          <table class="tbl" id="ov-rollout">
-            <thead><tr><th>Image</th><th>Assigned</th><th>Staged</th><th>Progress</th></tr></thead>
-            <tbody id="ov-rows"></tbody>
-          </table>
-          </div>
-        </div>
+        <div id="iris-overview-root"></div>
       </section>
       <section id="view-images" hidden>
         <div class="page-header">

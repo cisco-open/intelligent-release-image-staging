@@ -71,10 +71,25 @@ def test_legacy_router_does_not_mutate_react_navigation():
     assert js.count("setInterval(") == 1
 
 
+def test_overview_has_one_render_owner_without_extra_pollers():
+    js = APP.read_text()
+    component = (APP.parents[1] / "console-ui/src/overview.jsx").read_text()
+    for identifier in ("ov-cards", "ov-rows", "ov-attention", "telemetry-health",
+                       "deployment-layout", "deployment-context", "deployment-rows"):
+        assert "getElementById('%s')" % identifier not in js
+        assert 'id="%s"' % identifier in component
+    assert "iris:overview-state" in js and "iris:overview-state" in component
+    assert "iris:overview-action" in js and "iris:overview-action" in component
+    assert "dangerouslySetInnerHTML" not in component
+    assert "fetch(" not in component and "setInterval(" not in component
+    assert "telemetryRefreshGeneration" in js
+
+
 def test_console_boots_local_react_before_legacy_workflows():
     html = APP.with_name("index.html").read_text()
     assert '<div id="iris-header-root"></div>' in html
     assert '<div id="iris-navigation-root"></div>' in html
+    assert '<div id="iris-overview-root"></div>' in html
     assert '<main class="main" id="iris-main-content" tabindex="-1">' in html
     assert '<script type="module" src="/assets/console.js"></script>' in html
     assert '<script src="/app.js">' not in html
