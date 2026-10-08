@@ -256,26 +256,7 @@
         <div id="iris-inventory-table-root" data-inventory-react></div>
         <div id="iris-device-details-root"></div>
         <div id="iris-inventory-actions-root" data-inventory-actions-react></div>
-        <div id="role-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="role-modal-title" aria-describedby="role-modal-help">
-          <div class="modal">
-            <div class="modal-head">
-              <span id="role-modal-title">Set role <span id="role-modal-count" class="muted"></span></span>
-              <button class="btn ghost icon-only" type="button" id="role-modal-x" aria-label="Close">&#10005;</button>
-            </div>
-            <div class="modal-body">
-              <p id="role-modal-help">Apply one role to all selected devices, including other pages. Preview before saving. Only peer policy changes.</p>
-              <label class="field" for="role-selected"><span class="field-label">Role</span>
-                <select id="role-selected"><option value="" disabled selected>— choose a role —</option></select>
-              </label>
-              <p class="role-preview" id="role-preview" aria-live="polite" hidden></p>
-              <p class="role-message" id="role-modal-msg" role="status" aria-live="polite"></p>
-            </div>
-            <div class="modal-foot">
-              <button class="btn ghost" type="button" id="role-modal-cancel">Cancel</button>
-              <button class="btn" type="button" id="apply-role-selected">Preview change</button>
-            </div>
-          </div>
-        </div>
+        <div id="iris-role-actions-root" data-role-actions-react></div>
         <div id="iris-schedule-dialog-root" data-schedules-react></div>
         <div id="iris-assignments-root" data-assignments-react></div>
         <div id="iris-activity-root"></div>

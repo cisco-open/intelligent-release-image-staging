@@ -20,9 +20,10 @@ own speed limits. Sharing needs permission from both roles.
 ### Set a role on selected devices
 
 1. In **Inventory**, select the devices.
-2. Open **More actions → Set role…** and choose a role. The explicit
-   `— no role —` option clears membership.
-3. Select **Preview change**. One dry run covers every selected device and
+2. Open **More actions → Set role…** and check **Reviewed devices**. This list
+   stays fixed while the dialog is open. Choose a role, or `— no role —` to
+   clear membership.
+3. Select **Preview change**. One dry run covers every reviewed device and
    reports the impact on access and membership, the speed limits, per-device
    failures, and the confirmation threshold.
 4. Select **Set role**. It commits that preview, and an
@@ -32,9 +33,9 @@ own speed limits. Sharing needs permission from both roles.
 
 !!! warning
     If the commit request or its reply never arrives, then
-    **changes may have been saved**. Refresh the policy and inventory views,
-    review the reported drift, and preview again rather than sending the same
-    request twice.
+    **changes may have been saved**. Use **Refresh policy before retrying**,
+    check the device roles and reported drift, then preview again. Closing the
+    dialog does not cancel a request already sent.
 
 ### Edit role definitions
 
@@ -135,6 +136,10 @@ ACL: read the `role_drift` figure, fix it, and preview again.
 Quarantine the device from its row action or the bulk action in **Inventory**. A
 quarantined device is told to stop sharing with every peer, and the badge
 records your intent, not the tracker's last enforcement state.
+
+The bulk confirmation names the selected devices. Changes run one device at a
+time. An uncertain result stops the batch; later devices are shown as **not
+attempted**. Refresh and review the named outcomes before trying again.
 
 Quarantine is held separately from that device's ordinary ACL assignment, and
 applying it preserves the current ordinary ACL entry, which takes effect again

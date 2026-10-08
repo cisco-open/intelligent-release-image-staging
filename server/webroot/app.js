@@ -110,6 +110,7 @@
   var assignments = window.irisAssignments;
   var inventoryActions = window.irisInventoryActions;
   var schedules = window.irisSchedules;
+  var roleActions = window.irisRoleActions;
   var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
   function deviceFilterState() {
@@ -657,7 +658,7 @@
     scheduled: function (id) { return schedules.scheduled(id); }
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); }
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); }
     else if (!document.getElementById('view-devices').hidden) { deviceForms.resume(); schedules.resume(); }
   });
 
@@ -746,7 +747,6 @@
     var overlay = document.getElementById(id);
     if (!overlay || overlay.hidden) return;
     overlay.hidden = true;
-    if (id === 'role-modal') cancelRoleDialog();
     if (id === 'role-def-modal') cancelRoleDefinitionDialog();
     // Return focus to whatever opened it -- if that button has since been
     // hidden with the bulk bar (the batch cleared the selection), focus()
@@ -777,8 +777,6 @@
     });
     trapDialogFocus(overlay);
   }
-  var BULK_MODALS = ['role-modal'];
-  wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
   wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
   wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
   onInventoryAction('onboard-selected', function () { inventoryActions.open('onboard', selectedIds()); });
@@ -787,7 +785,6 @@
   function updateSelBar() {
     if (!selectedIds().length) {
       if (inventory.snapshot().menu === 'more') closeMenus();
-      BULK_MODALS.forEach(closeModal);
     }
   }
 
@@ -817,19 +814,9 @@
     inventory.update({bulkBusy: busy});
     BULK_BTNS.concat(BULK_OPENERS).forEach(function (id) {
       var el = document.getElementById(id);
-      if (el && !el.closest('[data-inventory-react], [data-assignments-react], [data-inventory-actions-react], [data-schedules-react]')) el.disabled = busy;
+      if (el && !el.closest('[data-inventory-react], [data-assignments-react], [data-inventory-actions-react], [data-schedules-react], [data-role-actions-react]')) el.disabled = busy;
     });
     syncRoleActionAvailability();
-  }
-  // Claim the lock for a selected-action, returning the checked ids (or null if
-  // another action holds it or nothing is selected).
-  function claimSelection() {
-    if (bulkBusy || inventory.snapshot().rowBusy.size) return null;
-    cancelSelectAllMatching();
-    var ids = selectedIds();
-    if (!ids.length) { devStatus.textContent = 'No devices selected.'; return null; }
-    setBulkBusy(true);
-    return ids;
   }
   assignments.connect({
     fetch: fetch, post: jpost,
@@ -1002,8 +989,6 @@
   function syncRoleActionAvailability() {
     var unavailable = !!roleCapabilityMessage();
     inventory.update({roleAvailable: !unavailable, policy: peerPolicy, policyOk: peerPolicyReadOk});
-    document.getElementById('apply-role-selected').disabled =
-      unavailable || roleRequestBusy || (bulkBusy && !rolePreview);
   }
   function renderPeerPolicyPanel() {
     var p = peerPolicyReadOk ? peerPolicy : {};
@@ -1050,150 +1035,6 @@
     syncRoleDefinitionsWithPolicy();
   }
 
-  var rolePreview = null, roleDialogGeneration = 0, roleRequestBusy = false;
-  function resetRolePreview() {
-    rolePreview = null;
-    document.getElementById('role-preview').hidden = true;
-    document.getElementById('apply-role-selected').textContent = 'Preview change';
-  }
-  function cancelRoleDialog() {
-    roleDialogGeneration++;
-    resetRolePreview();
-    // Closing does not cancel a request already on the wire. Its finally
-    // releases the lock, so another batch cannot race that outstanding write.
-    if (!roleRequestBusy) setBulkBusy(false);
-  }
-  function roleFailureText(failed) {
-    var ids = Object.keys(failed || {});
-    if (!ids.length) return '';
-    return '; failed: ' + ids.slice(0, 10).map(function (id) {
-      var reason = failed[id] === 'role_shadowed_by_assignment'
-        ? 'explicit ACL assignment shadows the role' : failed[id];
-      return id + ' (' + reason + ')';
-    }).join(', ') + (ids.length > 10 ? '; and ' + (ids.length - 10) + ' more' : '');
-  }
-  function roleRequestError(status, body) {
-    if (status === 412 || body.error === 'revision_conflict') {
-      return 'Peer policy changed. Refresh, then preview the change again before saving.';
-    }
-    if (status === 428) return 'A fresh preview and confirmation are required. Preview the change again.';
-    if (body.error === 'operation_backlog_full') return 'The operation backlog is full (' +
-      policyCount(body.unacknowledged) + '/' + policyCount(body.capacity) +
-      '). Wait for the tracker to acknowledge operations, then preview again.';
-    if (status === 503) return 'Role changes are unavailable. Check policy state and the tracker, then refresh before retrying.';
-    return 'Set role was refused' + (body.error ? ': ' + body.error : ' (' + status + ')') +
-      '. Refresh and preview again.';
-  }
-  onInventoryAction('set-role-selected', function () {
-    if (bulkBusy || !selectedIds().length) return;
-    var warning = roleCapabilityMessage();
-    if (warning) { devStatus.textContent = warning; return; }
-    roleDialogGeneration++;
-    resetRolePreview();
-    document.getElementById('role-modal-msg').textContent = '';
-    document.getElementById('role-modal-count').textContent = selectedIds().length + ' selected';
-    var sel = document.getElementById('role-selected');
-    sel.innerHTML = '<option value="" disabled selected>— choose a role —</option>' +
-      '<option value="__none">— no role —</option>' +
-      Object.keys((peerPolicy.roles || {}).members || {}).sort().map(function (name) {
-        return '<option value="' + esc(name) + '">' + esc(name) + '</option>';
-      }).join('');
-    sel.value = '';
-    sel.disabled = false;
-    if (!Object.keys((peerPolicy.roles || {}).members || {}).length) {
-      document.getElementById('role-modal-msg').textContent =
-        'No roles are defined yet. Open Policies and choose New role.';
-    }
-    openModal('role-modal');
-  });
-  document.getElementById('role-selected').addEventListener('change', function () {
-    if (roleRequestBusy) return;
-    resetRolePreview();
-    setBulkBusy(false);
-    document.getElementById('role-modal-msg').textContent = '';
-  });
-  document.getElementById('apply-role-selected').addEventListener('click', async function () {
-    if (roleRequestBusy) return;
-    var msg = document.getElementById('role-modal-msg');
-    var raw = document.getElementById('role-selected').value;
-    if (!raw) { msg.textContent = 'Choose a role, or "no role" to clear the declared role.'; return; }
-    var warning = roleCapabilityMessage();
-    if (warning) { msg.textContent = warning; resetRolePreview(); setBulkBusy(false); return; }
-    var committing = !!rolePreview;
-    var ids = committing ? rolePreview.ids : claimSelection();
-    if (!ids) return;
-    // The preview response has a candidate revision. CAS always carries the
-    // revision read BEFORE preview, even when the regular table poll advances.
-    var revision = committing ? rolePreview.revision : peerPolicy.revision;
-    var role = committing ? rolePreview.role : (raw === '__none' ? null : raw);
-    var payload = { device_ids: ids, role: role };
-    if (committing) payload.confirm_token = rolePreview.confirm_token;
-    var generation = roleDialogGeneration;
-    var keepLock = false;
-    roleRequestBusy = true;
-    document.getElementById('role-selected').disabled = true;
-    document.getElementById('apply-role-selected').disabled = true;
-    msg.textContent = committing ? 'Setting role… Closing this dialog does not cancel the request.' : 'Previewing change…';
-    try {
-      var response = await fetch('/api/v1/devices/bulk-role' + (committing ? '' : '?dry_run=1'), {
-        method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json',
-          'If-Match': '"iris-peer-policy-' + revision + '"' }), body: JSON.stringify(payload)
-      });
-      var body = await response.json();
-      if (!committing && generation !== roleDialogGeneration) return;
-      if (committing && typeof body.applied === 'number') {
-        devStatus.textContent = 'Set role applied to ' + body.applied + '/' + ids.length + ' device(s)' +
-          roleFailureText(body.failed) + '; role drift: ' + policyCount((body.role_drift || {}).count) + '.';
-      }
-      if (!response.ok) {
-        msg.textContent = roleRequestError(response.status, body);
-        if (committing && (body.partial || typeof body.applied === 'number')) {
-          msg.textContent = devStatus.textContent + ' ' + msg.textContent;
-        }
-        resetRolePreview();
-      } else if (committing) {
-        if (!body.ok || Object.keys(body.failed || {}).length) {
-          msg.textContent = devStatus.textContent + ' Review the failed devices before another preview.';
-          resetRolePreview();
-        } else {
-          closeModal('role-modal');
-        }
-      } else if (!body.ok || !body.applied) {
-        msg.textContent = 'No role changes can be applied' + roleFailureText(body.failed) + '.';
-        resetRolePreview();
-      } else {
-        rolePreview = { ids: ids.slice(), role: role, revision: revision, confirm_token: body.confirm_token };
-        var previewEl = document.getElementById('role-preview');
-        previewEl.textContent = 'Set role to ' + (role || 'no role') + ' for ' + body.applied + '/' + ids.length + ' device(s)' +
-          roleFailureText(body.failed) + '.\n' +
-          'Membership changes: ' + policyCount(body.member_delta) +
-          '\nDevices losing origin access: ' + policyCount(body.origin_access_lost) +
-          '\nEmpty permitted peer sets: ' + policyCount(body.empty_permitted_sets) +
-          '\nRole pairings stopped: ' + policyCount(body.role_pairs_stopped) +
-          '\nQoS policy changed: ' + (body.qos_changed === true ? 'yes' : body.qos_changed === false ? 'no' : 'unknown') +
-          '\nChanges affect new pairings; existing device-to-device sessions may continue.' +
-          (body.requires_confirmation ? '\nThis exceeds the confirmation threshold. Set role confirms these effects.' : '');
-        previewEl.hidden = false;
-        msg.textContent = 'Review the preview, then choose Set role to save or Cancel to leave roles unchanged.';
-        document.getElementById('apply-role-selected').textContent = 'Set role';
-        document.getElementById('role-modal-count').textContent = ids.length + ' selected';
-        keepLock = true;
-      }
-    } catch (e) {
-      msg.textContent = committing
-        ? 'Response unavailable. Role changes may have been saved; refresh and review before trying again.'
-        : 'Preview unavailable. No commit was sent; refresh and preview again.';
-      if (committing) devStatus.textContent = msg.textContent;
-      resetRolePreview();
-    } finally {
-      roleRequestBusy = false;
-      document.getElementById('role-selected').disabled = false;
-      if (!keepLock || generation !== roleDialogGeneration) setBulkBusy(false);
-      syncRoleActionAvailability();
-      if (keepLock) document.getElementById('apply-role-selected').focus();
-      if (committing || !keepLock) refreshDevices().catch(function () {});
-    }
-  });
   // ---- Role definitions: create, edit, delete, import, export ----
   // Definitions are the policy's own objects (GET /peer-policy/roles), read
   // while Policies is visible with its panel open, and after every definition
@@ -1697,61 +1538,31 @@
   });
   // ---- End role workflow ----
 
-  // Quarantine/release the whole selection. The peer-policy API is one device
-  // per call and carries a revision, so these run in sequence and carry the
-  // revision forward; a losing race re-reads the policy once rather than
-  // stamping a stale revision over someone else's change.
-  async function bulkQuarantine(quarantined) {
-    var ids = selectedIds();
-    if (!ids.length || bulkBusy) return;
-    var verb = quarantined ? 'Quarantine' : 'Release';
-    if (!confirm(verb + ' ' + ids.length + ' device' + (ids.length === 1 ? '' : 's') +
-        '?\n\nChanges peer and server access for all images. ' +
-        'Existing device-to-device transfers may continue. Device software is unchanged.')) return;
-    setBulkBusy(true);
-    var ok = 0, failed = [];
-    try {
-      for (var i = 0; i < ids.length; i++) {
-        var id = ids[i];
-        var done = false;
-        for (var attempt = 0; attempt < 2 && !done; attempt++) {
-          var r = await fetch('/api/v1/peer-policy/quarantine/' + encodeURIComponent(id), {
-            method: 'PUT', headers: csrfHdr({
-              'Content-Type': 'application/json',
-              'If-Match': '"iris-peer-policy-' + peerPolicy.revision + '"'
-            }),
-            body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
-          });
-          var body = await r.json().catch(function () { return {}; });
-          if (r.ok) {
-            peerPolicy.revision = body.revision;
-            peerPolicy.quarantine_assignments =
-              (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
-            if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
-            ok++; done = true;
-          } else if (r.status === 409 && attempt === 0) {
-            // someone else moved the policy on: re-read and try this one again
-            var pr = await fetch('/api/v1/peer-policy');
-            if (pr.ok) peerPolicy = await pr.json();
-          } else {
-            failed.push(id); done = true;
-          }
-        }
-      }
-      devStatus.textContent = verb + ' intent saved for ' + ok + ' device' +
-        (ok === 1 ? '' : 's') +
-        (failed.length ? ('; ' + failed.length + ' failed: ' + failed.join(', ')) : '.');
-    } finally {
-      setBulkBusy(false);
-      refreshDevices().catch(function () {});
-    }
-  }
-  onInventoryAction('quarantine-selected', function () {
-    bulkQuarantine(true);
+  // React owns captured role targets, preview/commit and serial quarantine.
+  roleActions.connect({
+    fetch: fetch, headers: csrfHdr,
+    warning: roleCapabilityMessage,
+    policyWriteBusy: function () { return roleDefBusy; },
+    confirm: function (message) { return confirm(message); },
+    isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
+    refreshInventory: async function () {
+      // A hidden/superseded read is not evidence for retrying an unknown write.
+      var result = await refreshDevices();
+      return !!(result && result.policyOk && result.policyTicket === peerPolicyReadGeneration && peerPolicyReadOk);
+    },
+    invalidatePolicyReads: function () { peerPolicyReadGeneration++; inventory.invalidate(); },
+    report: function (message, failed) { inventory.report(message, failed); },
+    claimBulk: function () {
+      if (bulkBusy || inventory.snapshot().rowBusy.size) return false;
+      cancelSelectAllMatching(); setBulkBusy(true); return true;
+    },
+    releaseBulk: function () { setBulkBusy(false); }
   });
-  onInventoryAction('release-selected', function () {
-    bulkQuarantine(false);
-  });
+  inventory.subscribe(function () { roleActions.prerequisites(inventory.snapshot()); });
+  roleActions.prerequisites(inventory.snapshot());
+  onInventoryAction('set-role-selected', function () { roleActions.open(selectedIds()); });
+  onInventoryAction('quarantine-selected', function () { return roleActions.quarantine(selectedIds(), true); });
+  onInventoryAction('release-selected', function () { return roleActions.quarantine(selectedIds(), false); });
 
   onInventoryAction('adopt-selected', function () { return inventoryActions.act('adopt', selectedIds()); });
   onInventoryAction('assign-images-selected', function () { assignments.openImages(selectedIds()); });
@@ -4140,7 +3951,7 @@
       closeModal('role-def-modal');
       closeModal('policy-advanced-modal');
     }
-    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); }
+    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); }
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });

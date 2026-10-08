@@ -123,13 +123,14 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     assert "['role', 'role'" in component and "['peer', 'peer'" in component
     assert "peer-intent badge" in component and "Quarantined intent" in component
     assert "bulkButton('set-role-selected', 'Set role…')" in component
-    modal = html.split('id="role-modal"', 1)[1].split('id="iris-assignments-root"', 1)[0]
+    modal = _react_shell('role-actions.jsx')
+    assert 'id="iris-role-actions-root" data-role-actions-react' in html
     assert 'role="dialog" aria-modal="true" aria-labelledby="role-modal-title"' in modal
     for cid in ('role-modal-title', 'role-selected', 'role-modal-msg', 'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
         assert 'id="%s"' % cid in modal
     assert 'aria-live="polite"' in modal
-    assert "wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);" in js
-    assert "'role-modal'" in js.split('var BULK_MODALS = [', 1)[1].split(']', 1)[0]
+    assert "controller.close()" in modal and "event.key === 'Escape'" in modal
+    assert "wireModal('role-modal'" not in js and "BULK_MODALS" not in js
     assert "'apply-role-selected'" in js.split('var BULK_BTNS = [', 1)[1].split(']', 1)[0]
     assert "'set-role-selected'" in js.split('var BULK_OPENERS = [', 1)[1].split(']', 1)[0]
     assert 'id="peer-policy-panel"' in html and 'id="role-capability-banner"' in html
@@ -137,7 +138,8 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     assert '<textarea' not in panel and '<textarea' not in modal
     assert '.policy-counts' in css and 'minmax(' in css
     workflow = js.split('// ---- Role workflow ----', 1)[1].split('// ---- End role workflow ----', 1)[0]
-    assert workflow.count("'/api/v1/devices/bulk-role'") == 1
+    assert _react_shell('role-actions-controller.mjs').count("'/api/v1/devices/bulk-role'") == 1
+    assert "'/api/v1/devices/bulk-role'" not in workflow
     assert 'forSelected(' not in workflow and "method: 'PUT'" not in workflow
 
 
@@ -175,7 +177,7 @@ function selectedIds() { return selection.slice(); }
 function setBulkBusy(b) { bulkBusy = b; }
 function claimSelection() { if (bulkBusy) return null; setBulkBusy(true); return selectedIds(); }
 function openModal(id) { el(id).hidden = false; }
-function closeModal(id) { el(id).hidden = true; if (id === 'role-modal') cancelRoleDialog(); if (id === 'role-def-modal') cancelRoleDefinitionDialog(); }
+function closeModal(id) { el(id).hidden = true; if (id === 'role-def-modal') cancelRoleDefinitionDialog(); }
 function csrfHdr(h) { return {...h, 'X-CSRF-Token': 'test-csrf'}; }
 function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
 function fmtDate(v) { return 'time:' + v; }
@@ -343,129 +345,13 @@ for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.
 ''')
 
 
-def test_role_bulk_action_uses_one_aggregate_preview_and_commit():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 0, 'untouched picker must be a no-op');
-el('role-selected').value = 'boat';
-reply(preview());
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 1);
-assert.equal(calls[0].url, '/api/v1/devices/bulk-role?dry_run=1');
-assert.deepEqual(calls[0].body, {device_ids: selection, role: 'boat'});
-assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
-assert.equal(bulkBusy, true, 'retain selection lock while the operator reviews');
-assert.match(el('role-preview').textContent, /origin/i);
-assert.match(el('role-preview').textContent, /QoS policy changed: yes/);
-peerPolicy.revision = 99; // polling must not replace the preview's base revision
-reply({ok: true, applied: 2, failed: {}, revision: 8, role_drift: {count: 0}});
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 2);
-assert.equal(calls[1].url, '/api/v1/devices/bulk-role');
-assert.deepEqual(calls[1].body, {device_ids: selection, role: 'boat', confirm_token: 'preview-token'});
-assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(bulkBusy, false);
-assert.match(devStatus.textContent, /2\/2/);
-assert.equal(el('role-modal').hidden, true);
-assert.ok(refreshes);
-''')
-
-
-@pytest.mark.parametrize('status,code', [
-    (412, 'precondition_failed'), (428, 'confirmation_required'),
-    (409, 'operation_backlog_full'), (503, 'policy_unavailable')])
-def test_role_bulk_commit_error_discards_preview_and_never_retries(status, code):
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = '__none';
-reply(preview());
-await el('apply-role-selected').listeners.click();
-assert.equal(calls[0].body.role, null);
-reply({error: CODE, unacknowledged: 256, capacity: 256}, STATUS);
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 2);
-assert.equal(bulkBusy, false);
-assert.equal(el('apply-role-selected').textContent, 'Preview change');
-assert.ok(el('role-modal-msg').textContent.length > 10);
-assert.equal(el('role-modal').hidden, false);
-'''.replace('CODE', repr(code)).replace('STATUS', str(status)))
-
-
-def test_role_bulk_cancellation_partial_and_network_outcomes():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply(preview({applied: 1, failed: {'off-page': 'role_shadowed_by_assignment'}}));
-await el('apply-role-selected').listeners.click();
-assert.match(el('role-preview').textContent, /off-page/);
-closeModal('role-modal');
-assert.equal(bulkBusy, false);
-assert.equal(calls.length, 1, 'cancel must never commit');
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply(preview());
-await el('apply-role-selected').listeners.click();
-reply({error: 'fleet_write_failed', partial: true, applied: 1,
-  failed: {'off-page': 'write_failed'}, role_drift: {count: 1}}, 503);
-await el('apply-role-selected').listeners.click();
-assert.match(devStatus.textContent, /1\/2/);
-assert.match(devStatus.textContent, /off-page/);
-assert.match(devStatus.textContent, /drift.*1|1.*drift/i);
-reply(preview());
-await el('apply-role-selected').listeners.click();
-replies.push(new Error('offline'));
-await el('apply-role-selected').listeners.click();
-assert.match(el('role-modal-msg').textContent, /may have been saved/);
-assert.equal(bulkBusy, false);
-''')
-
-
-def test_role_bulk_pending_cancel_and_changed_choice_invalidate_preview():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-let resolvePreview;
-replies.push(() => new Promise(resolve => {resolvePreview = resolve;}));
-const pending = el('apply-role-selected').listeners.click();
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 1, 'double click must not send a second preview');
-closeModal('role-modal');
-assert.equal(bulkBusy, true, 'retain lock until cancelled preview returns');
-resolvePreview({ok: true, status: 200, json: async () => preview()});
-await pending;
-assert.equal(bulkBusy, false);
-assert.equal(el('role-preview').hidden, true);
-assert.equal(el('role-modal').hidden, true);
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply(preview({requires_confirmation: false, confirm_token: null, qos_changed: false}));
-await el('apply-role-selected').listeners.click();
-assert.match(el('role-preview').textContent, /QoS policy changed: no/);
-el('role-selected').value = '__none';
-el('role-selected').listeners.change();
-assert.equal(bulkBusy, false);
-assert.equal(el('apply-role-selected').textContent, 'Preview change');
-reply(preview());
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.at(-1).url, '/api/v1/devices/bulk-role?dry_run=1');
-assert.equal(calls.at(-1).body.role, null);
-''')
-
-
-def test_role_bulk_all_failed_preview_cannot_commit_and_labels_the_refusal():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply({ok: false, applied: 0, failed: {'off-page': 'role_shadowed_by_assignment'}});
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 1);
-assert.equal(bulkBusy, false);
-assert.equal(el('apply-role-selected').textContent, 'Preview change');
-assert.match(el('role-modal-msg').textContent, /explicit ACL assignment shadows the role/);
-assert.equal(el('role-preview').hidden, true);
-''')
+def test_role_actions_execute_captured_targets_and_checked_response_regressions():
+    """Use the shipped controller, not a second implementation of its behavior."""
+    import subprocess
+    from pathlib import Path
+    tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/role-actions.test.mjs"
+    result = subprocess.run(["node", "--test", str(tests)], text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_peer_policy_panel_distinguishes_unknown_preflight_from_zero():
@@ -510,7 +396,7 @@ renderPeerPolicyPanel();
 assert.equal(el('role-capability-banner').hidden, false);
 assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
 assert.equal(inventory.state.roleAvailable, false);
-assert.equal(el('apply-role-selected').disabled, true);
+assert.equal(inventory.state.policyOk, true);
 delete peerPolicy.roles_supported; // genuinely older response, no capability flag
 delete peerPolicy.roles_present;
 renderPeerPolicyPanel();
@@ -532,7 +418,8 @@ assert.match(el('role-capability-banner').textContent, /fail.closed/i);
 peerPolicyReadOk = false;
 renderPeerPolicyPanel();
 assert.match(el('role-capability-banner').textContent, /unavailable/i);
-await el('set-role-selected').listeners.click();
+assert.equal(inventory.state.roleAvailable, false);
+assert.equal(inventory.state.policyOk, false);
 assert.equal(calls.length, 0);
 ''')
 
@@ -762,16 +649,13 @@ def test_all_selected_actions_share_one_busy_lock():
     for el in ("onboard-selected", "undeploy-selected", "set-cred-selected"):
         assert el in openers, "%s is not disabled while a bulk action runs" % el
     assert "BULK_BTNS.concat(BULK_OPENERS).forEach" in js
-    # Every action claims the lock rather than reading another button's state.
-    # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
-    # action cannot be added without also claiming the lock -- quarantine and
-    # release are the two exceptions, guarded inside bulkQuarantine instead.
-    claimers = [a for a in actions
-                if a not in ("quarantine-selected", "release-selected", "assign-images-selected", "apply-cred-selected",
-                             "onboard-confirm", "undeploy-confirm", "adopt-selected", "delete-selected", "create-schedule")]
-    assert js.count("claimSelection()") == len(claimers) + 1, (
-        "%d legacy actions but %d calls claim the lock (excluding its definition)"
-        % (len(claimers), js.count("claimSelection()") - 1))
+    # Controllers claim the common adapter lock, never another button's state.
+    assert "claimSelection()" not in js
+    for name in ('assignments', 'inventory-actions', 'schedules', 'role-actions'):
+        owner = _react_shell(name + '-controller.mjs')
+        assert "this.services.claimBulk(" in owner and "this.services.releaseBulk()" in owner
+    assert "roleActions.quarantine(selectedIds(), true)" in js
+    assert "roleActions.quarantine(selectedIds(), false)" in js
     assert "onBtn.disabled" not in js and "unBtn.disabled" not in js
     # Migrated actions all claim the same lock through their controller.
     controller = _react_shell('inventory-actions-controller.mjs')

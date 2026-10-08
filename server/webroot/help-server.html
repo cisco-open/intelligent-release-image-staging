@@ -131,6 +131,11 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       An unknown creation result needs <strong>Refresh schedules before
       retrying</strong>; check whether the named schedule already exists.
       Closing the dialog does not cancel a submitted request.</li>
+      <li>Set role keeps its reviewed devices fixed. If the result is uncertain,
+      use <strong>Refresh policy before retrying</strong> and check the roles
+      before another preview. Bulk quarantine stops on an uncertain result;
+      devices marked <strong>not attempted</strong> were left unchanged by
+      that batch.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>

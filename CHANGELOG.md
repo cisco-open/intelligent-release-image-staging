@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move Inventory Set role and bulk quarantine into React. Preserve reviewed
+  targets and preview revisions, check response accounting and report partial
+  or uncertain outcomes. Stop quarantine batches after an uncertain result
+  and identify devices not attempted.
+
 - Move schedule creation, history and ownership actions into React. Keep the
   reviewed target fixed, order panel and Inventory reads, preserve conditional
   ownership writes, and require review after an unknown creation result.

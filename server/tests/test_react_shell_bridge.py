@@ -82,6 +82,22 @@ def test_schedule_roots_have_one_owner_and_share_inventory_read_ordering():
     assert "setInterval(" not in (source / "schedules-controller.mjs").read_text()
 
 
+def test_inventory_role_actions_have_one_dom_owner_and_no_additional_timer():
+    legacy = APP.read_text()
+    html = APP.with_name("index.html").read_text()
+    source = APP.parent.parent / "console-ui/src"
+    for identifier in ('role-modal', 'role-selected', 'role-preview', 'role-modal-msg', 'apply-role-selected'):
+        assert "getElementById('%s')" % identifier not in legacy
+        assert 'id="%s"' % identifier not in html
+    assert 'id="iris-role-actions-root" data-role-actions-react' in html
+    assert 'mountRoleActions();' in (source / 'main.jsx').read_text()
+    assert 'roleActions.hide();' in legacy
+    assert 'result.policyTicket === peerPolicyReadGeneration' in legacy
+    assert '[data-role-actions-react]' in legacy
+    assert 'dangerouslySetInnerHTML' not in (source / 'role-actions.jsx').read_text()
+    assert 'setInterval(' not in (source / 'role-actions-controller.mjs').read_text()
+
+
 def test_session_status_and_logout_bridge_preserves_csrf_and_idle_semantics():
     if not shutil.which("node"):
         pytest.skip("Node is required for the browser-client bridge test")

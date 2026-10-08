@@ -121,6 +121,7 @@ export class InventoryController {
     this.update(patch);
     this.services.publish?.(this.state, policyTicket);
     this.services?.selectionChanged?.(this.selectedIds());
+    return {policyTicket, policyOk: !!policyOk};
   }
   changeSelection(selected) {
     this.cancelSelection(); this.update({selected});

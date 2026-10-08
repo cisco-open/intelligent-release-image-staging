@@ -75,8 +75,8 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. Role dialogs still use
-the older controller.
+write result is reported without retrying. The Policies role-definition
+editor still uses the older controller.
 
 The Add Device and credential forms use `device-forms-controller.mjs`, a shared
 model and `device-forms.jsx`. Model lookups only narrow the chosen management
@@ -115,6 +115,16 @@ come from the server; the browser does not recalculate recurring dates.
 Writes use the shared device mutation lock and checked results. Reaffirmation
 keeps the displayed ETag. Unknown creation requires an explicit list refresh
 before another submission. Hidden views stop reads, not submitted writes.
+
+Inventory Set role and bulk quarantine use `role-actions-controller.mjs`, its
+model and `role-actions.jsx`. Role targets are captured at opening, and commit
+uses the original preview revision and token. Checked accounting distinguishes
+complete, partial, refused and unknown results. A successful explicit policy
+refresh is required before retrying an uncertain commit. The shared device lock
+survives preview review and pending cancellation. Quarantine advances its own
+revision serially; only a confirmed conflict gets one reread and retry. Unknown
+outcomes stop the remaining devices. The separate Policies definition editor,
+imports and diagnostics remain in the older controller.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -190,6 +200,13 @@ history, unavailable evidence, revision conflicts and uncertain writes.
 `server/tests/test_schedules_client_api.py` exercises the shipped controller
 against real temporary stores for creation, history, stale ETags and ownership
 transfer. No runner or live device is started by that test.
+Role-action tests cover captured targets, preview effects, original revision
+and token, partial accounting, drift, cancellation and unknown replies.
+`server/tests/test_role_actions_client_api.py` checks the shipped controller
+against temporary authenticated stores for aggregate partial results, cleared
+membership, stale preview refusal and serial quarantine conflict recovery.
+Browser tests also check focus, named confirmation, mobile layout and plain-text
+failure messages. These fixtures do not qualify live enforcement or TLS.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console
