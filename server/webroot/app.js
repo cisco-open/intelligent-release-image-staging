@@ -859,25 +859,7 @@
     });
   }
 
-  // ---- Images (unchanged behavior) ----
-  var statusEl = document.getElementById('status');
-  var imageJobGen = 0;
-  // The full last-fetched /api/v1/images rows, kept for the image-detail drawer
-  // (KGV / Cisco Bulk Hash reconciler, Task 5) -- refreshImages() only ever
-  // wrote row HTML before, with nowhere to read a single image's verdict
-  // back out of once the drawer needed one.
-  var LAST_IMAGES = [];
-  // Verdict PILL (Task 7: was a plain .badge, now the Magnetic status-pill
-  // grammar) shared by the Images catalog, the image-detail drawer and the
-  // image picker: null state (never checked) reads as neutral, a mismatch
-  // reads as quarantined only while quarantined is actually still true (an
-  // override-released mismatch stays a mismatch verdict forever --
-  // release_quarantine() deliberately never rewrites hash_verification.state
-  // -- but it is no longer BLOCKING anything, so it must not keep claiming
-  // "quarantined"). Deferral is an orthogonal warning that can accompany any
-  // state, per the spec. A standalone derivation (not routed through
-  // statusDisplay()'s deviceStatus() key space) -- see levelPillHTML's own
-  // comment for why the two domains stay separate.
+  // Shared with the remaining legacy image picker.
   function bulkhashVerdictPillHTML(hv, quarantined) {
     var state = hv && hv.state;
     var html;
@@ -904,351 +886,47 @@
     }
     return html;
   }
-  // Set once by an Overview "Needs attention" image card (goToImagesFiltered
-  // below) just before routing here; consumed the next time the catalog's
-  // data is (re)fetched, so the toggle below reflects it even though the
-  // fetch and the navigation race each other.
-  var PENDING_IMG_ATTENTION = false;
-  async function refreshImages() {
-    var r = await fetch('/api/v1/images'); if (!r.ok) return;
-    var imgs = (await r.json()).images || [];
-    imgs.sort(function (a, b) { return (b.published_at || 0) - (a.published_at || 0); });
-    LAST_IMAGES = imgs;
-    if (PENDING_IMG_ATTENTION) {
-      var attnBox = document.getElementById('images-filter-attention');
-      if (attnBox) attnBox.checked = true;
-      PENDING_IMG_ATTENTION = false;
-    }
-    renderImageRows();
-  }
-  // Pure client-side render from LAST_IMAGES -- no fetch -- so the "Needs
-  // attention only" toggle can re-render instantly, the same pattern
-  // applyDeviceFilters() uses for the Devices table.
-  function renderImageRows() {
-    var attnBox = document.getElementById('images-filter-attention');
-    var attnOnly = !!(attnBox && attnBox.checked);
-    var imgs = attnOnly
-      ? LAST_IMAGES.filter(function (i) { return !!i.quarantined; })
-      : LAST_IMAGES;
-    // Catalog rows lead with the exact filename + verdict pill; image id
-    // stays adjacent (spec Task 7 Step 5).
-    document.getElementById('rows').innerHTML = imgs.length ? imgs.map(function (i) {
-      return '<tr data-id="' + esc(i.id) + '"><td class="machine">' + dash(i.filename) + '</td><td>' +
-        bulkhashVerdictPillHTML(i.hash_verification, i.quarantined) + '</td><td class="machine">' + esc(i.id) +
-        '</td><td class="machine">' + esc(fmtSize(i.size)) + '</td><td class="machine">' +
-        esc((i.sha256 || '').slice(0, 16)) + '…</td><td class="machine">' + esc(fmtDate(i.published_at)) +
-        '</td><td><button class="linkish img-info" title="Image details" aria-label="' +
-        'Image details for ' + esc(i.id) + '">ⓘ</button> ' +
-        '<button class="linkish danger-link del-img">delete</button></td></tr>';
-    }).join('') : '<tr><td colspan="7" class="muted">No images match.</td></tr>';
-    document.querySelectorAll('#rows .del-img').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        if (!confirm('Delete image ' + id + '? This removes it from the catalog and stops seeding.')) return;
-        var r = await fetch('/api/v1/images/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
-        if (r.status === 409) { var j = await r.json(); alert('Cannot delete: assigned to ' + (j.assigned || []).join(', ') + '. Reassign those devices first.'); return; }
-        refreshImages(); refreshImportable();
-      });
+
+  // Images owns its state, rendering and jobs in React. Keep session/CSRF and
+  // visible-view scheduling shared until the other operational views migrate.
+  function imageCommand(action, services) {
+    return new Promise(function (resolve, reject) {
+      window.dispatchEvent(new CustomEvent('iris:images-command', {
+        detail: {action: action, services: services, resolve: resolve, reject: reject}
+      }));
     });
-    document.querySelectorAll('#rows .img-info').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        openImageInfo(btn.closest('tr').getAttribute('data-id'));
-      });
-    });
-    var countEl = document.getElementById('images-count');
-    if (countEl) {
-      countEl.textContent = attnOnly
-        ? imgs.length + ' of ' + LAST_IMAGES.length + ' image' + (LAST_IMAGES.length === 1 ? '' : 's')
-        : LAST_IMAGES.length + ' image' + (LAST_IMAGES.length === 1 ? '' : 's');
-    }
   }
-  document.getElementById('images-filter-attention').addEventListener('change', renderImageRows);
-  // Overview's quarantined-images attention card routes here.
+  async function refreshImages() { return imageCommand('refresh'); }
+  async function refreshImportable() { return imageCommand('importable'); }
   function goToImagesFiltered() {
-    PENDING_IMG_ATTENTION = true;
+    imageCommand('attention');
     location.hash = '#images';
   }
-  // ---- Image detail drawer: verdict + release-from-quarantine, with the
-  // typed-confirm override path (KGV / Cisco Bulk Hash reconciler, Task 5).
-  // Mirrors openDeployInfo/closeDeployInfo's drawer pattern below.
-  var imgInfoId = null;
-  var imgInfoOpener = null;
-  function imageVerdictDetailText(hv) {
-    if (!hv || !hv.checked_at) return 'Never checked against the Cisco Bulk Hash feed.';
-    var text = 'Checked ' + fmtDate(hv.checked_at) + ' (source: ' + (hv.source || 'unknown') + ')';
-    if (hv.feed_published_at) text += '; feed published ' + fmtDate(hv.feed_published_at);
-    return text + '.';
-  }
-  function openImageInfo(id) {
-    imgInfoId = id;
-    imgInfoOpener = document.activeElement;
-    var img = LAST_IMAGES.filter(function (x) { return x.id === id; })[0] || {};
-    document.getElementById('ii-id').textContent = id;
-    document.getElementById('ii-file').textContent = img.filename || '';
-    document.getElementById('ii-verdict').innerHTML = bulkhashVerdictPillHTML(img.hash_verification, img.quarantined);
-    document.getElementById('ii-verdict-detail').textContent = imageVerdictDetailText(img.hash_verification);
-    // The operator's own `iris-publish --signature-verified` attestation
-    // (operator_attested_signature) is a separate fact from the reconciler's
-    // verdict above (cisco_signature_verified) -- #88, so it never disappears
-    // when the reconciler runs. Shown plainly, never as a pill, so it never
-    // reads as a second automated verdict.
-    document.getElementById('ii-operator-attestation').textContent =
-      img.operator_attested_signature
-        ? 'Operator attested at publish time that the Cisco signature was verified elsewhere.'
-        : 'Not attested by the publishing operator.';
-    // The release action only makes sense while an image is ACTUALLY
-    // quarantined -- an override-released mismatch keeps its "mismatch"
-    // verdict (see bulkhashVerdictPillHTML) but is not blocking anything, so
-    // there is nothing left here to release.
-    document.getElementById('ii-release-block').hidden = !img.quarantined;
-    document.getElementById('ii-override-block').hidden = true;
-    document.getElementById('ii-override-note').textContent = '';
-    document.getElementById('ii-confirm-text').value = '';
-    document.getElementById('ii-release-msg').textContent = '';
-    document.getElementById('img-info-panel').hidden = false;
-    document.getElementById('ii-close').focus();
-  }
-  function closeImageInfo() {
-    imgInfoId = null;
-    document.getElementById('img-info-panel').hidden = true;
-    if (imgInfoOpener) { imgInfoOpener.focus(); imgInfoOpener = null; }
-  }
-  document.getElementById('ii-close').addEventListener('click', closeImageInfo);
-  document.addEventListener('keydown', function (e) {
-    var panel = document.getElementById('img-info-panel');
-    if (e.key === 'Escape' && panel && !panel.hidden) closeImageInfo();
-  });
-  // No trapDialogFocus here (Task 6, fix wave): this drawer is non-modal --
-  // no backdrop, openImageInfo can be called again for another row while
-  // this is open -- so Tab must be free to leave it for the rest of the
-  // page. Focus still moves in on open and is restored to the opener above.
-  // Normal release first; the API answers 409 quarantine_still_mismatched
-  // when the stored sha512 still disagrees, which is when the override path
-  // (typed filename confirmation) appears. Every other failure is surfaced
-  // via the API's own error message, honestly, rather than a made-up one.
-  async function attemptReleaseQuarantine(override, confirmText) {
-    var msg = document.getElementById('ii-release-msg'); msg.textContent = '';
-    var releaseBtn = document.getElementById('ii-release');
-    var overrideBtn = document.getElementById('ii-release-override');
-    releaseBtn.disabled = true; overrideBtn.disabled = true;
-    try {
-      var r = await jpost('/api/v1/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine',
-        { override: override, confirm_text: confirmText });
-      var body = {};
-      try { body = await r.json(); } catch (e) { }
-      if (r.ok) {
-        closeImageInfo(); refreshImages();
-        // Same reason as the Refresh now / offline upload handlers below:
-        // keeps imageQuarantined (the picker's block list) from lagging
-        // this release by up to one periodic devices-view poll interval,
-        // during which the just-released image would stay unpickable.
-        refreshDevices().catch(function () { });
-        return;
-      }
-      if (r.status === 409 && body.error === 'quarantine_still_mismatched') {
-        document.getElementById('ii-override-block').hidden = false;
-        document.getElementById('ii-override-note').textContent =
-          'Still mismatching the Cisco feed — type the exact filename below to override.';
-        return;
-      }
-      msg.textContent = body.error || ('Release failed (' + r.status + ').');
-    } catch (e) {
-      msg.textContent = 'Network error — release request failed.';
-    } finally {
-      releaseBtn.disabled = false; overrideBtn.disabled = false;
-    }
-  }
-  document.getElementById('ii-release').addEventListener('click', function () {
-    attemptReleaseQuarantine(false, '');
-  });
-  document.getElementById('ii-release-override').addEventListener('click', function () {
-    attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value);
-  });
-  function publishedJobText(job) {
-    var text = 'Published ' + (job.image_id || '');
-    var verification = job.verification;
-    if (!verification) return text + ' ✓';
-    if (verification.outcome !== 'ok') {
-      return text + '; Cisco hash verification incomplete: ' +
-        (verification.detail || 'unknown failure');
-    }
-    if (verification.image_state === 'verified') {
-      return text + ' · verified against Cisco Bulk Hash ✓';
-    }
-    if (verification.image_state === 'mismatch') {
-      return text + ' · Cisco hash mismatch — quarantined';
-    }
-    if (verification.image_state === 'not_in_feed') {
-      return text + ' · not found in Cisco Bulk Hash feed';
-    }
-    return text + ' · Cisco hash verdict unavailable';
-  }
-  function pollJob(jobId) {
-    var gen = ++imageJobGen;
-    function next() { setTimeout(poll, 1000); }
-    async function poll() {
-      try {
-        var r = await fetch('/api/v1/images/jobs/' + jobId);
-        if (gen !== imageJobGen) return;
-        if (!r.ok) { statusEl.textContent = 'Publish status unavailable (' + r.status + '); retrying…'; next(); return; }
-        var j = await r.json();
-        if (gen !== imageJobGen) return;
-        if (j.state === 'done') { statusEl.textContent = publishedJobText(j); refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
-        else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; refreshImportable().catch(function () {}); }
-        else if (j.state === 'verifying') { statusEl.textContent = 'Published ' + (j.image_id || j.filename) + '; checking Cisco Bulk Hash…'; next(); }
-        else { statusEl.textContent = 'Publishing ' + j.filename + '…'; next(); }
-      } catch (e) { statusEl.textContent = 'Publish status unavailable; retrying…'; next(); }
-    }
-    poll();
-  }
-  // Images already on disk but not in the catalog: orphaned uploads after a
-  // catalog reset, and operator-staged files under the read-only image root.
-  async function refreshImportable() {
-    var panel = document.getElementById('import-panel');
-    var r = await fetch('/api/v1/images/importable');
-    if (!r.ok) { panel.hidden = true; return; }
-    var out = await r.json();
-    var cands = out.importable || [];
-    var skipped = out.skipped || [];
-    panel.hidden = cands.length === 0 && skipped.length === 0;
-    // The full path is shown, not just the basename: two files can share a
-    // basename across the roots, and the path is what distinguishes them.
-    document.getElementById('import-rows').innerHTML = cands.map(function (c) {
-      return '<tr><td class="machine">' + esc(c.filename) + '</td><td class="machine">' + esc(fmtSize(c.size)) +
-        '</td><td class="muted machine">' + esc(c.path) +
-        '</td><td><button class="linkish do-import" data-path="' + esc(c.path) +
-        '">import</button></td></tr>';
-    }).concat(skipped.map(function (c) {
-      return '<tr class="muted"><td class="machine">' + esc(c.filename) + '</td><td class="machine">' +
-        esc(fmtSize(c.size)) + '</td><td class="muted machine">' + esc(c.path) +
-        '</td><td>' + esc(c.reason) + '</td></tr>';
-    })).join('');
-    document.querySelectorAll('#import-rows .do-import').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        btn.disabled = true;
-        statusEl.textContent = 'Importing…';
-        var res = await fetch('/api/v1/images/import', {
-          method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ path: btn.getAttribute('data-path') })
-        });
-        if (!res.ok) {
-          btn.disabled = false;
-          var j = await res.json().catch(function () { return {}; });
-          statusEl.textContent = 'Import failed: ' + (j.error || res.status);
-          refreshImportable();
-          return;
-        }
-        pollJob((await res.json()).job_id);
+  await imageCommand('connect', {
+    fetch: fetch, headers: csrfHdr, post: jpost,
+    refreshDevices: function () { return refreshDevices(); },
+    confirm: function (text) { return window.confirm(text); },
+    alert: function (text) { window.alert(text); },
+    upload: function (file, progress) {
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('PUT', '/api/v1/images/upload/' + encodeURIComponent(file.name));
+        xhr.setRequestHeader('X-CSRF-Token', info.csrf);
+        xhr.upload.onprogress = function (event) {
+          if (event.lengthComputable) progress(event.loaded / event.total * 100);
+        };
+        xhr.onload = function () {
+          if (xhr.status === 401) onSessionLost();
+          if (xhr.status !== 200) { reject(new Error('upload failed (' + xhr.status + ')')); return; }
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch (error) { reject(new Error('Upload response unreadable. Refresh before trying again.')); }
+        };
+        xhr.onerror = function () { reject(new Error('Upload response unavailable. Refresh before trying again.')); };
+        xhr.onabort = function () { reject(new Error('Upload interrupted. Refresh before trying again.')); };
+        xhr.send(file);
       });
-    });
-  }
-  // Per-file upload rows: every picked/dropped file gets its OWN row (name,
-  // progress bar, state text) and its OWN publish poller, so concurrent
-  // uploads never fight over shared elements. The legacy #status singleton
-  // above now serves only the import-from-disk flow (its own #prog/#bar
-  // progress bar was dead -- never unhidden -- and was removed).
-  var uploadsEl = document.getElementById('uploads');
-  function uploadRowUi(name) {
-    var row = document.createElement('div');
-    row.className = 'upload-row';
-    var label = document.createElement('span');
-    label.className = 'up-name'; label.textContent = name; label.title = name;
-    var rowProg = document.createElement('div'); rowProg.className = 'progress';
-    rowProg.setAttribute('role', 'progressbar');
-    rowProg.setAttribute('aria-valuemin', '0');
-    rowProg.setAttribute('aria-valuemax', '100');
-    rowProg.setAttribute('aria-valuenow', '0');
-    rowProg.setAttribute('aria-label', name + ' upload progress');
-    var rowBar = document.createElement('div'); rowBar.className = 'bar';
-    rowProg.appendChild(rowBar);
-    var state = document.createElement('span'); state.className = 'up-state muted';
-    state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite');
-    var dismiss = document.createElement('button');
-    dismiss.type = 'button'; dismiss.className = 'linkish up-dismiss';
-    dismiss.textContent = '×'; dismiss.title = 'Dismiss'; dismiss.hidden = true;
-    dismiss.addEventListener('click', function () { row.remove(); });
-    row.appendChild(label); row.appendChild(rowProg);
-    row.appendChild(state); row.appendChild(dismiss);
-    uploadsEl.appendChild(row);
-    return {
-      progress: function (pct) {
-        rowBar.style.width = pct + '%';
-        rowProg.setAttribute('aria-valuenow', String(Math.round(pct)));
-        state.textContent = Math.round(pct) + '%';
-      },
-      publishing: function () {
-        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
-        state.textContent = 'publishing…';
-      },
-      verifying: function () {
-        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
-        state.textContent = 'checking Cisco Bulk Hash…';
-      },
-      done: function (text) {
-        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
-        state.textContent = text;
-        state.classList.remove('err'); dismiss.hidden = false;
-        // auto-fade finished rows; errors stay until dismissed
-        setTimeout(function () { row.remove(); }, 8000);
-      },
-      error: function (text) {
-        state.textContent = text; state.classList.add('err'); dismiss.hidden = false;
-      }
-    };
-  }
-  function pollUploadJob(jobId, ui) {
-    function next() { setTimeout(poll, 1000); }
-    async function poll() {
-      try {
-        var r = await fetch('/api/v1/images/jobs/' + jobId);
-        if (!r.ok) {
-          // A non-OK status (401 session gone, 404 job evicted/unknown) never
-          // heals — stop the poller and surface it in the row instead of
-          // spinning forever. Network blips (catch below) still retry.
-          ui.error('publish status unavailable (' + r.status + ')');
-          return;
-        }
-        var j = await r.json();
-        if (j.state === 'done') {
-          ui.done(publishedJobText(j));
-          refreshImages().catch(function () {}); refreshImportable().catch(function () {});
-        } else if (j.state === 'error') {
-          ui.error('publish failed: ' + j.message);
-          refreshImportable().catch(function () {});
-        } else {
-          if (j.state === 'verifying') ui.verifying();
-          next();
-        }
-      } catch (e) { next(); }
     }
-    poll();
-  }
-  function upload(file) {
-    if (!file) return;
-    var ui = uploadRowUi(file.name);
-    var MAX = 4 * 1024 * 1024 * 1024;
-    if (file.size > MAX) { ui.error('too large: ' + fmtSize(file.size) + ' (max 4 GB) — not uploaded'); return; }
-    ui.progress(0);
-    var xhr = new XMLHttpRequest();
-    xhr.open('PUT', '/api/v1/images/upload/' + encodeURIComponent(file.name));
-    xhr.setRequestHeader('X-CSRF-Token', info.csrf);
-    xhr.upload.onprogress = function (e) { if (e.lengthComputable) ui.progress(e.loaded / e.total * 100); };
-    xhr.onload = function () {
-      if (xhr.status === 200) { ui.publishing(); pollUploadJob(JSON.parse(xhr.responseText).job_id, ui); }
-      else { ui.error('upload failed (' + xhr.status + ')'); }
-    };
-    xhr.onerror = function () { ui.error('upload error'); };
-    xhr.send(file);
-  }
-  document.getElementById('pick').addEventListener('click', function () { document.getElementById('file').click(); });
-  document.getElementById('file').addEventListener('change', function (e) {
-    Array.prototype.forEach.call(e.target.files, upload);
-    e.target.value = '';   // allow re-picking the same file
   });
-  var drop = document.getElementById('drop');
-  ['dragenter', 'dragover'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('drag'); }); });
-  ['dragleave', 'drop'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('drag'); }); });
-  drop.addEventListener('drop', function (e) { Array.prototype.forEach.call(e.dataTransfer.files, upload); });
 
   // ---- Devices ----
   var devStatus = document.getElementById('dev-status');
@@ -7208,7 +6886,7 @@
     return jobBadge(l.state || 'done') +
       (l.rc == null ? '' : ' <span class="muted">rc=' + esc(l.rc) + '</span>');
   }
-  // Generation counter (same idiom as imageJobGen / caPollGen): two quick
+  // Generation counter (same idiom as caPollGen): two quick
   // "view" clicks race their fetches, and without this the SLOWER response
   // would paint the shared <pre> after the newer one — only the latest
   // requested file may render.

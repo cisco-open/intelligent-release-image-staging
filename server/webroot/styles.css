@@ -467,12 +467,16 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 /* per-file upload rows: each upload owns its bar and state text */
 #uploads { max-width:560px; margin:0 auto; text-align:left; }
 #uploads:empty { display:none; }
-.upload-row { display:flex; gap:10px; align-items:center; margin:8px 0; }
-.upload-row .up-name { flex:0 1 220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
-.upload-row .progress { flex:1 1 auto; margin:0; }
-.upload-row .up-state { white-space:nowrap; font-size:12px; min-width:64px; }
+.upload-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(64px,1fr) auto;
+  gap:6px 10px; align-items:center; margin:12px 0; }
+.upload-row .up-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.upload-row .progress { width:100%; margin:0; }
+/* Put the verdict below the name/bar so long errors neither hide progress
+   nor push a narrow page wider than the viewport. */
+.upload-row .up-state { grid-column:1 / -1; grid-row:2; white-space:normal;
+  overflow-wrap:anywhere; font-size:12px; min-width:0; }
 .upload-row .up-state.err { color:var(--danger); }
-.upload-row .up-dismiss { font-size:14px; }
+.upload-row .up-dismiss { grid-column:3; grid-row:1; font-size:14px; }
 /* per-job onboard log panels (one panel per job in #onboard-logs) */
 #onboard-logs .job-log-panel { margin-top:18px; }
 .job-log-head { display:flex; gap:8px; align-items:center; }

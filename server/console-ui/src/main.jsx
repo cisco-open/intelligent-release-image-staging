@@ -8,6 +8,7 @@ import { flushSync } from 'react-dom';
 import { mountSettingsNavigation } from './settings-navigation.jsx';
 import { mountPolicies } from './policies.jsx';
 import { mountOverview } from './overview.jsx';
+import { mountImages } from './images.jsx';
 import './shell.css';
 
 const primary = [
@@ -195,6 +196,7 @@ export function mountConsoleShell() {
     mountSettingsNavigation();
     mountPolicies();
     mountOverview();
+    mountImages();
   });
 }
 

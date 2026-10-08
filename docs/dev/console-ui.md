@@ -16,7 +16,8 @@ Console](../zensical/user-guide/console.md) for that.
 ## The shell and the legacy app
 
 `server/console-ui/` renders the header, primary navigation, Settings section
-navigation, simple Policies overview and the full Overview dashboard with React.
+navigation, simple Policies overview, full Overview dashboard and Images
+with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
 
@@ -25,11 +26,19 @@ publishes `iris:shell-state` and listens for React's `iris:logout` action.
 Overview uses `iris:overview-state` for rendering and `iris:overview-action`
 for attention-card navigation. The controller keeps authenticated requests,
 shared device-status calculations and the single visible-view refresh timer;
-it never writes into the React-owned Overview subtree. Request generation
-checks prevent older responses from replacing newer state. Settings pages keep their existing
+it never writes into the React-owned Overview or Images subtrees. Request
+generation checks prevent older responses from replacing newer state.
+Settings pages keep their existing
 `#settings/<section>` routes, so a link into a specific Settings section
 still lands there. Settings itself keeps one navigation-rail link and its own
 in-page section bar.
+
+Images owns its catalog, upload and import jobs, and quarantine drawer in
+`images-controller.mjs` and `images.jsx`. The `iris:images-command` adapter
+supplies the shared authenticated transport and routes refreshes from the
+existing timer. Each publish job runs independently. Responses from an older
+catalog request or a closed drawer cannot replace newer state. The adapter
+keeps CSRF tokens inside transport functions, including the upload XHR.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -68,6 +77,8 @@ npm run test:browser
 ```
 
 None of these checks contact a live server or a live device.
+Images checks exercise CSRF-protected writes, typed overrides, refused deletes,
+simultaneous uploads and imports, session expiry, keyboard focus and strict CSP.
 
 ## Building the browser assets
 

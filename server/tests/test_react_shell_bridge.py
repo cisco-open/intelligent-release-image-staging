@@ -90,9 +90,27 @@ def test_console_boots_local_react_before_legacy_workflows():
     assert '<div id="iris-header-root"></div>' in html
     assert '<div id="iris-navigation-root"></div>' in html
     assert '<div id="iris-overview-root"></div>' in html
+    assert '<div id="iris-images-root"></div>' in html
     assert '<main class="main" id="iris-main-content" tabindex="-1">' in html
     assert '<script type="module" src="/assets/console.js"></script>' in html
     assert '<script src="/app.js">' not in html
     assert html.index('href="/styles.css"') < html.index('href="/assets/console.css"')
     for view in ("overview", "images", "devices", "swarm", "settings", "monitoring", "setup"):
         assert 'id="view-%s"' % view in html
+
+
+def test_images_owns_rendering_and_jobs_without_another_inventory_poller():
+    js = APP.read_text()
+    component = (APP.parents[1] / "console-ui/src/images.jsx").read_text()
+    controller = (APP.parents[1] / "console-ui/src/images-controller.mjs").read_text()
+    for identifier in ("rows", "file", "drop", "uploads", "import-panel", "import-rows",
+                       "images-count", "images-filter-attention", "img-info-panel", "ii-close"):
+        assert "getElementById('%s')" % identifier not in js
+        assert 'id="%s"' % identifier in component
+    assert "iris:images-command" in js and "iris:images-command" in component
+    assert "dangerouslySetInnerHTML" not in component
+    assert "setInterval(" not in component and "setInterval(" not in controller
+    assert "fetch: fetch, headers: csrfHdr, post: jpost" in js
+    assert "xhr.setRequestHeader('X-CSRF-Token', info.csrf)" in js
+    assert "if (xhr.status === 401) onSessionLost()" in js
+    assert "if (!event.persisted) controller.dispose()" in component

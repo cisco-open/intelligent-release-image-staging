@@ -52,8 +52,8 @@ Console uploads remain in the separate uploads volume.
    Each file gets its own row with a progress bar, the publish state, and then
    the Bulk Hash result, the checksum Cisco publishes for an image.
 2. Watch the rows.
-   Finished rows fade out. A failed row stays, naming its error, until you
-   dismiss it.
+   Finished rows disappear after a short wait. A failed row stays, naming its
+   error, until you dismiss it.
 
 The cap is 4 GiB per file, and the browser refuses a larger one.
 
@@ -67,6 +67,9 @@ missing from the catalog.
    `image_import`, with `result=fail` and a reason for a rejection.
 2. Read the Bulk Hash result.
    An import runs the check at once, whatever the schedule says.
+
+You can start another import while one is running. The count shows how many
+are still running.
 
 A grayed-out file carries its reason. See
 [Why a file is not offered](#why-a-file-is-not-offered).

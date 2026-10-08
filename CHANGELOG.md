@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move the Images screen into React with independent upload and import jobs.
+  Keep verification, typed quarantine overrides and delete checks intact;
+  prevent late responses from closing another image's details. Keep upload
+  progress visible and wrap long results on narrow screens. Offer all supported
+  image formats in the file chooser.
+
 - Move dashboard rendering into React while keeping the current layout and
   refresh behavior. Preserve keyboard focus across refreshes and prevent late
   telemetry-health responses from replacing newer results.

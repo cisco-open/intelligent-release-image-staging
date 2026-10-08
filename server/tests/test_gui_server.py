@@ -710,51 +710,36 @@ def test_import_from_disk_panel_wired():
     """Source guards for importing images already on disk: an Images-view panel
     fed by GET /api/images/importable, a per-row import posting the candidate's
     exact path with the CSRF header, and reuse of the existing publish poll."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="import-panel"' in html
-    assert 'id="import-rows"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "'/api/v1/images/importable'" in js or '"/api/v1/images/importable"' in js
-    assert "/api/v1/images/import'" in js or '/api/v1/images/import"' in js
-    assert "#import-rows .do-import" in js
-    # the exact discovered path is echoed back — the server authorizes on
-    # candidate identity, so the client must not reconstruct or edit it
-    assert "data-path" in js
-    # the import POST carries the CSRF header, like every other mutating call
-    post_call = js.split("/api/v1/images/import'")[1][:400]
-    assert "csrfHdr(" in post_call
-    # publish progress reuses the upload path's poller rather than a second one
-    assert "pollJob((await res.json()).job_id)" in js
-    # the panel stays hidden only when there is nothing to show at all
-    assert "cands.length === 0 && skipped.length === 0" in js
-    # the distinguishing path is rendered — two roots can hold one basename
-    assert "esc(c.path)" in js
-    # deleting a catalogued image makes its name importable again
-    assert "refreshImages(); refreshImportable();" in js
+    component = _react_shell("images.jsx")
+    controller = _react_shell("images-controller.mjs")
+    js = _webroot("app.js")
+    assert 'id="import-panel"' in component and 'id="import-rows"' in component
+    assert 'data-path={item.path}' in component
+    assert 'onClick={() => controller.importFile(item.path)}' in component
+    assert '>{item.path}</td>' in component
+    assert 'hidden={!state.importAvailable || (!state.importable.length && !state.skipped.length)}' in component
+    assert "this.services.post('/api/v1/images/import', {path})" in controller
+    assert "this.pollJob(body.job_id" in controller
+    assert 'post: jpost' in js  # shared authenticated/CSRF transport
+    assert "headers: csrfHdr({'Content-Type': 'application/json'})" in js
+    assert 'else await this.refreshLists();' in controller
+    assert "Promise.all([this.refresh(), this.refresh('importable')])" in controller
 
 
 def test_publish_jobs_surface_automatic_hash_verification():
     """Both disk imports and uploads show the new verifying phase and verdict."""
-    js = _webroot("app.js")
-    result = js.split("function publishedJobText(job) {", 1)[1].split(
-        "\n  function pollJob", 1)[0]
+    result = _react_shell("image-model.mjs")
     assert "job.verification" in result
     assert "verified against Cisco Bulk Hash" in result
     assert "Cisco hash mismatch — quarantined" in result
     assert "not found in Cisco Bulk Hash feed" in result
     assert "Cisco hash verification incomplete" in result
-    disk_poll = js.split("function pollJob(jobId) {", 1)[1].split(
-        "\n  // Images already on disk", 1)[0]
-    assert "j.state === 'verifying'" in disk_poll
-    assert "checking Cisco Bulk Hash" in disk_poll
-    upload_poll = js.split("function pollUploadJob(jobId, ui) {", 1)[1].split(
-        "\n  function upload(file)", 1)[0]
-    assert "j.state === 'verifying'" in upload_poll
-    assert "ui.verifying()" in upload_poll
-    assert "ui.done(publishedJobText(j))" in upload_poll
+    controller = _react_shell("images-controller.mjs")
+    assert "this.pollJob(job.job_id" in controller  # uploads
+    assert "this.pollJob(body.job_id" in controller  # disk imports
+    assert "job.state === 'verifying'" in controller
+    assert "checking Cisco Bulk Hash" in controller
+    assert "ui.done(publishedJobText(job))" in controller
 
 
 def test_bulk_row_actions_wired():
@@ -10462,7 +10447,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("importable", "images", "devices",
+    table_ids = ("devices",
                  "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
                  "setup-pkg-table", "settings-info", "trust-tbl",
                  "audit-tbl", "dl-tbl")
@@ -10483,6 +10468,11 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
     assert '<div className="table-scroll" tabIndex={0} role="region" aria-label="Image rollout">' in component
     assert '<table className="tbl" id="ov-rollout">' in component
+    images = _react_shell("images.jsx")
+    for label, tid in (("Images available for import", "importable"), ("Image catalog", "images")):
+        region = images.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
+        assert '<table className="tbl" id="%s">' % tid in region
+    assert images.count('className="table-scroll" tabIndex={0} role="region"') == 2
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10503,7 +10493,7 @@ def test_dialogs_get_dialog_role_honestly():
     close -- that part of a dialog's contract holds regardless of modality."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    non_modal_drawers = ("img-info-panel", "deploy-info-panel", "dl-drawer")
+    non_modal_drawers = ("deploy-info-panel", "dl-drawer")
     for panel_id in non_modal_drawers + ("img-picker",):
         tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
         assert 'role="dialog"' in tag, panel_id
@@ -10518,10 +10508,16 @@ def test_dialogs_get_dialog_role_honestly():
         assert "trapDialogFocus(document.getElementById('%s'))" % panel_id not in js, panel_id
     # focus moves in on open and is restored to the opener on close, for
     # all four -- modal or not
-    for opener_var in ("imgInfoOpener", "deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
+    for opener_var in ("deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
         assert ("var %s = null;" % opener_var) in js, opener_var
         assert (opener_var + " = document.activeElement;") in js, opener_var
         assert (opener_var + ".focus();") in js, opener_var
+    images = _react_shell("images.jsx")
+    tag = images.split('id="img-info-panel"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in images
+    assert "opener.current = event.currentTarget" in images
+    assert "close.current?.focus()" in images and "opener.current.focus()" in images
 
 
 def test_forms_get_persistent_field_labels():
@@ -10566,12 +10562,11 @@ def test_error_and_status_regions_carry_live_roles():
     html = _webroot("index.html")
     alert_ids = ("df-err", "cf-err", "pw-msg", "cert-msg",
                  "trust-msg", "ca-msg", "td-msg", "ae-msg",
-                 "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg",
-                 "ii-override-note", "ii-release-msg")
+                 "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg")
     for eid in alert_ids:
         tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
         assert 'role="alert"' in tag, eid
-    status_ids = ("status", "dev-status", "di-note", "wz-progress", "wz-msg",
+    status_ids = ("dev-status", "di-note", "wz-progress", "wz-msg",
                   "cert-status", "td-status", "ae-status",
                   "sessions-info", "swarm-summary")
     for sid in status_ids:
@@ -10587,9 +10582,13 @@ def test_error_and_status_regions_carry_live_roles():
         tag = html.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
         assert 'role="progressbar"' in tag, pid
         assert 'aria-valuemin="0"' in tag and 'aria-valuemax="100"' in tag, pid
-    app_js = _webroot("app.js")
-    assert "rowProg.setAttribute('role', 'progressbar');" in app_js
-    assert "aria-valuenow" in app_js
+    images = _react_shell("images.jsx")
+    for eid in ("ii-override-note", "ii-release-msg"):
+        assert 'role="alert"' in images.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
+    tag = images.split('id="status"', 1)[1].split('>', 1)[0]
+    assert 'role="status"' in tag and 'aria-live="polite"' in tag
+    assert 'role="progressbar" aria-valuemin={0} aria-valuemax={100}' in images
+    assert 'aria-valuenow={Math.round(row.percent)}' in images
 
 
 def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokenized():
@@ -10726,39 +10725,21 @@ def test_images_catalog_leads_with_filename_and_verdict_pill():
     """Brief Step 5: catalog rows lead with the exact filename (.machine) +
     Cisco source-verification verdict pill; image id stays adjacent
     (.machine)."""
-    html = _webroot("index.html")
-    thead = html.split('id="images">', 1)[1].split("</thead>", 1)[0]
-    headers = [h.split("</th>")[0] for h in thead.split("<th>")[1:]]
+    component = _react_shell("images.jsx")
+    thead = component.split('id="images">', 1)[1].split("</thead>", 1)[0]
+    headers = [h.split("</th>")[0] for h in thead.split('<th scope="col">')[1:]]
     assert headers[:3] == ["File", "Verification", "Image ID"], headers
-    js = _webroot("app.js")
-    fn = js.split("function renderImageRows() {", 1)[1].split(
-        "\n  document.getElementById('images-filter-attention')", 1)[0]
-    row = fn.split("return '<tr data-id=", 1)[1].split("}).join('')", 1)[0]
-    pill_idx = row.index("bulkhashVerdictPillHTML(")
-    # filename leads (the FIRST esc(i.id) is the data-id attribute, not a
-    # displayed column -- the id column's own esc(i.id) comes after the pill).
-    # filename itself renders via dash() (Wave A item 8, em-dash fallback for
-    # an empty value) rather than a bare esc().
-    assert row.index("dash(i.filename") < pill_idx
-    assert "esc(i.id)" in row[pill_idx:]
+    row = component.split('<tbody id="rows">', 1)[1].split('</tbody>', 1)[0]
+    assert row.index("{item.filename || '—'}") < row.index('<Verdict image={item} />') < row.index('>{item.id}</td>')
 
 
 def test_images_needs_attention_toggle_filters_client_side_no_refetch():
-    """The "Needs attention only" toggle re-renders from LAST_IMAGES (the
-    already-fetched catalog), the same applyDeviceFilters()/renderDevices()
-    split Devices uses -- toggling it must never trigger a new /api/images
-    fetch."""
-    js = _webroot("app.js")
-    fn = js.split("function renderImageRows() {", 1)[1].split(
-        "\n  document.getElementById('images-filter-attention')", 1)[0]
-    # the filter + row-build itself, BEFORE the per-row click-handler wiring
-    # (the delete button's own handler legitimately calls fetch() for the
-    # DELETE request -- that is a click-time action, not part of re-render)
-    build = fn.split("document.querySelectorAll('#rows .del-img')", 1)[0]
-    assert "fetch(" not in build
-    assert "LAST_IMAGES.filter(" in build
-    assert "images-filter-attention" in fn
-    assert "'change', renderImageRows" in js
+    """Filtering uses the existing catalog; no new request or write."""
+    component = _react_shell("images.jsx")
+    controller = _react_shell("images-controller.mjs")
+    assert 'state.images.filter(item => !!item.quarantined)' in component
+    assert 'onChange={event => controller.setAttention(event.target.checked)}' in component
+    assert 'setAttention(value) { this.update({attentionOnly: !!value}); }' in controller
 
 
 def test_overview_fetches_devices_and_images_alongside_overview():
@@ -11317,7 +11298,7 @@ def test_devices_table_gets_the_dense_type_modifier():
     css = _webroot("styles.css")
     assert '<table class="tbl dense" id="devices">' in html
     # Images keeps the base (non-dense) table scale this wave
-    assert '<table class="tbl" id="images">' in html
+    assert '<table className="tbl" id="images">' in _react_shell("images.jsx")
     assert ".tbl.dense td { font-size:12px; line-height:18px; }" in css
     # row controls (selects/buttons) match the row's own 12px text
     assert "#dev-rows select, #dev-rows button { font-size:12px; }" in css
@@ -11351,19 +11332,17 @@ def test_images_import_blurb_drops_the_subdirectory_examples():
     Images import blurb -- the mechanism (a real subdirectory, the scanned
     extensions, IMAGES_ROOT) stays, only the illustrative "such as
     /opt/images/iosxe/c9300/ or /opt/images/iosxr/" clause goes."""
-    html = _webroot("index.html")
+    html = _react_shell("images.jsx")
     # the worked examples are gone outright -- these substrings do not
     # appear anywhere else in the page
     assert "such as" not in html
     assert "iosxe/c9300" not in html
     assert "/opt/images/iosxr/" not in html
-    assert ("Images copied onto the server under\n"
-            '              <span class="machine">/opt/images</span> — including any subdirectory —\n'
-            "              are offered for import below without uploading. Files ending in\n"
-            '              <span class="machine">.bin</span>, <span class="machine">.iso</span>,\n'
-            '              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are\n'
-            "              scanned. Set <span class=\"machine\">IMAGES_ROOT</span> to scan a\n"
-            "              different directory.</p>") in html
+    assert 'Images copied onto the server under' in html
+    assert '/opt/images</span> — including any subdirectory — are offered for import below without uploading.' in html
+    for suffix in ('.bin', '.iso', '.tar', '.rpm'):
+        assert '<span className="machine">%s</span>' % suffix in html
+    assert '<span className="machine">IMAGES_ROOT</span> to scan a different directory.' in html
 
 
 # ---- fix-wave regressions: HTTP layer, session lifecycle, console sources ----

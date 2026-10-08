@@ -5,10 +5,8 @@
 (spec Task 5): the Settings > Image verification pane (schedule, Refresh
 now, offline upload), the Images page verdict badges + image-detail drawer
 (release / typed-confirm override), and the multi-image picker's quarantine
-blocking. Client-side only -- app.js/index.html have no JS test harness in
-this repo, so these assert the markup/wiring stays intact (the SOURCE TEXT
-of the function bodies), the same idiom as test_tls_page_ux.py /
-test_onboard_feedback_ux.py / the picker tests in test_gui_server.py. The
+blocking. Legacy Settings/picker code keeps its source wiring guards. The
+migrated Images controller also runs executable JavaScript behavior tests. The
 HTTP endpoints these panes call are already covered end-to-end by
 test_gui_server_bulkhash.py (Task 4); nothing here re-tests the server."""
 import os
@@ -230,9 +228,9 @@ def test_schedule_form_posts_mode_and_hour_utc():
 # --- Images page: verdict badges --------------------------------------------
 
 def test_images_table_has_a_verification_column():
-    html = _read("index.html")
-    images_section = _slice(html, 'id="images">', "</table>")
-    assert "<th>Verification</th>" in images_section
+    component = _images_source("images.jsx")
+    images_section = _slice(component, 'id="images">', "</table>")
+    assert '<th scope="col">Verification</th>' in images_section
 
 
 def test_verdict_badge_texts_match_the_binding_copy():
@@ -305,15 +303,11 @@ def test_deferral_warning_is_additive_to_whatever_state_is_shown():
 
 
 def test_images_row_renders_the_pill_and_an_info_button():
-    """Task 7: the catalog row renderer moved out of refreshImages() (now
-    fetch-only) into renderImageRows(), a pure client-side render off
-    LAST_IMAGES shared with the new "Needs attention only" toggle -- same
-    split applyDeviceFilters()/renderDevices() already use for Devices."""
-    js = _read("app.js")
-    fn = js.split("function renderImageRows() {", 1)[1].split(
-        "\n  document.getElementById('images-filter-attention')", 1)[0]
-    assert "bulkhashVerdictPillHTML(i.hash_verification, i.quarantined)" in fn
-    assert "img-info" in fn
+    """The React-owned row keeps its verification pill and details action."""
+    component = _images_source("images.jsx")
+    assert "imageVerdicts(image.hash_verification, image.quarantined)" in component
+    assert '<Verdict image={item} />' in component
+    assert 'img-info' in component
 
 
 # --- Image picker: quarantined ids visibly blocked --------------------------
@@ -388,92 +382,30 @@ def test_images_list_populates_the_quarantine_map_alongside_imageIds():
 
 # --- Image detail drawer: release + typed-confirm override ------------------
 
+def _images_source(name):
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "src", name)) as stream:
+        return stream.read()
+
+
 def test_drawer_present_with_release_and_override_controls():
-    html = _read("index.html")
-    assert 'id="img-info-panel" class="drawer" hidden' in html
-    drawer = _slice(html, 'id="img-info-panel" class="drawer" hidden', "</div>\n      </section>")
-    assert 'id="ii-release"' in drawer
-    assert 'id="ii-confirm-text"' in drawer
-    assert 'id="ii-release-override"' in drawer
-    assert 'id="ii-override-block" hidden' in drawer
+    component = _images_source("images.jsx")
+    assert 'id="img-info-panel" className="drawer" hidden={!details} role="dialog"' in component
+    for identifier in ("ii-release", "ii-confirm-text", "ii-release-override"):
+        assert 'id="%s"' % identifier in component
+    assert 'id="ii-override-block" hidden={!details?.override}' in component
+    assert 'id="ii-release-block" hidden={!image.quarantined}' in component
+    assert "onClick={() => controller.release(false)}" in component
+    assert "onClick={() => controller.release(true)}" in component
+    assert "details.confirmText !== image.filename" in component
 
 
-def test_release_block_hidden_unless_the_image_is_actually_quarantined():
-    js = _read("app.js")
-    fn = js.split("function openImageInfo(id) {", 1)[1].split(
-        "\n  function closeImageInfo", 1)[0]
-    assert "getElementById('ii-release-block').hidden = !img.quarantined" in fn
-
-
-def test_normal_release_first_then_override_path_on_409_still_mismatching():
-    """Endpoint contract (Task 4): override=False first; a 409 body carries
-    error 'quarantine_still_mismatched', which is when the typed-confirm
-    override path (override=true + confirm_text) is offered."""
-    js = _read("app.js")
-    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
-        "\n  document.getElementById('ii-release')", 1)[0]
-    assert "'/api/v1/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine'" in fn
-    assert "override: override" in fn
-    assert "confirm_text: confirmText" in fn
-    assert "r.status === 409" in fn
-    assert "quarantine_still_mismatched" in fn
-    # every other failure surfaces the API's own message, not a made-up one
-    assert "body.error ||" in fn
-
-
-def test_successful_release_also_refreshes_devices():
-    """Same reason as the Refresh now / offline upload handlers
-    (refreshDevices().catch(...) alongside refreshImages()): without it,
-    imageQuarantined (the picker's block list) lagged a successful release
-    by up to one periodic devices-view poll interval, during which the
-    just-released image stayed unpickable."""
-    js = _read("app.js")
-    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
-        "\n  document.getElementById('ii-release')", 1)[0]
-    ok_block = fn.split("if (r.ok) {", 1)[1].split("}", 1)[0]
-    assert "closeImageInfo()" in ok_block
-    assert "refreshImages()" in ok_block
-    assert "refreshDevices().catch(" in ok_block
-
-
-def test_release_button_sends_no_override_the_override_button_sends_the_typed_text():
-    js = _read("app.js")
-    normal = js.split(
-        "document.getElementById('ii-release').addEventListener('click'", 1)[1][:200]
-    assert "attemptReleaseQuarantine(false, '')" in normal
-    override = js.split(
-        "document.getElementById('ii-release-override').addEventListener('click'", 1)[1][:250]
-    assert "attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value)" in override
-
-
-def test_release_disables_its_buttons_in_flight_and_surfaces_network_failure():
-    """Adjacent fix (a): mirrors the Refresh now handler's try/finally shape
-    -- both release buttons are disabled for the duration of the request
-    (re-enabled in a finally, so a thrown/network failure never leaves them
-    stuck disabled) and a thrown fetch/json error surfaces a message rather
-    than becoming a silent unhandled rejection."""
-    js = _read("app.js")
-    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
-        "\n  document.getElementById('ii-release')", 1)[0]
-    assert "releaseBtn.disabled = true" in fn
-    assert "overrideBtn.disabled = true" in fn
-    assert "try {" in fn
-    assert "catch (e) {" in fn
-    finally_block = fn.split("} finally {", 1)[1]
-    assert "releaseBtn.disabled = false" in finally_block
-    assert "overrideBtn.disabled = false" in finally_block
-    catch_block = fn.split("} catch (e) {", 1)[1].split("} finally {", 1)[0]
-    assert "msg.textContent" in catch_block
-
-
-def test_confirm_text_input_is_never_prefilled_with_the_filename():
-    """Typed-confirm means the OPERATOR types it -- pre-filling the input
-    with the expected value would defeat the point of the confirmation."""
-    js = _read("app.js")
-    fn = js.split("function openImageInfo(id) {", 1)[1].split(
-        "\n  function closeImageInfo", 1)[0]
-    assert "getElementById('ii-confirm-text').value = ''" in fn
-    # the bug this guards against: prefilling the confirm box with the
-    # expected answer defeats the point of a TYPED confirmation
-    assert "ii-confirm-text').value = img.filename" not in js
-    assert "ii-confirm-text').value = img" not in js
+def test_images_controller_executes_quarantine_upload_import_and_race_contracts():
+    """Run behavior tests for the migrated workflow, not removed DOM strings."""
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("Node is required for the Images controller tests")
+    path = os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "tests", "images-controller.test.mjs")
+    result = subprocess.run(["node", "--test", path], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
