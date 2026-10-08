@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Offline custodian companion; private roots never travel to the server."""
+"""Terminal signing companion; deployment receives only public approvals."""
 
 import os
 from pathlib import Path

@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The Ubuntu 24.04 amd64 installer builds the server, Console, both IOx
 architectures, IOS-XR RPM and Guest Shell bundles. It installs the tools it needs,
-creates the server's keys, and pauses for your signing-key holder's approval.
+creates the server's keys, and asks for signing approval.
 Run it over SSH or in a local terminal. You create your Console account yourself.
 
 Published packages carry GitHub artifact attestations from the public IRIS
@@ -54,17 +54,43 @@ and source inventories. See GitHub's
 ## Prepare once
 
 Use an Ubuntu host with a synchronized clock and network access for builds and
-dependencies. Keep the two private signing keys on their holders' separate
-offline machines. Provide only their public files and the public recovery
-recipient. Keep a separate copy of the private recovery key away from the server.
+dependencies. Install the authenticated package:
 
 ```bash
 sudo apt install ./iris-download/iris-installer_<version>_amd64.deb
 ```
 
-Each key holder runs `iris-key-setup` in a terminal on their own machine.
-Its menu guides key creation, request approval and copying public files.
-Follow [Create keys and approve signing requests](offline-approval.md).
+### Guided local setup
+
+Run this as your normal user, without `sudo`:
+
+```bash
+irisctl setup
+```
+
+The script asks for the server address, Console address and private key folder.
+Press Enter to use the suggested folder, or enter a full path. It creates both
+passphrase-protected signing keys and a separate backup recovery key, builds
+the packages, and asks you to approve the server's signing request. It calls
+`sudo` when needed. Passphrases go directly to OpenSSH.
+
+You decide whether to keep the private keys here, move them or split them later.
+Keeping them on the server means a host compromise can affect those keys too.
+The `recovery.age` file has no passphrase; protect it and keep an independent copy.
+The deployment backup does not include these private setup keys.
+
+Rerun the same command with the same `--instance` or `--state-dir` to continue.
+Existing keys are checked and reused, not replaced. If you moved them, provide
+their original folder with `--key-directory` when approval is needed. Add the
+layout options below for split Docker or Kubernetes; local key setup works with
+all three layouts. You create the Console account yourself.
+
+### Separate key holders
+
+To keep signing keys on separate offline machines from the start, each holder
+runs `iris-key-setup` there. Follow
+[Create keys and approve signing requests](offline-approval.md), then use
+`sudo irisctl install` with the public inputs shown below.
 
 Choose a new instance name and an empty state directory. Existing deployments
 are refused, not adopted. Restrict access to the Console before exposing its
@@ -73,8 +99,10 @@ your organization's firewall.
 
 ## Choose the layout
 
-All layouts use these common options; append the layout options below to the
-same command. Replace the example addresses and public recipient first.
+For separate key holders, all layouts use these common options. Append the
+layout options below to the same command. Replace the placeholders first.
+With guided local setup, append only the layout options to `irisctl setup`;
+the script supplies `--roots-dir` and `--recovery-recipient` for you.
 
 ```bash
 sudo irisctl install --instance my-iris \
@@ -195,7 +223,8 @@ If setup stops while copying its initial files, run `irisctl resume` with the
 same `--state-dir`. Keep the original installer version available until setup
 finishes. Resume checks recorded inputs and preserves changed or unknown files.
 
-Exit `20` means the installer is waiting for offline approval. Transfer only
+With `irisctl setup`, the script guides local approval and resumes for you.
+With separate key holders, exit `20` means the installer is waiting for approval. Transfer only
 `requests/online.pub` from the state directory to a key holder. Record its SHA256
 value and share that value separately so the holder can check the request.
 On the holder's machine, run:

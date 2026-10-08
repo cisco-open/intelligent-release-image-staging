@@ -78,7 +78,7 @@ def build(repo, output):
             "Maintainer: IRIS contributors\nSection: admin\nPriority: optional\n"
             "Depends: python3 (>= 3.12), age, ca-certificates, openssh-client\n"
             "Description: IRIS Ubuntu deployment installer\n"
-            " Source-build deployment with managed Ubuntu dependencies and offline signing approval.\n"
+            " Source-build deployment with managed Ubuntu dependencies and terminal signing approval.\n"
             " Authenticate published packages with the repository release attestation.\n")
         doc = root / "usr/share/doc/iris-installer"
         doc.mkdir(parents=True)

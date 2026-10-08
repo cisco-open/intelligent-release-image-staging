@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Ship `irisctl setup` for interactive local key creation, signing approval and
+  installation across Docker, split Docker and Kubernetes. Existing keys and
+  deployment settings are retained; separate-holder setup remains available.
+
 - Clarify that the Catalyst IOx profile requires the app-hosting SSD share for
   image placement; Guest Shell is the choice when that storage is unavailable.
 

@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Create the two offline signing keys
 
+For guided key creation on the deployment host instead, use
+[local setup](managed-package.md#guided-local-setup). The steps here use separate holders.
+
 Two offline keys, the signing roots, sign every instruction the server sends a
 device. Create both, keep the private halves offline, and put the two public
 halves where the package build reads them. The

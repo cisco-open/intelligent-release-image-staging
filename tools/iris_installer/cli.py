@@ -87,6 +87,13 @@ def parser():
         operation.add_argument("--recovery-root", type=Path, help="separate encrypted identity-set storage root")
         operation.add_argument("--recovery-identity", type=Path, help="optional independently held recovery identity made available on this host")
         operation.add_argument("--listen-address", help="explicit bind address for the recorded Kubernetes worker endpoint")
+    local_setup = commands.add_parser(
+        "setup", parents=[install], add_help=False,
+        help="interactive install with locally created signing and recovery keys")
+    local_setup.add_argument("--key-directory", type=Path,
+                             help="private local key folder; prompted if omitted")
+    public_status = commands.add_parser("setup-status", help="show public setup details for the terminal helper")
+    public_status.add_argument("--state-dir", type=Path, required=True)
     worker_status = commands.add_parser("worker-status", help="inspect the pinned maintenance service and storage")
     worker_status.add_argument("--state-dir", type=Path, required=True)
     worker_service = commands.add_parser("worker-service", help="control only this deployment's maintenance service")
@@ -94,11 +101,11 @@ def parser():
     worker_service.add_argument("--action", choices=("start", "stop", "restart"), required=True)
     managed = commands.add_parser("managed-worker", help=argparse.SUPPRESS)
     managed.add_argument("--state-dir", type=Path, required=True)
-    approve = commands.add_parser("approve-signing", help="run ONLY on the offline custodian machine")
+    approve = commands.add_parser("approve-signing", help="approve a signing request where its private root is held")
     approve.add_argument("--public-key", type=Path, required=True)
     approve.add_argument("--root-key", type=Path, required=True)
     approve.add_argument("--output", type=Path, default=Path("online-cert.pub"))
-    retire = commands.add_parser("approve-keylist", help="approve a public retirement payload ONLY on the offline custodian machine")
+    retire = commands.add_parser("approve-keylist", help="approve a public retirement payload where its private root is held")
     retire.add_argument("--payload", type=Path, required=True)
     retire.add_argument("--root-key", type=Path, required=True)
     retire.add_argument("--output", type=Path, default=Path("keylist.envelope"))
@@ -260,6 +267,12 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command in ("setup", "setup-status"):
+                from . import local_setup
+                if args.command == "setup-status":
+                    print(json.dumps(local_setup.public_status(args.state_dir), sort_keys=True))
+                    return 0
+                return local_setup.run_setup(args)
             if args.command == 'image-root':
                 from .image_storage import change
                 return change(args)

@@ -573,6 +573,12 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 0
     assert "--recovery-recipient" in result.stdout
+    result = subprocess.run([str(extracted / "usr/bin/irisctl"), "setup", "--help"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "--key-directory" in result.stdout
+    assert "docker-split" in result.stdout and "kubernetes" in result.stdout
+    assert (extracted / "usr/lib/iris-installer/iris_installer/local_setup.py").is_file()
     helper = extracted / "usr/bin/iris-key-setup"
     assert helper.stat().st_mode & 0o777 == 0o755
     environment = {key: value for key, value in os.environ.items()

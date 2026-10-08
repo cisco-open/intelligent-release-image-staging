@@ -32,7 +32,14 @@ repository and tagged release workflow, separate from deployment instruction roo
 On an isolated Ubuntu 24.04 amd64 test host, install the reviewed package with
 `sudo apt install ./iris-installer_<version>_amd64.deb`. Then:
 
-Run `sudo irisctl install` for prompts, or supply the same public inputs explicitly:
+Run `irisctl setup` without sudo for the owner-selected local-key workflow. It
+creates or checks protected signing roots and the recovery identity outside
+deployment storage, then invokes the matching privileged installer with public
+inputs only. It checks the selected signing key against the journal's pinned
+public roots before approving the exact reviewed request. Existing deployments
+resume without regenerating keys or changing their recorded configuration.
+
+For separate holders, run `sudo irisctl install` for prompts, or supply public inputs:
 
 ```bash
 sudo irisctl install --state-dir /var/lib/iris-installer/my-instance \
@@ -53,9 +60,10 @@ The default peer TLS policy is required. The Console binds loopback by default;
 set `--console-bind` and `--console-port` explicitly for approved management
 network exposure. Restrict first-claim access before deployment. A named,
 installer-owned Compose project isolates containers, images, volumes and state.
-Existing instances are refused, not adopted. Private offline roots stay with
-their custodians. The installer generates deployment identities, including age,
-online signing and TLS keys, but never generates an offline signing root.
+Existing instances are refused, not adopted. The deployment engine generates
+online signing, age and TLS identities; root creation is handled by the chosen
+local or separate-holder helper. Private setup keys are outside the deployment
+snapshot and backup. Keep an independent recovery copy and protect local custody.
 
 Docker installs accept `--image-root` for a dedicated host import folder.
 `irisctl image-root` can connect one to an existing one-host deployment while
@@ -64,7 +72,8 @@ and included in backup and restore alongside the separate uploads volume.
 Folder changes retain a recovery record until restart and backup checks pass.
 
 The engine pauses with exit 20 and exports `requests/online.pub` below its state
-directory. Take that public file to the offline custodian machine and run:
+directory. Local setup guides approval and resumes automatically. For separate
+holders, take that public file to the custodian machine and run:
 
 ```bash
 irisctl approve-signing --public-key online.pub --root-key /offline/root-a

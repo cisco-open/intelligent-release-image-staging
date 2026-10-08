@@ -1947,3 +1947,12 @@ def test_installer_guides_use_terminal_key_and_recovery_tools():
     for required in ("irisctl maintenance", "--job-id", "--allow-downtime",
                      "--independent-copy"):
         assert required in recovery, required
+
+
+def test_managed_installer_offers_local_and_separate_holder_workflows():
+    managed = _page("install/managed-package.md")
+    for phrase in ("irisctl setup", "without `sudo`", "Separate key holders",
+                   "--key-directory", "all three layouts", "independent copy",
+                   "does not include these private setup keys"):
+        assert phrase in managed, phrase
+    assert "local setup" in _page("install/offline-approval.md")

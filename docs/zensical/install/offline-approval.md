@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Create keys and approve signing requests
 
+This page covers separate key holders. For guided key creation and approval on
+the deployment host, use [local setup](managed-package.md#guided-local-setup).
+
 Run `iris-key-setup` in a terminal on the private key holder's machine.
 It asks for the files it needs, checks them and tells you what to transfer.
 The installer package includes the script. Use your approved process to bring
@@ -68,8 +71,8 @@ To replace a recovery key in an existing deployment, follow
 
     The native age identity file has no passphrase. Protect its storage and
     transfer. It is a different key from the offline instruction signing roots.
-    Private roots stay on their holders' machines. Never upload a private root
-    or its passphrase to the Console or copy it to the server.
+    Private roots stay on their holders' machines in this workflow. Never upload
+    a private root or its passphrase to the Console.
 
 ## If approval stops
 
