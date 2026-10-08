@@ -2,7 +2,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 set -eu
-apk add --no-cache gcc=15.2.0-r5 musl-dev=1.2.6-r2 openssl-dev=3.5.8-r0 openssl-libs-static=3.5.8-r0
+apk add --no-cache gcc=15.2.0-r5 musl-dev=1.2.6-r2 openssl-dev=3.5.9-r0 openssl-libs-static=3.5.9-r0
 mkdir -p /out
 cc -std=c99 -Os -Wall -Wextra -Werror -static /src/iris-aead.c -o /out/iris-aead -lcrypto -pthread
 strip /out/iris-aead

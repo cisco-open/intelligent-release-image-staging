@@ -56,7 +56,7 @@ FROM --platform=linux/amd64 alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710
 COPY tools/iris-aead.c /src/iris-aead.c
 COPY tools/build-instruction-crypto-inner.sh /src/build.sh
 COPY tools/licenses/musl-COPYRIGHT /src/musl-COPYRIGHT
-ADD --checksum=sha256:7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.8/LICENSE.txt /src/openssl-LICENSE
+ADD --checksum=sha256:7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/LICENSE.txt /src/openssl-LICENSE
 RUN sh /src/build.sh
 
 FROM python:3.12-slim-trixie

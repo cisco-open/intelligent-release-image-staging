@@ -102,13 +102,13 @@ Third-party programs installed in the distributed server image
 ------------------------------------------------------------------------------
 
 The IRIS iris-aead helper (tools/iris-aead.c, Apache-2.0) is statically linked
-with OpenSSL 3.5.8 libcrypto (Apache-2.0) and musl libc 1.2.6 (MIT). It uses
+with OpenSSL 3.5.9 libcrypto (Apache-2.0) and musl libc 1.2.6 (MIT). It uses
 OpenSSL's AES-256-SIV implementation; IRIS does not implement that primitive.
 The source and build scripts are shipped in tools/build-instruction-crypto*.
 OpenSSL's upstream LICENSE.txt and musl's COPYRIGHT are combined in
 iris-aead.LICENCE: beside the helper in Guest Shell bundles and the server's
 /opt/iris/bin, and under /usr/local/share/licenses in the IOx/XR image.
-OpenSSL source: https://github.com/openssl/openssl/tree/openssl-3.5.8
+OpenSSL source: https://github.com/openssl/openssl/tree/openssl-3.5.9
 
 Guest Shell bundles additionally carry a separate static OpenSSH portable
 10.5p1 ssh-keygen for Ed25519 instruction verification on older device hosts.

@@ -19,6 +19,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [2026.10.08]
 
+- Refresh the instruction-encryption helper's OpenSSL build pins and matching
+  notices after Alpine withdrew the previous packages. Keep the standalone,
+  server and device builds aligned.
+
 - Show directional device-to-device transfers on the Swarm Map using fresh,
   identity-matched peer observations. Add a per-device 10-second telemetry
   option in the Console, delivered through signed policy, while keeping the
