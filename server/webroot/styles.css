@@ -555,10 +555,8 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   .drawer { transition:none; }
 }
 
-/* Image picker: a centred modal over a translucent backdrop, shared by the
-   per-row assign button and the bulk "Assign images to N devices…" action
-   (openImagePicker in app.js) -- a choice to make and confirm, not a panel
-   to read alongside the table, so it is a modal rather than a third drawer. */
+/* Shared modal chrome. React's assignment dialogs and the remaining
+   application dialogs use the same scrollable body and fixed footer. */
 .modal-backdrop { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.35);
   display:flex; align-items:center; justify-content:center; padding:24px; }
 .modal-backdrop[hidden] { display:none; }

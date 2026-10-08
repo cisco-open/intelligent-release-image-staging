@@ -5,8 +5,8 @@
 (spec Task 5): the Settings > Image verification pane (schedule, Refresh
 now, offline upload), the Images page verdict badges + image-detail drawer
 (release / typed-confirm override), and the multi-image picker's quarantine
-blocking. Legacy Settings/picker code keeps its source wiring guards. The
-migrated Images controller also runs executable JavaScript behavior tests. The
+blocking. Settings keeps its source wiring guards. The migrated Images and
+assignment controllers also run executable JavaScript behavior tests. The
 HTTP endpoints these panes call are already covered end-to-end by
 test_gui_server_bulkhash.py (Task 4); nothing here re-tests the server."""
 import os
@@ -312,15 +312,14 @@ def test_images_row_renders_the_pill_and_an_info_button():
 
 # --- Image picker: quarantined ids visibly blocked --------------------------
 
-def _picker_body(js):
-    return js.split("function openImagePicker(currentIds, onApply) {", 1)[1].split(
-        "\n  function closeImagePicker", 1)[0]
+def _picker_source(name):
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "src", name)) as stream:
+        return stream.read()
 
 
 def test_picker_marks_quarantined_rows_with_a_badge():
-    js = _read("app.js")
-    picker = _picker_body(js)
-    assert "imageQuarantined[id]" in picker
+    picker = _picker_source('assignments.jsx')
+    assert "image.quarantined" in picker
     assert "quarantined</span>" in picker
 
 
@@ -328,13 +327,12 @@ def test_picker_disables_a_quarantined_id_only_when_not_already_assigned():
     """Blocks NEW selection (disabled + badge, per the brief) without
     trapping an operator who needs to uncheck an image that was assigned
     before it became quarantined -- that removal must stay possible."""
-    js = _read("app.js")
-    picker = _picker_body(js)
-    assert "var quarantined = !!imageQuarantined[id]" in picker
-    assert "var blocked = quarantined && !checkedSet[id]" in picker
-    assert "data-blocked=\"1\"" in picker
+    picker = _picker_source('assignments-model.mjs')
+    assert "quarantined: !!image?.quarantined" in picker
+    assert "(!checked && (unknown || image?.quarantined || state.chosen.length >= 10))" in picker
+    assert "data-blocked={image.quarantined ? '1' : undefined}" in _picker_source('assignments.jsx')
     # the pinned "unknown" disabling stays intact, untouched by this addition
-    assert "unknown ? ' disabled' : ''" in picker
+    assert "const retained = unknown && state.original?.includes(id)" in picker
 
 
 def test_picker_tags_every_quarantined_row_not_just_ones_blocked_at_render_time():
@@ -350,10 +348,9 @@ def test_picker_tags_every_quarantined_row_not_just_ones_blocked_at_render_time(
     must be unconditional on `quarantined` alone, so updateCount's sweep
     (input:not(:checked) -> disabled) catches it the instant it is
     unchecked."""
-    js = _read("app.js")
-    picker = _picker_body(js)
-    assert "(blocked && !unknown ? ' disabled' : '')" in picker
-    assert "(quarantined ? ' data-blocked=\"1\"' : '')" in picker
+    picker = _picker_source('assignments.jsx')
+    assert "disabled={image.disabled}" in picker
+    assert "data-blocked={image.quarantined ? '1' : undefined}" in picker
     # the regression this guards: data-blocked gated on `blocked` (render-
     # time-unchecked-only) instead of `quarantined` (every quarantined row)
     assert "blocked ? ' data-blocked" not in picker
@@ -366,11 +363,9 @@ def test_picker_cap_logic_never_re_enables_a_blocked_checkbox():
     quarantine block just because the count dropped, and it is what must
     disable a quarantined row the moment it is unchecked (see the
     render-time-tagging test above)."""
-    js = _read("app.js")
-    picker = _picker_body(js)
-    fn = picker.split("function updateCount() {", 1)[1].split("\n    }", 1)[0]
-    assert "cb.disabled = n >= 10 || cb.dataset.blocked === '1'" in fn
-    assert "input:not(:checked)" in fn
+    picker = _picker_source('assignments-model.mjs')
+    assert "(!checked && (unknown || image?.quarantined || state.chosen.length >= 10))" in picker
+    assert "disabled: state.busy || !state.ready || !state.imagesOk || retained" in picker
 
 
 def test_images_list_populates_the_quarantine_map_alongside_imageIds():

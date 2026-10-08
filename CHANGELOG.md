@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move image and bulk credential dialogs into React. Keep Apply tied to the
+  reviewed devices and require a complete, current image preview. Preserve
+  assignment conflict checks, validate results and bound parallel requests.
+  Report unknown outcomes without retrying; keep locks through dialog close.
+
 - Move Add Device and credential profiles into React. Keep form entries during
   polling, order shared credential reads, check save and delete outcomes, and
   keep pending-write locks through close and reopen. Clear entered passwords

@@ -62,7 +62,13 @@ An imported device cannot be onboarded until you give it a profile.
 
 1. Open **Inventory** and select the imported rows.
 2. Open **More actions → Set credential** and pick a profile.
-3. Press **Apply**.
+3. Check **reviewed devices**, then press **Apply**. This list stays fixed while
+   the dialog is open.
+
+The result counts saved changes and names any refusals. If the result is
+unknown, check the refreshed device rows before trying again. Choosing
+**no credential** asks you to confirm clearing these assignments; it keeps
+the profiles.
 
 A re-import replaces a device's network fields and keeps its credential
 profile. A CSV that lists a `device_id` twice is rejected as a whole.

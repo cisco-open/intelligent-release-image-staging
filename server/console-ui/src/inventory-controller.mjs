@@ -78,6 +78,7 @@ export class InventoryController {
     const query = filterQuery(this.state.filters), offset = this.state.offset;
     const policyTicket = this.services.beginPolicyRead?.();
     const credentialTicket = this.services.beginCredentialRead?.();
+    const imageTicket = this.services.beginImageRead?.();
     this.update({loading: true});
     const paths = ['/api/v1/devices?' + pageQuery(this.state.filters, offset), '/api/v1/images',
       '/api/v1/credentials', '/api/v1/peer-policy', '/api/v1/onboard/jobs', '/api/v1/schedules'];
@@ -97,6 +98,7 @@ export class InventoryController {
       jobs: records(jobs, 'jobs') ? jobs.body.jobs : this.state.jobs,
       schedules: records(schedules, 'schedules') ? schedules.body.schedules : this.state.schedules};
     if (this.services.acceptCredentials) Object.assign(patch, this.services.acceptCredentials(credentials, credentialTicket));
+    if (this.services.acceptImages) Object.assign(patch, this.services.acceptImages(images, imageTicket));
     try {
       if (!devices.ok) throw new Error('Device target preview unavailable' + (devices.status ? ` (${devices.status})` : '') + '.');
       const body = checkedPage(devices.body, offset, PAGE_SIZE);

@@ -69,9 +69,14 @@ not the rows you selected, see [Schedule maintenance windows](scheduling.md).
 ### Assign a set of images
 
 1. Select the devices and click **Assign images**. The picker opens pre-checked
-   with the images every selected device already holds.
+   with the images assigned to every selected device.
 2. Check the images the whole selection should stage, up to ten.
-3. Apply. A selection whose assignments differ is flagged, then confirmed.
+3. Apply. Different assignments are flagged. Removing existing assignments
+   asks for confirmation.
+
+The dialog keeps the devices you reviewed when you opened it. For conflicts
+or an unknown result, follow
+[Assign images and check staging status](assignments.md#in-the-console).
 
 !!! warning
 

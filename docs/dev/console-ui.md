@@ -18,7 +18,7 @@ Console](../zensical/user-guide/console.md) for that.
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
-device-details and Activity drawers
+image and bulk credential dialogs, device-details and Activity drawers
 with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
@@ -74,8 +74,8 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. Inventory's assignment, bulk credential
-and schedule dialogs still use the older controller.
+write result is reported without retrying. CSV import, job-option, role and
+schedule dialogs still use the older controller.
 
 The Add Device and credential forms use `device-forms-controller.mjs`, a shared
 model and `device-forms.jsx`. Model lookups only narrow the chosen management
@@ -85,6 +85,17 @@ Writes hold their lock through close and reopen. Failed reads keep the last
 list as unavailable, and unknown writes are reported without replaying them.
 Closing the credential panel, leaving Inventory or hiding the tab clears entered
 secrets. Inventory polling preserves form fields and keyboard focus.
+
+Image and bulk credential dialogs use `assignments-controller.mjs`,
+`assignments-model.mjs` and `assignments.jsx`. Opening captures the reviewed
+device IDs; later selection changes cannot add targets to Apply. Image review
+checks fresh device pages and reads the catalog with ordering tickets shared
+with Inventory. Each write includes its captured assignment precondition.
+Up to four requests run together, with checked per-device outcomes. Conflicts
+or unknown results require an explicit review, never an automatic resend.
+Bulk credentials use one checked request and distinguish a named profile from
+clearing the assignment. Row and bulk locks survive closing the dialog;
+closing stops preview reads but leaves submitted writes running.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -142,6 +153,13 @@ unknown write results, hidden-view reads and keyboard focus across polling.
 Form checks cover every management type's wire fields, model lookup races,
 credential read ordering, refused saves and deletes, close/reopen locks,
 secret clearing and the absence of secret text in error messages.
+Assignment checks cover captured targets, complete previews, shared catalog
+read ordering, ordered image sets, quarantine and the ten-image limit,
+confirmation, conflicts, unknown responses and pending-write focus.
+`server/tests/test_assignment_client_api.py` runs the shipped controller against
+a temporary authenticated management server for assignment conflicts and partial
+credential updates. This fixture uses HTTP and no live devices; it does not
+qualify the Console proxy or TLS.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console

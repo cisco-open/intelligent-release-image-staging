@@ -107,6 +107,7 @@
   // read through this adapter rather than inspecting or rewriting its DOM.
   var inventory = window.irisInventory;
   var deviceForms = window.irisDeviceForms;
+  var assignments = window.irisAssignments;
   var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
   function deviceFilterState() {
@@ -721,6 +722,8 @@
     beginPolicyRead: function () { return ++peerPolicyReadGeneration; },
     beginCredentialRead: function () { return deviceForms.beginCredentialRead(); },
     acceptCredentials: function (result, ticket) { return deviceForms.acceptCredentials(result, ticket); },
+    beginImageRead: function () { return assignments.beginImageRead(); },
+    acceptImages: function (result, ticket) { return assignments.acceptImages(result, ticket); },
     publish: function (state, policyTicket) {
       LAST_DEVICES = state.rows; LAST_DEV_NOW = state.now; devTotal = state.total;
       imageListOk = state.imagesOk;
@@ -735,7 +738,6 @@
       var liveJobIds = new Set(state.jobs.map(function (job) { return job.id; }));
       Object.keys(lastJobStep).forEach(function (id) { if (!liveJobIds.has(id)) delete lastJobStep[id]; });
       SCHEDULES = state.schedules;
-      syncCredSelected();
       if (policyTicket === peerPolicyReadGeneration) {
         peerPolicyReadOk = state.policyOk;
         if (state.policyOk) peerPolicy = state.policy;
@@ -758,7 +760,7 @@
     scheduled: function (id) { return pendingScheduleText(id, SCHEDULES); }
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { inventory.hide(); deviceForms.hide(); }
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); }
     else if (!document.getElementById('view-devices').hidden) deviceForms.resume();
   });
 
@@ -903,10 +905,9 @@
     });
     trapDialogFocus(overlay);
   }
-  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'cred-modal', 'role-modal'];
+  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'role-modal'];
   wireModal('onboard-modal', ['onboard-cancel', 'onboard-modal-x']);
   wireModal('undeploy-modal', ['undeploy-cancel', 'undeploy-modal-x']);
-  wireModal('cred-modal', ['cred-modal-cancel', 'cred-modal-x']);
   wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
   wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
   wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
@@ -917,20 +918,10 @@
   onInventoryAction('undeploy-selected', function () {
     openModal('undeploy-modal');
   });
-  onInventoryAction('set-cred-selected', function () {
-    if (!credListOk) {
-      devStatus.textContent = 'Credential list unavailable; not opening the picker. ' +
-        'Retry once the profile list loads.';
-      return;
-    }
-    var msg = document.getElementById('cred-modal-msg');
-    if (msg) msg.textContent = '';
-    syncCredSelected();
-    openModal('cred-modal');
-  });
+  onInventoryAction('set-cred-selected', function () { assignments.openCredentials(selectedIds()); });
   function updateSelBar() {
     var n = selectedIds().length;
-    ['onboard', 'undeploy', 'cred'].forEach(function (key) {
+    ['onboard', 'undeploy'].forEach(function (key) {
       var el = document.getElementById(key + '-modal-count');
       if (el) el.textContent = n + ' selected';
     });
@@ -989,7 +980,7 @@
     inventory.update({bulkBusy: busy});
     BULK_BTNS.concat(BULK_OPENERS).forEach(function (id) {
       var el = document.getElementById(id);
-      if (el && !el.closest('[data-inventory-react]')) el.disabled = busy;
+      if (el && !el.closest('[data-inventory-react], [data-assignments-react]')) el.disabled = busy;
     });
     syncRoleActionAvailability();
   }
@@ -1003,26 +994,28 @@
     setBulkBusy(true);
     return ids;
   }
-  // The bulk credential picker is populated from the same credOpts the per-row
-  // dropdowns use, and is re-synced whenever profiles change — creating a
-  // profile must make it immediately assignable, not on the next 10s poll.
-  function syncCredSelected() {
-    var sel = document.getElementById('cred-selected');
-    if (!sel) return;
-    var keep = sel.value;
-    // The resting placeholder is disabled so an untouched Apply is a no-op;
-    // clearing is an explicit, distinct choice (CRED_CLEAR) that Apply then
-    // confirms -- never the value the modal happens to open on.
-    sel.innerHTML = '<option value="" disabled>— choose a credential profile —</option>' +
-      '<option value="' + CRED_CLEAR + '">— no credential (clear the assignment) —</option>' +
-      credOpts.map(function (c) {
-        return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
-      }).join('');
-    sel.value = keep;
-    if (sel.value !== keep) sel.selectedIndex = 0;
-  }
-  // Sentinel for the bulk picker's explicit "clear" choice; posted as "".
-  var CRED_CLEAR = '__none';
+  assignments.connect({
+    fetch: fetch, post: jpost,
+    confirm: function (message) { return confirm(message); },
+    isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
+    refreshInventory: refreshDevices,
+    report: function (message, failed) { inventory.report(message, failed); },
+    claimRow: function (id) { return inventory.claimRow(id); },
+    releaseRow: function (id) { inventory.releaseRow(id); },
+    claimBulk: function () {
+      if (bulkBusy || inventory.snapshot().rowBusy.size) return false;
+      cancelSelectAllMatching(); setBulkBusy(true); return true;
+    },
+    releaseBulk: function () { setBulkBusy(false); },
+    publishImages: function (state) {
+      inventory.update(state);
+      imageListOk = state.imagesOk; imageIds = state.images.map(function (image) { return image.id; });
+      imageFilenames = Object.create(null); imageQuarantined = Object.create(null);
+      state.images.forEach(function (image) { imageFilenames[image.id] = image.filename || ''; imageQuarantined[image.id] = !!image.quarantined; });
+    }
+  });
+  inventory.subscribe(function () { assignments.prerequisites(inventory.snapshot()); });
+  assignments.prerequisites(inventory.snapshot());
   // "id — filename", both escaped -- the same two facts the catalog list
   // shows for an image, so a picker/drawer row never makes the operator go
   // find the id in the Images tab to see what it actually is. Falls back to
@@ -1035,135 +1028,8 @@
     var fn = imageFilenames[id];
     return fn && fn !== id ? esc(id) + ' — ' + esc(fn) : esc(id);
   }
-  // ---- Image picker: one control shared by the per-row assign button and
-  // the bulk "Assign images to N devices…" toolbar action below. Both POST
-  // the checked ids, in the order the checked-first render placed them,
-  // through the SAME ordered-set body (image_ids) -- there is exactly one
-  // way to pick images in this console, whether for one device or many, so
-  // the row select and the bulk dropdown that used to do this separately
-  // cannot drift apart again.
-  var imgPickerOnApply = null;
-  // Open the picker for ONE device and apply what comes back. Named, because
-  // two callers need it: each row's assign button, and the conflict retry in
-  // assignImagesTo -- a lost race must re-open the very control the operator
-  // was using, on the set that is really stored now.
-  function openRowAssign(id) {
-    if (bulkBusy || inventory.snapshot().rowBusy.has(id)) return;
-    if (!imageListOk) {
-      devStatus.textContent = 'Image list unavailable; not opening the picker. ' +
-        'Retry once the Images list loads.';
-      return;
-    }
-    var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
-    var current = rowAssignedIds(d);
-    // Device ids are operator-chosen strings, so the map must not inherit
-    // (or assign into) anything from Object.prototype.
-    var expect = Object.create(null);
-    expect[id] = current;
-    openImagePicker(current, function (ids) {
-      // An empty pick is a deliberate unassign for a device that already
-      // has one; for anything else it is one unchecked box away from
-      // wiping the assigned set by accident, so confirm before it posts.
-      if (!ids.length && !confirm('Unassign all images from ' + id + '?')) return;
-      // The same row lock covers assignment, credential, install and
-      // quarantine edits. It never releases a different action's bulk lock.
-      if (!inventory.claimRow(id)) return;
-      assignImagesTo([id], ids, { ownsBulkLock: false, expect: expect })
-        .catch(function () { devStatus.textContent = 'Assignment outcome is unknown. Refresh before trying again.'; })
-        .finally(function () { inventory.releaseRow(id); });
-    });
-  }
-  var imgPickerOpener = null;
-  function openImagePicker(currentIds, onApply) {
-    var overlay = document.getElementById('img-picker');
-    imgPickerOpener = document.activeElement;
-    var rows = document.getElementById('img-picker-rows');
-    var counter = document.getElementById('img-picker-count');
-    // Reset any note left over from a previous open (the bulk caller below
-    // sets one back on right after this returns, when it applies).
-    var note = document.getElementById('img-picker-note');
-    if (note) note.hidden = true;
-    var checkedSet = Object.create(null);   // image ids are operator-chosen
-    (currentIds || []).forEach(function (id) { checkedSet[id] = true; });
-    // checked-first: the current set, in its own order, before every other
-    // catalog image -- so what is already assigned is never buried below
-    // the fold in a large catalog, and Apply's read order (top to bottom)
-    // preserves it.
-    // An assigned id the catalog list does not carry used to be filtered out
-    // of the picker entirely. Apply posts exactly what is checked, so the id
-    // the operator was never shown was removed from the device by the act of
-    // looking. It keeps its place in the order instead, checked and disabled,
-    // and applying preserves it.
-    var ordered = (currentIds || [])
-      .concat(imageIds.filter(function (id) { return !checkedSet[id]; }));
-    rows.innerHTML = ordered.length ? ordered.map(function (id) {
-      var unknown = imageIds.indexOf(id) === -1;
-      // Quarantined images are visibly blocked here rather than silently
-      // hidden (KGV / Cisco Bulk Hash reconciler, Task 5) -- but only from
-      // being NEWLY checked. One already checked (assigned before it was
-      // quarantined) stays togglable at RENDER time so the operator can
-      // still uncheck it to remove the bad assignment -- but every
-      // quarantined row (checked or not) carries data-blocked="1" so that
-      // the moment it IS unchecked, updateCount's own disable sweep below
-      // catches it and it cannot be re-checked. Without data-blocked on the
-      // checked row too, unchecking it produced a plain unchecked-and-
-      // enabled box indistinguishable from any other image, and the
-      // operator could tick it straight back. The server's own
-      // set_policy() refusal (QuarantinedImage -> 400) stays the backstop
-      // either way.
-      var quarantined = !!imageQuarantined[id];
-      var blocked = quarantined && !checkedSet[id];
-      return '<label class="img-pick-row"><input type="checkbox" class="img-pick" value="' +
-        esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + (unknown ? ' disabled' : '') +
-        (blocked && !unknown ? ' disabled' : '') +
-        (quarantined ? ' data-blocked="1"' : '') +
-        '> ' + imageLabel(id) +
-        (quarantined ? ' <span class="badge badge-fail" title="Hash mismatch — ' +
-          'quarantined by the Cisco Bulk Hash reconciler">quarantined</span>' : '') +
-        (unknown ? ' <span class="muted">— not in the catalog; kept as assigned</span>' : '') +
-        (blocked ? ' <span class="muted">— quarantined; cannot be newly assigned</span>' : '') +
-        '</label>';
-    }).join('') : '<p class="muted">No images in the catalog yet.</p>';
-    function updateCount() {
-      var n = rows.querySelectorAll('input:checked').length;
-      counter.textContent = n + '/10';
-      // the 11th box is disabled, not just rejected server-side at Apply;
-      // a quarantined row (data-blocked) stays disabled regardless of
-      // count, never re-enabled just because the selection dropped -- and
-      // this sweep is what catches a quarantined row the MOMENT it is
-      // unchecked (see the render-time comment above), since every
-      // quarantined row carries data-blocked="1" whether or not it started
-      // checked.
-      rows.querySelectorAll('input:not(:checked)').forEach(function (cb) {
-        cb.disabled = n >= 10 || cb.dataset.blocked === '1';
-      });
-    }
-    rows.querySelectorAll('input').forEach(function (cb) { cb.addEventListener('change', updateCount); });
-    updateCount();
-    imgPickerOnApply = function () {
-      var ids = Array.prototype.map.call(rows.querySelectorAll('input:checked'),
-        function (cb) { return cb.value; });
-      closeImagePicker();
-      onApply(ids);
-    };
-    overlay.hidden = false;
-    document.getElementById('img-picker-cancel').focus();
-  }
-  function closeImagePicker() {
-    document.getElementById('img-picker').hidden = true;
-    imgPickerOnApply = null;
-    if (imgPickerOpener) { imgPickerOpener.focus(); imgPickerOpener = null; }
-  }
-  document.getElementById('img-picker-apply').addEventListener('click', function () {
-    if (imgPickerOnApply) imgPickerOnApply();
-  });
-  // Cancel closes without ever POSTing -- picking is a deliberate confirm.
-  document.getElementById('img-picker-cancel').addEventListener('click', closeImagePicker);
-  document.addEventListener('keydown', function (e) {
-    var overlay = document.getElementById('img-picker');
-    if (e.key === 'Escape' && overlay && !overlay.hidden) closeImagePicker();
-  });
-  trapDialogFocus(document.getElementById('img-picker'));
+  // Both entry points use the same React picker and captured-target controller.
+  function openRowAssign(id) { return assignments.openImages([id], true); }
   function delWarning(ids) {
     // Removing inventory does NOT undeploy: an onboarded device keeps running
     // its agent with no Console inventory entry for it, so say so before it
@@ -1209,79 +1075,6 @@
     // `ids` actually went through (delete-selected, so a removed device
     // does not linger in SELECTED forever) diff `ids` against this.
     return failedIds;
-  }
-  // issue #125: the bulk-endpoint counterpart of forSelected -- ONE POST
-  // carrying every selected id, instead of one request per id. Reports the
-  // same status-line shape forSelected does (label N/M device(s); failed:
-  // id (reason), ...), from the single response's {applied, failed} rather
-  // than from N settled promises. Always releases the shared bulk lock
-  // (unlike forSelected, nothing here shares it with a non-selected-action
-  // caller).
-  async function bulkApply(label, ids, fn) {
-    var failedIds = [];
-    try {
-      var r = await fn(ids);
-      var body = null;
-      try { body = await r.json(); } catch (e) { }
-      if (r.ok && body) {
-        var failedMap = body.failed || {};
-        failedIds = Object.keys(failedMap);
-        var reasons = failedIds.map(function (id) {
-          return id + ' (' + failedMap[id] + ')';
-        });
-        devStatus.textContent = label + ' ' + body.applied + '/' + ids.length +
-          ' device(s)' + (reasons.length ? '; failed: ' + reasons.join(', ') : '');
-      } else {
-        // The request itself failed (bad input, session/CSRF, network) --
-        // nothing in this batch applied, so every id counts as failed.
-        failedIds = ids.slice();
-        var reason = (body && body.error) || '';
-        devStatus.textContent = label + ' failed for all ' + ids.length +
-          ' device(s)' + (reason ? ': ' + reason : '');
-      }
-    } catch (e) {
-      failedIds = ids.slice();
-      devStatus.textContent = label + ' failed for all ' + ids.length +
-        ' device(s): network error';
-    } finally {
-      setBulkBusy(false);
-    }
-    refreshDevices();
-    return failedIds;
-  }
-  // Shared by the per-row assign button and the bulk toolbar action: POST
-  // the SAME ordered image_ids body to every device id, sequentially,
-  // reporting per-device failures in the status line through forSelected --
-  // same shape as every other bulk action. An empty imgIds is a deliberate
-  // unassign, not the absence of a choice: the picker's Apply always POSTs
-  // whatever is checked, including nothing.
-  //
-  // opts.expect maps a device id to the set its picker was OPENED on, and the
-  // server refuses (409) if the stored set has moved on since. It has to be a
-  // snapshot the caller captured: reading the current set here would pick up
-  // whatever the 10s poll last wrote, which is precisely the concurrent edit
-  // the check exists to catch -- absorbed in silence. Devices with no
-  // snapshot post without the field and keep the unconditional write.
-  function assignImagesTo(ids, imgIds, opts) {
-    opts = opts || {};
-    var expect = opts.expect;
-    var label = imgIds.length ? ('Assigned ' + imgIds.length + ' image(s) to') : 'Unassigned';
-    var conflicts = [];
-    return forSelected(label, ids, async function (id) {
-      var body = { image_ids: imgIds };
-      if (expect && expect[id] !== undefined) body.expect_image_ids = expect[id];
-      var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/assign', body);
-      if (r.status === 409) conflicts.push(id);
-      return r;
-    }, opts).then(async function () {
-      if (!conflicts.length) return;
-      // Nothing was written for these. Re-read first, so what the operator is
-      // told (and re-opened on) is what the device actually carries now.
-      await refreshDevices().catch(function () { });
-      devStatus.textContent = 'Images changed elsewhere on ' + conflicts.join(', ') +
-        '; nothing was written there. Review the current set and apply again.';
-      if (ids.length === 1 && conflicts.length === 1) openRowAssign(conflicts[0], null);
-    });
   }
   onInventoryAction('delete-selected', async function () {
     var ids = claimSelection();
@@ -2177,152 +1970,7 @@
                    { acknowledge_adopt: true });
     });
   });
-  // Selection is id-keyed and outlives paging/filtering (issue #112), so a
-  // selected device is very often NOT in LAST_DEVICES, which holds only the
-  // currently rendered page. Issue #121: the picker used to fall back to []
-  // for any such device, feeding a fabricated "assigned: []" into both the
-  // pre-check preview and the expect_image_ids compare-and-set below -- the
-  // server correctly refused (409) the resulting write, but for the wrong
-  // reason, and every off-page device in the selection spuriously conflicted.
-  //
-  // There is no "fetch by id list" route (only q=, a substring search), so
-  // this walks /api/v1/devices at the server's own page cap
-  // (gui_server.MAX_PAGE_LIMIT), matching by device_id, and stops the moment
-  // every id missing from LAST_DEVICES has been found. Unfiltered, since
-  // SELECTED persists across filter changes and a selected device may no
-  // longer match whatever the filter bar shows now. For the common case --
-  // the whole selection already on the rendered page -- this makes no
-  // request at all. Returns a device_id -> row map; an id that still cannot
-  // be found (deleted since being selected, or the walk failed) is simply
-  // absent from it, same as it always was for a genuinely unknown device.
-  async function fetchDeviceRows(ids) {
-    var byId = Object.create(null);
-    LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; });
-    var missing = ids.filter(function (id) { return !byId[id]; });
-    if (!missing.length) return byId;
-    var need = Object.create(null);
-    missing.forEach(function (id) { need[id] = true; });
-    var remaining = missing.length;
-    var batch = 1000, offset = 0, total = null;
-    while (remaining > 0 && (total === null || offset < total)) {
-      var qs = 'limit=' + batch + '&offset=' + offset;
-      var r;
-      try { r = await fetch('/api/v1/devices?' + qs); } catch (e) { break; }
-      if (!r.ok) break;
-      var body = await r.json();
-      total = typeof body.total === 'number' ? body.total : 0;
-      var got = body.devices || [];
-      got.forEach(function (d) {
-        if (need[d.device_id]) { byId[d.device_id] = d; delete need[d.device_id]; remaining--; }
-      });
-      if (!got.length) break;   // never spin forever on an unexpected reply
-      offset += got.length;
-    }
-    return byId;
-  }
-  onInventoryAction('assign-images-selected', async function () {
-    var ids = selectedIds();
-    if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
-    if (!imageListOk) {
-      devStatus.textContent = 'Image list unavailable; not opening the picker. ' +
-        'Retry once the Images list loads.';
-      return;
-    }
-    var byId = await fetchDeviceRows(ids);
-    // Pre-check the INTERSECTION of the selection's current sets: pre-
-    // checking the UNION would silently ADD an image to a device that does
-    // not have it the moment ANY other selected device does; pre-checking
-    // just one device's set would silently DROP an image from the rest on
-    // Apply. The intersection is the only starting point Apply cannot
-    // change anyone's assignment by surprise from.
-    // Off-page ids resolve via fetchDeviceRows (issue #121), not [].
-    var sets = ids.map(function (id) { return rowAssignedIds(byId[id] || {}); });
-    var intersection = sets.reduce(function (a, b) {
-      return a.filter(function (x) { return b.indexOf(x) !== -1; });
-    });
-    // Whether the selection's sets are all IDENTICAL, which is the only case
-    // Apply cannot surprise anyone in. Apply posts ONE set to every selected
-    // device, so every image the picker does not show checked is DROPPED from
-    // whichever device had it -- and an intersection can be perfectly
-    // non-empty while the sets still disagree ([A,B] + [A] -> [A]). That is
-    // exactly the case that used to apply in silence: the pre-check looked
-    // complete, so nothing warned and nothing confirmed, and the device with
-    // the larger set quietly lost an image. Compared as SEQUENCES, since
-    // applying rewrites the order too. The note below and the confirm inside
-    // Apply both read this one derivation.
-    var firstSet = sets[0].join('\u0000');
-    var setsDiffer = sets.some(function (s) { return s.join('\u0000') !== firstSet; });
-    // What each selected device was showing when the picker opened, so an
-    // assignment written by someone else in between is refused rather than
-    // flattened by this Apply.
-    var expect = Object.create(null);
-    ids.forEach(function (id, i) { expect[id] = sets[i]; });
-    openImagePicker(intersection, function (imgIds) {
-      var claimed = claimSelection();
-      if (!claimed) return;
-      // A mixed starting point is not itself destructive.  For example,
-      // [A] + [] -> [A] only gives the second device the same assignment.
-      // Warn only when the proposed result actually removes an image from at
-      // least one selected device.
-      var removesAssignment = sets.some(function (s) {
-        return s.some(function (id) { return imgIds.indexOf(id) === -1; });
-      });
-      // An empty pick from the bulk path is one accidental Apply away from
-      // wiping every selected device's assignment (an empty intersection
-      // opens the picker with nothing pre-checked) -- confirm before it posts.
-      if (!imgIds.length) {
-        if (!confirm('Unassign all images from ' + claimed.length + ' device(s)?')) {
-          setBulkBusy(false); return;
-        }
-      } else if (removesAssignment &&
-          !confirm('Replace image assignments?\n\nAll selected devices will use these ' +
-                   imgIds.length + ' images. Existing assignments not selected here will be removed.')) {
-        setBulkBusy(false); return;
-      }
-      assignImagesTo(claimed, imgIds, { expect: expect });
-    });
-    // Sets that disagree are the trap, whatever their intersection comes to:
-    // Apply as-is replaces everyone's set with whatever ends up checked. Say
-    // so before the operator picks. Devices that all agree -- including every
-    // one of them unassigned -- are not a trap and get no note.
-    if (setsDiffer) {
-      var note = document.getElementById('img-picker-note');
-      if (note) {
-        note.textContent = 'These devices have different image assignments. '
-          + 'Apply gives them all the selected images. Confirm before removing existing assignments.';
-        note.hidden = false;
-      }
-    }
-  });
-  document.getElementById('apply-cred-selected').addEventListener('click', async function () {
-    var raw = document.getElementById('cred-selected').value;
-    var msg = document.getElementById('cred-modal-msg');
-    if (!raw) {
-      // untouched picker: nothing is applied, the modal stays open
-      if (msg) msg.textContent = 'Choose a credential profile, or "no credential" to clear.';
-      return;
-    }
-    var pid = raw === CRED_CLEAR ? '' : raw;
-    // The confirm text and the action it confirms must count the SAME set --
-    // selectedIds() (SELECTED), not the checked rows in the DOM, which under
-    // paging can be only a fraction of the real selection the claim below
-    // actually fires against (issue #112 prerequisite 2).
-    var count = selectedIds().length;
-    if (!pid && !confirm('Clear the credential on ' + count + ' selected device(s)?\n\n' +
-        'Onboard and undeploy will be unavailable until you assign another profile. ' +
-        'The credential profiles are kept.')) return;
-    var ids = claimSelection();
-    if (!ids) return;
-    closeModal('cred-modal');
-    // issue #125: one request for the whole selection (ids can run into the
-    // thousands via "Select all N matching devices"), not one per device --
-    // see bulkApply and gui_server.py's /api/v1/devices/bulk-credential.
-    await bulkApply(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
-      function (allIds) {
-        return jpost('/api/v1/devices/bulk-credential',
-                     { device_ids: allIds, credential_profile_id: pid });
-      });
-  });
+  onInventoryAction('assign-images-selected', function () { assignments.openImages(selectedIds()); });
   function deviceSeriesLabel(series, model) {
     var labels = { IE3x00: 'IE Switches', IR1x00: 'IR Routers',
       C8xxx: 'Catalyst Routers', C9xxx: 'Catalyst Switches',
@@ -2341,7 +1989,7 @@
     report: function (message, failed) { inventory.report(message, failed); },
     publishCredentials: function (state) {
       credOpts = state.credentials; credListOk = state.credentialsOk;
-      inventory.update(state); syncCredSelected();
+      inventory.update(state);
     }
   });
   // Opening a form is not a mutation. Keep its trigger usable while the
@@ -4987,7 +4635,7 @@
       closeModal('role-def-modal');
       closeModal('policy-advanced-modal');
     }
-    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); }
+    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); }
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });

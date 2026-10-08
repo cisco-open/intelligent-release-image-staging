@@ -27,6 +27,26 @@ def test_device_and_credential_forms_have_only_react_dom_owners():
     assert "deviceForms.hide();" in legacy
 
 
+def test_assignment_dialogs_have_only_react_dom_owners():
+    legacy = APP.read_text()
+    html = APP.with_name("index.html").read_text()
+    source = APP.parent.parent / "console-ui/src"
+    entry = (source / "main.jsx").read_text()
+    component = (source / "assignments.jsx").read_text()
+    controller = (source / "assignments-controller.mjs").read_text()
+    for identifier in ("img-picker", "img-picker-rows", "img-picker-apply",
+                       "cred-modal", "cred-selected", "apply-cred-selected"):
+        assert "getElementById('%s')" % identifier not in legacy
+        assert 'id="%s"' % identifier not in html
+    assert 'id="iris-assignments-root" data-assignments-react' in html
+    assert "mountAssignments();" in entry
+    assert "assignments.acceptImages(result, ticket)" in legacy
+    assert "assignments.hide();" in legacy
+    assert "el.closest('[data-inventory-react], [data-assignments-react]')" in legacy
+    assert "dangerouslySetInnerHTML" not in component
+    assert "setInterval(" not in component and "setInterval(" not in controller
+
+
 def test_session_status_and_logout_bridge_preserves_csrf_and_idle_semantics():
     if not shutil.which("node"):
         pytest.skip("Node is required for the browser-client bridge test")

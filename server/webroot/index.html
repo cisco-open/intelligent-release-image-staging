@@ -274,23 +274,9 @@
         </div>
         <div id="iris-inventory-table-root" data-inventory-react></div>
         <div id="iris-device-details-root"></div>
-        <!-- Image picker: one control shared by the per-row "assign" button
-             and the bulk "Assign images to N devices…" toolbar action
-             (openImagePicker in app.js). A centred modal, not a drawer -- it
-             is a choice to make and confirm, not a panel to read alongside
-             the table it was opened from. role=dialog + aria-modal (Task 6). -->
-        <!-- Bulk-action modals (Magnetic Modal > Usage: "Use modals for
-             simple tasks that inform, confirm, or complete a simple action").
-             Onboard/Undeploy/Set credential used to be .menu popovers hanging
-             off caret buttons in the bulk bar, each holding form controls and
-             its own nested submit -- which Magnetic Dropdown rules out
-             ("Selecting an item from the menu starts an action without
-             requiring the use of another button to submit or apply") and
-             names modals as the right home for: "provide features in bulk
-             action bar that open modals". Same chrome as the image picker
-             below; every control id is unchanged, so telemetryFlags(),
-             startBatch() and the credential handler read exactly what they
-             read before. -->
+        <!-- Job-option and role dialogs still use the shared application
+             controller. Image and bulk credential dialogs mount separately
+             under iris-assignments-root. -->
         <div id="onboard-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="onboard-modal-title">
           <div class="modal">
             <div class="modal-head">
@@ -326,24 +312,6 @@
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="undeploy-cancel">Cancel</button>
               <button class="btn danger" type="button" id="undeploy-confirm">Start undeploy</button>
-            </div>
-          </div>
-        </div>
-        <div id="cred-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="cred-modal-title">
-          <div class="modal">
-            <div class="modal-head">
-              <span id="cred-modal-title">Set credential <span id="cred-modal-count" class="muted"></span></span>
-              <button class="btn ghost icon-only" type="button" id="cred-modal-x" aria-label="Close">&#10005;</button>
-            </div>
-            <div class="modal-body">
-              <label class="field" for="cred-selected"><span class="field-label">Credential profile</span>
-                <select id="cred-selected"><option value="" disabled selected>— choose a credential profile —</option></select>
-              </label>
-              <p class="err" id="cred-modal-msg" aria-live="polite"></p>
-            </div>
-            <div class="modal-foot">
-              <button class="btn ghost" type="button" id="cred-modal-cancel">Cancel</button>
-              <button class="btn" type="button" id="apply-cred-selected">Apply</button>
             </div>
           </div>
         </div>
@@ -425,21 +393,7 @@
             </div>
           </div>
         </div>
-        <div id="img-picker" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-label="Choose images">
-          <div class="modal">
-            <div class="modal-head">
-              <span>Choose images <span id="img-picker-count" class="muted"></span></span>
-            </div>
-            <div class="modal-body">
-              <p id="img-picker-note" class="muted" hidden role="status" aria-live="polite"></p>
-              <div id="img-picker-rows"></div>
-            </div>
-            <div class="modal-foot">
-              <button class="btn ghost" id="img-picker-cancel">Cancel</button>
-              <button class="btn" id="img-picker-apply">Apply</button>
-            </div>
-          </div>
-        </div>
+        <div id="iris-assignments-root" data-assignments-react></div>
         <div id="iris-activity-root"></div>
       </section>
       <section id="view-swarm" hidden>

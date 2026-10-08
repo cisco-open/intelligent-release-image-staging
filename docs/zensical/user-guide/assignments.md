@@ -24,6 +24,16 @@ them on the Devices table and use **Assign images**; see
     The new choice replaces the old one, so include every image you want to
     keep. An empty set unassigns every image.
 
+The picker reads current assignments before enabling **Apply**. Expand
+**reviewed devices** to check its targets. They stay fixed while it is open,
+even if the table selection changes. Closing it after Apply leaves requests
+running; check the result in Inventory.
+
+If another update changes an assignment, the server refuses the outdated
+choice. A lost or incomplete response is shown as unknown. Choose **Review
+current assignments**, check the new selection, then decide whether to apply
+again. The Console never resends the change automatically.
+
 ## With the API
 
 `POST /api/v1/devices/{device_id}/assign` assigns images to one device that is

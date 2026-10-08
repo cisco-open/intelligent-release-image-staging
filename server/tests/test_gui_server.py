@@ -123,7 +123,7 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     assert "['role', 'role'" in component and "['peer', 'peer'" in component
     assert "peer-intent badge" in component and "Quarantined intent" in component
     assert "bulkButton('set-role-selected', 'Set role…')" in component
-    modal = html.split('id="role-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    modal = html.split('id="role-modal"', 1)[1].split('id="iris-assignments-root"', 1)[0]
     assert 'role="dialog" aria-modal="true" aria-labelledby="role-modal-title"' in modal
     for cid in ('role-modal-title', 'role-selected', 'role-modal-msg', 'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
         assert 'id="%s"' % cid in modal
@@ -711,8 +711,8 @@ def test_bulk_row_actions_wired():
         html = f.read()
     for action in ('adopt-selected', 'delete-selected'):
         assert "bulkButton('" + action + "'" in _react_shell('inventory.jsx')
-    for el in ('id="cred-selected"', 'id="apply-cred-selected"'):
-        assert el in html, el
+    assert 'id="cred-selected"' in _react_shell('assignments.jsx')
+    assert "'apply-cred-selected'" in _react_shell('assignments.jsx')
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
@@ -724,8 +724,8 @@ def test_bulk_row_actions_wired():
     # ...but the bulk credential action (issue #125) posts ONE request
     # carrying every selected id, not one per-device request each --
     # see bulkApply and gui_server.py's /api/devices/bulk-credential.
-    assert "'/api/v1/devices/bulk-credential'" in js
-    assert "function bulkApply(" in js
+    assert "'/api/v1/devices/bulk-credential'" in _react_shell('assignments-controller.mjs')
+    assert "bulkCredentialResult(response" in _react_shell('assignments-controller.mjs')
     # the single delete path confirms first
     assert "function delWarning(" in js
     assert js.count("confirm(delWarning(") == 1
@@ -734,8 +734,8 @@ def test_bulk_row_actions_wired():
     # creating or deleting a profile re-renders the device rows, so a device
     # imported before any profile existed becomes assignable immediately
     assert "await this.refreshCredentials(); await this.refreshInventory();" in _react_shell('device-forms-controller.mjs')
-    assert "inventory.update(state); syncCredSelected();" in js
-    assert "function syncCredSelected(" in js
+    assert "inventory.update(state);" in js
+    assert "assignments.prerequisites(inventory.snapshot())" in js
 
 
 def test_all_selected_actions_share_one_busy_lock():
@@ -766,7 +766,7 @@ def test_all_selected_actions_share_one_busy_lock():
     # action cannot be added without also claiming the lock -- quarantine and
     # release are the two exceptions, guarded inside bulkQuarantine instead.
     claimers = [a for a in actions
-                if a not in ("quarantine-selected", "release-selected")]
+                if a not in ("quarantine-selected", "release-selected", "assign-images-selected", "apply-cred-selected")]
     assert js.count("claimSelection()") == len(claimers), (
         "%d actions but %d claim the lock"
         % (len(claimers), js.count("claimSelection()")))
@@ -9629,286 +9629,47 @@ def test_every_status_the_cell_can_show_is_filterable():
     assert "status: 'status'" in _react_shell('inventory-model.mjs')
 
 
-def test_image_can_be_assigned_to_the_selection():
-    """Assigning an image was per-row only, which does not scale past a handful
-    of devices -- and the devices table gained filters precisely so an operator
-    could act on a subset. Bulk assignment now opens the SAME image picker the
-    per-row button uses (Task 4: an ordered multi-image set, not a single
-    <select>), and shares the selected-action lock with every other bulk
-    action, or a delete could fire mid-assignment.
-
-    NOTE: this test used to pin the single-image <select id="image-selected">
-    + <button id="apply-image-selected"> pair with an "__unassign" sentinel
-    value. Task 4 replaces that control with the shared image-set picker
-    (openImagePicker) per its own spec, which is why this test's assertions
-    changed rather than only gaining new ones -- the control it pinned no
-    longer exists by design, not by drift."""
-    html = _webroot("index.html")
-    app_js = _webroot("app.js")
-    assert '<select id="image-selected"' not in html, \
-        "old single-image bulk picker still wired -- was it really replaced?"
-    assert 'id="apply-image-selected"' not in html
-    assert "bulkButton('assign-images-selected'" in _react_shell('inventory.jsx')
-    assert "'assign-images-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
-        "bulk image assign is not under the shared selected-action lock"
-    # two occurrences of the bare getElementById() exist (updateSelBar's
-    # live label text, and the click handler below) -- split on the
-    # listener registration specifically so this pins the handler, not the
-    # label update.
-    handler = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1][:3800]
-    assert "openImagePicker(" in handler
-    assert "claimSelection()" in handler
-    # the intersection of the selection's current sets, not the union of them
-    # (union would silently ADD an image to a device that lacks it) and not
-    # one device's set either (that would silently DROP one from the rest)
-    assert "reduce(" in handler and "indexOf(" in handler
-    apply_fn = app_js.split("function assignImagesTo", 1)[1][:500]
-    assert "'/assign'" in apply_fn
-    assert "image_ids:" in apply_fn
+def test_assignment_models_and_controller_behavior():
+    """Run actual ES modules, including all former picker source-pin behavior."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for assignment client regressions")
+    tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/assignments.test.mjs"
+    result = subprocess.run([node, "--test", str(tests)], text=True,
+                            capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "# fail 0" in result.stdout
 
 
-def test_empty_apply_confirms_before_unassigning(tmp_path):
-    """Review finding: two selected devices with DIFFERENT image sets
-    intersect to an EMPTY picker selection, which opens with nothing
-    pre-checked -- clicking Apply without touching a box then silently wipes
-    every selected device's assignment, no confirmation. Both the bulk path
-    and the single-device (per-row) path must confirm before POSTing an
-    empty image_ids body; a device that already has nothing assigned is a
-    harmless extra prompt, not a special case to detect."""
-    app_js = _webroot("app.js")
-    bulk_handler = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1][:4800]
-    assert "!imgIds.length" in bulk_handler
-    assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
-        in bulk_handler
-    # cancelling the confirm must release the bulk selected-action lock, the
-    # same way the existing delete-selected cancel path does
-    assert "setBulkBusy(false)" in bulk_handler.split(
-        "Unassign all images from", 1)[1][:200]
-    row_handler = app_js.split("function openRowAssign(id) {", 1)[1][:1400]
-    assert "!ids.length" in row_handler
-    assert "confirm('Unassign all images from ' + id + '?')" in row_handler
-
-
-def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
-    """Additional to the confirm above: an empty intersection can ALSO mean
-    every selected device genuinely has nothing assigned -- not a trap, so no
-    note. It is a trap only when at least one selected device DOES have an
-    assignment (the empty pre-check came from sets that disagree, not from
-    everyone being unassigned); that case gets a one-line warning in the
-    picker before the operator checks anything."""
-    html = _webroot("index.html")
-    app_js = _webroot("app.js")
-    assert 'id="img-picker-note"' in html
-    bulk_handler = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1][:4800]
-    assert "These devices have different image assignments" in bulk_handler
-    assert "sets.some(" in bulk_handler
-    # the picker itself resets any stale note on every open, so a note left
-    # over from one bulk pick never bleeds into the next (bulk or per-row)
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "img-picker-note" in picker
-
-
-def test_bulk_picker_warns_when_the_sets_merely_overlap():
-    """Review finding, untested until now: the note and the confirm keyed off
-    an EMPTY intersection, which catches only the extreme case. dev1=[A,B]
-    with dev2=[A] intersects to a perfectly non-empty [A], so that selection
-    got no note and no confirm -- the picker looked complete, Apply posted [A]
-    to both, and dev1 lost B with nothing said.
-
-    The pre-picker note belongs on the SETS, not their intersection.  The
-    confirmation, however, belongs on the proposed RESULT: [A,B] + [A] -> [A]
-    removes B and must warn, while [A] + [] -> [A] only adds A and must not
-    claim that the operator is assigning different images. Identical sets --
-    every device unassigned included -- stay a plain, unconfirmed apply."""
-    app_js = _webroot("app.js")
-    bulk_handler = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1][:4800]
-    assert "setsDiffer" in bulk_handler
-    # the gate is no longer the emptiness of the intersection
-    assert "!intersection.length &&" not in bulk_handler, \
-        "the note still fires only on an EMPTY intersection"
-    assert "if (setsDiffer) {" in bulk_handler
-    # Apply confirms only when the checked result omits an existing image, and
-    # cancelling that confirm releases the shared selected-action lock like
-    # every other one. A mixed [A] + [] start followed by [A] is additive and
-    # therefore does not produce a false destructive-change warning.
-    assert "removesAssignment" in bulk_handler
-    derivation = bulk_handler.split("var removesAssignment", 1)[1][:350]
-    assert "sets.some(" in derivation and "imgIds.indexOf(id) === -1" in derivation
-    guard = bulk_handler.split("} else if (removesAssignment &&", 1)
-    assert len(guard) == 2, "Apply does not confirm before removing an assignment"
-    assert "confirm(" in guard[1][:200]
-    assert "setBulkBusy(false)" in guard[1][:900]
-
-
-def test_per_row_assign_never_releases_the_bulk_selected_action_lock():
-    """Review finding: the per-row assign button routes through forSelected(),
-    whose finally unconditionally did setBulkBusy(false). Assigning one row
-    while a bulk action was still running therefore re-enabled every bulk
-    button -- a delete could then fire while an onboard batch was still
-    starting, which is precisely what the shared selected-action lock exists
-    to prevent.
-
-    One row is not a selected-action: it must not touch that lock at all. The
-    row's own button carries the busy state for the duration of its POST."""
-    app_js = _webroot("app.js")
-    helper = app_js.split("async function forSelected(", 1)[1][:1400]
-    assert "ownsBulkLock" in helper, \
-        "forSelected still releases the bulk lock unconditionally"
-    assert "if (opts.ownsBulkLock !== false) setBulkBusy(false);" in helper
-    row_handler = app_js.split("function openRowAssign(id) {", 1)[1][:1400]
-    assert "ownsBulkLock: false" in row_handler
-    # ...and the row disables its own control while the POST is in flight
-    assert "inventory.claimRow(id)" in row_handler
-    assert "inventory.releaseRow(id)" in row_handler
-    # and the row is the only caller that opts out -- openRowAssign is where
-    # that decision lives, so it cannot be copied into a bulk path by accident
-    assert app_js.count("ownsBulkLock: false") == 1
-    # the bulk callers keep the default: they claimed the lock, they release it
-    bulk_handler = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1][:3800]
-    assert "ownsBulkLock" not in bulk_handler
-
-
-def test_image_picker_and_drawer_show_filename_not_just_id():
-    """Review finding: the picker and the deployment drawer showed a bare
-    image id, forcing the operator to go find it in the Images tab to see
-    what it actually is. Both now render 'id — filename', escaped like every
-    other interpolation in this file, matching how the catalog list already
-    shows both facts about an image."""
-    app_js = _webroot("app.js")
-    assert "function imageLabel(id)" in app_js
-    label_fn = app_js.split("function imageLabel(id) {", 1)[1][:300]
-    assert "esc(id)" in label_fn and "esc(fn)" in label_fn
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "imageLabel(id)" in picker
-    drawer = _react_shell("device-details-model.mjs").split("function imageRows", 1)[1]
-    assert "`${id} — ${filename}`" in drawer
-    assert "imageRows(state?.device" in _react_shell("device-details.jsx")
-
-
-def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
-    """Review finding: two operators editing the same device's images had
-    nothing between them -- the later Apply simply won, and the earlier edit
-    vanished without a trace, while the peer-policy PUT beside it has carried
-    an if_revision compare-and-set all along.
-
-    Both entry points now capture what each device was showing when the picker
-    opened and send it as expect_image_ids. A 409 means nothing was written:
-    the client re-reads, says so, and re-opens the picker for a single device
-    on the set that is really stored."""
-    app_js = _webroot("app.js")
-    body = app_js.split("function assignImagesTo(ids, imgIds, opts) {", 1)[1][:1600]
-    assert "expect_image_ids" in body
-    # the expectation is the caller's SNAPSHOT, never a fresh read here (that
-    # would absorb the very concurrent edit this is meant to catch)
-    assert "opts.expect" in body
-    assert "r.status === 409" in body
-    assert "openRowAssign(conflicts[0], null)" in body
-    # ...and both callers capture one
-    row = app_js.split("function openRowAssign(id) {", 1)[1][:1400]
-    assert "expect[id] = current" in row
-    assert "expect: expect" in row
-    bulk = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1].split(
-            "getElementById('apply-cred-selected').addEventListener", 1)[0]
-    assert "expect[id] = sets[i]" in bulk
-    assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
-    # device ids are operator-chosen strings, so these maps have no prototype
-    assert app_js.count("Object.create(null)") >= 2
-
-
-def test_picker_does_not_open_on_a_failed_image_fetch():
-    """Hardening: a failed /api/images substitutes an empty list, which by the
-    time it reaches the picker is indistinguishable from an empty catalog --
-    and an empty picker can only be applied as "unassign everything". Neither
-    entry point opens on a fetch that did not succeed; the status line says so
-    instead.
-
-    Companion: an assigned id the catalog list does not carry was filtered out
-    of the picker entirely, so Apply -- which posts exactly what is checked --
-    dropped it. It keeps its place, checked and disabled."""
-    app_js = _webroot("app.js")
-    assert "imageListOk = state.imagesOk" in app_js, \
-        "the image list's load state is assumed rather than recorded"
-    assert app_js.count("if (!imageListOk) {") == 2, \
-        "both picker entry points must refuse a picker with no real catalog"
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "var unknown = imageIds.indexOf(id) === -1" in picker
-    assert "unknown ? ' disabled' : ''" in picker
-    assert "not in the catalog" in picker
-
-
-def test_bulk_assign_resolves_off_page_selection_from_the_server():
-    """Issue #121: selection is id-keyed and outlives paging (issue #112), so
-    a selected device is very often NOT in LAST_DEVICES, which holds only the
-    currently rendered page. The bulk picker used to derive its pre-check
-    intersection AND its expect_image_ids compare-and-set straight from
-    LAST_DEVICES, so an off-page selected device read as "assigned: []" --
-    the server correctly refused (409) the resulting write, but for the wrong
-    reason, and it happened for every off-page device in the selection.
-
-    fetchDeviceRows() resolves each selected id's REAL current row first (a
-    bounded /api/devices walk keyed by device_id -- there is no "fetch by id
-    list" route), and the click handler now reads from that map instead of
-    LAST_DEVICES."""
-    app_js = _webroot("app.js")
-    assert "async function fetchDeviceRows(ids)" in app_js
-    fetch_fn = app_js.split("async function fetchDeviceRows(ids) {", 1)[1].split(
-        "\n  onInventoryAction('assign-images-selected',", 1)[0]
-    # keyed by device_id, seeded from whatever page is already rendered
-    assert "byId[d.device_id] = d" in fetch_fn
-    assert "LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; })" in fetch_fn
-    assert "/api/v1/devices?" in fetch_fn
-    # bounded: nothing to fetch when the whole selection is already rendered,
-    # and the walk stops the moment every missing id has been found rather
-    # than always paging the entire fleet
-    assert "if (!missing.length) return byId;" in fetch_fn
-    assert "remaining--" in fetch_fn
-    bulk_handler = app_js.split(
-        "onInventoryAction('assign-images-selected',", 1)[1][:3800]
-    assert "await fetchDeviceRows(ids)" in bulk_handler
-    # the pre-check/expect sets are read from the fetched map, never straight
-    # from LAST_DEVICES (which is exactly the bug: the page in the DOM is not
-    # the same thing as the selection)
-    assert "byId[id]" in bulk_handler
-    assert "LAST_DEVICES" not in bulk_handler, \
-        "bulk picker still trusts LAST_DEVICES for a selection that can span pages"
-
-
-def test_image_picker_is_one_function_shared_by_both_entry_points():
-    """The row select and the bulk dropdown used to be two separate ways to
-    assign the same thing, through two different code paths that could (and
-    did) drift apart. Task 4 replaces both with ONE picker function -- pin
-    that there is exactly one definition, that both the per-row button and
-    the bulk toolbar action call it, and that it enforces the 10-image cap
-    itself (the 11th checkbox disabled, not just the server's 400)."""
-    app_js = _webroot("app.js")
-    assert app_js.count("function openImagePicker(currentIds, onApply)") == 1
-    # definition + at least two call sites (per-row, bulk)
-    assert app_js.count("openImagePicker(") >= 3
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert ">= 10" in picker, "unchecked boxes are never disabled at the cap"
-    assert ".disabled = " in picker
-    # checked-first: the device's current set renders before the rest of the
-    # catalog, so it is never buried below the fold
-    assert "checked" in picker.lower()
-
-
-def test_row_assign_is_a_button_not_a_select():
+def test_row_and_bulk_assignment_share_the_react_picker():
     component, js = _react_shell('inventory.jsx'), _webroot('app.js')
     assert '<button type="button" className="linkish assign-btn"' in component
     assert 'onClick={() => services.assign?.(id)}' in component and 'assign: openRowAssign' in js
     assert "'— assign —'" in component and '`${assigned.length} image(s)`' in component
     assert '<select className="assign"' not in component
-    assert 'function openImagePicker(' in js and 'function assignImagesTo(' in js
+    assert 'assignments.openImages([id], true)' in js
+    assert 'assignments.openImages(selectedIds())' in js
+    assert 'id="iris-assignments-root" data-assignments-react' in _webroot('index.html')
+    assert "function openImagePicker" not in js and "function assignImagesTo" not in js
+    controller = _react_shell('assignments-controller.mjs')
+    assert 'expect_image_ids: expect.get(id)' in controller
+    assert 'const chosen = checkedIds(state.chosen, 10), ids = state.ids.slice()' in controller
+    assert 'this.services.claimBulk(state.ids)' in controller
+    assert 'inventory.rowBusy.size > 0' in controller
+    assert "beginImageRead: function () { return assignments.beginImageRead(); }" in js
+    assert 'assignments.prerequisites(inventory.snapshot())' in js
+
+
+def test_assignment_picker_and_drawer_show_filename_once():
+    model = _react_shell('assignments-model.mjs')
+    assert 'row.filename !== row.id' in model
+    assert '`${row.id} — ${row.filename}`' in model
+    assert 'image.label' in _react_shell('assignments.jsx')
+    drawer = _react_shell('device-details-model.mjs')
+    assert '`${id} — ${filename}`' in drawer
 
 
 def test_deployed_badge_requires_every_assigned_image_staged():
@@ -10361,17 +10122,14 @@ def test_dialogs_get_dialog_role_honestly():
     close -- that part of a dialog's contract holds regardless of modality."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    img_picker_tag = html.split('id="img-picker"', 1)[1].split(">", 1)[0]
-    assert 'role="dialog"' in img_picker_tag
-    assert 'aria-modal="true"' in img_picker_tag
+    picker = _react_shell('assignments.jsx')
+    assert 'role="dialog" aria-modal="true"' in picker
     assert "function trapDialogFocus(container) {" in js
-    assert "trapDialogFocus(document.getElementById('img-picker'))" in js
+    assert "event.key !== 'Tab'" in picker and 'first?.focus()' in picker and 'last?.focus()' in picker
     # focus moves in on open and is restored to the opener on close, for
     # all four -- modal or not
-    for opener_var in ("imgPickerOpener",):
-        assert ("var %s = null;" % opener_var) in js, opener_var
-        assert (opener_var + " = document.activeElement;") in js, opener_var
-        assert (opener_var + ".focus();") in js, opener_var
+    assert 'const active = document.activeElement' in picker and 'target.focus()' in picker
+    assert "'#img-picker-cancel')?.focus()" in picker
     images = _react_shell("images.jsx")
     tag = images.split('id="img-info-panel"', 1)[1].split('>', 1)[0]
     assert 'role="dialog"' in tag and 'aria-modal' not in tag
@@ -10941,8 +10699,8 @@ def test_bulk_bar_action_buttons_capped_via_more_menu():
         assert "bulkButton('" + action + "'" in menu
     assert 'className="menu-divider"' in menu and "'menu-item danger menu-close'" in menu
     assert 'id="cred-selected"' not in menu
-    modal = _webroot('index.html').split('id="cred-modal"', 1)[1].split('id="img-picker"', 1)[0]
-    assert 'id="cred-selected"' in modal and 'id="apply-cred-selected"' in modal
+    modal = _react_shell('assignments.jsx')
+    assert 'id="cred-selected"' in modal and "'apply-cred-selected'" in modal
 
 
 def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
@@ -10997,8 +10755,7 @@ def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
     # every modal still offers an explicit close control, per Magnetic Modal
     html = _webroot("index.html")
     for mid, closers in (("onboard-modal", ("onboard-cancel", "onboard-modal-x")),
-                         ("undeploy-modal", ("undeploy-cancel", "undeploy-modal-x")),
-                         ("cred-modal", ("cred-modal-cancel", "cred-modal-x"))):
+                         ("undeploy-modal", ("undeploy-cancel", "undeploy-modal-x"))):
         block = html.split('id="%s"' % mid, 1)[1].split("<!--", 1)[0]
         for cid in closers:
             assert 'id="%s"' % cid in block, "%s must offer %s" % (mid, cid)
@@ -11394,15 +11151,12 @@ def test_bulk_credential_modal_untouched_is_noop_and_clear_confirms():
     """Source guard (IRIS-08-001): the resting placeholder is disabled (an
     untouched Apply does nothing), clearing is a distinct sentinel that is
     confirmed, and the modal refuses to open without a profile list."""
-    js = _webroot("app.js")
-    html = _webroot("index.html")
-    assert '<select id="cred-selected"><option value="" disabled selected>' in html
-    assert 'id="cred-modal-msg"' in html
-    assert "var CRED_CLEAR = '__none';" in js
-    assert "<option value=\"\" disabled>" in js
-    assert "var pid = raw === CRED_CLEAR ? '' : raw;" in js
-    assert "confirm('Clear the credential on '" in js
-    assert "if (!raw) {" in js
+    js, component = _react_shell('assignments-controller.mjs'), _react_shell('assignments.jsx')
+    assert '<option value="" disabled>' in component
+    assert "'cred-modal-msg'" in component
+    assert "choice.startsWith('profile:') ? choice.slice(8) : ''" in js
+    assert 'Clear the credential on ${ids.length} reviewed device(s)?' in js
+    assert "if (!choice) {" in js
 
 
 def test_credential_list_failure_is_not_rendered_as_no_credential():
@@ -11415,28 +11169,27 @@ def test_credential_list_failure_is_not_rendered_as_no_credential():
     assert 'disabled={busy || state.bulkBusy || !state.credentialsOk}' in _react_shell('inventory.jsx')
     assert 'Credential list unavailable; showing the assignment as recorded' in _react_shell('inventory.jsx')
     assert "credential list unavailable; assign later" in _react_shell('device-forms.jsx')
-    assert "Credential list unavailable; not opening the picker." in js
+    assert "Credential list unavailable; not opening the picker." in _react_shell('assignments-controller.mjs')
 
 
 def test_console_id_keyed_maps_are_prototype_free():
-    """Source guard (IRIS-08-009): every map keyed by an operator-chosen id
-    is created with Object.create(null).
-
-    'marked' (a per-render DOM scrape) is gone as of issue #112: selection is
-    now the persistent SELECTED map, id-keyed the same way and replacing
-    'marked' in this list rather than adding beside it."""
+    """Operator-chosen IDs use null-prototype objects, Map or Set."""
     js = _webroot("app.js")
     for decl in ("var LAST_JOBS_BY_DEVICE = Object.create(null);",
                  "var best = Object.create(null);",
                  "var imageFilenames = Object.create(null);",
                  "var imageQuarantined = Object.create(null);",
-                 "var checkedSet = Object.create(null);",
                  "imageFilenames = Object.create(null);",
                  "imageQuarantined = Object.create(null);"):
         assert decl in js, decl
     assert "var SELECTED = {};" not in js and "var checkedSet = {};" not in js
     model = _react_shell('inventory-controller.mjs')
     assert 'selected: new Set()' in model and 'rowBusy: new Set()' in model
+    picker = _react_shell('assignments-model.mjs')
+    controller = _react_shell('assignments-controller.mjs')
+    assert 'const expect = new Map(ids.map(id =>' in picker
+    assert 'const records = new Map(), seen = new Set(), targets = new Set(ids)' in controller
+    assert 'const chosen = new Set(this.state.chosen)' in controller
 
 
 def test_telemetry_filter_has_unknown_bucket():

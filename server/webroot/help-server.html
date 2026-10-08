@@ -114,6 +114,11 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       the server connection before editing those fields. An unknown edit
       outcome means the response was lost or unreadable; check the refreshed
       row before trying again.</li>
+      <li>Image and bulk credential dialogs keep the devices you reviewed when
+      you opened them. Check <strong>reviewed devices</strong> before applying.
+      For an image conflict or unknown result, choose <strong>Review current
+      assignments</strong> and check the new selection before applying again.
+      Closing a dialog does not cancel submitted changes.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>
