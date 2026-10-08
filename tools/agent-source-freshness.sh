@@ -64,6 +64,13 @@ iris_check_agent_freshness() {
   behind="$(git -C "$repo" rev-list --count "HEAD..$ref" -- $paths 2>/dev/null || true)"
   case "$behind" in ''|*[!0-9]*) return 0 ;; esac
   [ "$behind" -gt 0 ] || return 0
+  # A no-fast-forward merge (or a cherry-pick) can put commits on the
+  # reference side without adding any source bytes missing from this tip.
+  # Compare the selected trees before calling that topology stale. A real
+  # upstream difference still follows the normal warning/refusal path.
+  if git -C "$repo" diff --quiet HEAD "$ref" -- $paths; then
+    return 0
+  fi
   {
     echo "!! WARNING: this checkout is $behind commit(s) behind $ref under: $paths"
     echo "   The image/package about to be built will ship OLDER agent code"

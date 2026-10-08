@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Accept merged or cherry-picked build sources when their checked files match
+  the reference branch. Continue refusing genuinely stale device sources.
+
 - Reuse defensive-copy plans for unchanged inventory rows, while retaining
   fresh content and permission checks on every read.
 

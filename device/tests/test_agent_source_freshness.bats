@@ -143,6 +143,45 @@ _check_under_set_e() {
   [ -z "$output" ]
 }
 
+@test "a merged feature tip with identical source is fresh despite the merge commit" {
+  _make_stale_repo
+  git -C "$R" branch feature main
+  git -C "$R" branch -f main "$C1"
+  git -C "$R" checkout -q main
+  git -C "$R" merge -q --no-ff feature -m "Merge feature"
+  git -C "$R" checkout -q feature
+  echo "three" > "$R/device/agent/a.py"
+  git -C "$R" add device/agent/a.py
+  git -C "$R" commit -q -m "Next feature change"
+  git -C "$R" checkout -q main
+  git -C "$R" merge -q --no-ff feature -m "Merge continued feature"
+  git -C "$R" checkout -q feature
+  [ "$(git -C "$R" rev-list --count HEAD..main -- device/agent)" -gt 0 ]
+  _check_under_set_e IRIS_REQUIRE_FRESH_AGENT=1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" != *"WARNING"* ]]
+}
+
+@test "identical cherry-picked source is fresh but differing upstream bytes still fail" {
+  _make_stale_repo
+  upstream="$(git -C "$R" rev-parse main)"
+  git -C "$R" checkout -q -b feature
+  echo "feature" > "$R/unrelated.txt"
+  git -C "$R" add unrelated.txt
+  git -C "$R" commit -q -m "Unrelated feature"
+  git -C "$R" cherry-pick "$upstream"
+  _check IRIS_REQUIRE_FRESH_AGENT=1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -z "$output" ]
+  git -C "$R" checkout -q main
+  echo "three" > "$R/device/agent/a.py"
+  git -C "$R" add device/agent/a.py
+  git -C "$R" commit -q -m "New upstream source"
+  git -C "$R" checkout -q feature
+  _check IRIS_REQUIRE_FRESH_AGENT=1
+  [ "$status" -eq 1 ]
+}
+
 @test "does nothing outside a git checkout" {
   R="$TMP/not-a-repo"
   mkdir -p "$R"
