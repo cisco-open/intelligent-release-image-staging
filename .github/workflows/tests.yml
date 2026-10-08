@@ -100,6 +100,8 @@ jobs:
             -p no:cacheprovider -q server/tests/test_managed_worker.py
           sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
             -p no:cacheprovider -q server/tests/test_installer_install.py -k umask
+          sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+            -p no:cacheprovider -q server/tests/test_installer_initialization.py
 
       - name: bats
         # Report the shell suite even when pytest failed: one push should

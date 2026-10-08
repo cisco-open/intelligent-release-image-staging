@@ -17,7 +17,9 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
+import tempfile
 
 from . import ubuntu
 from .state import InstallError, Journal, atomic_write, regular_bytes
@@ -429,8 +431,8 @@ class DockerInstall:
         return self.finish()
 
 
-def snapshot(source, destination):
-    """Copy only declared distribution inputs, never an operator's dirty tree."""
+def source_inventory(source):
+    """Validate the declared distribution inventory before reserving inputs."""
     source = Path(source).resolve()
     manifest_path = source / "INSTALLER-SOURCE.json"
     if not manifest_path.is_file():
@@ -438,27 +440,155 @@ def snapshot(source, destination):
     manifest = json.loads(regular_bytes(manifest_path, 8 * 1024 * 1024))
     if not isinstance(manifest, dict) or not manifest:
         raise InstallError("Invalid source inventory")
-    destination.mkdir(mode=0o755)
-    destination.chmod(0o755)
     for name, expected in manifest.items():
+        if not isinstance(name, str) or not isinstance(expected, str):
+            raise InstallError("Unsafe source inventory entry")
         relative = Path(name)
-        if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
+        if (relative.is_absolute() or not relative.parts or ".." in relative.parts or str(relative) != name
                 or not re.fullmatch(r"[0-9a-f]{64}", expected)):
             raise InstallError("Unsafe source inventory entry")
-        path = source / relative
-        if path.resolve() != path or not path.is_file() or digest(path) != expected:
-            raise InstallError("Source inventory mismatch: " + name)
-        output = destination / relative
-        output.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        directory = output.parent
-        while directory != destination:
-            directory.chmod(0o755)
-            directory = directory.parent
-        shutil.copyfile(path, output)
-        output.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
-        if digest(output) != expected:
-            raise InstallError("Source changed during snapshot")
     return manifest
+
+
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _public_directory(path):
+    path = Path(path)
+    if path.resolve() != path:
+        raise InstallError("Installation inputs must not traverse symlinks")
+    path.mkdir(mode=0o755, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise InstallError("Installation input directory has changed ownership")
+    path.chmod(0o755)
+    _sync_directory(path)
+    _sync_directory(path.parent)
+
+
+def _input_buffer(path):
+    """Open only the caller-owned scratch file reserved by initialization."""
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        os.close(fd)
+        raise InstallError("Unsafe initialization buffer; preserve it for inspection")
+    return os.fdopen(fd, 'r+b')
+
+
+def _publish_input(source, output, expected, mode, buffer):
+    """Verify before rename so an interrupted copy never leaves a partial input."""
+    if output.exists() or output.is_symlink():
+        if (output.resolve() != output or not output.is_file()
+                or output.stat().st_uid != os.geteuid()
+                or output.stat().st_nlink != 1 or digest(output) != expected):
+            raise InstallError("Completed installation input changed; preserve it: " + str(output))
+    else:
+        with _input_buffer(buffer) as temporary:
+            temporary.seek(0)
+            temporary.truncate()
+            shutil.copyfileobj(source, temporary)
+            temporary.flush()
+            if digest(buffer) != expected:
+                raise InstallError("Source changed during snapshot")
+            os.fsync(temporary.fileno())
+        os.replace(buffer, output)
+    output.chmod(mode)
+    with output.open('rb') as published:
+        os.fsync(published.fileno())
+    for directory in {output.parent, Path(buffer).parent}:
+        _sync_directory(directory)
+
+
+def snapshot(source, destination, *, expected_manifest=None, buffer=None):
+    """Copy verified inputs; a pinned initialization may resume complete files."""
+    source = Path(source).resolve()
+    destination = Path(destination).absolute()
+    manifest = source_inventory(source)
+    if expected_manifest is not None and manifest != expected_manifest:
+        raise InstallError("Installer source inventory changed; use the original source package")
+    if expected_manifest is None:
+        destination.mkdir(mode=0o755)
+    _public_directory(destination)
+    expected_dirs = {str(parent) for name in manifest for parent in Path(name).parents}
+    for path in destination.rglob('*'):
+        name = str(path.relative_to(destination))
+        if path.is_symlink() or (name not in manifest and not (path.is_dir() and name in expected_dirs)):
+            raise InstallError("Unexpected snapshot input; preserve it: " + name)
+    owned_buffer = buffer is None
+    if owned_buffer:
+        fd, buffer = tempfile.mkstemp(prefix='.snapshot-', dir=destination.parent)
+        os.close(fd)
+    try:
+        for name, expected in manifest.items():
+            relative = Path(name)
+            path = source / relative
+            if path.resolve() != path or not path.is_file() or digest(path) != expected:
+                raise InstallError("Source inventory mismatch: " + name)
+            output = destination / relative
+            for parent in reversed(relative.parents):
+                if str(parent) != '.':
+                    _public_directory(destination / parent)
+            mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+            with path.open('rb') as data:
+                _publish_input(data, output, expected, mode, buffer)
+    finally:
+        if owned_buffer and Path(buffer).exists():
+            Path(buffer).unlink()
+    return manifest
+
+
+def complete_initialization(journal):
+    """Resume only inputs explicitly reserved before the first snapshot write."""
+    import io
+    record = journal.document.get('initialization')
+    if record is None:
+        if journal.document.get('state') == 'INITIALIZING':
+            raise InstallError('Initialization intent is missing; preserve the journal')
+        return
+    if (journal.document.get('state') != 'INITIALIZING' or journal.document['completed']
+            or not isinstance(record, dict) or set(record) != {'source', 'public_roots'}
+            or not isinstance(record['source'], str) or not Path(record['source']).is_absolute()
+            or not isinstance(record['public_roots'], dict) or len(record['public_roots']) != 2
+            or not isinstance(journal.document.get('source_manifest'), dict)
+            or not journal.document['source_manifest']):
+        raise InstallError('Invalid initialization intent; preserve the journal')
+    roots = record['public_roots']
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+\.pub', name)
+           or not isinstance(data, str) or not data.startswith('ssh-ed25519 ')
+           for name, data in roots.items()):
+        raise InstallError('Invalid public roots in initialization intent')
+    try:
+        root_bytes = {name: data.encode('ascii') for name, data in roots.items()}
+    except UnicodeEncodeError:
+        raise InstallError('Invalid public roots in initialization intent') from None
+    expected_roots = {name: hashlib.sha256(data).hexdigest() for name, data in root_bytes.items()}
+    if expected_roots != journal.document.get('root_digests'):
+        raise InstallError('Initialization root fingerprints changed; preserve the journal')
+    buffer = journal.directory / '.initial-input-buffer'
+    snapshot(record['source'], journal.directory / 'source',
+             expected_manifest=journal.document['source_manifest'], buffer=buffer)
+    directory = journal.directory / 'roots'
+    _public_directory(directory)
+    if any(path.name not in roots for path in directory.iterdir()):
+        raise InstallError('Unexpected roots input; preserve it for inspection')
+    for name, data in root_bytes.items():
+        _publish_input(io.BytesIO(data), directory / name, expected_roots[name], 0o644, buffer)
+        run(['ssh-keygen', '-lf', str(directory / name)], capture=True)
+    read_roots(directory)
+    if buffer.exists() or buffer.is_symlink():
+        with _input_buffer(buffer):
+            pass
+        buffer.unlink()
+    journal.document.pop('initialization')
+    journal.document['state'] = 'INITIALIZED'
+    journal.save()
 
 
 def installation(journal, runner=None):
@@ -520,18 +650,20 @@ def start(args):
             matches = run([*command, "--filter", "label=com.docker.compose.project=" + config["instance"]], capture=True)
             if matches.strip():
                 raise InstallError("Compose instance already has resources; adoption is not implemented")
-        manifest = snapshot(args.source, journal.directory / "source")
-        (journal.directory / "roots").mkdir(mode=0o755)
-        (journal.directory / "roots").chmod(0o755)
-        for name, data in roots.items():
-            atomic_write(journal.directory / "roots" / name, data, 0o644)
-            run(["ssh-keygen", "-lf", str(journal.directory / "roots" / name)], capture=True)
+        manifest = source_inventory(args.source)
+        # Validate the captured public bytes, not a path that could change
+        # between validation and recording the immutable initialization intent.
+        for data in roots.values():
+            run(['ssh-keygen', '-lf', '-'], input=data, capture=True)
         import uuid
         journal.document = {"schema": 1, "id": str(uuid.uuid4()), "config": config,
                             "source_manifest": manifest,
                             "root_digests": {name: hashlib.sha256(data).hexdigest() for name, data in roots.items()},
-                            "completed": {}, "state": "INITIALIZED"}
+                            "completed": {}, "state": "INITIALIZING",
+                            "initialization": {"source": str(Path(args.source).resolve()),
+                                               "public_roots": {name: data.decode('ascii') for name, data in roots.items()}}}
         journal.save()
+        complete_initialization(journal)
         return installation(journal).resume()
 
 
@@ -543,4 +675,6 @@ def resume(args):
             raise InstallError("No installation journal exists")
         from .restore import assert_no_pending_restore
         assert_no_pending_restore(journal)
+        validate_config(journal.document['config'])
+        complete_initialization(journal)
         return installation(journal).resume(args.certificate)

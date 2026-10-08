@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Resume interrupted initial installer snapshots using recorded public inputs.
+  Verify each file before publishing it and preserve unknown or changed files.
+
 - Allow installer port checks to pass after closed TCP connections while still
   rejecting active listeners. Cover single and split Docker hosts. Recovery
   errors now give the supported terminal commands for the selected deployment.

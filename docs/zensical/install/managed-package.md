@@ -191,6 +191,10 @@ administrator-provisioned PV bound to this namespace's `iris-data` claim.
 
 ## Approve and resume
 
+If setup stops while copying its initial files, run `irisctl resume` with the
+same `--state-dir`. Keep the original installer version available until setup
+finishes. Resume checks recorded inputs and preserves changed or unknown files.
+
 Exit `20` means the installer is waiting for offline approval. Transfer only
 `requests/online.pub` from the state directory to a key holder. Record its SHA256
 value and share that value separately so the holder can check the request.
