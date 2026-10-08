@@ -188,7 +188,8 @@ test('quarantine capability, lock and cancellation gates send nothing', async ()
 
 test('real bridge only unlocks unknown-role review after an accepted current Inventory policy read', async () => {
   const inventory = new InventoryController(), roleActions = new RoleActionsController();
-  let peerPolicyReadGeneration = 0, peerPolicyReadOk = true, roleDefBusy = false, bulkBusy = false;
+  let peerPolicyReadGeneration = 0, peerPolicyReadOk = true, bulkBusy = false;
+  const policies = {state: {busy: false}};
   let held = null, superseded = false, unavailable = false;
   const policy = {revision: 7, quarantine_assignments: [], roles_supported: true, roles: {members: {boat: 2}}};
   const fetch = async path => {

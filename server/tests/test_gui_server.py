@@ -133,216 +133,40 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     assert "wireModal('role-modal'" not in js and "BULK_MODALS" not in js
     assert "'apply-role-selected'" in js.split('var BULK_BTNS = [', 1)[1].split(']', 1)[0]
     assert "'set-role-selected'" in js.split('var BULK_OPENERS = [', 1)[1].split(']', 1)[0]
-    assert 'id="peer-policy-panel"' in html and 'id="role-capability-banner"' in html
-    panel = html.split('id="peer-policy-panel"', 1)[1].split('</details>', 1)[0]
+    panel = _react_shell('policy-dialogs.jsx')
+    assert 'id="peer-policy-panel"' in panel
+    assert 'id="role-capability-banner"' in _react_shell('policies.jsx')
     assert '<textarea' not in panel and '<textarea' not in modal
     assert '.policy-counts' in css and 'minmax(' in css
-    workflow = js.split('// ---- Role workflow ----', 1)[1].split('// ---- End role workflow ----', 1)[0]
     assert _react_shell('role-actions-controller.mjs').count("'/api/v1/devices/bulk-role'") == 1
-    assert "'/api/v1/devices/bulk-role'" not in workflow
-    assert 'forSelected(' not in workflow and "method: 'PUT'" not in workflow
+    assert "'/api/v1/devices/bulk-role'" not in js
 
 
-def _run_role_console_js(script):
-    """Execute the actual scoped Console code with a small DOM/fetch double.
-
-    This is a request/state-machine check, not a browser-layout claim.
-    """
+def _run_policies_node(pattern):
+    """Run shipped controller regressions, never a duplicate state machine."""
     import subprocess
-    js = _webroot('app.js')
-    assert '// ---- Role workflow ----' in js
-    code = js.split('// ---- Role workflow ----', 1)[1].split(
-        '// ---- End role workflow ----', 1)[0]
-    result = subprocess.run(['node', '-'], input=r'''
-const assert = require('node:assert/strict');
-const elements = new Map();
-function el(id) {
-  if (!elements.has(id)) elements.set(id, {
-    value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
-    listeners: {}, addEventListener(k, f) { this.listeners[k] = f; },
-    focus() { this.focused = true; }
-  });
-  return elements.get(id);
-}
-var document = {getElementById: el, querySelectorAll: () => [], querySelector: () => null};
-var confirmPrompts = [], confirmAnswers = [];
-function confirm(text) { confirmPrompts.push(text); return confirmAnswers.length ? confirmAnswers.shift() : true; }
-async function downloadCsv(url, name) { calls.push({url, download: name}); }
-var peerPolicy = {revision: 7, roles_supported: true, roles: {members: {boat: 2}}};
-var peerPolicyReadOk = true, bulkBusy = false, devStatus = el('dev-status');
-const inventory = {state: {}, update(patch) { this.state = {...this.state, ...patch}; }};
-function onInventoryAction(id, handler) { el(id).listeners.click = handler; }
-var selection = ['on-page', 'off-page'];
-function selectedIds() { return selection.slice(); }
-function setBulkBusy(b) { bulkBusy = b; }
-function claimSelection() { if (bulkBusy) return null; setBulkBusy(true); return selectedIds(); }
-function openModal(id) { el(id).hidden = false; }
-function closeModal(id) { el(id).hidden = true; if (id === 'role-def-modal') cancelRoleDefinitionDialog(); }
-function csrfHdr(h) { return {...h, 'X-CSRF-Token': 'test-csrf'}; }
-function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
-function fmtDate(v) { return 'time:' + v; }
-var refreshes = 0;
-async function refreshDevices() { refreshes++; }
-var calls = [], replies = [];
-async function fetch(url, opts) {
-  calls.push({url, ...opts, body: opts && opts.body !== undefined ? JSON.parse(opts.body) : undefined});
-  const next = replies.shift();
-  if (next instanceof Error) throw next;
-  if (typeof next === 'function') return await next();
-  return {ok: next.status < 400, status: next.status, json: async () => next.body,
-          headers: {get: (k) => (next.headers || {})[k] || null}};
-}
-function reply(body, status = 200) { replies.push({status, body}); }
-function preview(extra = {}) {
-  return {ok: true, applied: 2, failed: {}, dry_run: true, revision: 8,
-    candidate_revision: 8, confirm_token: 'preview-token', requires_confirmation: true,
-    member_delta: 2, origin_access_lost: 1, empty_permitted_sets: 0,
-    role_pairs_stopped: 1, qos_changed: true, ...extra};
-}
-''' + code + '\n(async () => {\n' + script + '\n})().catch(e => {console.error(e); process.exit(1);});',
-        text=True, capture_output=True, timeout=10)
+    tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/policies.test.mjs"
+    result = subprocess.run(
+        ["node", "--test", "--test-name-pattern", pattern, str(tests)],
+        text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert re.search(r"# pass [1-9][0-9]*", result.stdout), result.stdout
 
 
 def test_role_definition_editor_previews_then_commits_with_the_preview_token():
-    """#222: the editor follows the Set role contract exactly -- one dry run
-    on the pre-preview revision, then one commit carrying that preview's
-    token on the SAME revision even when polling has moved on."""
-    _run_role_console_js(r'''
-await el('role-def-new').listeners.click();
-assert.equal(el('role-def-modal').hidden, false);
-el('rd-name').value = 'Bad Name';
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 0, 'invalid input never reaches the server');
-assert.match(el('role-def-msg').textContent, /Role name must/);
-el('rd-name').value = 'boat';
-el('rd-peers').value = 'fiber, boat';
-el('rd-nets').value = '10.20.0.0/16';
-el('rd-restricted').checked = true;
-el('rd-origin').checked = false;
-el('rd-on-stale').value = 'keep';
-reply(preview({member_delta: 0, origin_access_lost: 0, role_pairs_stopped: 0}));
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 1);
-assert.equal(calls[0].method, 'PUT');
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
-assert.deepEqual(calls[0].body, {restricted: true, peers: ['boat', 'fiber'], origin: false,
-  nets: ['10.20.0.0/16'], on_stale: 'keep'});
-assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
-assert.equal(el('role-def-preview').hidden, false);
-assert.match(el('role-def-preview').textContent, /Create role boat/);
-assert.match(el('role-def-preview').textContent, /QoS policy changed: yes/);
-assert.equal(el('role-def-save').textContent, 'Save role');
-peerPolicy.revision = 99; // polling must not replace the preview's base revision
-reply({ok: true, dry_run: false, revision: 8, candidate_revision: 8});
-reply({revision: 8, roles: {boat: {restricted: true, peers: ['boat', 'fiber'], origin: false}}});
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 3);
-assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
-assert.equal(calls[1].body.confirm_token, 'preview-token');
-assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(calls[2].url, '/api/v1/peer-policy/roles', 'definitions re-read after the write');
-assert.equal(el('role-def-modal').hidden, true);
-assert.match(el('role-def-status').textContent, /Role boat saved at policy revision 8/);
-assert.equal(peerPolicy.revision, 8);
-assert.equal(refreshes, 1, 'the Set role dropdown and Role filter follow the device refresh');
-await new Promise(r => setTimeout(r, 0)); // the definitions re-read renders after the dialog closed
-assert.match(el('role-def-rows').innerHTML, /data-role="boat"/);
-assert.match(el('role-def-rows').innerHTML, /fiber/);
-''')
+    _run_policies_node("definition create previews|definition commit")
 
 
 def test_role_definition_editor_edit_discards_a_stale_preview_and_carries_qos_state():
-    _run_role_console_js(r'''
-roleDefinitions = {boat: {restricted: true, peers: ['boat'], qos: {seed_up_bps: 12500000},
-  qos_state: {seeder: {numwant: 4}}}};
-roleDefinitionsRevision = 7;
-roleDefinitionsOk = true;
-openRoleDefinitionEditor('boat');
-assert.equal(el('rd-name').disabled, true);
-assert.equal(el('role-def-modal-title').textContent, 'Edit role boat');
-reply(preview());
-await el('role-def-save').listeners.click();
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
-assert.deepEqual(calls[0].body.qos_state, {seeder: {numwant: 4}}, 'a full replacement keeps the tracker overlay');
-assert.match(el('role-def-preview').textContent, /Replace role boat/);
-el('role-def-modal').listeners.input({target: {}});
-assert.equal(el('role-def-preview').hidden, true, 'editing after a preview discards it');
-assert.equal(el('role-def-save').textContent, 'Preview change');
-assert.match(el('role-def-msg').textContent, /Preview again/);
-reply({code: 'revision_conflict', revision: 9}, 409);
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 2, 'a second click previews again rather than committing');
-assert.match(el('role-def-msg').textContent, /Peer policy changed/);
-reply({code: 'role_isolated', role: 'boat'}, 409);
-await el('role-def-save').listeners.click();
-assert.match(el('role-def-msg').textContent, /permit itself/);
-''')
+    _run_policies_node("existing editor holds|editing after preview")
 
 
 def test_role_definition_delete_and_import_preview_then_confirm():
-    _run_role_console_js(r'''
-reply(preview({role_pairs_stopped: 1}));
-replies.push({status: 204, body: null, headers: {ETag: '"iris-peer-policy-9"'}});
-reply({revision: 9, roles: {}});
-await deleteRoleDefinition('boat');
-assert.equal(calls[0].method, 'DELETE');
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
-assert.match(confirmPrompts[0], /Delete role boat/);
-assert.match(confirmPrompts[0], /Role pairings stopped: 1/);
-assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
-assert.equal(calls[1].body.confirm_token, 'preview-token');
-assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(peerPolicy.revision, 9, 'a 204 carries the revision only in its ETag');
-assert.match(el('role-def-status').textContent, /Role boat deleted at policy revision 9/);
-calls.length = 0; confirmPrompts.length = 0;
-// A declined confirmation commits nothing.
-confirmAnswers.push(false);
-reply(preview({roles: 2}));
-await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
-assert.equal(calls.length, 1);
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/import-csv?dry_run=1');
-assert.deepEqual(calls[0].body, {csv: 'role\nboat\nfiber\n'});
-assert.match(confirmPrompts[0], /Replace every role definition with the 2 role\(s\) in roles\.csv/);
-assert.match(confirmPrompts[0], /Roles missing from the file are removed/);
-assert.match(el('role-def-status').textContent, /cancelled; nothing changed/);
-calls.length = 0;
-reply(preview({roles: 2}));
-reply({ok: true, dry_run: false, revision: 10, candidate_revision: 10, roles: 2});
-reply({revision: 10, roles: {boat: {peers: ['boat']}, fiber: {peers: ['fiber']}}});
-await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
-assert.equal(calls[1].url, '/api/v1/peer-policy/roles/import-csv');
-assert.equal(calls[1].body.confirm_token, 'preview-token');
-assert.match(el('role-def-status').textContent, /Imported 2 role definition\(s\) from roles\.csv at policy revision 10/);
-calls.length = 0;
-reply({code: 'invalid_roles_csv', detail: 'unknown roles CSV field: bogus'}, 422);
-await importRoleDefinitions('role,bogus\nx,1\n', 'bad.csv');
-assert.equal(calls.length, 1, 'a refused preview never commits');
-assert.match(el('role-def-status').textContent, /Import refused: unknown roles CSV field: bogus/);
-reply({code: 'role_in_use', roles: ['boat']}, 409);
-await importRoleDefinitions('role\nfiber\n', 'drop.csv');
-assert.match(el('role-def-status').textContent, /declared roles missing from the file: boat/);
-await el('role-def-export').listeners.click();
-assert.deepEqual(calls[calls.length - 1], {url: '/api/v1/peer-policy/roles/export-csv', download: 'roles.csv'});
-''')
+    _run_policies_node("delete |CSV |role exports")
 
 
 def test_role_definition_controls_follow_the_capability_banner():
-    _run_role_console_js(r'''
-peerPolicy.roles_supported = false;
-renderPeerPolicyPanel();
-for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, true, id);
-await el('role-def-new').listeners.click();
-assert.equal(calls.length, 0);
-assert.match(el('role-def-status').textContent, /cannot confirm.*role support/i);
-await importRoleDefinitions('role\nboat\n', 'roles.csv');
-await deleteRoleDefinition('boat');
-assert.equal(calls.length, 0, 'no preview while the banner shows');
-peerPolicy.roles_supported = true;
-renderPeerPolicyPanel();
-for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, false, id);
-''')
+    _run_policies_node("capability, degraded policy")
 
 
 def test_role_actions_execute_captured_targets_and_checked_response_regressions():
@@ -355,73 +179,11 @@ def test_role_actions_execute_captured_targets_and_checked_response_regressions(
 
 
 def test_peer_policy_panel_distinguishes_unknown_preflight_from_zero():
-    _run_role_console_js(r'''
-peerPolicy = {roles_supported: true, roles_present: true,
-  enforcement: {stale: true, mutual_origin: {mode: 'preflight'}}};
-for (const count of [null, undefined, false, '0', -1, NaN]) {
-  peerPolicy.enforcement.mutual_origin.newly_denied_device_count = count;
-  renderPeerPolicyPanel();
-  const text = el('policy-mutual-origin').textContent;
-  assert.match(text, /preflight count unavailable/i);
-  assert.doesNotMatch(text, /newly denied devices/);
-  assert.match(text, /restriction is not active/);
-  assert.match(text, /Tracker status is stale/);
-}
-peerPolicy.enforcement.mutual_origin.newly_denied_device_count = 0;
-renderPeerPolicyPanel();
-assert.match(el('policy-mutual-origin').textContent, /0 newly denied devices/);
-delete peerPolicy.enforcement.mutual_origin;
-renderPeerPolicyPanel();
-assert.match(el('policy-mutual-origin').textContent, /status unavailable/);
-''')
+    _run_policies_node("preflight diagnostics")
 
 
 def test_peer_policy_panel_count_only_and_capability_banner_behavior():
-    _run_role_console_js(r'''
-peerPolicy = {revision: 7, roles_supported: true, roles_present: true,
-  roles: {defined: 1, restricted: 1, members: {'boat<script>': 2}, nets: ['192.0.2.4']},
-  role_drift: {count: 3, device_ids: ['192.0.2.5']}, outbox: {unacknowledged: 9, capacity: 256},
-  origin_qos: {state: 'enforced', target_download_count: 4, applied_download_count: 4,
-    last_reconciled_at: 1000, addresses: ['192.0.2.6']},
-  enforcement: {mutual_origin: {mode: 'preflight', newly_denied_device_count: 2}}};
-renderPeerPolicyPanel();
-let rendered = [...elements.values()].map(e => e.textContent + e.innerHTML).join(' ');
-assert.match(rendered, /9\/256/);
-assert.match(rendered, /boat&lt;script>/);
-assert.doesNotMatch(rendered, /192\.0\.2\./);
-assert.match(rendered, /preflight/i);
-assert.equal(el('role-capability-banner').hidden, true);
-peerPolicy.roles_supported = false;
-renderPeerPolicyPanel();
-assert.equal(el('role-capability-banner').hidden, false);
-assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
-assert.equal(inventory.state.roleAvailable, false);
-assert.equal(inventory.state.policyOk, true);
-delete peerPolicy.roles_supported; // genuinely older response, no capability flag
-delete peerPolicy.roles_present;
-renderPeerPolicyPanel();
-let roleWarning = el('role-capability-banner').textContent.toLowerCase();
-assert.match(roleWarning, /cannot confirm.*role support/i);
-let normalizedRoleWarning = roleWarning.replace(/\s+/g, ' ');
-assert.match(normalizedRoleWarning,
-  /independent (?:peer )?quarantine.{0,100}(?:not enforced|ignored|not sufficient|insufficient).{0,100}(?:older|predating) servers?.{0,180}(?:containment|compatibility).{0,100}downgrad/);
-assert.doesNotMatch(roleWarning, /pre-d/);
-assert.doesNotMatch(roleWarning,
-  /quarantine restricted devices before (?:a|any)? ?downgrade/);
-peerPolicy.roles_supported = true;
-peerPolicy.degraded = true;
-renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /degraded/i);
-peerPolicy.fail_closed = true;
-renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /fail.closed/i);
-peerPolicyReadOk = false;
-renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /unavailable/i);
-assert.equal(inventory.state.roleAvailable, false);
-assert.equal(inventory.state.policyOk, false);
-assert.equal(calls.length, 0);
-''')
+    _run_policies_node("diagnostics keep|capability warnings")
 
 
 def test_role_policy_startup_signal_identifies_lost_state_without_addresses(tmp_path, capsys):
@@ -10623,23 +10385,16 @@ def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
     # the old form agreed with the matched count
     assert "((devs.length === total ? total : devs.length) === 1 ? '' : 's')" not in js
 
-    # 2 -- a menu-hosted opener resolves to the popover's trigger
-    fn = js.split("function openModal(id) {", 1)[1].split("\n  }", 1)[0]
-    assert "var opener = document.activeElement;" in fn
-    assert "opener.closest('.menu')" in fn
-    assert "menu.closest('.menu-wrap')" in fn
-    assert "wrap.querySelector('[aria-expanded]')" in fn
-    assert "modalOpener = opener;" in fn
-    assert "modalOpener = document.activeElement;" not in js
-
-    # 3 -- no backdrop click-to-close anywhere (the phrase appears in the
-    # comment explaining why, so pin the code form, not the words)
-    assert "if (e.target === overlay) closeModal" not in js
-    assert "overlay.addEventListener('click'" not in js
-    wire = js.split("function wireModal(id, closerIds) {", 1)[1].split("\n  }", 1)[0]
-    assert "addEventListener('click'" in wire, "the ✕/Cancel closers must stay"
-    assert "e.key === 'Escape'" in wire
-    assert "trapDialogFocus(overlay);" in wire
+    # React actions return focus to the stable menu trigger and trap Tab.
+    actions = _react_shell('inventory-actions.jsx')
+    assert "opener.current" in actions and "[aria-expanded]" in actions
+    assert "function openModal(" not in js and "function wireModal(" not in js
+    for name in ('inventory-actions.jsx', 'role-actions.jsx', 'policy-dialogs.jsx'):
+        modal = _react_shell(name)
+        assert "event.key === 'Escape'" in modal
+        assert "event.key !== 'Tab'" in modal
+        assert "controller.close()" in modal
+        assert "event.target === event.currentTarget" not in modal
     # every modal still offers an explicit close control, per Magnetic Modal
     component = _react_shell('inventory-actions.jsx')
     assert "id={action + '-cancel'}" in component and "id={action + '-modal-x'}" in component
@@ -12286,27 +12041,28 @@ def test_role_definitions_editor_wired_in_console():
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    panel = html.split('id="peer-policy-panel"')[1].split("</details>")[0]
-    for cid in ('id="role-def-new"', 'id="role-def-import"', 'id="role-def-export"',
-                'id="role-def-file"', 'id="role-def-rows"', 'id="role-def-status"'):
-        assert cid in panel, cid + " must live inside the Peer policy panel"
-    modal = html.split('id="role-def-modal"')[1].split('id="sched-modal"')[0]
-    for cid in ('id="rd-name"', 'id="rd-peers"', 'id="rd-nets"', 'id="rd-on-stale"',
-                'id="rd-restricted"', 'id="rd-origin"', 'id="rd-rates"', 'id="rd-swarm"',
-                'id="role-def-preview"', 'id="role-def-save"'):
-        assert cid in modal, cid + " must live inside the role editor"
-    assert "managed through the API or CLI" not in html
-    assert "/api/v1/peer-policy/roles/import-csv?dry_run=1" in js
-    assert "/api/v1/peer-policy/roles/export-csv" in js
-    save = js.split("getElementById('role-def-save').addEventListener")[1]
-    assert "?dry_run=1" in save and "confirm_token" in save
-    assert "wireModal('role-def-modal'" in js
-    # every role-scoped QoS key is editable, none of the global-only ones is
+    panel = _react_shell('policy-dialogs.jsx')
+    for cid in ('role-def-new', 'role-def-import', 'role-def-export',
+                'role-def-file', 'role-def-rows', 'role-def-status',
+                'rd-name', 'rd-peers', 'rd-nets', 'rd-on-stale',
+                'rd-restricted', 'rd-origin', 'rd-rates', 'rd-swarm',
+                'role-def-preview', 'role-def-save'):
+        assert cid in panel
+    assert 'id="iris-policies-root" data-policies-react' in html
+    assert 'id="role-def-modal"' not in html
+    assert "managed through the API or CLI" not in panel
+    controller = _react_shell('policies-controller.mjs')
+    assert "/api/v1/peer-policy/roles/import-csv" in controller
+    assert "/api/v1/peer-policy/roles/export-csv" in controller
+    assert "?dry_run=1" in controller and "confirm_token" in controller
+    assert "'If-Match'" in controller
     import role_csv
+    model = _react_shell('policy-definitions-model.mjs')
+    fields = model.split("export const roleQosFields = [")[1].split("];")[0]
     for key in role_csv.ROLE_QOS_FIELDS:
-        assert "['%s'," % key in js, key
+        assert "['%s'," % key in fields, key
     for key in ("origin_up_bps", "origin_per_torrent_up_bps", "origin_max_peers"):
-        assert "'%s'" % key not in js.split("ROLE_QOS_FIELDS = [")[1].split("];")[0]
+        assert "'%s'" % key not in fields
 
 
 def test_role_policy_view_and_effective_qos(role_api):
@@ -12927,30 +12683,21 @@ def test_role_drift_accepts_preloaded_rows_without_a_second_fleet_read(
 
 def _run_instruction_console_js(script):
     import subprocess
-    js = _webroot("app.js")
-    code = js.split("// ---- Instruction status projection ----", 1)[1].split(
-        "// ---- End instruction status projection ----", 1)[0]
-    model = (Path(gui_server.WEBROOT).parent / 'console-ui/src/inventory-model.mjs').as_uri()
-    imports = f"import {{instructionBadge}} from {json.dumps(model)};\n"
+    root = Path(gui_server.WEBROOT).parent / 'console-ui/src'
+    imports = (f"import {{instructionBadge}} from {json.dumps((root / 'inventory-model.mjs').as_uri())};\n"
+               f"import {{instructionDiagnostics}} from {json.dumps((root / 'policy-model.mjs').as_uri())};\n")
     result = subprocess.run(["node", "--input-type=module", "-"], input=imports + r'''
 import assert from 'node:assert/strict';
-const elements = new Map();
-function el(id) {
-  if (!elements.has(id)) elements.set(id, {
-    textContent: '', innerHTML: '', hidden: false, className: ''
-  });
-  return elements.get(id);
+let panel;
+function renderInstructionPanel(policy) {
+  panel = instructionDiagnostics(policy, value => 'time:' + value);
 }
-var document = {getElementById: el};
-function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
-function fmtDate(v) { return 'time:' + v; }
-function policyCount(v) { return Number.isSafeInteger(v) && v >= 0 ? v : '—'; }
-''' + code + '\n' + script, text=True, capture_output=True)
+''' + script, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
-    html, js = (_webroot(name) for name in ("index.html", "app.js"))
+    component = _react_shell('policy-dialogs.jsx')
     assert "'Instructions'" in _react_shell('inventory.jsx')
     assert 'colSpan={12}' in _react_shell('inventory.jsx')
     for identifier in (
@@ -12960,15 +12707,13 @@ def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
             "instruction-key-state", "instruction-cert-days",
             "instruction-keylist-age", "instruction-root-ceremony",
             "instruction-root-quorum", "instruction-key-actions"):
-        assert 'id="%s"' % identifier in html
-    assert "Server-observed" in html
-    assert "Device-authored" in html
-    assert "Agent-asserted" in html
-    assert "violation = 0 does not mean compliant" in html
-    block = js.split("// ---- Instruction status projection ----", 1)[1].split(
-        "// ---- End instruction status projection ----", 1)[0]
-    assert "fetch(" not in block
-    assert "setTimeout(" not in block
+        assert identifier in component
+    for label in ("Server-observed", "Device-authored", "Agent-asserted",
+                  "violation = 0 does not mean compliant"):
+        assert label in component
+    model = _react_shell('policy-model.mjs')
+    assert "fetch(" not in model
+    assert "setTimeout(" not in model
 
 
 def test_instruction_console_renders_exact_escaped_chip_rollup_and_custody():
@@ -13004,28 +12749,27 @@ renderInstructionPanel({
     root_ceremony_overdue: 'critical', root_quorum_degraded: true,
     roots_attested_180d: 1, roots_configured: 2}
 });
-assert.equal(el('policy-issued-revision').textContent, 'r12');
-assert.match(el('policy-applied-revisions').innerHTML,
-  /r9223372036854775807<\/span>: 1/);
-assert.equal(el('policy-instr-stamp-missing').textContent, '4 devices');
-assert.equal(el('policy-pointer-skew').textContent, '1 device');
-assert.equal(el('policy-instruction-observed').textContent, 'time:456');
-assert.equal(el('instruction-cert-days').textContent, '-2 days');
-assert.match(el('instruction-root-ceremony').textContent, /critical/);
-assert.match(el('instruction-root-quorum').textContent, /degraded/);
-assert.match(el('instruction-key-actions').textContent, /certificate renewal due/);
-assert.match(el('instruction-key-actions').textContent, /signing refused/);
-assert.match(el('instruction-key-actions').textContent, /key list re-sign due/);
+assert.equal(panel.cells['policy-issued-revision'], 'r12');
+assert.deepEqual(panel.applied, [{label: 'r7', count: 2}, {label: 'r9223372036854775807', count: 1}]);
+assert.equal(panel.cells['policy-instr-stamp-missing'], '4 devices');
+assert.equal(panel.cells['policy-pointer-skew'], '1 device');
+assert.equal(panel.cells['policy-instruction-observed'], 'time:456');
+assert.equal(panel.cells['instruction-cert-days'], '-2 days');
+assert.match(panel.cells['instruction-root-ceremony'], /critical/);
+assert.match(panel.cells['instruction-root-quorum'], /degraded/);
+assert.match(panel.cells['instruction-key-actions'], /certificate renewal due/);
+assert.match(panel.cells['instruction-key-actions'], /signing refused/);
+assert.match(panel.cells['instruction-key-actions'], /key list re-sign due/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 500, instr_stamp_missing: null,
     pointer_skew: null}, instruction_keys: null});
-assert.equal(el('policy-instr-stamp-missing').textContent, 'unavailable');
-assert.equal(el('policy-pointer-skew').textContent, 'unavailable');
-assert.equal(el('instruction-cert-days').textContent, 'unavailable');
-assert.equal(el('instruction-root-ceremony').textContent, 'unknown');
-assert.equal(el('instruction-key-actions').textContent, 'unavailable');
-assert.match(el('policy-applied-revisions').innerHTML, /unavailable/);
+assert.equal(panel.cells['policy-instr-stamp-missing'], 'unavailable');
+assert.equal(panel.cells['policy-pointer-skew'], 'unavailable');
+assert.equal(panel.cells['instruction-cert-days'], 'unavailable');
+assert.equal(panel.cells['instruction-root-ceremony'], 'unknown');
+assert.equal(panel.cells['instruction-key-actions'], 'unavailable');
+assert.deepEqual(panel.applied, [{label: 'unavailable'}]);
 
 let unknownDrift = instructionBadge({instruction: {label: 'unknown',
   display_state: 'unknown', evidence: 'agent-asserted',
@@ -13040,13 +12784,13 @@ renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, st
     certificate_days_to_expiry: 0, keylist_age_days: 100,
     root_ceremony_overdue: 'warn', root_quorum_degraded: false,
     roots_attested_180d: 2, roots_configured: 2}});
-assert.equal(el('policy-issued-revision').textContent, 'r0');
-assert.equal(el('policy-instr-stamp-missing').textContent, '0 devices');
-assert.equal(el('policy-pointer-skew').textContent, '0 devices');
-assert.equal(el('instruction-cert-days').textContent, '0 days');
-assert.match(el('instruction-root-ceremony').textContent, /warn/);
-assert.match(el('instruction-root-quorum').textContent, /healthy/);
-assert.equal(el('instruction-key-actions').textContent, 'key list re-sign due');
+assert.equal(panel.cells['policy-issued-revision'], 'r0');
+assert.equal(panel.cells['policy-instr-stamp-missing'], '0 devices');
+assert.equal(panel.cells['policy-pointer-skew'], '0 devices');
+assert.equal(panel.cells['instruction-cert-days'], '0 days');
+assert.match(panel.cells['instruction-root-ceremony'], /warn/);
+assert.match(panel.cells['instruction-root-quorum'], /healthy/);
+assert.equal(panel.cells['instruction-key-actions'], 'key list re-sign due');
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 502, instr_stamp_missing: 0,
@@ -13056,8 +12800,8 @@ renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, state
     keylist_age_days: null, root_ceremony_overdue: 'unknown',
     root_quorum_degraded: false, roots_attested_180d: 0,
     roots_configured: 0}});
-assert.equal(el('instruction-root-quorum').textContent, 'not enabled');
-assert.equal(el('instruction-key-actions').textContent, 'not enabled');
+assert.equal(panel.cells['instruction-root-quorum'], 'not enabled');
+assert.equal(panel.cells['instruction-key-actions'], 'not enabled');
 ''')
 
 

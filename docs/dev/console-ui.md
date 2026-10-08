@@ -16,7 +16,7 @@ Console](../zensical/user-guide/console.md) for that.
 ## The shell and the legacy app
 
 `server/console-ui/` renders the header, primary navigation, Settings section
-navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
+navigation, Policies, full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
 device-details and Activity drawers
@@ -75,8 +75,7 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. The Policies role-definition
-editor still uses the older controller.
+write result is reported without retrying.
 
 The Add Device and credential forms use `device-forms-controller.mjs`, a shared
 model and `device-forms.jsx`. Model lookups only narrow the chosen management
@@ -123,8 +122,19 @@ complete, partial, refused and unknown results. A successful explicit policy
 refresh is required before retrying an uncertain commit. The shared device lock
 survives preview review and pending cancellation. Quarantine advances its own
 revision serially; only a confirmed conflict gets one reread and retry. Unknown
-outcomes stop the remaining devices. The separate Policies definition editor,
-imports and diagnostics remain in the older controller.
+outcomes stop the remaining devices.
+
+Policies uses `policies-controller.mjs`, `policy-definitions-model.mjs`,
+`policy-model.mjs`, `policies.jsx` and `policy-dialogs.jsx`. React owns the sharing
+table, definition editor, CSV actions, deletion and count-only diagnostics.
+Reads share policy ordering tickets with Inventory; writes share its mutation
+lock. The editor retains its original revision and a deep copy of non-editable
+tracker overrides. Editing or closing cancels a preview, not a submitted write.
+Checked replies include the native empty-body DELETE with its committed ETag.
+Incomplete replies require explicit refresh and review; the controller never
+replays an uncertain write. A conflicting editor must reload before previewing.
+Role CSV now includes four seeder/leecher timing columns, so export/import
+preserves tracker overrides. Missing columns still clear that replacement layer.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first

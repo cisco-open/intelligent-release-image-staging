@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## What this is for
 
-You edit roles on the Console's Devices and Roles screens or through the API; the Console has no role-policy JSON editor.
+Use **Policies** to edit roles and **Inventory** to assign devices to them.
+The Console has no role-policy JSON editor.
 
 IRIS moves an image over a private swarm: a device takes pieces from other
 devices. A role is a named group of devices that share with each other. Use
@@ -53,10 +54,14 @@ restricted flag, peer roles, origin access, networks and speed limit overrides.
 4. Select **Preview change**, then **Save role**. Editing any field after a
    preview discards it. **Delete** previews first too.
 
+If a save cannot be confirmed, refresh and review the current definition before
+trying again. **Reload current definition** discards your draft. Closing the
+editor leaves an already-submitted save running.
+
 The Console sets per-role speed limits in **Edit role definitions → Advanced**
-(above). The global default, per-device overrides, and the tracker's
-`qos_state` go through the management API route `PUT /api/v1/peer-policy/qos`
-only. Pair explanations are available only through
+(above). Global defaults use `PUT /api/v1/peer-policy/qos`. Tracker timing
+overrides (`qos_state`) use the management API or the role CSV below; editing other role fields preserves
+them. Pair explanations are available only through
 `GET /api/v1/peer-policy/explain`.
 
 !!! warning
@@ -73,7 +78,10 @@ still declares refuses the import. **Export CSV** downloads the definitions.
 `fleet/roles.csv` is operator-owned and ignored by Git, so back it up with your
 site inventory. Lists in
 `peers` and `nets` are semicolon-separated, rates are integer bytes per second,
-and `*_s` values are integer seconds.
+and `*_s` values are integer seconds. The `seeder_numwant`, `leecher_numwant`,
+`seeder_announce_min_interval_s` and `leecher_announce_min_interval_s` columns
+preserve tracker timing overrides. Blank or missing columns inherit defaults;
+import replaces those overrides too.
 
 An import validates the whole role graph, including symmetric restricted-role
 links and reserved names, before it writes anything, and a write that only

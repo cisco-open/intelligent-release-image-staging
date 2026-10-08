@@ -47,7 +47,7 @@ Role names match `^[a-z0-9][a-z0-9._-]{0,31}$`, and at most 256 roles may exist.
 | `nets` | empty | Optional IPv4 subnet hints for role management. |
 | `on_stale` | `keep` for restricted roles, `defaults` otherwise | What happens to QoS when the policy goes stale: keep the last verified values, or fall back to defaults. |
 | `qos` | empty | Overrides the global QoS values for this role, for the keys that allow a role scope. |
-| `qos_state` | omitted | The seeder and leecher tracker cadence overlay for this role. Tracker-only, and set only through the API. |
+| `qos_state` | omitted | The seeder and leecher tracker cadence overlay for this role. Tracker-only; editable through the API or role CSV. |
 
 Allow-list membership always falls back to tracker-only, independent of `on_stale`. `peers` must be a non-null array of unique role names. The role schema sets no per-role member cap, but the devices in one role still cannot exceed the devices in your inventory. A restricted role with `origin: false` is valid. `origin_unreachable` is an advisory the server returns when neither this role nor a permitted role can reach the origin. Every role and QoS object is closed and typed: an unknown key is refused.
 
@@ -84,7 +84,9 @@ Values are integers. Rate keys are bytes per second, and `0` means unlimited; a 
 
 A `PUT /api/v1/peer-policy/qos` write replaces the whole selected QoS object; `{}` clears that layer. Omitting `qos_state` preserves the stored state object. An explicit `qos_state: {}` removes only the selected state layer and preserves the rest of the scalar QoS unchanged. A full role-definition replacement, a `PUT .../roles/<name>` write, must include `qos_state` to retain it: that write is a complete replacement, not a merge.
 
-Zero is unlimited, so no rate key expresses **never upload**. Use role membership and access rules to keep a role off a swarm, and account for connections aria2 already holds. The Console edits role fields as typed fields; global or role QoS, including the `qos_state` overlay, is set only through `PUT /api/v1/peer-policy/qos`. There is no per-device QoS write route. Pair explanations come only from `GET /api/v1/peer-policy/explain`.
+Role CSV uses `seeder_numwant`, `leecher_numwant`, `seeder_announce_min_interval_s` and `leecher_announce_min_interval_s` for the corresponding `qos_state` values. The same bounds apply. Export includes these columns; import replaces the whole definition, so blank or omitted cells remove those overrides.
+
+Zero is unlimited, so no rate key expresses **never upload**. Use role membership and access rules to keep a role off a swarm, and account for connections aria2 already holds. The Console edits per-role QoS as typed fields and preserves tracker overlays. Global QoS uses `PUT /api/v1/peer-policy/qos`. There is no per-device QoS write route. Pair explanations come only from `GET /api/v1/peer-policy/explain`.
 
 Scalar QoS is the instruction intent the server sends to a device. `tracker_qos` explains the selected tracker state and its sources. `tracker_qos` is tracker-only: tracker state never enters instruction QoS or control, telemetry, semantic hashes, role artifacts, stamps, serials, envelopes, heartbeat, or device configuration.
 

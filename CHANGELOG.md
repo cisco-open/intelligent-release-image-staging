@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move the complete Policies workflow into React. Preserve drafts and preview
+  revisions, check save/import/delete replies, and require review after an
+  uncertain save. Keep keyboard focus and distinguish unavailable diagnostics
+  from zero counts. Role CSV export/import now preserves seeder and leecher
+  timing overrides.
+
 - Move Inventory Set role and bulk quarantine into React. Preserve reviewed
   targets and preview revisions, check response accounting and report partial
   or uncertain outcomes. Stop quarantine batches after an uncertain result

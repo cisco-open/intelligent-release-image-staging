@@ -247,3 +247,8 @@
 [data-role-actions-react] .field select { width: 100%; }
 [data-role-actions-react] .modal-foot { flex-wrap: wrap; }
 [data-role-actions-react] .modal-body { overflow-wrap: anywhere; }
+[data-policies-react] .modal-backdrop { z-index: 210; }
+[data-policies-react] .modal-foot, [data-policies-react] .role-def-actions { flex-wrap: wrap; }
+[data-policies-react] .field { display: flex; width: 100%; }
+[data-policies-react] .field :is(input,select) { width: 100%; }
+[data-policies-react] .modal-body { overflow-wrap: anywhere; }

@@ -1055,8 +1055,8 @@ def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
                      downgrade, re.DOTALL)
 
 
-def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
-    """Acceptance 27/28 preserves scalar intent and the API-only boundary."""
+def test_workstream_a_docs_separate_tracker_observability_and_state_controls():
+    """Tracker overlays stay outside device intent and round-trip through CSV."""
     observability = (_page("reference/telemetry-signals.md") + "\n"
                      + _page("reference/peer-policy-api.md") + "\n"
                      + _page("user-guide/monitoring.md"))
@@ -1095,18 +1095,18 @@ def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
     assert "qos_state" in console_lower
     assert re.search(r"qos_state.{0,160}(?:api-only|management api|documented api)",
                      console_lower, re.DOTALL)
+    assert "seeder_numwant" in console_lower and "leecher_numwant" in console_lower
     assert "no role-policy json editor" in console_lower
 
     fleet_lower = fleet.lower()
-    for term in ("iris-role", "roles.csv", "scalar-only", "qos_state",
+    for term in ("iris-role", "roles.csv", "seeder/leecher", "qos_state",
                  "qos_changed", "candidate-bound"):
         assert term in fleet_lower, term
-    assert re.search(r"iris-role\s+export.{0,160}omit.{0,60}qos_state",
+    assert re.search(r"iris-role\s+export.{0,160}including.{0,60}qos_state",
                      fleet_lower, re.DOTALL)
     assert re.search(r"iris-role\s+define.{0,160}(?:remove|clear).{0,80}state",
                      fleet_lower, re.DOTALL)
-    assert re.search(r"iris-role\s+import.{0,160}(?:remove|clear).{0,80}state",
-                     fleet_lower, re.DOTALL)
+    assert "blank or missing columns remove" in fleet_lower
     assert re.search(r"(?:configure|preserve|remove).{0,100}state.{0,100}"
                      r"management api", fleet_lower, re.DOTALL)
     for verb in ("configure", "preserve", "remove"):

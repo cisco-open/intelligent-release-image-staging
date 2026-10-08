@@ -111,6 +111,7 @@
   var inventoryActions = window.irisInventoryActions;
   var schedules = window.irisSchedules;
   var roleActions = window.irisRoleActions;
+  var policies = window.irisPolicies;
   var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
   function deviceFilterState() {
@@ -658,7 +659,7 @@
     scheduled: function (id) { return schedules.scheduled(id); }
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); }
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); policies.hide(); }
     else if (!document.getElementById('view-devices').hidden) { deviceForms.resume(); schedules.resume(); }
   });
 
@@ -719,66 +720,6 @@
     activityCommand('visibility', {visible: !document.hidden && !document.getElementById('view-devices').hidden});
   });
   function closeMenus() { inventory.update({menu: ''}); }
-  // Remaining policy dialogs retain their existing controller.
-  var modalOpener = null;
-  function openModal(id) {
-    var overlay = document.getElementById(id);
-    if (!overlay) return;
-    // Remember what to hand focus back to on close. An opener that lives
-    // INSIDE a .menu popover -- "Set credential…" in the bulk bar's overflow
-    // -- carries .menu-close, so wireMenu's own panel handler runs closeMenus()
-    // a moment after this line and hides it. focus() on a display:none element
-    // is a spec'd no-op, so restoring to it would silently drop the operator
-    // at the top of the document instead of back in the bulk bar. Fall back to
-    // the popover's trigger, which stays on screen.
-    var opener = document.activeElement;
-    var menu = opener && opener.closest ? opener.closest('.menu') : null;
-    if (menu) {
-      var wrap = menu.closest('.menu-wrap');
-      opener = (wrap && wrap.querySelector('[aria-expanded]')) || opener;
-    }
-    modalOpener = opener;
-    overlay.hidden = false;
-    var first = overlay.querySelector('.modal-body input, .modal-body select') ||
-                overlay.querySelector('.modal-foot .btn');
-    if (first) first.focus();
-  }
-  function closeModal(id) {
-    var overlay = document.getElementById(id);
-    if (!overlay || overlay.hidden) return;
-    overlay.hidden = true;
-    if (id === 'role-def-modal') cancelRoleDefinitionDialog();
-    // Return focus to whatever opened it -- if that button has since been
-    // hidden with the bulk bar (the batch cleared the selection), focus()
-    // on it is simply a no-op and the browser falls back to the document.
-    if (modalOpener && modalOpener.focus) modalOpener.focus();
-    modalOpener = null;
-  }
-  function wireModal(id, closerIds) {
-    var overlay = document.getElementById(id);
-    if (!overlay) return;
-    closerIds.forEach(function (cid) {
-      var el = document.getElementById(cid);
-      if (el) el.addEventListener('click', function () { closeModal(id); });
-    });
-    // Deliberately NO backdrop click-to-close. The head's ✕, the foot's Cancel
-    // and Escape are the ways out, which is what Magnetic Modal asks for ("Do
-    // include a button to close the modal in all cases") -- and it is what the
-    // image picker below, this page's pre-existing modal, already does.
-    // A bare `e.target === overlay` closer misfires twice: the second click of
-    // a double-click on the opener lands on the backdrop that the first click
-    // just raised over it, so the dialog flashes open and shut and the button
-    // reads as dead; and a click is dispatched at the common ancestor of its
-    // mousedown and mouseup, so drag-selecting the undeploy modal's force
-    // help text and releasing past the dialog edge targets the overlay and
-    // closes it mid-read.
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && !overlay.hidden) closeModal(id);
-    });
-    trapDialogFocus(overlay);
-  }
-  wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
-  wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
   onInventoryAction('onboard-selected', function () { inventoryActions.open('onboard', selectedIds()); });
   onInventoryAction('undeploy-selected', function () { inventoryActions.open('undeploy', selectedIds()); });
   onInventoryAction('set-cred-selected', function () { assignments.openCredentials(selectedIds()); });
@@ -873,676 +814,46 @@
   inventory.subscribe(function () { inventoryActions.prerequisites(inventory.snapshot()); });
   inventoryActions.prerequisites(inventory.snapshot());
   onInventoryAction('delete-selected', function () { return inventoryActions.act('delete', selectedIds()); });
-  // ---- Role workflow ----
-  // Consume the count-only view explicitly. Never render arbitrary policy or
-  // status objects: role member counts are the only dynamic keyed collection.
-  function policyCount(value) {
-    return Number.isSafeInteger(value) && value >= 0 ? value : '—';
-  }
-  // ---- Instruction status projection ----
-  function decimalRevisionCompare(a, b) {
-    a = String(a); b = String(b);
-    return a.length === b.length ? (a < b ? -1 : a > b ? 1 : 0)
-      : a.length - b.length;
-  }
-  function instructionMapRows(values, revisionKeys, emptyText) {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return '<li class="muted">unavailable</li>';
-    }
-    var keys = Object.keys(values).filter(function (key) {
-      return Number.isSafeInteger(values[key]) && values[key] >= 0;
-    }).sort(revisionKeys ? decimalRevisionCompare : undefined);
-    return keys.map(function (key) {
-      return '<li><span class="machine">' + esc(revisionKeys ? 'r' + key : key) +
-        '</span>: ' + values[key] + '</li>';
-    }).join('') || '<li class="muted">' + esc(emptyText) + '</li>';
-  }
-  function instructionDeviceCount(value) {
-    return Number.isSafeInteger(value) && value >= 0
-      ? value + ' device' + (value === 1 ? '' : 's') : 'unavailable';
-  }
-  function custodyInteger(value, suffix) {
-    return Number.isSafeInteger(value) ? value + suffix : 'unavailable';
-  }
-  function renderInstructionPanel(policy) {
-    policy = policy && typeof policy === 'object' ? policy : {};
-    var rollup = policy.fleet_rollup && typeof policy.fleet_rollup === 'object'
-      && !Array.isArray(policy.fleet_rollup) ? policy.fleet_rollup : null;
-    var status = policy.instruction_status || {};
-    var custody = policy.instruction_keys;
-    document.getElementById('policy-issued-revision').textContent =
-      typeof status.issued_revision_label === 'string'
-        ? status.issued_revision_label
-        : (rollup && Number.isSafeInteger(rollup.issued_revision)
-          && rollup.issued_revision >= 0 ? 'r' + rollup.issued_revision : 'unavailable');
-    document.getElementById('policy-applied-revisions').innerHTML =
-      instructionMapRows(Number.isSafeInteger(status.pointer_skew)
-        && status.pointer_skew >= 0 && rollup ? rollup.applied : null,
-      true, 'No accepted identity reported.');
-    document.getElementById('policy-instruction-states').innerHTML =
-      instructionMapRows(rollup && rollup.states, false, 'No inventory devices.');
-    document.getElementById('policy-instr-stamp-missing').textContent =
-      instructionDeviceCount(status.instr_stamp_missing);
-    document.getElementById('policy-pointer-skew').textContent =
-      instructionDeviceCount(status.pointer_skew);
-    document.getElementById('policy-instruction-observed').textContent =
-      typeof status.observed_at === 'number' && Number.isFinite(status.observed_at)
-        ? fmtDate(status.observed_at) : 'unavailable';
-    if (!custody || typeof custody !== 'object' || Array.isArray(custody)) {
-      document.getElementById('instruction-key-state').textContent = 'unavailable';
-      document.getElementById('instruction-cert-days').textContent = 'unavailable';
-      document.getElementById('instruction-keylist-age').textContent = 'unavailable';
-      document.getElementById('instruction-root-ceremony').textContent = 'unknown';
-      document.getElementById('instruction-root-quorum').textContent = 'unknown';
-      document.getElementById('instruction-key-actions').textContent = 'unavailable';
-      return;
-    }
-    document.getElementById('instruction-key-state').textContent =
-      typeof custody.state === 'string' ? custody.state : 'unavailable';
-    document.getElementById('instruction-cert-days').textContent =
-      custodyInteger(custody.certificate_days_to_expiry, ' days');
-    document.getElementById('instruction-keylist-age').textContent =
-      custodyInteger(custody.keylist_age_days, ' days');
-    document.getElementById('instruction-root-ceremony').textContent =
-      ['ok', 'warn', 'critical', 'unknown'].indexOf(custody.root_ceremony_overdue) >= 0
-        ? custody.root_ceremony_overdue : 'unknown';
-    var roots = Number.isSafeInteger(custody.roots_attested_180d)
-      && Number.isSafeInteger(custody.roots_configured)
-      ? ' · ' + custody.roots_attested_180d + '/' + custody.roots_configured +
-        ' roots attested in 180 days' : '';
-    var enabled = custody.enabled;
-    document.getElementById('instruction-root-quorum').textContent = enabled === false
-      ? 'not enabled' : enabled !== true ? 'unknown'
-      : custody.root_quorum_degraded === true ? 'degraded' + roots
-      : custody.root_quorum_degraded === false ? 'healthy' + roots : 'unknown';
-    var actionFlags = [
-      ['certificate_renewal_due', 'certificate renewal due'],
-      ['signing_refused', 'signing refused'],
-      ['keylist_resign_due', 'key list re-sign due']
-    ];
-    var actions = actionFlags.filter(function (entry) {
-      return custody[entry[0]] === true;
-    }).map(function (entry) { return entry[1]; });
-    var actionsKnown = actionFlags.every(function (entry) {
-      return typeof custody[entry[0]] === 'boolean';
-    });
-    document.getElementById('instruction-key-actions').textContent = enabled === false
-      ? 'not enabled' : enabled !== true || !actionsKnown
-      ? 'unavailable' : actions.join(' · ') || 'none';
-  }
-  // ---- End instruction status projection ----
-  function roleCapabilityMessage() {
-    if (!peerPolicyReadOk) return 'Peer policy unavailable. Role changes are disabled; refresh to read current policy.';
-    if (peerPolicy.roles_supported !== true) {
-      return 'This Console cannot confirm backend role support. ' +
-        (peerPolicy.roles_present ? 'The backend declares role state. ' : '') +
-        'Role changes are disabled. Use a compatible server. Independent peer quarantine is not ' +
-        'enforced by older servers. ' +
-        'Use a reviewed containment and compatibility procedure before downgrading. ' +
-        'A fully downgraded Console and server cannot show this warning.';
-    }
-    if (peerPolicy.fail_closed) return 'Peer policy is fail-closed. Peer discovery is denied and role changes are disabled. Restore a valid policy.';
-    if (peerPolicy.degraded) return 'Peer policy is degraded. The server may be using a last-known-good policy or have lost role state. ' +
-      'Role changes are disabled; check server startup logs and restore authoritative policy state.';
-    return '';
-  }
+  // React owns Policies; this bridge shares authentication and read ordering
+  // with Inventory without writing into the Policies root.
+  function roleCapabilityMessage() { return policies.capability(peerPolicy, peerPolicyReadOk); }
   function syncRoleActionAvailability() {
-    var unavailable = !!roleCapabilityMessage();
-    inventory.update({roleAvailable: !unavailable, policy: peerPolicy, policyOk: peerPolicyReadOk});
+    inventory.update({roleAvailable: !roleCapabilityMessage(), policy: peerPolicy, policyOk: peerPolicyReadOk});
   }
   function renderPeerPolicyPanel() {
-    var p = peerPolicyReadOk ? peerPolicy : {};
-    var roles = p.roles || {}, drift = p.role_drift || {}, outbox = p.outbox || {};
-    var origin = p.origin_qos || {}, enforcement = p.enforcement || {};
-    var mutual = enforcement.mutual_origin || {};
-    ['role-capability-banner', 'inventory-role-capability-banner'].forEach(function (id) {
-      var banner = document.getElementById(id);
-      banner.textContent = roleCapabilityMessage();
-      banner.hidden = !banner.textContent;
-    });
     syncRoleActionAvailability();
-    renderInstructionPanel(p);
-    document.getElementById('policy-roles-defined').textContent = policyCount(roles.defined);
-    document.getElementById('policy-roles-restricted').textContent = policyCount(roles.restricted);
-    document.getElementById('policy-role-drift').textContent = policyCount(drift.count);
-    // Capacity is the API's bounded contract, never a count derived from rows.
-    var backlog = policyCount(outbox.unacknowledged) + '/' + policyCount(outbox.capacity);
-    document.getElementById('policy-outbox').textContent = backlog;
-    document.getElementById('peer-policy-summary').textContent = peerPolicyReadOk
-      ? policyCount(roles.defined) + ' roles · ' + policyCount(roles.restricted) +
-        ' restricted · ' + policyCount(drift.count) + ' drift · outbox ' + backlog
-      : 'Policy counts unavailable';
-    var members = roles.members || {};
-    document.getElementById('policy-role-members').innerHTML = Object.keys(members).sort().map(function (name) {
-      return '<li><span class="machine">' + esc(name) + '</span>: ' + policyCount(members[name]) + '</li>';
-    }).join('') || '<li class="muted">' + (peerPolicyReadOk && roles.defined === 0
-      ? 'No roles defined.' : 'Role member counts unavailable.') + '</li>';
-    var stateLabels = { enforced: 'enforced', degraded: 'degraded', rpc_unavailable: 'RPC unavailable' };
-    var state = Object.prototype.hasOwnProperty.call(stateLabels, origin.state)
-      ? stateLabels[origin.state] : 'unavailable';
-    document.getElementById('policy-origin-qos').textContent = 'Last origin QoS state: ' + state +
-      ' · ' + policyCount(origin.applied_download_count) + '/' + policyCount(origin.target_download_count) +
-      ' downloads applied · last reconciled: ' + (typeof origin.last_reconciled_at === 'number'
-        ? fmtDate(origin.last_reconciled_at) : 'never') + '. Origin limits apply globally or per torrent, not per role.';
-    var preflightCount = mutual.newly_denied_device_count;
-    var preflightText = Number.isSafeInteger(preflightCount) && preflightCount >= 0
-      ? 'Mutual-origin preflight only: ' + preflightCount + ' newly denied devices.'
-      : 'Mutual-origin preflight count unavailable.';
-    document.getElementById('policy-mutual-origin').textContent = mutual.mode === 'preflight'
-      ? preflightText + ' This additional origin restriction is not active.' +
-        (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '')
-      : 'Mutual-origin preflight status unavailable.';
-    syncRoleDefinitionsWithPolicy();
+    policies.policy(peerPolicy, peerPolicyReadOk);
+    var banner = document.getElementById('inventory-role-capability-banner');
+    banner.textContent = roleCapabilityMessage(); banner.hidden = !banner.textContent;
   }
-
-  // ---- Role definitions: create, edit, delete, import, export ----
-  // Definitions are the policy's own objects (GET /peer-policy/roles), read
-  // while Policies is visible with its panel open, and after every definition
-  // write. The Set role dialog and the Role filter keep reading the member
-  // map from /peer-policy, which lists every defined role, so a new
-  // definition reaches them on the next device refresh. Every write follows
-  // the Set role contract: strong CAS on the revision read BEFORE preview,
-  // one dry run, then one commit carrying that preview's confirmation token.
-  var ROLE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
-  var ROLE_QOS_FIELDS = [
-    ['seed_up_bps', 'Upload while seeding', 'rate'],
-    ['seed_down_bps', 'Download while seeding', 'rate'],
-    ['leech_up_bps', 'Upload while downloading', 'rate'],
-    ['leech_down_bps', 'Download while downloading', 'rate'],
-    ['overall_up_bps', 'Overall upload', 'rate'],
-    ['overall_down_bps', 'Overall download', 'rate'],
-    ['per_peer_bps', 'Per-peer modelling rate', 'rate'],
-    ['request_peer_speed_limit_bps', 'Requested peer speed', 'rate'],
-    ['max_peers', 'Peers per torrent', '1–1000'],
-    ['fanout', 'Fanout multiplier', '1–1000, ≤ peers per torrent'],
-    ['max_concurrent', 'Concurrent torrents', '1–1000'],
-    ['numwant', 'Peers per announce', '4–200'],
-    ['announce_min_interval_s', 'Announce interval', 'seconds, 10–300'],
-    ['handout_budget', 'Handouts per window', '0–1000'],
-    ['catalog_tick_s', 'Catalog tick', 'seconds, 60–900, multiple of 60'],
-    ['telemetry_every_ticks', 'Telemetry every', 'ticks, 1–60'],
-    ['telemetry_pause', 'Pause telemetry', 'bool']
-  ];
-  var roleDefinitions = {}, roleDefinitionsRevision = null, roleDefinitionsOk = false;
-  var roleDefinitionsError = '', roleDefinitionsLoading = false;
-  var roleDefinitionsGeneration = 0, roleDefinitionsController = null;
-  var roleDefEditing = null, roleDefPreview = null, roleDefBusy = false, roleDefGeneration = 0;
-  var roleDefRevision = null, roleDefOriginal = {};
-
-  function renderRoleQosFields() {
-    var rates = [], swarm = [];
-    ROLE_QOS_FIELDS.forEach(function (f) {
-      var key = f[0], label = f[1], kind = f[2], html;
-      if (kind === 'bool') {
-        html = '<label class="field"><span class="field-label">' + esc(label) + '</span>' +
-          '<select data-qos="' + key + '"><option value="">Inherit</option>' +
-          '<option value="true">Yes</option><option value="false">No</option></select></label>';
-      } else {
-        html = '<label class="field"><span class="field-label">' + esc(label) +
-          ' <span class="muted">' + (kind === 'rate' ? 'bytes/s' : esc(kind)) + '</span></span>' +
-          '<input data-qos="' + key + '" inputmode="numeric" placeholder="inherit" autocomplete="off">' +
-          (kind === 'rate' ? '<span class="muted rate-hint" data-rate-hint="' + key + '"></span>' : '') +
-          '</label>';
-      }
-      (kind === 'rate' ? rates : swarm).push(html);
-    });
-    document.getElementById('rd-rates').innerHTML = rates.join('');
-    document.getElementById('rd-swarm').innerHTML = swarm.join('');
-  }
-  function rateHint(raw) {
-    if (raw === '') return '';
-    if (!/^[0-9]+$/.test(raw)) return 'whole number of bytes per second';
-    var n = parseInt(raw, 10);
-    if (n === 0) return 'unlimited';
-    if (n < 8192) return 'too low: 0 or at least 8192';
-    var bits = n * 8;
-    return '≈ ' + (bits >= 1e9 ? (bits / 1e9).toFixed(2) + ' Gbit/s'
-      : bits >= 1e6 ? (bits / 1e6).toFixed(1) + ' Mbit/s' : (bits / 1e3).toFixed(0) + ' kbit/s');
-  }
-  function updateRateHints() {
-    document.querySelectorAll('#role-def-modal [data-rate-hint]').forEach(function (el) {
-      var input = document.querySelector('#role-def-modal [data-qos="' + el.getAttribute('data-rate-hint') + '"]');
-      el.textContent = input ? rateHint(input.value.trim()) : '';
-    });
-  }
-  renderRoleQosFields();
-  document.getElementById('role-def-modal').addEventListener('input', function (e) {
-    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-qos')) updateRateHints();
-    roleDefGeneration++;
-    // Any edit invalidates a pending preview: the commit must carry the
-    // token of exactly the candidate the operator reviewed.
-    if (roleDefPreview && !roleDefBusy) {
-      resetRoleDefinitionPreview();
-      document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
-    }
+  policies.connect({
+    fetch: fetch, headers: csrfHdr, formatDate: fmtDate,
+    confirm: function (message) { return confirm(message); },
+    saveCsv: inventoryActions.saveCsv,
+    isVisible: function () { return !document.hidden && !document.getElementById('view-policies').hidden; },
+    beginPolicyRead: function () { return ++peerPolicyReadGeneration; },
+    publishPolicy: function (policy, valid, ticket) {
+      if (ticket !== peerPolicyReadGeneration) return false;
+      peerPolicyReadOk = valid;
+      if (valid) peerPolicy = policy;
+      renderPeerPolicyPanel(); return true;
+    },
+    invalidatePolicyReads: function () { peerPolicyReadGeneration++; inventory.invalidate(); },
+    claimBulk: function () {
+      if (bulkBusy || inventory.snapshot().rowBusy.size) return false;
+      cancelSelectAllMatching(); setBulkBusy(true); return true;
+    },
+    releaseBulk: function () { setBulkBusy(false); }
   });
-  document.getElementById('role-def-modal').addEventListener('change', function () {
-    updateRoleAccessControls();
-    roleDefGeneration++;
-    if (roleDefPreview && !roleDefBusy) {
-      resetRoleDefinitionPreview();
-      document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
-    }
-  });
-
-  function resetRoleDefinitionPreview() {
-    roleDefPreview = null;
-    document.getElementById('role-def-preview').hidden = true;
-    document.getElementById('role-def-save').textContent = 'Preview change';
-  }
-  function cancelRoleDefinitionDialog() {
-    roleDefGeneration++;
-    resetRoleDefinitionPreview();
-  }
-  function setRoleDefBusy(busy) {
-    roleDefBusy = busy;
-    document.getElementById('role-def-save').disabled = busy;
-    renderRoleDefinitionControls();
-  }
-  function renderRoleDefinitionControls() {
-    var unavailable = !!roleCapabilityMessage();
-    ['role-def-new', 'role-def-import', 'role-def-export'].forEach(function (id) {
-      document.getElementById(id).disabled = unavailable || roleDefBusy;
-    });
-    document.querySelectorAll('#role-def-rows button').forEach(function (b) {
-      b.disabled = unavailable || roleDefBusy;
-    });
-    publishPolicySummary();
-  }
-  // React owns the simple policy view; existing preview/CAS handlers retain
-  // write ownership. No duplicate API reads, writes or optimistic enforcement.
-  function publishPolicySummary() {
-    if (typeof window === 'undefined' || !window.dispatchEvent) return;
-    window.dispatchEvent(new CustomEvent('iris:policy-state', {detail: {
-      ready: peerPolicyReadOk, policy: peerPolicyReadOk ? peerPolicy : {},
-      definitionsReady: roleDefinitionsOk, definitions: roleDefinitions || {},
-      revision: roleDefinitionsRevision,
-      disabled: !!roleCapabilityMessage() || roleDefBusy
-    }}));
-  }
-  if (typeof window !== 'undefined' && window.addEventListener) {
-    window.addEventListener('iris:policy-action', function (event) {
-      if (document.getElementById('view-policies').hidden) return;
-      var request = event.detail || {};
-      if (request.action === 'advanced') {
-        openModal('policy-advanced-modal');
-        document.getElementById('policy-advanced-close').focus();
-        return;
-      }
-      if (roleCapabilityMessage() || roleDefBusy) return;
-      if (request.action === 'new') openRoleDefinitionEditor(null);
-      else if (request.action === 'edit' && roleDefinitionsOk &&
-               roleDefinitionsRevision === peerPolicy.revision &&
-               Object.prototype.hasOwnProperty.call(roleDefinitions, request.name)) {
-        openRoleDefinitionEditor(request.name);
-      }
-    });
-  }
-  function policyRevisionFromEtag(etag) {
-    var m = /iris-peer-policy-(\d+)/.exec(etag || '');
-    return m ? parseInt(m[1], 10) : null;
-  }
-  async function policyWrite(method, url, payload, revision) {
-    var r = await fetch(url, {
-      method: method,
-      headers: csrfHdr({ 'Content-Type': 'application/json',
-                         'If-Match': '"iris-peer-policy-' + revision + '"' }),
-      body: JSON.stringify(payload || {})
-    });
-    var body = {};
-    if (r.status !== 204) { try { body = await r.json(); } catch (e) { body = {}; } }
-    if (!body || typeof body !== 'object') body = {};
-    return { ok: r.ok, status: r.status, body: body,
-             revision: typeof body.revision === 'number' ? body.revision : policyRevisionFromEtag(r.headers.get('ETag')) };
-  }
-  function roleDefinitionProblem(status, body, verb) {
-    body = body || {};
-    var code = body.code || body.error || '';
-    if (status === 412 || code === 'revision_conflict') return 'Peer policy changed. Refresh, then preview again.';
-    if (status === 428) return 'A fresh preview and confirmation are required. Preview again.';
-    if (code === 'role_in_use') {
-      var parts = [];
-      if (typeof body.member_count === 'number') {
-        parts.push(body.member_count + ' device(s) declare it' + (body.device_ids && body.device_ids.length
-          ? ' (' + body.device_ids.slice(0, 10).join(', ') + (body.truncated ? ', …' : '') + ')' : ''));
-      }
-      if (body.roles && body.roles.length) parts.push('declared roles missing from the file: ' + body.roles.join(', '));
-      if (body.referring_roles && body.referring_roles.length) parts.push('referred to by ' + body.referring_roles.join(', '));
-      if (body.referring_schedules && body.referring_schedules.length) parts.push('used by schedule(s) ' + body.referring_schedules.join(', '));
-      return verb + ' refused: role in use' + (parts.length ? ' — ' + parts.join('; ') : '') + '.';
-    }
-    if (code === 'operation_backlog_full') return 'The operation backlog is full (' +
-      policyCount(body.unacknowledged) + '/' + policyCount(body.capacity) +
-      '). Wait for the tracker to acknowledge operations, then preview again.';
-    if (status === 401) return 'Your session expired. Log in again, then preview again.';
-    if (status === 503) return verb + ' unavailable: check policy state and the tracker, then refresh before retrying.';
-    var reason = body.detail || code || ('HTTP ' + status);
-    if (code === 'role_isolated') reason = 'a role must permit itself; check the peer roles';
-    if (code === 'role_reserved_name') reason = 'that role name is reserved';
-    return verb + ' refused: ' + reason + '.';
-  }
-  function blastText(title, body) {
-    return title + '.\nMembership changes: ' + policyCount(body.member_delta) +
-      '\nDevices losing origin access: ' + policyCount(body.origin_access_lost) +
-      '\nEmpty permitted peer sets: ' + policyCount(body.empty_permitted_sets) +
-      '\nRole pairings stopped: ' + policyCount(body.role_pairs_stopped) +
-      '\nQoS policy changed: ' + (body.qos_changed === true ? 'yes' : body.qos_changed === false ? 'no' : 'unknown') +
-      '\nChanges affect new pairings; existing device-to-device sessions may continue.' +
-      (body.requires_confirmation ? '\nThis exceeds the confirmation threshold; applying confirms these effects.' : '');
-  }
-  function qosSummary(qos) {
-    var keys = Object.keys(qos || {});
-    if (!keys.length) return '<span class="muted">inherit</span>';
-    return keys.map(function (k) {
-      return '<span class="machine qos-chip">' + esc(k) + '=' + esc(String(qos[k])) + '</span>';
-    }).join('');
-  }
-  function renderRoleDefinitions() {
-    var rows = document.getElementById('role-def-rows');
-    if (!roleDefinitionsOk) {
-      rows.innerHTML = '<tr><td colspan="7" class="muted">' + esc(roleDefinitionsError || 'Role definitions unavailable.') + '</td></tr>';
-    } else {
-      var names = Object.keys(roleDefinitions).sort();
-      rows.innerHTML = names.map(function (name) {
-        var d = roleDefinitions[name] || {};
-        var peers = (d.peers || []).filter(function (p) { return p !== name; });
-        return '<tr>' +
-          '<td class="machine">' + esc(name) + '</td>' +
-          '<td>' + (d.restricted ? 'yes' : 'no') + '</td>' +
-          '<td class="machine">' + (peers.length ? esc(peers.join(', ')) : '<span class="muted">only itself</span>') + '</td>' +
-          '<td>' + (d.origin === false ? 'no' : 'yes') + '</td>' +
-          '<td class="machine">' + (d.nets && d.nets.length ? esc(d.nets.join(', ')) : '—') + '</td>' +
-          '<td class="qos">' + qosSummary(d.qos) + '</td>' +
-          '<td><button class="linkish role-def-edit" type="button" data-role="' + esc(name) + '">Edit</button> · ' +
-          '<button class="linkish danger-link role-def-delete" type="button" data-role="' + esc(name) + '">Delete</button></td></tr>';
-      }).join('') || '<tr><td colspan="7" class="muted">No roles defined. Choose New role, or import a roles CSV.</td></tr>';
-    }
-    renderRoleDefinitionControls();
-  }
-  async function loadRoleDefinitions(background) {
-    if (roleDefinitionsLoading) return;
-    var mine = ++roleDefinitionsGeneration;
-    roleDefinitionsController = new AbortController();
-    roleDefinitionsLoading = true;
-    try {
-      var options = { signal: roleDefinitionsController.signal };
-      if (background) options.headers = { 'X-IRIS-Poll': '1' };
-      var r = await fetch('/api/v1/peer-policy/roles', options);
-      var body = null;
-      try { body = r.ok ? await r.json() : null; } catch (e) { body = null; }
-      if (mine !== roleDefinitionsGeneration) return;
-      roleDefinitionsOk = !!body && typeof body === 'object' && body.roles && typeof body.roles === 'object';
-      if (roleDefinitionsOk) {
-        roleDefinitions = body.roles;
-        roleDefinitionsRevision = body.revision;
-        roleDefinitionsError = '';
-        if (typeof body.revision === 'number' &&
-            (typeof peerPolicy.revision !== 'number' || body.revision > peerPolicy.revision)) {
-          peerPolicy.revision = body.revision;
-        }
-      } else {
-        roleDefinitionsError = r.status === 401 ? 'Your session expired; log in again.'
-          : 'Role definitions unavailable (' + r.status + ').';
-      }
-    } catch (e) {
-      if (mine !== roleDefinitionsGeneration || (e && e.name === 'AbortError')) return;
-      roleDefinitionsOk = false;
-      roleDefinitionsError = 'Role definitions unavailable.';
-    } finally {
-      if (mine === roleDefinitionsGeneration) {
-        roleDefinitionsLoading = false;
-        renderRoleDefinitions();
-      }
-    }
-  }
-  // Keep write gating current, but fetch definitions only while Policies is
-  // visible. Another API client/session's edits appear on the next poll.
-  function syncRoleDefinitionsWithPolicy() {
-    renderRoleDefinitionControls();
-    var panel = document.getElementById('peer-policy-panel');
-    if (!document.getElementById('view-policies').hidden && panel.open &&
-        peerPolicyReadOk && roleDefinitionsOk && !roleDefBusy &&
-        typeof peerPolicy.revision === 'number' && peerPolicy.revision !== roleDefinitionsRevision) {
-      loadRoleDefinitions(true);
-    }
-  }
-  document.getElementById('peer-policy-panel').addEventListener('toggle', function (e) {
-    if (e.target.open && !document.getElementById('view-policies').hidden) loadRoleDefinitions();
-  });
-
-  function openRoleDefinitionEditor(name) {
-    // Only one modal can own focus. Move from Advanced to the editor without
-    // leaving a hidden focus trap underneath it.
-    closeModal('policy-advanced-modal');
-    document.getElementById('role-editor-advanced').open = false;
-    var d = JSON.parse(JSON.stringify(name ? (roleDefinitions[name] || {}) : {}));
-    roleDefEditing = name || null;
-    // The form and its unedited overlay belong to this exact read. Polling
-    // cannot lend a stale editor a newer revision that bypasses its CAS.
-    roleDefRevision = name ? roleDefinitionsRevision : peerPolicy.revision;
-    roleDefOriginal = d;
-    roleDefGeneration++;
-    resetRoleDefinitionPreview();
-    document.getElementById('role-def-msg').textContent = '';
-    document.getElementById('role-def-modal-title').textContent = name ? 'Edit role ' + name : 'New role';
-    var nameEl = document.getElementById('rd-name');
-    nameEl.value = name || '';
-    nameEl.disabled = !!name;
-    document.getElementById('rd-peers').value = (d.peers || []).filter(function (p) { return p !== name; }).join(', ');
-    document.getElementById('rd-nets').value = (d.nets || []).join(', ');
-    document.getElementById('rd-on-stale').value = d.on_stale || '';
-    document.getElementById('rd-restricted').checked = !!d.restricted;
-    document.getElementById('rd-origin').checked = d.origin !== false;
-    updateRoleAccessControls();
-    var qos = d.qos || {};
-    document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
-      var key = el.getAttribute('data-qos');
-      el.value = Object.prototype.hasOwnProperty.call(qos, key) ? String(qos[key]) : '';
-    });
-    updateRateHints();
-    document.getElementById('role-def-save').disabled = false;
-    openModal('role-def-modal');
-    if (name) document.getElementById('rd-restricted').focus();
-  }
-  function updateRoleAccessControls() {
-    var restricted = document.getElementById('rd-restricted').checked;
-    document.getElementById('rd-peers').disabled = !restricted;
-    document.getElementById('rd-origin').disabled = !restricted;
-  }
-  function roleDefinitionFromForm() {
-    var name = document.getElementById('rd-name').value.trim();
-    if (!ROLE_NAME_RE.test(name)) {
-      return { error: 'Role name must be 1–32 characters of a–z, 0–9, dot, underscore or hyphen, starting with a letter or digit.' };
-    }
-    var listOf = function (id) {
-      return document.getElementById(id).value.split(/[\s,;]+/).filter(Boolean);
-    };
-    var peers = [name], bad = null;
-    listOf('rd-peers').forEach(function (p) {
-      if (!ROLE_NAME_RE.test(p)) bad = bad || p;
-      else if (peers.indexOf(p) === -1) peers.push(p);
-    });
-    if (bad) return { error: 'Peer role name is invalid: ' + bad };
-    var def = { restricted: document.getElementById('rd-restricted').checked, peers: peers,
-                origin: document.getElementById('rd-origin').checked };
-    var nets = listOf('rd-nets');
-    if (nets.length) def.nets = nets;
-    var onStale = document.getElementById('rd-on-stale').value;
-    if (onStale) def.on_stale = onStale;
-    var qos = {}, qosError = null;
-    document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
-      var key = el.getAttribute('data-qos'), raw = el.value.trim();
-      if (!raw) return;
-      if (key === 'telemetry_pause') { qos[key] = raw === 'true'; return; }
-      if (!/^[0-9]+$/.test(raw)) {
-        qosError = qosError || (key + ' must be a whole number' + (/_bps$/.test(key) ? ' of bytes per second' : '') + '.');
-        return;
-      }
-      qos[key] = parseInt(raw, 10);
-    });
-    if (qosError) return { error: qosError };
-    if (Object.keys(qos).length) def.qos = qos;
-    // A definition PUT is a full replacement, so the tracker-only qos_state
-    // overlay (API-configured, not edited here) rides along unchanged.
-    if (roleDefEditing && roleDefOriginal.qos_state) {
-      def.qos_state = roleDefOriginal.qos_state;
-    }
-    return { name: name, definition: def };
-  }
-  document.getElementById('role-def-new').addEventListener('click', function () {
-    if (roleDefBusy) return;
-    var warning = roleCapabilityMessage();
-    if (warning) { document.getElementById('role-def-status').textContent = warning; return; }
-    openRoleDefinitionEditor(null);
-  });
-  document.getElementById('role-def-rows').addEventListener('click', function (e) {
-    var b = e.target && e.target.closest ? e.target.closest('button[data-role]') : null;
-    if (!b || b.disabled || roleDefBusy) return;
-    var name = b.getAttribute('data-role');
-    if (b.classList.contains('role-def-edit')) openRoleDefinitionEditor(name);
-    else if (b.classList.contains('role-def-delete')) deleteRoleDefinition(name);
-  });
-  document.getElementById('role-def-save').addEventListener('click', async function () {
-    if (roleDefBusy) return;
-    var msg = document.getElementById('role-def-msg');
-    var warning = roleCapabilityMessage();
-    if (warning) { msg.textContent = warning; resetRoleDefinitionPreview(); return; }
-    var committing = !!roleDefPreview;
-    var built = committing ? roleDefPreview : roleDefinitionFromForm();
-    if (built.error) { msg.textContent = built.error; return; }
-    var revision = committing ? roleDefPreview.revision : roleDefRevision;
-    if (typeof revision !== 'number') { msg.textContent = 'Peer policy revision unknown. Close this editor, refresh, and reopen it.'; return; }
-    var payload = Object.assign({}, built.definition);
-    if (committing) payload.confirm_token = roleDefPreview.confirm_token;
-    var generation = roleDefGeneration;
-    var verb = roleDefEditing ? 'Replace role ' : 'Create role ';
-    setRoleDefBusy(true);
-    msg.textContent = committing ? 'Saving role… Closing this dialog does not cancel the request.' : 'Previewing change…';
-    try {
-      var res = await policyWrite('PUT', '/api/v1/peer-policy/roles/' + encodeURIComponent(built.name) +
-        (committing ? '' : '?dry_run=1'), payload, revision);
-      if (!committing && generation !== roleDefGeneration) {
-        msg.textContent = 'The definition changed. Preview again before saving.';
-        return;
-      }
-      if (!res.ok) {
-        msg.textContent = roleDefinitionProblem(res.status, res.body, committing ? 'Save' : 'Preview');
-        if (res.status === 412 || res.body.code === 'revision_conflict') {
-          msg.textContent = 'Peer policy changed. Close this editor, refresh, and reopen the current definition before previewing again.';
-        }
-        resetRoleDefinitionPreview();
-        return;
-      }
-      if (committing) {
-        if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
-        document.getElementById('role-def-status').textContent = 'Role ' + built.name + ' saved at policy revision ' +
-          policyCount(res.revision) + '.';
-        closeModal('role-def-modal');
-        loadRoleDefinitions();
-        refreshDevices().catch(function () {});
-        return;
-      }
-      roleDefPreview = { name: built.name, definition: built.definition, revision: revision,
-                         confirm_token: res.body.confirm_token };
-      var previewEl = document.getElementById('role-def-preview');
-      previewEl.textContent = blastText(verb + built.name, res.body);
-      previewEl.hidden = false;
-      msg.textContent = 'Review the preview, then choose Save role to apply or Cancel to leave definitions unchanged.';
-      document.getElementById('role-def-save').textContent = 'Save role';
-    } catch (e) {
-      msg.textContent = committing
-        ? 'Response unavailable. The role may have been saved; refresh and review before trying again.'
-        : 'Preview unavailable. No commit was sent; try again.';
-      resetRoleDefinitionPreview();
-    } finally {
-      setRoleDefBusy(false);
-      if (roleDefPreview) document.getElementById('role-def-save').focus();
-    }
-  });
-  async function deleteRoleDefinition(name) {
-    if (roleDefBusy) return;
-    var status = document.getElementById('role-def-status');
-    var warning = roleCapabilityMessage();
-    if (warning) { status.textContent = warning; return; }
-    var revision = peerPolicy.revision;
-    if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
-    var url = '/api/v1/peer-policy/roles/' + encodeURIComponent(name);
-    setRoleDefBusy(true);
-    status.textContent = 'Previewing deletion of ' + name + '…';
-    try {
-      var preview = await policyWrite('DELETE', url + '?dry_run=1', {}, revision);
-      if (!preview.ok) { status.textContent = roleDefinitionProblem(preview.status, preview.body, 'Delete'); return; }
-      if (!confirm(blastText('Delete role ' + name, preview.body) + '\n\nDelete this role definition?')) {
-        status.textContent = 'Deletion of ' + name + ' cancelled; nothing changed.';
-        return;
-      }
-      var res = await policyWrite('DELETE', url, { confirm_token: preview.body.confirm_token }, revision);
-      if (!res.ok) { status.textContent = roleDefinitionProblem(res.status, res.body, 'Delete'); return; }
-      if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
-      status.textContent = 'Role ' + name + ' deleted' +
-        (typeof res.revision === 'number' ? ' at policy revision ' + res.revision : '') + '.';
-      loadRoleDefinitions();
-      refreshDevices().catch(function () {});
-    } catch (e) {
-      status.textContent = 'Response unavailable. The role may have been deleted; refresh and review before retrying.';
-    } finally {
-      setRoleDefBusy(false);
-    }
-  }
-  document.getElementById('role-def-import').addEventListener('click', function () {
-    if (roleDefBusy) return;
-    var warning = roleCapabilityMessage();
-    if (warning) { document.getElementById('role-def-status').textContent = warning; return; }
-    document.getElementById('role-def-file').click();
-  });
-  document.getElementById('role-def-file').addEventListener('change', function (e) {
-    var f = e.target.files[0];
-    e.target.value = '';
-    if (!f) return;
-    var rd = new FileReader();
-    rd.onload = function () { importRoleDefinitions(String(rd.result || ''), f.name); };
-    rd.readAsText(f);
-  });
-  async function importRoleDefinitions(csv, filename) {
-    if (roleDefBusy) return;
-    var status = document.getElementById('role-def-status');
-    var warning = roleCapabilityMessage();
-    if (warning) { status.textContent = warning; return; }
-    var revision = peerPolicy.revision;
-    if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
-    setRoleDefBusy(true);
-    status.textContent = 'Previewing import of ' + filename + '…';
-    try {
-      var preview = await policyWrite('POST', '/api/v1/peer-policy/roles/import-csv?dry_run=1', { csv: csv }, revision);
-      if (!preview.ok) { status.textContent = roleDefinitionProblem(preview.status, preview.body, 'Import'); return; }
-      var text = blastText('Replace every role definition with the ' + policyCount(preview.body.roles) +
-        ' role(s) in ' + filename, preview.body) + '\n\nRoles missing from the file are removed. Continue?';
-      if (!confirm(text)) { status.textContent = 'Import of ' + filename + ' cancelled; nothing changed.'; return; }
-      var res = await policyWrite('POST', '/api/v1/peer-policy/roles/import-csv',
-        { csv: csv, confirm_token: preview.body.confirm_token }, revision);
-      if (!res.ok) { status.textContent = roleDefinitionProblem(res.status, res.body, 'Import'); return; }
-      if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
-      status.textContent = 'Imported ' + policyCount(res.body.roles) + ' role definition(s) from ' + filename +
-        ' at policy revision ' + policyCount(res.revision) + '.';
-      loadRoleDefinitions();
-      refreshDevices().catch(function () {});
-    } catch (e) {
-      status.textContent = 'Import response unavailable. Definitions may have changed; refresh and review before retrying.';
-    } finally {
-      setRoleDefBusy(false);
-    }
-  }
-  document.getElementById('role-def-export').addEventListener('click', function () {
-    if (roleDefBusy) return;
-    downloadCsv('/api/v1/peer-policy/roles/export-csv', 'roles.csv');
-  });
-  // ---- End role workflow ----
+  inventory.subscribe(function () { policies.prerequisites(inventory.snapshot()); });
+  policies.prerequisites(inventory.snapshot());
+  policies.policy(peerPolicy, peerPolicyReadOk);
 
   // React owns captured role targets, preview/commit and serial quarantine.
   roleActions.connect({
     fetch: fetch, headers: csrfHdr,
     warning: roleCapabilityMessage,
-    policyWriteBusy: function () { return roleDefBusy; },
+    policyWriteBusy: function () { return policies.state.busy; },
     confirm: function (message) { return confirm(message); },
     isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
     refreshInventory: async function () {
@@ -1591,8 +902,7 @@
   // controller's cancellable read runs, including close and immediate reopen.
   onInventoryAction('add-dev', function () { deviceForms.toggleDevice(); });
   onInventoryAction('manage-creds', function () { deviceForms.toggleCredentials(); });
-  // CSV state, validation and async lifetimes belong to React. Role export
-  // reuses the same checked download path until the role editor migrates.
+  // Inventory CSV state, validation and async lifetimes belong to React.
   onInventoryAction('import-csv', function () { inventoryActions.chooseFile(); });
   function downloadCsv(url, filename) { return inventoryActions.download(url, filename); }
   onInventoryAction('export-csv', function () { return downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
@@ -3868,41 +3178,9 @@
   }
   publishHelp();
 
-  // ---- Policies view reads ----
-  // Keep the page independent of Inventory's paging/credential/job requests.
-  // Reads never replace editor fields or the revision captured by a preview.
-  var policiesRefreshGeneration = 0, policiesRefreshController = null;
-  function cancelPolicyReads() {
-    policiesRefreshGeneration++;
-    if (policiesRefreshController) policiesRefreshController.abort();
-    roleDefinitionsGeneration++;
-    if (roleDefinitionsController) roleDefinitionsController.abort();
-    roleDefinitionsLoading = false;
-  }
-  async function refreshPolicies() {
-    if (document.getElementById('view-policies').hidden) return;
-    var mine = ++policiesRefreshGeneration;
-    var policyMine = ++peerPolicyReadGeneration;
-    if (policiesRefreshController) policiesRefreshController.abort();
-    policiesRefreshController = new AbortController();
-    var nextPolicy = null;
-    try {
-      var response = await fetch('/api/v1/peer-policy', { signal: policiesRefreshController.signal });
-      if (response.ok) nextPolicy = await response.json();
-    } catch (e) {
-      if (e && e.name === 'AbortError') return;
-    }
-    if (mine !== policiesRefreshGeneration || policyMine !== peerPolicyReadGeneration ||
-        document.getElementById('view-policies').hidden) return;
-    peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
-    if (peerPolicyReadOk) peerPolicy = nextPolicy;
-    renderPeerPolicyPanel();
-    if (!roleDefBusy && document.getElementById('peer-policy-panel').open &&
-        (!roleDefinitionsOk || roleDefinitionsRevision !== peerPolicy.revision)) {
-      await loadRoleDefinitions();
-    }
-  }
-  // ---- End Policies view reads ----
+  // The router remains the only Policies polling timer.
+  function cancelPolicyReads() { policies.hide(); }
+  function refreshPolicies() { return policies.refresh(); }
 
   // ---- hash router ----
   var VIEWS = ['overview', 'images', 'devices', 'policies', 'swarm', 'settings', 'monitoring', 'setup'];
@@ -3948,8 +3226,6 @@
     if (VIEWS.indexOf(view) < 0) view = 'overview';
     if (view !== 'policies') {
       cancelPolicyReads();
-      closeModal('role-def-modal');
-      closeModal('policy-advanced-modal');
     }
     if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); }
     VIEWS.forEach(function (v) {

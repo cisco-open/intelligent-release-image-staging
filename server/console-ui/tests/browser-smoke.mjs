@@ -48,7 +48,6 @@ try {
     drain: {ready: true, blocked_device_ids: [], removed_device_ids: []}};
   const backupId = '11111111-1111-1111-1111-111111111111';
   await page.addInitScript(() => {
-    window.addEventListener('iris:policy-state', event => { window.testPolicyState = event.detail; });
     window.testStreams = [];
     window.EventSource = class {
       constructor(url) { this.url = url; this.listeners = {}; window.testStreams.push(this); }
@@ -175,11 +174,12 @@ try {
         const body = route.request().postDataJSON();
         assert.equal(route.request().headers()['x-csrf-token'], 'test-only');
         assert.equal(route.request().headers()['if-match'], '"iris-peer-policy-1"');
-        assert.equal(body.qos.overall_up_bps, 4096);
+        assert.equal(body.qos.overall_up_bps, 16384);
         assert.equal(body.restricted, true);
         assert.equal(body.origin, false);
         assert.deepEqual(body.peers, ['branch', 'staging']);
-        if (url.searchParams.get('dry_run') === '1') return route.fulfill({json: {confirm_token: 'fixture-preview', revision: 1}});
+        if (url.searchParams.get('dry_run') === '1') return route.fulfill({json: {ok: true, dry_run: true, confirm_token: 'fixture-preview', revision: 1,
+          member_delta: 0, origin_access_lost: 0, empty_permitted_sets: 0, role_pairs_stopped: 0, qos_changed: true, requires_confirmation: true}});
         assert.equal(body.confirm_token, 'fixture-preview');
         return route.fulfill({status: 412, json: {code: 'revision_conflict'}});
       }
@@ -852,7 +852,7 @@ try {
   assert.equal(await page.locator('#role-editor-advanced').getAttribute('open'), null);
   await page.locator('#role-editor-advanced > summary').click();
   assert.equal(await page.locator('[data-qos="overall_up_bps"]').inputValue(), '8192');
-  await page.locator('[data-qos="overall_up_bps"]').fill('4096');
+  await page.locator('[data-qos="overall_up_bps"]').fill('16384');
   await page.locator('#role-def-save').click();
   await page.locator('#role-def-save').getByText('Save role', {exact: true}).waitFor();
   await page.locator('#role-def-save').click();
@@ -878,11 +878,11 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   if (screenshots) await page.screenshot({ path: path.join(screenshots, 'policies-mobile.png') });
   await page.setViewportSize({width: 1440, height: 1000});
-  const policyState = await page.evaluate(() => window.testPolicyState);
-  await page.evaluate(state => window.dispatchEvent(new CustomEvent('iris:policy-state', {detail: {...state, ready: false, disabled: true}})), policyState);
+  const policyState = await page.evaluate(() => window.irisPolicies.state.policy);
+  await page.evaluate(state => window.irisPolicies.policy(state, false), policyState);
   await sharing.getByText('Role permissions unavailable. Refresh or check Advanced.').waitFor();
   assert.equal(await page.getByRole('button', {name: 'New role', exact: true}).isDisabled(), true);
-  await page.evaluate(state => window.dispatchEvent(new CustomEvent('iris:policy-state', {detail: state})), policyState);
+  await page.evaluate(state => window.irisPolicies.policy(state, true), policyState);
   await sharing.getByRole('rowheader').filter({hasText: 'staging'}).waitFor();
   assert.deepEqual(writes, [], 'Navigation, selection and cancelling an editor must not mutate server state');
   await page.getByRole('navigation', { name: 'Primary', exact: true }).getByRole('link', { name: 'Inventory', exact: true }).click();
