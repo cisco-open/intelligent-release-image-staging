@@ -30,6 +30,7 @@ const rows = {innerHTML: ''};
 const document = {getElementById: () => rows, querySelectorAll: () => []};
 var SCHEDULES = [], SCHED_HISTORY_ROWS = 25, schedRefreshGeneration = 0;
 var schedStatus = {};
+const inventory = {state: {}, update(patch) { this.state = {...this.state, ...patch}; }};
 function esc(s) { return String(s); }
 function scheduleTargetSummary() { return ''; }
 function scheduleNextFireText() { return ''; }
@@ -58,7 +59,7 @@ async function fetch(url) {
     program += r'''
 (async () => {
   await renderSchedules();
-  process.stdout.write(JSON.stringify({html: rows.innerHTML, historyReads}));
+  process.stdout.write(JSON.stringify({html: rows.innerHTML, historyReads, pending: inventory.state.schedules}));
 })().catch(error => {console.error(error); process.exit(1);});
 '''
     result = subprocess.run([node, "-"], input=program, text=True,
@@ -69,6 +70,7 @@ async function fetch(url) {
 
 def test_history_cap_keeps_unread_schedules_visible_without_claiming_no_runs():
     result = _render("completed", 26)
+    assert len(result["pending"]) == 26
     assert len(result["historyReads"]) == 50
     assert result["html"].count("<tr ") == 26
     last = result["html"].split('<tr data-id="constructor">')[1]

@@ -57,10 +57,10 @@ try {
       const fixtures = {
         '/api/v1/session': {username: 'Details fixture', csrf: 'fixture-only'},
         '/api/v1/help': {version: 'fixture', deployment_id: 'fixture-only'},
-        '/api/v1/devices': {devices, total: devices.length, offset: 0, now: 2000000000},
+        '/api/v1/devices': {devices, total: devices.length, offset: 0, revision: 1, now: 2000000000},
         '/api/v1/images': {images: [{id: 'a', filename: 'a.bin'}, {id: 'b', filename: 'b.bin', quarantined: true}]},
         '/api/v1/credentials': {profiles: []}, '/api/v1/onboard/jobs': {jobs: [], max_concurrent: 25},
-        '/api/v1/peer-policy': {revision: 1, roles_supported: true, roles: {defined: 0, restricted: 0, members: {}},
+        '/api/v1/peer-policy': {revision: 1, quarantine_assignments: [], roles_supported: true, roles: {defined: 0, restricted: 0, members: {}},
           enforcement: {state: 'enforced', stale: false}, role_drift: {count: 0}, outbox: {unacknowledged: 0, capacity: 256}},
       };
       return route.fulfill({status: fixtures[url.pathname] ? 200 : 503, json: fixtures[url.pathname] || {error: 'Fixture unavailable'}});
@@ -150,14 +150,14 @@ try {
   failures.add('/api/v1/devices/edge-01/deployment'); await open('edge-01');
   await page.locator('#di-note').getByText('Deployment details unavailable', {exact: false}).waitFor();
   assert.equal(await page.locator('#di-log-rows .dlog-view').count(), 2, 'logs survive record failure');
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
     window.originalDetailsOpener = document.querySelector('#dev-rows tr[data-id="edge-01"] button.dinfo');
-    document.dispatchEvent(new Event('visibilitychange'));
+    await window.irisInventory.refresh();
   });
-  await page.waitForFunction(() => !window.originalDetailsOpener.isConnected);
+  assert.equal(await page.evaluate(() => window.originalDetailsOpener.isConnected), true, 'Keyed table retains the opener through a poll');
   await page.keyboard.press('Escape');
   assert.equal(await page.evaluate(() => document.activeElement.matches('#dev-rows tr[data-id="edge-01"] button.dinfo')), true,
-    'closing after a table refresh focuses the replacement opener');
+    'closing after a table refresh restores the retained opener');
   await open('edge-01');
   await page.getByRole('navigation', {name: 'Primary', exact: true}).getByRole('link', {name: 'Images', exact: true}).click();
   await page.waitForFunction(() => document.getElementById('deploy-info-panel').hidden);

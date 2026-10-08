@@ -116,17 +116,16 @@ management_api._serve_with_shutdown(
 
 def test_role_column_panel_and_modal_are_scoped_and_accessible():
     html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
-    assert '<th>Device</th><th>Role</th>' in html
-    assert '<td class="dev-role">' in js and 'dash(d.role)' in js
-    assert 'colspan="12"' in js
-    assert html.count('id="dev-filter-role"') == 1
-    assert html.count('id="dev-filter-peer"') == 1
-    assert "peer-intent badge" in js and "Quarantined intent" in js
-    assert 'id="set-role-selected">Set role…</button>' in html
+    component = _react_shell("inventory.jsx")
+    assert "['Device', 'Role', 'IP'" in component
+    assert '<td className="dev-role">{device.role' in component
+    assert 'colSpan={12}' in component
+    assert "['role', 'role'" in component and "['peer', 'peer'" in component
+    assert "peer-intent badge" in component and "Quarantined intent" in component
+    assert "bulkButton('set-role-selected', 'Set role…')" in component
     modal = html.split('id="role-modal"', 1)[1].split('id="img-picker"', 1)[0]
     assert 'role="dialog" aria-modal="true" aria-labelledby="role-modal-title"' in modal
-    for cid in ('role-modal-title', 'role-selected', 'role-modal-msg',
-                'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
+    for cid in ('role-modal-title', 'role-selected', 'role-modal-msg', 'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
         assert 'id="%s"' % cid in modal
     assert 'aria-live="polite"' in modal
     assert "wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);" in js
@@ -137,8 +136,7 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     panel = html.split('id="peer-policy-panel"', 1)[1].split('</details>', 1)[0]
     assert '<textarea' not in panel and '<textarea' not in modal
     assert '.policy-counts' in css and 'minmax(' in css
-    workflow = js.split('// ---- Role workflow ----', 1)[1].split(
-        '// ---- End role workflow ----', 1)[0]
+    workflow = js.split('// ---- Role workflow ----', 1)[1].split('// ---- End role workflow ----', 1)[0]
     assert workflow.count("'/api/v1/devices/bulk-role'") == 1
     assert 'forSelected(' not in workflow and "method: 'PUT'" not in workflow
 
@@ -170,6 +168,8 @@ function confirm(text) { confirmPrompts.push(text); return confirmAnswers.length
 async function downloadCsv(url, name) { calls.push({url, download: name}); }
 var peerPolicy = {revision: 7, roles_supported: true, roles: {members: {boat: 2}}};
 var peerPolicyReadOk = true, bulkBusy = false, devStatus = el('dev-status');
+const inventory = {state: {}, update(patch) { this.state = {...this.state, ...patch}; }};
+function onInventoryAction(id, handler) { el(id).listeners.click = handler; }
 var selection = ['on-page', 'off-page'];
 function selectedIds() { return selection.slice(); }
 function setBulkBusy(b) { bulkBusy = b; }
@@ -509,7 +509,7 @@ peerPolicy.roles_supported = false;
 renderPeerPolicyPanel();
 assert.equal(el('role-capability-banner').hidden, false);
 assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
-assert.equal(el('set-role-selected').disabled, true);
+assert.equal(inventory.state.roleAvailable, false);
 assert.equal(el('apply-role-selected').disabled, true);
 delete peerPolicy.roles_supported; // genuinely older response, no capability flag
 delete peerPolicy.roles_present;
@@ -607,6 +607,8 @@ def test_no_orphaned_control_ids():
     assert 'id="iris-activity-root"' in html
     assert 'mountActivity();' in _react_shell("main.jsx")
     html += _react_shell("activity.jsx")
+    assert 'id="iris-inventory-root"' in html
+    html += _react_shell("inventory.jsx")
     ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
     assert len(ids) > 30, "id extraction matched too little — patterns drifted"
@@ -616,100 +618,51 @@ def test_no_orphaned_control_ids():
 
 
 def test_csv_download_buttons_and_multiselect_onboard_wired():
-    """Source guards for two console fixes:
-    (1) Export/Example CSV must be plain <button>s, not <a download> anchors —
-        Chrome blocks download-attribute navigations over connections with
-        certificate errors (self-signed labs), which made the old anchors dead.
-    (2) The devices table supports selecting multiple rows and bulk-onboarding
-        them via a shared 'Onboard selected' button."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert '<button class="menu-item menu-close" id="export-csv">' in html
-    assert '<button class="menu-item menu-close" id="example-csv">' in html
-    assert 'id="export-csv" href' not in html
-    assert 'id="example-csv" href' not in html
-    assert 'download' not in html.split('id="example-csv"')[1].split('>')[0]
-    assert 'id="onboard-selected"' in html
-    assert 'id="mark-all"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "function downloadCsv(" in js
-    assert "'export-csv'" in js and "'example-csv'" in js
-    assert "#dev-rows .cred" in js
-    assert "/credential'" in js or '/credential"' in js
-    assert "onboard-selected" in js
-    assert "#dev-rows tr[data-id]" in js
-    assert "function toggleDeviceRow(row)" in js
-    assert "getElementById('dev-rows').addEventListener('keydown'" in js
+    component, js = _react_shell("inventory.jsx"), _webroot("app.js")
+    csv = component.split('id="csv-menu"', 1)[1].split('</div>', 1)[0]
+    for action in ('import-csv', 'export-csv', 'example-csv'):
+        assert "['" + action + "'," in csv
+        assert "onInventoryAction('" + action + "'," in js
+    assert '<button key={id} type="button"' in csv and 'href=' not in csv and 'download=' not in csv
+    assert "bulkButton('onboard-selected'" in component and 'id="mark-all"' in component
+    assert 'function downloadCsv(' in js
+    assert "controller.edit(id, 'credential', event.target.value)" in component
+    assert 'onKeyDown={event =>' in component and 'controller.toggle(id)' in component
+    assert 'post: jpost' in js
 
 
 def test_devices_toolbar_regrouped():
-    """Option-A layout (2026-08-12 spec S1-S4) as revised by the Magnetic
-    action-layout pass (2026-09-01): bulk actions live in a selection bar that
-    is hidden in static HTML; the three CSV controls live inside the CSV menu;
-    the telemetry checkboxes live inside the onboard MODAL (Magnetic Dropdown
-    forbids a menu whose items need "another button to submit or apply", and
-    names modals as the bulk bar's own escape hatch); Delete is a destructive
-    item in the overflow dropdown (Dropdown > Types); the per-row action-links
-    column is gone."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert '<div class="selbar" id="sel-bar" hidden>' in html
-    csv_menu = html.split('id="csv-menu"')[1].split('</div>')[0]
-    for cid in ('id="import-csv"', 'id="export-csv"', 'id="example-csv"'):
-        assert cid in csv_menu, cid + " must live inside the CSV menu"
+    html, component, js = _webroot("index.html"), _react_shell("inventory.jsx"), _webroot("app.js")
+    assert 'className="selbar" id="sel-bar" hidden={!state.selected.size}' in component
     modal = html.split('id="onboard-modal"')[1].split('id="undeploy-modal"')[0]
-    for cid in ('id="onboard-telemetry"', 'id="onboard-telemetry-stream"',
-                'id="onboard-confirm"'):
-        assert cid in modal, cid + " must live inside the onboard modal"
-    # the onboard/undeploy options are not reachable from a dropdown any more
+    for cid in ('onboard-telemetry', 'onboard-telemetry-stream', 'onboard-confirm'):
+        assert 'id="%s"' % cid in modal
     assert 'id="onboard-pop"' not in html and 'id="undeploy-pop"' not in html
-    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in html
-    devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
-    # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
-    # only real header cells.
-    assert devices_thead.count('<th>') == 12, \
-        "Role and Instructions remain; row selection needs no checkbox column"
-    assert devices_thead.count('<th>Role</th>') == 1
-    assert devices_thead.count('<th>Instructions</th>') == 1
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "function wireMenu(" in js and "function updateSelBar(" in js
-    assert "#dev-rows .onboard" not in js and "#dev-rows .adopt" not in js \
-        and "#dev-rows .del'" not in js, "per-row action links must be gone"
-    assert "function startOnboard(" not in js, "dead single-row path removed"
-    assert "onclick=" not in js and "onclick=" not in html
+    assert "bulkButton('delete-selected', 'Delete…', 'menu-item danger menu-close')" in component
+    headers = component.split("{['Device',", 1)[1].split('].map(label', 1)[0]
+    assert len(re.findall(r"'[^']+'", headers)) == 10  # plus Device and Status
+    assert "'Role'" in headers and "'Instructions'" in headers and '<th>Status' in component
+    assert 'function wireMenu(' not in js and 'function updateSelBar(' in js
+    for old in ('#dev-rows .onboard', '#dev-rows .adopt', "#dev-rows .del'", 'function startOnboard('):
+        assert old not in js
+    assert 'onclick=' not in js + html + component
 
 
 def test_peer_policy_console_controls_are_typed_and_safe():
-    """Device inventory gets one CSRF-protected quarantine/release action; it
-    exposes intent separately from count-only tracker enforcement, never a
-    generic ACL/seeder editor or IP-derived legacy identity."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert '<th>Peer policy</th>' in html
-    assert 'id="legacy-peer-warning" hidden' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    # refreshDevices owns the policy snapshot, so an older peer-policy request
-    # cannot overwrite the generation that rendered the device table.
+    html, js = _webroot("index.html"), _webroot("app.js")
+    component, controller, model = (_react_shell(name) for name in ('inventory.jsx', 'inventory-controller.mjs', 'inventory-model.mjs'))
+    assert "'Peer policy'" in component and 'id="legacy-peer-warning" hidden' in html
     assert "function refreshPeerPolicy()" not in js
-    assert "fetch('/api/v1/peer-policy', { signal: signal })" in js
-    assert "'/api/v1/peer-policy/quarantine/' + encodeURIComponent(id)" in js
-    assert "method: 'PUT', headers: csrfHdr" in js
-    assert "if_revision: peerPolicy.revision" in js
-    assert "r.status === 409" in js and "operation_backlog_full" in js
-    assert "Existing device-to-device transfers may continue" in js
-    assert "Device software is unchanged" in js
-    assert "Quarantined intent" in js and "desired_ip_count" in js and "conflict_types" in js
+    assert "'/api/v1/peer-policy'" in controller
+    assert "'/api/v1/peer-policy/quarantine/' + encodeURIComponent(id)" in controller
+    assert "method: 'PUT', headers: this.services.headers" in controller
+    assert 'if_revision: policy.revision' in controller
+    assert 'Existing device-to-device transfers may continue' in controller and 'Device software is unchanged' in controller
+    assert 'Quarantined intent' in component and 'desired_ip_count' in model and 'conflict_types' in model
     assert "participant_class === 'legacy_unattributed'" in js
     assert "p.tracker" in js and "device_ip" not in js.split("function refreshSwarm()")[1].split("// ---- Settings ----")[0]
-    assert "otlp_export.signals" in js and "dropped_total" in js
-    policy_area = js.split("function setQuarantine(")[1].split("async function refreshDevices")[0]
-    assert "method: 'DELETE'" not in policy_area and "acl" not in policy_area.lower()
+    assert 'otlp_export.signals' in js and 'dropped_total' in js
+    assert "method: 'DELETE'" not in controller and 'acl' not in controller.lower()
 
 
 def test_import_from_disk_panel_wired():
@@ -756,8 +709,9 @@ def test_bulk_row_actions_wired():
     delete, so there is exactly one confirm(delWarning(...)) call site."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    for el in ('id="adopt-selected"', 'id="delete-selected"',
-               'id="cred-selected"', 'id="apply-cred-selected"'):
+    for action in ('adopt-selected', 'delete-selected'):
+        assert "bulkButton('" + action + "'" in _react_shell('inventory.jsx')
+    for el in ('id="cred-selected"', 'id="apply-cred-selected"'):
         assert el in html, el
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
@@ -766,7 +720,7 @@ def test_bulk_row_actions_wired():
     assert "'apply-cred-selected'" in js
     assert "/adopt'" in js and "acknowledge_adopt: true" in js
     # the per-row credential dropdown still uses the single-device route...
-    assert "'/credential'" in js or "+ '/credential'" in js
+    assert "controller.edit(id, 'credential', event.target.value)" in _react_shell('inventory.jsx')
     # ...but the bulk credential action (issue #125) posts ONE request
     # carrying every selected id, not one per-device request each --
     # see bulkApply and gui_server.py's /api/devices/bulk-credential.
@@ -852,7 +806,7 @@ def test_undeploy_and_status_ui_wired():
     deployed/staging indicator in the devices table."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert 'id="undeploy-selected"' in html
+    assert "bulkButton('undeploy-selected'" in _react_shell('inventory.jsx')
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
@@ -8889,71 +8843,31 @@ def test_console_refreshes_the_visible_view_periodically():
 
 
 def test_devices_filter_every_column_and_act_on_the_filtered_set():
-    """The devices table could not be filtered, so an operator working a
-    subset had to hand-pick rows. Every meaningful column gets a filter, the
-    row count reports the match, and 'select all' marks the FILTERED rows so
-    every bulk action -- quarantine included -- operates on exactly what the
-    filter selected."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    devices = html.split('id="view-devices"', 1)[1].split("</section>", 1)[0]
-    # one control per meaningful column, plus free text across the row
-    for control in ("dev-filter-q", "dev-filter-management-type", "dev-filter-platform",
-                    "dev-filter-cred", "dev-filter-telemetry", "dev-filter-peer",
-                    "dev-filter-status", "dev-filter-clear"):
-        assert 'id="%s"' % control in devices, "missing filter control: %s" % control
-    # quarantine is available as a BULK action, not only per row
-    assert 'id="quarantine-selected"' in devices
-    assert 'id="release-selected"' in devices
-    # the predicate exists and is applied before the rows are rendered
-    assert "deviceMatchesFilters" in js
-    # filters re-render, and the periodic poll must not wipe them
-    assert "applyDeviceFilters" in js
+    component = _react_shell("inventory.jsx")
+    for key in ('managementType', 'platform', 'status', 'cred', 'telemetry', 'peer', 'role', 'modelFamily', 'osFamily'):
+        assert "['" + key + "'," in component
+    assert 'id="dev-filter-q"' in component and 'id="dev-filter-clear"' in component
+    assert "bulkButton('quarantine-selected'" in component and "bulkButton('release-selected'" in component
+    assert 'value={state.filters[spec[0]]}' in component and 'controller.setFilter(spec[0], event.target.value)' in component
+    assert 'pageQuery(this.state.filters, offset)' in _react_shell('inventory-controller.mjs')
+    assert 'deviceMatchesFilters' not in _webroot('app.js'), 'The server owns target matching; pages are not silently narrowed again'
 
 
 def test_agent_install_rename_and_inventory_only_label():
-    """Vocabulary fix: the 'platform' field (guestshell/iox/router) read as
-    networking hardware to operators, so its DISPLAY text becomes "Agent
-    install" everywhere it appears -- the add-form placeholder, the devices-
-    table header, and the filter label. Separately, the 'legacy'/
-    'legacy_routed' management_type value displayed as the word "legacy",
-    which reads like a real inventory state rather than "management type
-    not chosen yet" -- it becomes "Inventory only — management type not
-    chosen". Both are display-only: the wire field name 'platform', its
-    values (guestshell/iox/router), and the management_type values (legacy/
-    legacy_routed) are unchanged."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-
-    # index.html: filter option, filter label, table header, add-form select
-    assert '<option value="legacy">Inventory only — management type not chosen</option>' in html
-    assert 'aria-label="Filter by agent install"' in html
-    assert '<option value="">Agent install: any</option>' in html
-    assert '<th>Agent install</th>' in html
+    html, component, model, controller = _webroot('index.html'), _react_shell('inventory.jsx'), _react_shell('inventory-model.mjs'), _react_shell('inventory-controller.mjs')
+    assert "['platform', 'platform', 'agent install', 'Agent install: any'" in component
+    assert "['legacy', 'Inventory only — management type not chosen']" in component
+    assert "'Agent install'" in component and 'aria-label={`Agent install for ${id}`}' in component
     assert '<option value="" disabled selected>Choose an agent install</option>' in html
-    assert 'Agent install - auto by model' not in html
-    # the old wording is gone everywhere it used to appear as a label
-    assert '>Platform<' not in html
-    assert 'Platform: any' not in html
-    assert 'Filter by platform"' not in html
-    assert '>legacy</option>' not in html
-
-    # the field id, its values, and the management_type values are untouched
-    assert 'id="df-platform"' in html and 'id="dev-filter-platform"' in html
-    assert 'value="guestshell"' in html and 'value="iox"' in html
-    assert 'value="router"' in html and 'value="xr-appmgr"' in html
-    assert '<option value="legacy"' in html
-
-    # app.js: the row-management-type display and the status/detail lines
-    assert "'Inventory only — management type not chosen'" in js
-    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
-    assert "'Agent install updated for '" in js
-    assert "'Agent install update failed: '" in js
-    assert "row('Agent install', lookup(platforms, res.platform" in _react_shell("device-details-model.mjs")
+    assert 'id="df-platform"' in html
+    for value in ('guestshell', 'iox', 'router', 'xr-appmgr'):
+        assert 'value="' + value + '"' in html
+        assert "'" + value + "'" in component
+    assert "type === 'legacy' || type === 'legacy_routed'" in model
+    assert "'Inventory only — management type not chosen'" in model
+    assert "kind === 'platform' ? 'Agent install'" in controller
+    assert "row('Agent install', lookup(platforms, res.platform" in _react_shell('device-details-model.mjs')
+    assert '>Platform<' not in html and 'Platform: any' not in component
 
 
 def test_agent_install_labels_name_the_runtime_not_router_networking():
@@ -8994,21 +8908,10 @@ def test_add_device_form_filters_install_options_live_by_model():
 
 
 def test_xr_host_management_type_option_added_to_both_selects():
-    """The xr-host management type needs to be choosable from the console:
-    the add-device form's df-management-type select and the devices-table
-    dev-filter-management-type select both gain the wire value xr-host. The
-    filter (whose siblings are bare wire-value labels like "routed") gets
-    the short honest label 'XR host'; the add-device form (whose siblings
-    are each "Label - one-line description", e.g. "Routed - IRIS-managed
-    app network") gets the matching descriptive form so xr-host doesn't
-    stand out as the one option with no explanation."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    dev_filter = html.split('id="dev-filter-management-type"', 1)[1].split("</select>", 1)[0]
-    assert '<option value="xr-host">XR host</option>' in dev_filter
-    df_mgmt_type = html.split('id="df-management-type"', 1)[1].split("</select>", 1)[0]
-    assert ('<option value="xr-host">XR host - router\'s own network '
-            'stack</option>') in df_mgmt_type
+    html, component = _webroot('index.html'), _react_shell('inventory.jsx')
+    assert "['xr-host', 'XR host']" in component
+    form = html.split('id="df-management-type"', 1)[1].split('</select>', 1)[0]
+    assert "XR host - router's own network stack</option>" in form and 'value="xr-host"' in form
 
 
 # Management-type visibility and model lookup behavior are exercised against
@@ -9034,29 +8937,13 @@ def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
 
 
 def test_devices_table_renders_honest_xr_host_label():
-    """managementTypeLabel must render xr-host as 'XR host' -- no VLAN/VPG
-    detail suffix appended, since xr-host carries neither -- while the
-    existing legacy/inventory-only branch stays untouched. Scoped to the
-    managementTypeLabel assignment itself (a bare substring search would
-    pass on ANY occurrence of these tokens anywhere in app.js and would
-    never notice a xr-host arm that accidentally referenced
-    managementTypeDetail), so this also pins that the xr-host arm precedes
-    the generic 'managementType + managementTypeDetail' fallback and never
-    reads managementTypeDetail."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    label = js.split("var managementTypeLabel = ", 1)[1].split(";\n", 1)[0]
-    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in label
-    assert "'Inventory only — management type not chosen'" in label
-    assert "managementType === 'xr-host'" in label
-    assert "'XR host'" in label
-    fallback_marker = "(managementType + managementTypeDetail)"
-    assert fallback_marker in label
-    xr_idx = label.index("managementType === 'xr-host'")
-    fallback_idx = label.index(fallback_marker)
-    assert xr_idx < fallback_idx, "xr-host arm must precede the generic fallback"
-    xr_arm = label[xr_idx:fallback_idx]
-    assert "managementTypeDetail" not in xr_arm
+    model = _react_shell('inventory-model.mjs')
+    function = model.split('export function managementLabel(device)', 1)[1].split('export function telemetryBadge', 1)[0]
+    assert "if (type === 'xr-host') return 'XR host';" in function
+    assert function.index("type === 'xr-host'") < function.index("type.startsWith('router-')")
+    assert "type === 'legacy' || type === 'legacy_routed'" in function
+    assert 'Inventory only — management type not chosen' in function
+    assert 'managementLabel(device)' in _react_shell('inventory.jsx')
 
 
 def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
@@ -9733,32 +9620,16 @@ def _webroot(name):
 
 
 def test_every_status_the_cell_can_show_is_filterable():
-    """The Status filter must offer every state the Status cell can render.
-
-    The filter used to derive its own status from a three-branch copy of the
-    cell's logic, so a device reading "onboarding…", "placement failed" or
-    "copying to bootflash:" could not be selected at all, and asking for
-    "enrolled" quietly swept them in. One derivation now feeds both, and the
-    dropdown is generated from it -- this guards that they cannot drift."""
-    app_js = _webroot("app.js")
-    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
-    body = body.split("\n  function ", 1)[0]
+    js = _webroot('app.js')
+    body = js.split('function deviceStatus(d, devNow) {', 1)[1].split('\n  function ', 1)[0]
     rendered = set(re.findall(r"key: '([a-z-]+)'", body))
-    assert rendered, "deviceStatus() returned no recognisable keys"
-
-    options = app_js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
+    options = js.split('var DEVICE_STATUS_OPTIONS = [', 1)[1].split('];', 1)[0]
     offered = set(re.findall(r"\['([a-z-]+)',", options))
-    assert rendered <= offered, (
-        "renderable but not filterable: %s" % sorted(rendered - offered))
-    # "offline" is a modifier on top of the cell, not one of its branches
-    assert offered - rendered == {"offline"}, sorted(offered - rendered)
-    # the filter compares the shared key, never a second derivation
-    assert "deviceStatus(d, devNow).key !== f.status" in app_js
-    assert "deviceStatusKey" not in app_js
-    # and the markup no longer carries a hand-written subset
-    html = _webroot("index.html")
-    picker = html.split('id="dev-filter-status"', 1)[1].split("</select>", 1)[0]
-    assert picker.count("<option") == 1, "status options are hardcoded again"
+    assert rendered and rendered <= offered and offered - rendered == {'offline'}
+    assert 'statusOptions: DEVICE_STATUS_OPTIONS' in js
+    component = _react_shell('inventory.jsx')
+    assert "key === 'status'" in component and 'services.statusOptions' in component
+    assert "status: 'status'" in _react_shell('inventory-model.mjs')
 
 
 def test_image_can_be_assigned_to_the_selection():
@@ -9780,7 +9651,7 @@ def test_image_can_be_assigned_to_the_selection():
     assert '<select id="image-selected"' not in html, \
         "old single-image bulk picker still wired -- was it really replaced?"
     assert 'id="apply-image-selected"' not in html
-    assert 'id="assign-images-selected"' in html
+    assert "bulkButton('assign-images-selected'" in _react_shell('inventory.jsx')
     assert "'assign-images-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
         "bulk image assign is not under the shared selected-action lock"
     # two occurrences of the bare getElementById() exist (updateSelBar's
@@ -9788,7 +9659,7 @@ def test_image_can_be_assigned_to_the_selection():
     # listener registration specifically so this pins the handler, not the
     # label update.
     handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "onInventoryAction('assign-images-selected',", 1)[1][:3800]
     assert "openImagePicker(" in handler
     assert "claimSelection()" in handler
     # the intersection of the selection's current sets, not the union of them
@@ -9810,7 +9681,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     harmless extra prompt, not a special case to detect."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
+        "onInventoryAction('assign-images-selected',", 1)[1][:4800]
     assert "!imgIds.length" in bulk_handler
     assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
         in bulk_handler
@@ -9818,7 +9689,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     # same way the existing delete-selected cancel path does
     assert "setBulkBusy(false)" in bulk_handler.split(
         "Unassign all images from", 1)[1][:200]
-    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    row_handler = app_js.split("function openRowAssign(id) {", 1)[1][:1400]
     assert "!ids.length" in row_handler
     assert "confirm('Unassign all images from ' + id + '?')" in row_handler
 
@@ -9834,7 +9705,7 @@ def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
     app_js = _webroot("app.js")
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
+        "onInventoryAction('assign-images-selected',", 1)[1][:4800]
     assert "These devices have different image assignments" in bulk_handler
     assert "sets.some(" in bulk_handler
     # the picker itself resets any stale note on every open, so a note left
@@ -9858,7 +9729,7 @@ def test_bulk_picker_warns_when_the_sets_merely_overlap():
     every device unassigned included -- stay a plain, unconfirmed apply."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
+        "onInventoryAction('assign-images-selected',", 1)[1][:4800]
     assert "setsDiffer" in bulk_handler
     # the gate is no longer the emptiness of the intersection
     assert "!intersection.length &&" not in bulk_handler, \
@@ -9892,17 +9763,17 @@ def test_per_row_assign_never_releases_the_bulk_selected_action_lock():
     assert "ownsBulkLock" in helper, \
         "forSelected still releases the bulk lock unconditionally"
     assert "if (opts.ownsBulkLock !== false) setBulkBusy(false);" in helper
-    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    row_handler = app_js.split("function openRowAssign(id) {", 1)[1][:1400]
     assert "ownsBulkLock: false" in row_handler
     # ...and the row disables its own control while the POST is in flight
-    assert "btn.disabled = true" in row_handler
-    assert "btn.isConnected" in row_handler
+    assert "inventory.claimRow(id)" in row_handler
+    assert "inventory.releaseRow(id)" in row_handler
     # and the row is the only caller that opts out -- openRowAssign is where
     # that decision lives, so it cannot be copied into a bulk path by accident
     assert app_js.count("ownsBulkLock: false") == 1
     # the bulk callers keep the default: they claimed the lock, they release it
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "onInventoryAction('assign-images-selected',", 1)[1][:3800]
     assert "ownsBulkLock" not in bulk_handler
 
 
@@ -9943,11 +9814,11 @@ def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
     assert "r.status === 409" in body
     assert "openRowAssign(conflicts[0], null)" in body
     # ...and both callers capture one
-    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    row = app_js.split("function openRowAssign(id) {", 1)[1][:1400]
     assert "expect[id] = current" in row
     assert "expect: expect" in row
     bulk = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1].split(
+        "onInventoryAction('assign-images-selected',", 1)[1].split(
             "getElementById('apply-cred-selected').addEventListener", 1)[0]
     assert "expect[id] = sets[i]" in bulk
     assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
@@ -9966,7 +9837,7 @@ def test_picker_does_not_open_on_a_failed_image_fetch():
     of the picker entirely, so Apply -- which posts exactly what is checked --
     dropped it. It keeps its place, checked and disabled."""
     app_js = _webroot("app.js")
-    assert "imageListOk = ir.ok" in app_js, \
+    assert "imageListOk = state.imagesOk" in app_js, \
         "the image list's load state is assumed rather than recorded"
     assert app_js.count("if (!imageListOk) {") == 2, \
         "both picker entry points must refuse a picker with no real catalog"
@@ -9993,7 +9864,7 @@ def test_bulk_assign_resolves_off_page_selection_from_the_server():
     app_js = _webroot("app.js")
     assert "async function fetchDeviceRows(ids)" in app_js
     fetch_fn = app_js.split("async function fetchDeviceRows(ids) {", 1)[1].split(
-        "\n  document.getElementById('assign-images-selected')", 1)[0]
+        "\n  onInventoryAction('assign-images-selected',", 1)[0]
     # keyed by device_id, seeded from whatever page is already rendered
     assert "byId[d.device_id] = d" in fetch_fn
     assert "LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; })" in fetch_fn
@@ -10004,7 +9875,7 @@ def test_bulk_assign_resolves_off_page_selection_from_the_server():
     assert "if (!missing.length) return byId;" in fetch_fn
     assert "remaining--" in fetch_fn
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "onInventoryAction('assign-images-selected',", 1)[1][:3800]
     assert "await fetchDeviceRows(ids)" in bulk_handler
     # the pre-check/expect sets are read from the fetched map, never straight
     # from LAST_DEVICES (which is exactly the bug: the page in the DOM is not
@@ -10035,21 +9906,12 @@ def test_image_picker_is_one_function_shared_by_both_entry_points():
 
 
 def test_row_assign_is_a_button_not_a_select():
-    """The per-row image control used to be a <select class="assign">: one
-    change event picked exactly one image. It cannot express an ORDERED SET,
-    so it is replaced by a button that opens the shared picker with the
-    row's current assigned set."""
-    html = _webroot("index.html")
-    app_js = _webroot("app.js")
-    assert '<select class="assign"' not in app_js
-    assert 'class="linkish assign-btn"' in app_js
-    assert "#dev-rows .assign-btn" in app_js
-    # the button opens the shared picker on the row's own assigned set
-    # (through openRowAssign, which the 409 retry re-enters)
-    assert "openRowAssign(btn.closest('tr').getAttribute('data-id'), btn)" in app_js
-    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
-    assert "rowAssignedIds(d)" in row and "openImagePicker(current," in row
-    assert 'id="mark-all"' in html   # the checkbox column stays untouched
+    component, js = _react_shell('inventory.jsx'), _webroot('app.js')
+    assert '<button type="button" className="linkish assign-btn"' in component
+    assert 'onClick={() => services.assign?.(id)}' in component and 'assign: openRowAssign' in js
+    assert "'— assign —'" in component and '`${assigned.length} image(s)`' in component
+    assert '<select className="assign"' not in component
+    assert 'function openImagePicker(' in js and 'function assignImagesTo(' in js
 
 
 def test_deployed_badge_requires_every_assigned_image_staged():
@@ -10440,7 +10302,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("devices", "wz-pkg-table",
+    table_ids = ("wz-pkg-table",
                  "setup-pkg-table", "settings-info", "trust-tbl")
     for tid in table_ids:
         marker = 'id="%s"' % tid
@@ -10479,6 +10341,9 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     region = activity.split('aria-label="Device jobs">', 1)[1].split('</div>', 1)[0]
     assert '<table className="tbl" id="batch-table">' in region
     assert 'className="table-scroll" tabIndex={0} role="region"' in activity
+    inventory = _react_shell('inventory.jsx')
+    region = inventory.split('aria-label="Device inventory">', 1)[1].split('</div>', 1)[0]
+    assert '<table className="tbl dense" id="devices">' in region
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10718,19 +10583,13 @@ def test_overview_needs_attention_is_worst_of_group_and_excludes_offline():
 
 
 def test_devices_attention_filter_is_appended_not_added_to_the_status_options():
-    """'__attention' is a rollup over several deviceStatus() keys, not a
-    producible status of its own -- it must be appended to the rendered
-    <select>, never merged into DEVICE_STATUS_OPTIONS itself (that array is
-    exactly "every key deviceStatus() can produce",
-    test_every_status_the_cell_can_show_is_filterable enforces it)."""
-    js = _webroot("app.js")
-    options_literal = js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
-    assert "__attention" not in options_literal
-    assert "'<option value=\"__attention\">Needs attention (any)</option>'" in js
-    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "f.status === '__attention'" in filter_fn
-    assert "'negative'" in filter_fn and "'severe'" in filter_fn and "'warning'" in filter_fn
+    js = _webroot('app.js')
+    options = js.split('var DEVICE_STATUS_OPTIONS = [', 1)[1].split('];', 1)[0]
+    assert '__attention' not in options
+    assert ".concat([['__attention', 'Needs attention (any)']])" in _react_shell('inventory.jsx')
+    assert "status: 'status'" in _react_shell('inventory-model.mjs')
+    # Actual server matching is covered by test_devices_status_offline_and_attention_filters.
+    assert 'deviceMatchesFilters' not in js
 
 
 def test_images_catalog_leads_with_filename_and_verdict_pill():
@@ -10822,28 +10681,11 @@ def test_overview_attention_band_distinguishes_no_data_from_all_clear():
 # ---------------------------------------------------------------------------
 
 def test_devices_filter_offers_only_producible_options():
-    """M2 is ADJUDICATED as repair, not removal: the value="legacy" option
-    describes a real fleet state (an unclassified device, which the server
-    always stores as the truthy 'legacy_routed' -- gui_fleet.py's
-    _legacy_record/_legacy_like) and stays exactly where it is. What was
-    broken is the FILTER COMPARISON at deviceMatchesFilters(): it fell back
-    to the string 'legacy' only when d.management_type was falsy, which
-    never happens, so selecting the option always returned zero rows. Pin
-    both halves: the option survives verbatim, and the comparison now
-    folds 'legacy_routed' into 'legacy' the same way the row label already
-    does (managementTypeLabel, app.js) -- without touching that label
-    line, which test_devices_table_renders_honest_xr_host_label pins
-    character-for-character already."""
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert ('<option value="legacy">Inventory only — management type not '
-            'chosen</option>') in html
-    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
-        "\n  }", 1)[0]
-    # the repaired comparison: legacy_routed and legacy compare equal, the
-    # same equivalence class managementTypeLabel already grants the row label
-    assert ("d.management_type === 'legacy_routed' ? 'legacy' : "
-            "(d.management_type || 'legacy')") in filter_fn
+    assert "['legacy', 'Inventory only — management type not chosen']" in _react_shell('inventory.jsx')
+    assert "managementType: 'management_type'" in _react_shell('inventory-model.mjs')
+    row = {'device_id': 'old', 'management_type': 'legacy_routed'}
+    assert gui_server.target_row_matches(row, {'management_type': 'legacy'}, now=1)
+    assert not gui_server.target_row_matches(row, {'management_type': 'xr-host'}, now=1)
 
 
 def test_device_status_cell_carries_job_step_and_elapsed():
@@ -10889,7 +10731,7 @@ def test_offline_is_expected_during_active_undeploy():
     own state === 'running': a queued undeploy job's offline device keeps
     the normal, honest "no recent heartbeat" pill."""
     js = _webroot("app.js")
-    fn = js.split("function deviceStatusHtml(d, devNow) {", 1)[1].split(
+    fn = js.split("function deviceStatusPresentation(d, devNow) {", 1)[1].split(
         "\n  }", 1)[0]
     assert "Offline (expected during undeploy)" in fn
     assert "[1/5]" in fn
@@ -11007,57 +10849,16 @@ def test_table_scroll_fade_color_is_parameterized_for_cards():
 
 
 def test_bulk_bar_names_selection_scope():
-    """Final review fix wave, spec §5: the bulk bar names whether the checked
-    set IS the whole filtered table or only part of it, and -- when it's
-    only part -- gives a one-click path to the rest.
-
-    Rewritten for issue #112 (paging): "the whole filtered table" used to BE
-    every rendered '#dev-rows .mark' row, because the table always rendered
-    the entire fleet -- so m (every row) and n (checked rows) were both safe
-    to read straight off the DOM, and the one-click path could just replay
-    #mark-all's own change handler. Once the table pages, that DOM read is
-    exactly the ambiguity issue #112 flags: '#dev-rows .mark' only ever
-    holds the current page, and replaying #mark-all only ever selects it.
-    m is now devTotal (the server's own match count for the current filter)
-    and n is Object.keys(SELECTED).length (real selections, id-keyed,
-    independent of what page is rendered); the one-click path now walks
-    every server page of the current filter (selectAllMatchingDevices)
-    instead of touching #mark-all at all."""
-    html = _webroot("index.html")
-    selbar = html.split('id="sel-bar"', 1)[1].split('class="selbar-actions"', 1)[0]
-    assert '<span class="muted" id="sel-scope-text" hidden></span>' in selbar
-    # A tertiary BUTTON, not the .linkish text link it used to be: Magnetic
-    # Button > Usage keeps text links for navigation inside a paragraph and
-    # gives standalone actions a button. Cancel is its neighbour because
-    # Magnetic Table > Bulk action bar dismisses the bar either by deselecting
-    # every row or by "the 'Cancel' button".
-    assert '<button class="btn tertiary" type="button" id="sel-scope-all" hidden></button>' in selbar
-    assert '<button class="btn tertiary" type="button" id="sel-clear">Cancel</button>' in selbar
-    assert 'onclick=' not in selbar
-
-    js = _webroot("app.js")
-    fn = js.split("function updateSelBar() {", 1)[1].split("\n  }", 1)[0]
-    assert "var n = Object.keys(SELECTED).length;" in fn
-    assert "var m = devTotal;" in fn
-    assert "deviceMatchIds.filter(function (id) { return !!SELECTED[id]; })" in fn
-    assert "var allSelected = m > 0 && completeMatches && matchingSelected === m;" in fn
-    assert "n === m" not in fn
-    assert "m <= n" not in fn
-    assert "'· All ' + m + ' matching devices selected'" in fn
-    assert "'· Select all ' + m + ' matching devices'" in fn
-
-    # the click runs a REAL server-side walk of the current filter, not a
-    # replay of #mark-all (which can only ever reach the rendered page)
-    click_fn = js.split(
-        "document.getElementById('sel-scope-all').addEventListener('click', function () {",
-        1)[1].split("\n  });", 1)[0]
-    assert "selectAllMatchingDevices();" in click_fn
-    assert "markAll" not in click_fn
-
-    select_all_fn = js.split("async function selectAllMatchingDevices() {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "deviceFilterQuery(deviceFilterState())" in select_all_fn
-    assert "ids.forEach(function (id) { SELECTED[id] = true; });" in select_all_fn
+    component, model, controller = (_react_shell(name) for name in ('inventory.jsx', 'inventory-model.mjs', 'inventory-controller.mjs'))
+    assert 'id="sel-scope-text" hidden={!scope.text}' in component
+    assert 'id="sel-scope-all" hidden={!scope.offerAll}' in component
+    assert 'controller.selectAll()' in component and 'controller.clearSelection()' in component
+    assert 'matchIds.filter(id => selected.has(id)).length' in model
+    assert 'total > 0 && complete && matched === total' in model
+    assert 'selected outside this' in model and 'matches are unconfirmed' in model
+    assert 'pageQuery(this.state.filters, offset, 1000)' in controller
+    assert 'new Set([...this.state.selected, ...ids])' in controller
+    assert "'sel-scope-all'" not in _webroot('app.js'), 'No legacy mutation inside the React root'
 
 
 def test_table_type_roles_are_magnetic_p3_p4():
@@ -11125,94 +10926,18 @@ def test_monitoring_group_stays_inside_react_navigation():
 
 
 def test_bulk_bar_action_buttons_capped_via_more_menu():
-    """Magnetic Table > Bulk action bar: "When row checkboxes are selected,
-    the bulk action bar appears, allowing up to 4 specific actions for the
-    selected rows... The bulk action bar stays visible until all rows are
-    deselected or the 'Cancel' button is clicked."
-
-    So .selbar-actions holds exactly four controls, the fourth being the
-    overflow (Magnetic Dropdown lists "List actions from a horizontal 3-dot
-    icon" as a dropdown use case, and Table > Action column reaches for an
-    overflow icon button once there are more than two). The single primary
-    sits on the group's outside edge per Button > Button group > Alignment.
-    Selection state -- the count, the select-all-beyond-this-page shortcut and
-    Cancel -- sits outside that group and is not one of the four.
-
-    Adopt/Quarantine/Release/Set-credential/Delete live inside the overflow;
-    every id, click handler and the shared bulk busy-lock stay put
-    (test_bulk_row_actions_wired / test_all_selected_actions_share_one_busy_
-    lock guard those already)."""
-    def _top_level_button_ids(container):
-        # IDs of buttons NOT nested inside a `.menu` floating popover -- a
-        # menu-wrap TRIGGER button stays visible in the bar at all times
-        # (only its popover's own contents are hidden until opened), so
-        # `.menu-wrap` itself is transparent to this count; depth only
-        # starts at a `.menu` popover's own opening tag (exact class
-        # match, so it does not fire on `.menu-wrap`/`.menu-note` too), and
-        # any <div> nested inside one still balances the count correctly
-        # via the generic branch below.
-        depth = 0
-        ids = []
-        i = 0
-        while i < len(container):
-            if depth == 0 and container.startswith('<div class="menu"', i):
-                depth = 1
-                i += 4
-            elif depth > 0 and container.startswith("<div", i):
-                depth += 1
-                i += 4
-            elif depth > 0 and container.startswith("</div>", i):
-                depth -= 1
-                i += 6
-            elif depth == 0 and container.startswith('<button class="btn', i):
-                m = re.search(r'id="([^"]+)"', container[i:i + 260])
-                ids.append(m.group(1) if m else None)
-                i += 1
-            else:
-                i += 1
-        return ids
-
-    html = _webroot("index.html")
-    selbar = html.split('id="sel-bar"', 1)[1].split('id="dev-form"', 1)[0]
-    state, actions = selbar.split('class="selbar-actions"', 1)
-
-    # selection state, not actions on the selection
-    assert _top_level_button_ids(state) == ['sel-scope-all', 'sel-clear']
-
-    # exactly four, primary last (right-aligned group, outside edge)
-    ids = _top_level_button_ids(actions)
-    assert ids == ['assign-images-selected', 'undeploy-selected',
-                   'onboard-selected', 'more-menu-btn'], ids
-    assert len(ids) <= 4
-    assert actions.count('<button class="btn"') == 1, "one primary per group"
-
-    # the fourth is an icon-only overflow trigger with an accessible name
-    trigger = actions.split('id="more-menu-btn"', 1)[0]
-    assert 'class="btn ghost icon-only"' in trigger[trigger.rfind("<button"):]
-    assert 'aria-label="More actions"' in actions.split(
-        'id="more-menu-btn"', 1)[1].split(">", 1)[0]
-
-    more_pop = actions.split('id="more-pop" hidden>', 1)[1].split("</div>", 1)[0]
-    for folded_id in ("adopt-selected", "quarantine-selected",
-                      "release-selected", "set-cred-selected",
-                      "delete-selected"):
-        assert ('id="%s"' % folded_id) in more_pop, folded_id
-        # menu-close so the popover closes the instant the action fires --
-        # without it .menu's own click handler stopPropagation()s and the
-        # outside-click closer (document listener) never sees the click
-        before = more_pop.split('id="%s"' % folded_id, 1)[0]
-        tag_start = before.rfind("<button")
-        assert "menu-close" in before[tag_start:], folded_id
-    # Dropdown > Types: destructive menu items are a supported type, and the
-    # divider groups Delete away from the reversible actions above it
-    assert '<hr class="menu-divider">' in more_pop
-    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in more_pop
-    # the credential picker moved out of the menu and into its own modal --
-    # Dropdown items act immediately, they never carry a select + Apply pair
-    assert 'id="cred-selected"' not in more_pop
-    cred_modal = html.split('id="cred-modal"', 1)[1].split('id="img-picker"', 1)[0]
-    assert 'id="cred-selected"' in cred_modal
-    assert 'id="apply-cred-selected"' in cred_modal
+    component = _react_shell('inventory.jsx')
+    actions = component.split('className="selbar-actions"', 1)[1].split('id="more-pop"', 1)[0]
+    assert re.findall(r"bulkButton\('([^']+)'", actions) == ['assign-images-selected', 'undeploy-selected', 'onboard-selected']
+    assert actions.count('id="more-menu-btn"') == 1 and 'aria-label="More actions"' in actions
+    assert "bulkButton('onboard-selected', 'Onboard…', 'btn')" in actions
+    menu = component.split('id="more-pop"', 1)[1].split('</div>', 1)[0]
+    for action in ('adopt-selected', 'quarantine-selected', 'release-selected', 'set-cred-selected', 'set-role-selected', 'schedule-selected', 'delete-selected'):
+        assert "bulkButton('" + action + "'" in menu
+    assert 'className="menu-divider"' in menu and "'menu-item danger menu-close'" in menu
+    assert 'id="cred-selected"' not in menu
+    modal = _webroot('index.html').split('id="cred-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    assert 'id="cred-selected"' in modal and 'id="apply-cred-selected"' in modal
 
 
 def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
@@ -11241,8 +10966,9 @@ def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
     js = _webroot("app.js")
 
     # 1 -- both branches pluralise on `total`
-    assert "(devs.length === total ? String(total) : devs.length + ' of ' + total) +" in js
-    assert "' result' + (total === 1 ? '' : 's');" in js
+    component = _react_shell('inventory.jsx')
+    assert "state.rows.length === state.total ? state.total : state.rows.length + ' of ' + state.total" in component
+    assert "result${state.total === 1 ? '' : 's'}" in component
     # the old form agreed with the matched count
     assert "((devs.length === total ? total : devs.length) === 1 ? '' : 's')" not in js
 
@@ -11306,7 +11032,7 @@ def test_devices_table_gets_the_dense_type_modifier():
     unmodified."""
     html = _webroot("index.html")
     css = _webroot("styles.css")
-    assert '<table class="tbl dense" id="devices">' in html
+    assert '<table className="tbl dense" id="devices">' in _react_shell('inventory.jsx')
     # Images keeps the base (non-dense) table scale this wave
     assert '<table className="tbl" id="images">' in _react_shell("images.jsx")
     assert ".tbl.dense td { font-size:12px; line-height:18px; }" in css
@@ -11680,9 +11406,9 @@ def test_credential_list_failure_is_not_rendered_as_no_credential():
     row to "no credential"."""
     js = _webroot("app.js")
     assert "var credListOk = false;" in js
-    assert "if (cr.ok) credOpts = (await cr.json()).profiles || [];" in js
-    assert "credential pickers are disabled until it loads." in js
-    assert "var credSel = credListOk" in js
+    assert 'credentials: credentialsOk ? credentials.body.profiles : this.state.credentials' in _react_shell('inventory-controller.mjs')
+    assert 'disabled={busy || state.bulkBusy || !state.credentialsOk}' in _react_shell('inventory.jsx')
+    assert 'Credential list unavailable; showing the assignment as recorded' in _react_shell('inventory.jsx')
     assert "credential list unavailable; assign later" in js
     assert "Credential list unavailable; not opening the picker." in js
 
@@ -11699,22 +11425,21 @@ def test_console_id_keyed_maps_are_prototype_free():
                  "var best = Object.create(null);",
                  "var imageFilenames = Object.create(null);",
                  "var imageQuarantined = Object.create(null);",
-                 "var peerPolicyBusy = Object.create(null);",
-                 "var SELECTED = Object.create(null);",
-                 "SELECTED = Object.create(null);",
                  "var checkedSet = Object.create(null);",
                  "imageFilenames = Object.create(null);",
                  "imageQuarantined = Object.create(null);"):
         assert decl in js, decl
     assert "var SELECTED = {};" not in js and "var checkedSet = {};" not in js
+    model = _react_shell('inventory-controller.mjs')
+    assert 'selected: new Set()' in model and 'rowBusy: new Set()' in model
 
 
 def test_telemetry_filter_has_unknown_bucket():
     """Source guard (IRIS-08-008): the filter's tri-state matches the cell's."""
     js = _webroot("app.js")
     html = _webroot("index.html")
-    assert '<option value="unknown">' in html.split('id="dev-filter-telemetry"')[1].split("</select>")[0]
-    assert ": 'unknown';" in js and "typeof d.telemetry_stream_enabled === 'boolean'" in js
+    assert "['unknown', 'unknown (no heartbeat yet)']" in _react_shell('inventory.jsx')
+    assert "telemetry: 'telemetry'" in _react_shell('inventory-model.mjs')
 
 
 def test_swarm_map_treats_error_body_as_failed_poll():
@@ -12249,17 +11974,14 @@ def test_devices_role_filter_matches_exact_role_and_unassigned(tmp_path):
 
 
 def test_declared_role_filter_has_server_and_client_parity():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="dev-filter-role"' in html
-    assert '<option value="__none">— no role —</option>' in html
-    assert 'role: val(\'dev-filter-role\')' in js
-    assert "role: 'role'" in js
-    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
-    predicate = predicate.split("\n  }", 1)[0]
-    assert "f.role" in predicate and "d.role" in predicate
-    assert "Object.keys(" in js.split("function syncDeviceFilterOptions()", 1)[1]
-    assert ".roles || {}).members" in js
+    component = _react_shell('inventory.jsx')
+    assert "['role', 'role'" in component and "['__none', '— no role —']" in component
+    assert 'state.policy?.roles?.members' in component
+    assert 'values.concat([[state.filters[key], state.filters[key]]])' in component
+    assert "role: 'role'" in _react_shell('inventory-model.mjs')
+    assert gui_server.target_row_matches({'role': 'boat'}, {'role': 'boat'}, now=1)
+    assert gui_server.target_row_matches({'role': ''}, {'role': '__none'}, now=1)
+    assert not gui_server.target_row_matches({'role': 'boat'}, {'role': '__none'}, now=1)
 
 
 def test_target_filters_use_fleet_and_deployment_facts_not_heartbeat(tmp_path):
@@ -12411,36 +12133,16 @@ def test_record_backed_target_facts_are_stable_across_preview_filters(tmp_path):
 
 
 def test_device_type_filters_have_server_and_client_preview_parity():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="dev-filter-model-family"' in html
-    assert 'id="dev-filter-os-family"' in html
-    assert "modelFamily: val('dev-filter-model-family')" in js
-    assert "osFamily: val('dev-filter-os-family')" in js
-    assert "modelFamily: 'model_family'" in js
-    assert "osFamily: 'os_family'" in js
-    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
-    predicate = predicate.split("\n  }", 1)[0]
-    assert "d.model_family" in predicate
-    assert "d.os_family" in predicate
-    assert "d.platform_resolved || d.platform" in predicate
-    assert "target_warnings" in js
-    assert 'id="dev-target-warning"' in html
-    refresh = js.split("async function refreshDevices() {", 1)[1].split(
-        "\n  function syncDeviceFilterOptions()", 1)[0]
-    failed = refresh.split("if (!dr.ok)", 1)[1].split(
-        "var dbody = await dr.json()", 1)[0]
-    assert "devStatus.textContent" in failed
-    assert "targetWarning.textContent" in failed
-    assert "document.getElementById('dev-rows').innerHTML" in failed
-    assert "Device target preview unavailable." in failed
-    assert "document.getElementById('dev-count').textContent = " \
-        "'Results unavailable'" in failed
-    assert "devTotal = 0" in failed and "devOffset = 0" in failed
-    assert "updateDevPager(0)" in failed
-    assert "markAll.disabled = true" in failed
-    assert "markAll.textContent = 'Select page'" in failed
-    assert "delete SELECTED" not in failed
+    component, model, controller = (_react_shell(name) for name in
+        ('inventory.jsx', 'inventory-model.mjs', 'inventory-controller.mjs'))
+    assert "['modelFamily', 'model-family'" in component
+    assert "['osFamily', 'os-family'" in component
+    assert "modelFamily: 'model_family'" in model and "osFamily: 'os_family'" in model
+    assert 'target_warnings' in controller and 'id="dev-target-warning"' in component
+    assert 'Device target preview unavailable' in controller
+    assert 'rows: [], total: 0, offset: 0, now: 0, readOk: false' in controller
+    assert "'Results unavailable'" in component and 'disabled={!state.rows.length}' in component
+    assert 'matchQuery: null, matchIds: null' in controller
 
     # Task 22 consumes this same pure predicate; the HTTP handler delegates to
     # it rather than owning a second copy of the target language.
@@ -12470,77 +12172,23 @@ def test_device_type_filters_have_server_and_client_preview_parity():
 
 def test_failed_target_preview_cannot_be_replayed_from_selection_cache():
     import subprocess
-
-    js = _webroot("app.js")
-    refresh = "async function refreshDevices() {" + js.split(
-        "async function refreshDevices() {", 1)[1].split(
-            "\n\n  // Populate the credential filter", 1)[0]
-    select_all = "async function selectAllMatchingDevices() {" + js.split(
-        "async function selectAllMatchingDevices() {", 1)[1].split(
-            "\n  // Every selected-action shares one lock", 1)[0]
-    script = r'''
-const assert = require('node:assert/strict');
-const elements = new Map();
-function el(id) {
-  if (!elements.has(id)) elements.set(id, {
-    textContent: '', innerHTML: '', checked: true, indeterminate: true,
-    disabled: false
-  });
-  return elements.get(id);
-}
-var document = {getElementById: el};
-class AbortController {
-  constructor() { this.signal = {}; }
-  abort() {}
-}
-var devicesRefreshGeneration = 0, devicesRefreshController = null;
-var peerPolicyReadGeneration = 0;
-var LAST_DEVICES = [{device_id: 'stale-row'}], LAST_DEV_NOW = 77;
-var devTotal = 1, devOffset = 0, DEV_PAGE_SIZE = 200;
-var SELECTED = {'keep-selected': true};
-var peerPolicyReadOk = true, peerPolicy = {}, devStatus = el('dev-status');
-var selectAllMatchingBusy = false;
-var selectAllMatchingRun = null, bulkBusy = false;
-var deviceSelectionQuery = '', deviceMatchIds = null;
-function updateSelBar() {}
-function applyPendingDevFilter() {}
-function devicesPageQuery() { return ''; }
-function deviceFilterState() { return {}; }
-function deviceFilterQuery() { return ''; }
-function renderPeerPolicyPanel() {}
-// The schedule read rides along with the device read and is advisory; this
-// harness is about the device projection, so it stands in for it.
-async function refreshScheduleList() {}
-var pagerTotal = null;
-function updateDevPager(total) { pagerTotal = total; }
-var replayed = null;
-function renderDevices(devices) { replayed = devices.slice(); }
-async function fetch(url) {
-  if (url.startsWith('/api/v1/devices?')) {
-    return {ok: false, status: 503, json: async () => ({})};
-  }
-  if (url === '/api/v1/onboard/jobs') {
-    return {ok: true, status: 200, json: async () => ({jobs: []})};
-  }
-  return {ok: true, status: 200, json: async () => ({})};
-}
-''' + refresh + '\n' + select_all + r'''
-(async () => {
-  await refreshDevices();
-  assert.deepEqual(LAST_DEVICES, []);
-  assert.equal(LAST_DEV_NOW, 0);
-  assert.match(el('dev-rows').innerHTML, /preview unavailable/i);
-  assert.equal(el('dev-count').textContent, 'Results unavailable');
-  assert.equal(pagerTotal, 0);
-  assert.equal(el('mark-all').disabled, true);
-  assert.equal(el('mark-all').textContent, 'Select page');
-  await selectAllMatchingDevices();
-  assert.equal(replayed, null, 'No selection read replays the unavailable page');
-  assert.deepEqual(SELECTED, {'keep-selected': true});
-})().catch(error => { console.error(error); process.exit(1); });
-'''
-    result = subprocess.run(
-        ["node", "-"], input=script, text=True, capture_output=True)
+    model = (Path(gui_server.WEBROOT).parent / 'console-ui/src/inventory-model.mjs').as_uri()
+    controller = (Path(gui_server.WEBROOT).parent / 'console-ui/src/inventory-controller.mjs').as_uri()
+    program = f"import {{InventoryController}} from {json.dumps(controller)}; import {{selectionScope}} from {json.dumps(model)};" + r"""
+import assert from 'node:assert/strict';
+const c = new InventoryController(); let reads = 0;
+c.connect({fetch: async () => { reads++; return {ok: false, status: 503}; }});
+c.update({rows: [{device_id: 'stale'}], now: 77, total: 1, matchQuery: '', selected: new Set(['keep'])});
+await c.refresh();
+assert.deepEqual(c.snapshot().rows, []); assert.equal(c.snapshot().now, 0);
+assert.equal(c.snapshot().total, 0); assert.equal(c.snapshot().offset, 0);
+assert.match(c.snapshot().error, /preview unavailable/);
+assert.match(selectionScope(c.snapshot()).text, /unconfirmed/);
+assert.equal(selectionScope(c.snapshot()).offerAll, false);
+const n = reads; await c.selectAll(); assert.equal(reads, n);
+assert.deepEqual(c.selectedIds(), ['keep']); c.dispose();
+"""
+    result = subprocess.run(['node', '--input-type=module', '-'], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -13639,8 +13287,10 @@ def _run_instruction_console_js(script):
     js = _webroot("app.js")
     code = js.split("// ---- Instruction status projection ----", 1)[1].split(
         "// ---- End instruction status projection ----", 1)[0]
-    result = subprocess.run(["node", "-"], input=r'''
-const assert = require('node:assert/strict');
+    model = (Path(gui_server.WEBROOT).parent / 'console-ui/src/inventory-model.mjs').as_uri()
+    imports = f"import {{instructionBadge}} from {json.dumps(model)};\n"
+    result = subprocess.run(["node", "--input-type=module", "-"], input=imports + r'''
+import assert from 'node:assert/strict';
 const elements = new Map();
 function el(id) {
   if (!elements.has(id)) elements.set(id, {
@@ -13658,8 +13308,8 @@ function policyCount(v) { return Number.isSafeInteger(v) && v >= 0 ? v : '—'; 
 
 def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
     html, js = (_webroot(name) for name in ("index.html", "app.js"))
-    assert "<th>Instructions</th>" in html
-    assert 'colspan="12"' in js
+    assert "'Instructions'" in _react_shell('inventory.jsx')
+    assert 'colSpan={12}' in _react_shell('inventory.jsx')
     for identifier in (
             "policy-issued-revision", "policy-applied-revisions",
             "policy-instruction-states", "policy-instr-stamp-missing",
@@ -13680,23 +13330,23 @@ def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
 
 def test_instruction_console_renders_exact_escaped_chip_rollup_and_custody():
     _run_instruction_console_js(r'''
-let cell = instructionCell({instruction: {
+let cell = instructionBadge({instruction: {
   label: 'stale · last reported applied r9223372036854775807<img>', display_state: 'stale',
   underlying_state: 'applied', evidence: 'server-observed',
   report_age_seconds: 601, report_stale: true, pointer_skew: true,
   qos_drift_count: 0
 }});
-assert.match(cell, /applied r9223372036854775807&lt;img>/);
-assert.doesNotMatch(cell, /9223372036854776000/);
-assert.doesNotMatch(cell, /<img>/);
-assert.match(cell, /server-observed/);
-assert.match(cell, /last agent report \(agent-asserted\): applied/);
-assert.match(cell, /report 601s old/);
-assert.match(cell, /pointer skew/);
-let rejected = instructionCell({instruction: {label: 'rejected',
+assert.equal(cell.label, 'stale · last reported applied r9223372036854775807<img>');
+assert.doesNotMatch(cell.label, /9223372036854776000/);
+// React escapes these text fields; the browser suite verifies no HTML executes.
+assert.match(cell.detail, /server-observed/);
+assert.match(cell.detail, /last agent report \(agent-asserted\): applied/);
+assert.match(cell.detail, /report 601s old/);
+assert.match(cell.detail, /pointer skew/);
+let rejected = instructionBadge({instruction: {label: 'rejected',
   display_state: 'rejected', underlying_state: 'key_rejected',
   evidence: 'agent-asserted', reason: 'unknown_key', report_age_seconds: 1}});
-assert.match(rejected, /reason: unknown_key/);
+assert.match(rejected.detail, /reason: unknown_key/);
 
 renderInstructionPanel({
   fleet_rollup: {issued_revision: 12,
@@ -13734,10 +13384,10 @@ assert.equal(el('instruction-root-ceremony').textContent, 'unknown');
 assert.equal(el('instruction-key-actions').textContent, 'unavailable');
 assert.match(el('policy-applied-revisions').innerHTML, /unavailable/);
 
-let unknownDrift = instructionCell({instruction: {label: 'unknown',
+let unknownDrift = instructionBadge({instruction: {label: 'unknown',
   display_state: 'unknown', evidence: 'agent-asserted',
   report_age_seconds: 1, qos_drift_count: null}});
-assert.match(unknownDrift, /QoS drift unavailable/);
+assert.match(unknownDrift.detail, /QoS drift unavailable/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, states: {applied: 1}},
   instruction_status: {observed_at: 501, instr_stamp_missing: 0,
@@ -14233,7 +13883,7 @@ _SCHEDULE_OCCURRENCE = {
 
 def test_schedules_panel_lists_the_schedule_facts_an_operator_plans_from():
     html = _webroot("index.html")
-    assert 'id="manage-schedules"' in html
+    assert "['manage-schedules', 'Schedules']" in _react_shell('inventory.jsx')
     panel = html.split('id="sched-panel"', 1)[1].split("</div>", 1)[0] + \
         html.split('id="sched-panel"', 1)[1]
     for column in ("Action", "Target", "Next run", "State",
@@ -14300,7 +13950,7 @@ def test_orphaned_schedule_names_the_missing_actor_and_can_be_reaffirmed():
 
 def test_schedule_bulk_action_targets_the_current_device_filter():
     html = _webroot("index.html")
-    assert 'id="schedule-selected"' in html
+    assert "bulkButton('schedule-selected'" in _react_shell('inventory.jsx')
     for element in ('id="sched-modal"', 'id="sched-modal-scope"',
                     'id="sched-modal-kind"', 'id="sched-modal-when"',
                     'id="sched-modal-preview"', 'id="create-schedule"'):
@@ -14372,8 +14022,8 @@ def test_device_row_shows_a_pending_schedule_before_a_manual_conflict():
     assert out["miss"] == "" and out["none"] == ""
 
     js = _webroot("app.js")
-    assert "pendingScheduleText(d.device_id" in js
-    assert "sched-chip" in js
+    assert "pendingScheduleText(id, SCHEDULES)" in js
+    assert "sched-chip" in _react_shell('inventory.jsx')
 
 
 def test_schedule_view_carries_its_own_next_fire_slot(tmp_path):
@@ -14407,25 +14057,12 @@ def test_schedule_next_run_never_renders_an_unreadable_row_as_undefined():
 
 
 def test_agent_install_dropdown_offers_only_what_the_row_can_take():
-    """An operator picked IOx for a C8000V on a router management type and
-    watched the dropdown snap back: the fleet store refused it with a 400 and
-    the next refresh re-rendered the stored value, with the reason parked in
-    the status line. The row now carries the server's own answer
-    (install_options) and refuses the choice up front, with the reason on the
-    option itself. The stored value stays selectable so the inventory is never
-    hidden. The server-side rule (install_options_for_record) stays the one
-    source of truth; this is presentation of it, not a second rule."""
-    js = _webroot("app.js")
-    render = js.split("var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr']", 1)[1].split(".join('')", 1)[0]
-    assert "d.install_options" in js
-    assert "allowed.indexOf(key) === -1" in render
-    assert "key !== platVal" in render          # the stored value is never disabled
-    assert "disabled title=" in render
-    assert "installRefusal(d, key)" in render
-    refusal = js.split("function installRefusal(d, platform) {", 1)[1].split("\n  }", 1)[0]
-    assert "router-routed" in refusal and "router-nat" in refusal and "xr-host" in refusal
-    # the failure path keeps surfacing the server's reason and reverting
-    handler = js.split("querySelectorAll('#dev-rows .platform')", 1)[1].split("\n    });", 1)[0]
-    assert "Agent install update failed" in handler and "refreshDevices()" in handler
-    source = inspect.getsource(gui_server.make_server)
-    assert 'row["install_options"] = gui_fleet.install_options_for_record(d)' in source
+    component, controller, js = _react_shell('inventory.jsx'), _react_shell('inventory-controller.mjs'), _webroot('app.js')
+    assert "['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map" in component
+    assert 'Array.isArray(device.install_options)' in component and '!device.install_options.includes(value)' in component
+    assert 'value !== platform' in component and 'disabled={!!refused}' in component
+    assert 'services.installRefusal?.(device, value)' in component
+    refusal = js.split('function installRefusal(d, platform) {', 1)[1].split('\n  }', 1)[0]
+    assert 'router-routed' in refusal and 'router-nat' in refusal and 'xr-host' in refusal
+    assert 'update refused' in controller and 'body?.error' in controller and 'await this.refresh()' in controller
+    assert 'row["install_options"] = gui_fleet.install_options_for_record(d)' in inspect.getsource(gui_server.make_server)

@@ -15,7 +15,7 @@ try {
   const errors = [], writes = [], failures = new Map();
   let holdTelemetry = false, heldTelemetry = null;
   const devices = {devices: [{device_id: 'router-a', device_ip: '192.0.2.10', model: 'C8000V',
-    model_family: 'C8xxx', management_type: 'iox', assigned_images: [], stage_state: 'error'}], total: 1};
+    model_family: 'C8xxx', management_type: 'iox', assigned_images: [], stage_state: 'error'}], total: 1, offset: 0, revision: 1, now: 2000000000};
   const images = {images: [{id: 'image-a', filename: '<img src=x onerror=alert(1)>', quarantined: true}]};
   const fixtures = {
     '/api/v1/session': {username: 'Overview fixture', csrf: 'test-only'},

@@ -61,7 +61,7 @@ def run_controller(scenario):
     source = APP.read_text()
     html_ids = re.findall(r'\bid="([^"]+)"', APP.with_name("index.html").read_text())
     start = source.index("  var devForm = document.getElementById('dev-form');")
-    end = source.index("  document.getElementById('add-dev').addEventListener", start)
+    end = source.index("  onInventoryAction('add-dev',", start)
     result = subprocess.run(
         [node], input="const htmlIds = " + json.dumps(html_ids) + ";\n" + HARNESS
         + source[start:end] + "\n(async () => {\n" + scenario

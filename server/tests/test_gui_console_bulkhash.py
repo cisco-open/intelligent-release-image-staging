@@ -375,9 +375,10 @@ def test_picker_cap_logic_never_re_enables_a_blocked_checkbox():
 
 def test_images_list_populates_the_quarantine_map_alongside_imageIds():
     js = _read("app.js")
-    fn = js.split("async function refreshDevices() {", 1)[1].split(
-        "\n  function syncDeviceFilterOptions() {", 1)[0]
-    assert "imageQuarantined[i.id] = !!i.quarantined" in fn
+    fn = js.split("publish: function (state, policyTicket) {", 1)[1].split(
+        "selectionChanged: updateSelBar", 1)[0]
+    assert "imageQuarantined[image.id] = !!image.quarantined" in fn
+    assert "imageListOk = state.imagesOk" in fn
 
 
 # --- Image detail drawer: release + typed-confirm override ------------------

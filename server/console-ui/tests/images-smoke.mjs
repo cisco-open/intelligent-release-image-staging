@@ -29,7 +29,7 @@ try {
   const fixtures = {
     '/api/v1/session': {username: 'Images fixture', csrf: 'test-only'},
     '/api/v1/help': {version: 'test', deployment_id: 'fixture-only'},
-    '/api/v1/devices': {devices: [], total: 0},
+    '/api/v1/devices': {devices: [], total: 0, offset: 0, revision: 1, now: 2000000000},
     '/api/v1/images': images, '/api/v1/images/importable': importable,
     '/api/v1/onboard/jobs': {jobs: [], max_concurrent: 25}, '/api/v1/credentials': {profiles: []},
   };
@@ -166,7 +166,12 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement.id), 'images-filter-attention');
   await page.locator('#images-filter-attention').uncheck();
   await row('image/a').getByText('Mismatch — released', {exact: true}).waitFor();
-  assert.ok((reads.get('/api/v1/devices') || 0) > deviceReads, 'Release refreshes device eligibility');
+  assert.equal(reads.get('/api/v1/devices') || 0, deviceReads, 'Hidden Inventory does not compete with visible-view reads');
+  await page.evaluate(() => { location.hash = '#devices'; });
+  await page.locator('#dev-count').getByText('0 results', {exact: true}).waitFor();
+  assert.ok((reads.get('/api/v1/devices') || 0) > deviceReads, 'Returning to Inventory reads current device eligibility');
+  await page.evaluate(() => { location.hash = '#images'; });
+  await row('image/a').waitFor();
   assert.equal(writes[0].endpoint, '/api/v1/images/image%2Fa/release-quarantine');
   assert.deepEqual(writes[0].body, {override: false, confirm_text: ''});
   assert.equal(await row('image/a').locator('.is-positive').count(), 0);

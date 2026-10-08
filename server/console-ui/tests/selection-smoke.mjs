@@ -49,7 +49,7 @@ try {
         '/api/v1/help': {version: 'fixture', deployment_id: 'fixture-only'},
         '/api/v1/images': {images: []}, '/api/v1/credentials': {profiles: []},
         '/api/v1/onboard/jobs': {jobs: [], now: 2000000000},
-        '/api/v1/peer-policy': {revision: 1, roles_supported: true, roles: {defined: 0, restricted: 0, members: {}},
+        '/api/v1/peer-policy': {revision: 1, quarantine_assignments: [], roles_supported: true, roles: {defined: 0, restricted: 0, members: {}},
           enforcement: {state: 'enforced', stale: false}, role_drift: {count: 0}, outbox: {unacknowledged: 0, capacity: 256}},
       };
       return route.fulfill({status: fixtures[url.pathname] ? 200 : 503, json: fixtures[url.pathname] || {error: 'Fixture unavailable'}});

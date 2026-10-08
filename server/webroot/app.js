@@ -103,81 +103,16 @@
     });
   }
   function dash(v) { return v ? esc(v) : '—'; }
-  // Telemetry posture as the DEVICE last reported it (not what onboarding
-  // asked for). Tri-state: an agent that predates the flag reports nothing,
-  // which is "unknown" — never shown as "off", since off is a real choice.
-  // ---- Devices: column filters -------------------------------------------
-  // Every bulk action operates on an explicit id SET (SELECTED, below), and
-  // the table renders only what the server just said matches -- filtering
-  // then "select all" is how an operator acts on a subset without hand-
-  // picking. Filter state lives in the DOM controls, not in the row data,
-  // so the periodic re-render never clears it.
-  //
-  // Issue #112: the nine column filters now have
-  // SERVER-SIDE parity (gui_server.py's _row_matches_extra_filters mirrors
-  // deviceMatchesFilters below condition-for-condition) -- a prerequisite
-  // for paging the table, because a page filtered only on what the server
-  // understood would silently disagree with the filter bar. deviceOffset/
-  // devTotal/DEV_PAGE_SIZE (below) are that paging; SELECTED is prerequisite
-  // 2, selection keyed by device_id rather than by rendered DOM row, so a
-  // bulk action still hits exactly the ids the operator meant after a page
-  // turns, a filter changes, or a poll re-renders.
-  var LAST_DEVICES = [];
-  var LAST_DEV_NOW = 0;
-  var DEV_PAGE_SIZE = 200;
-  var devOffset = 0;   // start of the CURRENTLY LOADED page, within the filtered set
-  var devTotal = 0;    // server's total match count for the current filter (all pages)
-  // device_id -> true. Populated by row clicks, page selection and by
-  // selectAllMatchingDevices() (the real "every matching device" action);
-  // never scraped from the DOM, which reflects only the current page.
-  var SELECTED = Object.create(null);
-  // A count cannot prove that selected IDs match the current filter. Retain
-  // coverage only from a complete page or a successful all-pages read.
-  var deviceSelectionQuery = null;
-  var deviceMatchIds = null;
-  // device_id -> the most relevant retained onboard/undeploy job (facelift
-  // carried fix #2, step/elapsed in the status cell). Refreshed alongside
-  // the devices table from the EXISTING GET /api/v1/onboard/jobs listing
-  // (already used by the batch panel) -- the /api/v1/devices merge itself
-  // (_device_view()/latest_jobs_by_device() server-side) deliberately trims
-  // started_at and last_line off, so this is a client-side-only
-  // cross-reference by device_id, never a server change.
+  // React owns table state, filters and selected IDs. The remaining dialogs
+  // read through this adapter rather than inspecting or rewriting its DOM.
+  var inventory = window.irisInventory;
+  var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
-
   function deviceFilterState() {
-    function val(id) {
-      var el = document.getElementById(id);
-      return el ? el.value : '';
-    }
-    return {
-      q: val('dev-filter-q').trim().toLowerCase(),
-      managementType: val('dev-filter-management-type'),
-      platform: val('dev-filter-platform'),
-      cred: val('dev-filter-cred'),
-      telemetry: val('dev-filter-telemetry'),
-      peer: val('dev-filter-peer'),
-      role: val('dev-filter-role'),
-      modelFamily: val('dev-filter-model-family'),
-      osFamily: val('dev-filter-os-family'),
-      status: val('dev-filter-status')
-    };
+    var filters = inventory.snapshot().filters;
+    return Object.assign({}, filters, {q: filters.q.trim().toLowerCase()});
   }
-  // The SAME filter state as a GET /api/v1/devices query string (q/
-  // management_type/platform/cred/telemetry/peer/role/model_family/
-  // os_family/status) -- the wire names
-  // _device_filter_params (gui_server.py) reads. Kept as one function so a
-  // filter added to deviceFilterState() above can never be forgotten here.
-  function deviceFilterQuery(f) {
-    var names = { q: 'q', managementType: 'management_type', platform: 'platform',
-                  cred: 'cred', telemetry: 'telemetry', peer: 'peer',
-                  role: 'role', modelFamily: 'model_family',
-                  osFamily: 'os_family', status: 'status' };
-    var parts = [];
-    Object.keys(names).forEach(function (key) {
-      if (f[key]) parts.push(names[key] + '=' + encodeURIComponent(f[key]));
-    });
-    return parts.join('&');
-  }
+  function onInventoryAction(id, handler) { inventory.onAction(id, handler); }
 
   // ---- schedule projections (Phase 2) ----
   // Pure string/document builders over the schedule and occurrence documents
@@ -548,50 +483,22 @@
   // device (a different action, or one that already finished) can never be
   // mistaken for the one the cell is describing right now.
   var JOB_ACTION_FOR_STATUS_KEY = { onboarding: 'onboard', undeploying: 'undeploy' };
-  function deviceStatusHtml(d, devNow) {
+  function deviceStatusPresentation(d, devNow) {
     var st = deviceStatus(d, devNow);
-    var ratio = st.key === 'image-failed' ? imageFailedRatio(d) : undefined;
+    var disp = statusDisplay(st, st.key === 'image-failed' ? imageFailedRatio(d) : undefined);
     var job = LAST_JOBS_BY_DEVICE[d.device_id];
-    var activeJob = (job && (job.state === 'queued' || job.state === 'running') &&
-      job.action === JOB_ACTION_FOR_STATUS_KEY[st.key]) ? job : null;
-    var html;
-    if (activeJob) {
-      // carried fix #2: append " [n/m] · Xm" to the in-progress label
-      // itself, rather than going through statusPillHTML/STATUS_DYNAMIC_KEYS
-      // (which would sentence-case a label deviceStatus() never set for
-      // onboarding/undeploying) -- every other status key's rendering below
-      // is byte-identical to before.
-      var disp = statusDisplay(st, ratio);
-      html = levelPillHTML(disp.level, disp.label + jobPhaseSuffix(activeJob), { title: st.detail });
-    } else {
-      html = statusPillHTML(st, { title: st.detail, ratio: ratio });
-    }
-    if (st.detail) {
-      html += ' <span class="muted" title="' + esc(st.detail) + '">' + esc(st.detail) + '</span>';
-    }
+    var activeJob = job && (job.state === 'queued' || job.state === 'running') &&
+      job.action === JOB_ACTION_FOR_STATUS_KEY[st.key] ? job : null;
+    var pills = [{level: disp.level, label: disp.label + (activeJob ? jobPhaseSuffix(activeJob) : ''), title: st.detail}];
     if (deviceIsOffline(d, devNow)) {
-      // carried fix #3: a device already offline/stale WHILE its own
-      // undeploy job is actually RUNNING is the expected shape of a
-      // healthy teardown -- undeploy step [1/5] deactivates the agent (EEM
-      // applets removed, or the appmgr app stopped on XR) well before the
-      // rest of the job finishes, so no heartbeat is exactly what should
-      // happen. deviceStatus() sets st.key 'undeploying' for BOTH a queued
-      // AND a running job (it only reads d.onboard_state, not the job's own
-      // record), so gating on st.key alone would label a device stuck
-      // behind the onboard concurrency cap as "expected offline" before its
-      // job has even started -- a false claim (review finding: a batch
-      // undeploy beyond max_concurrent showed step [1/5] deactivated on
-      // devices whose job never touched them). Gate on the CROSS-REFERENCED
-      // job's own state === 'running' instead; a queued job's offline
-      // device keeps the normal, honest "no recent heartbeat" treatment.
+      // Only a running teardown can explain a stopped heartbeat. A queued
+      // undeploy has not touched the agent yet and keeps the normal warning.
       if (activeJob && activeJob.state === 'running' && st.key === 'undeploying') {
-        html += ' ' + levelPillHTML('inactive', 'Offline (expected during undeploy)',
-          { title: 'The agent is deactivated at undeploy step [1/5]; no heartbeat is expected again until it re-enrolls.' });
-      } else {
-        html += ' ' + statusPillHTML('offline');
-      }
+        pills.push({level: 'inactive', label: 'Offline (expected during undeploy)',
+          title: 'The agent is deactivated at undeploy step [1/5]; no heartbeat is expected again until it re-enrolls.'});
+      } else pills.push(statusDisplay('offline'));
     }
-    return html;
+    return {pills: pills, detail: st.detail};
   }
   function deviceIsOffline(d, devNow) {
     return !!(d.last_seen && (devNow - d.last_seen) >= 600);
@@ -647,68 +554,6 @@
     return (step ? ' [' + step + ']' : '') + ' · ' + elapsed;
   }
 
-  function deviceMatchesFilters(d, f, devNow) {
-    if (f.q) {
-      var hay = [d.device_id, d.device_ip, d.model, d.heartbeat_model]
-        .filter(Boolean).join(' ').toLowerCase();
-      if (hay.indexOf(f.q) === -1) return false;
-    }
-    // Mirrors managementTypeLabel's own legacy_routed/legacy equivalence
-    // (below, in the row renderer) without touching that pinned line: the
-    // wire value for an unclassified device is always the truthy
-    // "legacy_routed" (gui_fleet.py's _legacy_record/_legacy_like), so the
-    // naive `d.management_type || 'legacy'` fallback here never actually
-    // fires and the value="legacy" filter option matched zero rows every
-    // time an operator picked it (facelift M2, ADJUDICATED repair-not-
-    // remove: the option itself stays exactly as it is).
-    if (f.managementType && (d.management_type === 'legacy_routed' ? 'legacy' : (d.management_type || 'legacy')) !== f.managementType) return false;
-    if (f.platform) {
-      var plat = d.platform_resolved || d.platform || '';
-      if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
-    }
-    if (f.cred) {
-      var cred = d.credential_profile_id || '';
-      if (f.cred === '__none' ? cred !== '' : cred !== f.cred) return false;
-    }
-    if (f.telemetry) {
-      // Same tri-state as telemetryCell: "on" only when the device has
-      // actually reported telemetry (never-heartbeated devices are
-      // "unknown", not silently bucketed with "on").
-      var tel = d.telemetry_enabled === false ? 'off'
-        : (d.telemetry_enabled === true || typeof d.telemetry_stream_enabled === 'boolean') ? 'on'
-        : 'unknown';
-      if (tel !== f.telemetry) return false;
-    }
-    if (f.peer) {
-      var q = peerPolicyAssigned(d.device_id) ? 'quarantined' : 'not-quarantined';
-      if (q !== f.peer) return false;
-    }
-    if (f.role) {
-      var role = d.role || '';
-      if (f.role === '__none' ? role !== '' : role !== f.role) return false;
-    }
-    if (f.modelFamily && d.model_family !== f.modelFamily) return false;
-    if (f.osFamily && (d.os_family || '') !== f.osFamily) return false;
-    if (f.status) {
-      // "offline" is a modifier on top of whatever the cell says (a device can
-      // read "deployed" and still be stale), so it stays its own choice.
-      if (f.status === 'offline') { if (!deviceIsOffline(d, devNow)) return false; }
-      // '__attention': Overview's "Needs attention" rollup card routes here
-      // (goToDevicesFiltered below) -- any level the Magnetic grammar marks
-      // negative/severe/warning, spanning BOTH IRIS lifecycles (agent
-      // deployment AND target-software staging). A general "what needs me"
-      // filter, unlike the Staging Boundary's own failed-step derivation
-      // (boundarySteps in device-details-model.mjs, the device drawer),
-      // which stays scoped to the staging lifecycle only -- see that
-      // function's comment.
-      else if (f.status === '__attention') {
-        var lvl = statusDisplay(deviceStatus(d, devNow)).level;
-        if (lvl !== 'negative' && lvl !== 'severe' && lvl !== 'warning') return false;
-      }
-      else if (deviceStatus(d, devNow).key !== f.status) return false;
-    }
-    return true;
-  }
   // Set once by an Overview "Needs attention" devices card just before
   // routing here; consumed the next time the devices list is (re)fetched.
   var PENDING_DEV_FILTER = null;
@@ -717,59 +562,6 @@
     location.hash = '#devices';
   }
 
-  // A filter or search change now means the match set itself changed
-  // server-side (issue #112 prerequisite 1 made that possible), so this
-  // returns to page one and re-fetches rather than re-rendering the page
-  // already in hand -- the OLD behavior, back when every filter ran
-  // client-side over the whole fleet already in memory. Debounced: the q
-  // box fires on every keystroke ('input', not 'change'), and a fetch per
-  // keystroke would hammer the server on a fast typist.
-  var applyDeviceFiltersTimer = null;
-  function applyDeviceFilters() {
-    if (applyDeviceFiltersTimer) clearTimeout(applyDeviceFiltersTimer);
-    // Invalidate the previous query immediately, including during debounce.
-    devicesRefreshGeneration++;
-    if (devicesRefreshController) devicesRefreshController.abort();
-    deviceSelectionQuery = null;
-    deviceMatchIds = null;
-    cancelSelectAllMatching();
-    updateSelBar();
-    updateMoreFiltersSummary();
-    updateFilterBarState();
-    applyDeviceFiltersTimer = setTimeout(function () {
-      applyDeviceFiltersTimer = null;
-      devOffset = 0;
-      refreshDevices().catch(function () {
-        devStatus.textContent = 'Device refresh unavailable. Try the filter again.';
-      });
-    }, 250);
-  }
-
-  function peerTlsCell(d) {
-    var t = d.peer_tls || {}, mode = t.runtime_source === 'aria2_rpc' ? t.runtime_mode : 'unknown';
-    var known = mode === 'required' || mode === 'disabled';
-    var stale = !d.last_seen || Date.now() / 1000 - d.last_seen >= 600;
-    var label = known ? (mode === 'required' ? 'required' : 'off') : 'unknown';
-    var configured = t.configured_mode === 'required' ? 'required' : t.configured_mode === 'disabled' ? 'off' : 'unknown';
-    var title = 'Torrent transport: daemon policy last reported ' + (d.last_seen ? fmtDate(d.last_seen) : 'never') +
-      '. Configured: ' + configured + '. This is not a negotiated connection measurement.';
-    return '<span class="badge ' + (known && !stale ? 'badge-queued' : 'badge-off') + '" title="' + esc(title) + '">TLS ' + label + (stale && known ? ' (stale)' : '') + '</span>';
-  }
-  function telemetryCell(d) {
-    if (d.telemetry_enabled === false) {
-      return '<span class="badge badge-off" title="the agent sends no telemetry">off</span>';
-    }
-    if (d.telemetry_stream_enabled === true) {
-      return '<span class="badge badge-ok" title="live samples ride this device\'s heartbeats">streaming</span>';
-    }
-    if (d.telemetry_stream_enabled === false) {
-      return '<span class="badge badge-queued" title="terminal reports only; re-onboard with Telemetry streaming ticked to enable">reports</span>';
-    }
-    if (d.telemetry_enabled === true) {
-      return '<span class="badge badge-queued" title="agent predates the streaming flag">reports</span>';
-    }
-    return '<span class="muted" title="no heartbeat yet">—</span>';
-  }
   function fmtSize(n) {
     if (n == null) return '';
     var u = ['B', 'KB', 'MB', 'GB']; var i = 0; n = Number(n);
@@ -906,484 +698,64 @@
   // Inventory and Policies share capability/revision state. Only the latest
   // initiated read may replace it when routes or post-write reads overlap.
   var peerPolicyReadGeneration = 0;
-  // Image and device ids are operator-chosen strings (the server accepts
-  // "constructor", "toString", ...), so every id-keyed map is
-  // prototype-free; a plain {} made a device called "constructor" render
-  // pre-checked and its Quarantine button permanently disabled.
-  var peerPolicyBusy = Object.create(null);
   function peerPolicyAssigned(deviceId) {
     return (peerPolicy.quarantine_assignments || []).indexOf(deviceId) !== -1;
   }
-  function peerPolicyStatus() {
-    var e = peerPolicy.enforcement || {};
-    var state = ['pending', 'enforced', 'degraded', 'rpc_unavailable', 'fail_closed'].indexOf(e.state) !== -1
-      ? e.state : 'pending';
-    // IRIS-99: the tracker reconciler can freeze (its own degraded-pass
-    // write failing, or the process dying) with peer-enforcement.json's
-    // last recorded state left at "enforced" forever -- the API's `stale`
-    // flag (server-computed from last_reconciled_at, since "now" belongs
-    // there) is what tells this apart from a genuinely current pass. A
-    // stale claim is shown as stale REGARDLESS of the frozen state: an old
-    // "enforced" must not read as healthy just because nothing rewrote it.
-    var stale = !!e.stale;
-    var label = stale ? state + ' (stale)' : state;
-    var details = 'Last tracker enforcement: ' + state + '; desired peers: ' +
-      (typeof e.desired_ip_count === 'number' ? e.desired_ip_count : 0);
-    details += '; last reconciled: ' +
-      (e.last_reconciled_at ? fmtDate(e.last_reconciled_at) : 'never');
-    if (stale) {
-      details += ' (STALE -- enforcement may not reflect current policy; ' +
-        'check the tracker process)';
-    }
-    if (e.last_error) details += '; last error: ' + e.last_error;
-    if (e.conflict_count) details += '; conflicts: ' + (e.conflict_types || []).join(', ');
-    var badgeClass = stale ? 'badge-fail' : (state === 'enforced' ? 'badge-ok' :
-      (state === 'degraded' || state === 'fail_closed' ? 'badge-fail' : 'badge-queued'));
-    return '<span class="badge ' + badgeClass +
-      '" title="' + esc(details) + '">' + esc(label) + '</span>';
-  }
-  var devicesRefreshGeneration = 0, devicesRefreshController = null;
-  async function setQuarantine(btn) {
-    var id = btn.closest('tr').getAttribute('data-id');
-    var quarantined = !peerPolicyAssigned(id);
-    var action = quarantined ? 'Quarantine' : 'Release';
-    if (!confirm(action + ' ' + id + '?\n\nChanges peer and server access for all images. ' +
-        'Existing device-to-device transfers may continue. Device software is unchanged.')) return;
-    btn.disabled = true;
-    peerPolicyBusy[id] = true;
-    try {
-      var r = await fetch('/api/v1/peer-policy/quarantine/' + encodeURIComponent(id), {
-        method: 'PUT', headers: csrfHdr({
-          'Content-Type': 'application/json',
-          'If-Match': '"iris-peer-policy-' + peerPolicy.revision + '"'
-        }),
-        body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
-      });
-      var body = await r.json().catch(function () { return {}; });
-      if (r.ok) {
-        peerPolicy.revision = body.revision;
-        peerPolicy.quarantine_assignments = (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
-        if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
-        devStatus.textContent = action + ' intent saved for ' + id + '.';
-        // The mutation is already committed. A follow-up read failure may leave
-        // the view stale, but must never turn a truthful success into "failed".
-        refreshDevices().catch(function () {});
-      } else if (r.status === 409) {
-        devStatus.textContent = 'Peer policy changed elsewhere. Review the current policy and retry; no change was made.';
-        // Refresh best-effort without masking the accurate conflict outcome.
-        refreshDevices().catch(function () {});
-      } else if (r.status === 503 && body.error === 'operation_backlog_full') {
-        devStatus.textContent = 'Peer-policy operation backlog is full; retry later.';
-      } else {
-        devStatus.textContent = 'Peer-policy update failed: ' + (body.error || r.status) + '.';
-      }
-    } catch (e) {
-      devStatus.textContent = 'Peer-policy update failed; retry later.';
-    } finally {
-      delete peerPolicyBusy[id];
-      if (btn.isConnected) btn.disabled = false;
-    }
-  }
-  // Live status: the devices table previously refreshed via TWO independent
-  // 10s loops -- this function's own unconditional setTimeout chain
-  // (formerly named scheduleDevices, which ran for the page's lifetime
-  // regardless of which hash-routed view was visible) AND the hash
-  // router's view-scoped startViewPoll(). Both called refreshDevices()
-  // every ~10s while Devices was on screen -- redundant, unsynchronized
-  // /api/v1/devices traffic. The hash router (below) is now the SOLE owner of
-  // visible-view polling, Devices included; this is the guarded function it
-  // polls Devices with. Never redraw while the operator is interacting
-  // with a row control (redrawing innerHTML would yank an open dropdown
-  // out from under them) -- the hidden-tab suspension, immediate refresh on
-  // tab return, and 10s cadence are all the router's startViewPoll now.
-  function pollDevices() {
-    var a = document.activeElement;
-    if (a && a.closest && a.closest('#dev-rows')) return;
-    return refreshDevices().catch(function () {
-      devStatus.textContent = 'Device refresh unavailable; retrying…';
-    });
-  }
-  // A pending status filter (Overview's "Needs attention" routing) must land
-  // on the control before devicesPageQuery() builds the query from it --
-  // filtering is server-side now (issue #112), so there is no client-side
-  // "rows already in hand" left to re-filter the old way, after the fetch.
-  function applyPendingDevFilter() {
-    if (PENDING_DEV_FILTER === null) return;
-    var sel = document.getElementById('dev-filter-status');
-    if (sel) sel.value = PENDING_DEV_FILTER;
-    PENDING_DEV_FILTER = null;
-    devOffset = 0;
-  }
-  function devicesPageQuery() {
-    var q = deviceFilterQuery(deviceFilterState());
-    return (q ? q + '&' : '') + 'limit=' + DEV_PAGE_SIZE + '&offset=' + devOffset;
-  }
-  // The page came back empty while matches exist elsewhere -- the fleet
-  // shrank, or a filter/refresh moved this page's devices off the end.
-  // Snap back to page one rather than stranding the operator on a dead page;
-  // devTotal>0 with a non-empty offset=0 page always holds (a page is at
-  // least one row), so a caller retrying on `true` recurses at most once.
-  function devicesPageWentEmpty(devs) {
-    if (devs.length || devOffset <= 0 || devTotal <= 0) return false;
-    devOffset = 0;
-    return true;
-  }
+  // The router remains the only owner of the visible-view 10-second poll.
+  // Keyed React rows preserve focus and open controls through a fresh read.
+  function pollDevices() { return refreshDevices(); }
   async function refreshDevices() {
-    var mine = ++devicesRefreshGeneration;
-    var policyMine = ++peerPolicyReadGeneration;
-    if (devicesRefreshController) devicesRefreshController.abort();
-    devicesRefreshController = new AbortController();
-    var signal = devicesRefreshController.signal;
-    applyPendingDevFilter();
-    var selectionQuery = deviceFilterQuery(deviceFilterState());
-    var devicesQuery = devicesPageQuery();
-    // Optional job listing -- decoupled from the other four fetches below
-    // via its own .then/.catch (Task 7's refreshOverview pattern); see the
-    // full rationale where its result is consumed, past credOpts below.
-    var jobsPromise = fetch('/api/v1/onboard/jobs', { signal: signal }).then(function (r) {
-      return r.ok ? r.json() : null;
-    }).catch(function () { return null; });
-    // Schedules ride along with the device read so a row can show a pending
-    // window before an operator assigns over it. Its own failure never fails
-    // the table: the marker is advisory and stays as it was.
-    var schedulesPromise = refreshScheduleList(signal);
-    var results;
-    try {
-      results = await Promise.all([fetch('/api/v1/devices?' + devicesQuery, { signal: signal }), fetch('/api/v1/images', { signal: signal }), fetch('/api/v1/credentials', { signal: signal }), fetch('/api/v1/peer-policy', { signal: signal }), jobsPromise, schedulesPromise]);
-    } catch (e) {
-      // Superseding a refresh is expected; callers must not see an unhandled
-      // AbortError. Other failures still reach their caller/status handling.
-      if (e && e.name === 'AbortError') return;
-      if (mine === devicesRefreshGeneration && policyMine === peerPolicyReadGeneration) {
-        peerPolicyReadOk = false;
-        renderPeerPolicyPanel();
-      }
-      if (mine === devicesRefreshGeneration) {
-        deviceSelectionQuery = null; deviceMatchIds = null;
-        updateSelBar();
-      }
-      throw e;
+    if (document.hidden || document.getElementById('view-devices').hidden) return;
+    if (PENDING_DEV_FILTER !== null) {
+      inventory.invalidate();
+      inventory.update({filters: Object.assign({}, inventory.snapshot().filters, {status: PENDING_DEV_FILTER}), offset: 0});
+      PENDING_DEV_FILTER = null;
     }
-    var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jobsBody = results[4];
-    if (mine !== devicesRefreshGeneration) return;
-    var nextPolicy = null;
-    try { if (pr.ok) nextPolicy = await pr.json(); } catch (e) { /* unreadable policy */ }
-    if (mine !== devicesRefreshGeneration) return;
-    if (policyMine === peerPolicyReadGeneration) {
-      peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
-      if (peerPolicyReadOk) peerPolicy = nextPolicy;
+    return inventory.refresh();
+  }
+  inventory.connect({
+    fetch: fetch, post: jpost, headers: csrfHdr,
+    confirm: function (message) { return confirm(message); },
+    isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
+    beginPolicyRead: function () { return ++peerPolicyReadGeneration; },
+    publish: function (state, policyTicket) {
+      LAST_DEVICES = state.rows; LAST_DEV_NOW = state.now; devTotal = state.total;
+      imageListOk = state.imagesOk;
+      imageIds = state.images.map(function (image) { return image.id; });
+      imageFilenames = Object.create(null); imageQuarantined = Object.create(null);
+      state.images.forEach(function (image) {
+        imageFilenames[image.id] = image.filename || '';
+        imageQuarantined[image.id] = !!image.quarantined;
+      });
+      credListOk = state.credentialsOk; credOpts = state.credentials;
+      LAST_JOBS_BY_DEVICE = bestJobForDevice(state.jobs);
+      var liveJobIds = new Set(state.jobs.map(function (job) { return job.id; }));
+      Object.keys(lastJobStep).forEach(function (id) { if (!liveJobIds.has(id)) delete lastJobStep[id]; });
+      SCHEDULES = state.schedules;
+      syncCredSelected();
+      if (policyTicket === peerPolicyReadGeneration) {
+        peerPolicyReadOk = state.policyOk;
+        if (state.policyOk) peerPolicy = state.policy;
+      }
+      // Publish shared policy capabilities last, after every adapter value
+      // is ready. A newer Policies read always wins over this route's read.
       renderPeerPolicyPanel();
-    }
-    var targetWarning = document.getElementById('dev-target-warning');
-    if (!dr.ok) {
-      devStatus.textContent = 'Device target preview unavailable (' + dr.status +
-        ').';
-      LAST_DEVICES = [];
-      LAST_DEV_NOW = 0;
-      deviceSelectionQuery = null; deviceMatchIds = null;
-      document.getElementById('dev-rows').innerHTML =
-        '<tr><td colspan="12" class="muted">Device target preview unavailable.</td></tr>';
-      document.getElementById('dev-count').textContent = 'Results unavailable';
-      devTotal = 0;
-      devOffset = 0;
-      updateDevPager(0);
-      var markAll = document.getElementById('mark-all');
-      if (markAll) {
-        markAll.disabled = true;
-        markAll.textContent = 'Select page';
-      }
-      if (targetWarning) {
-        targetWarning.textContent =
-          'Target preview unavailable — filters are not confirmed.';
-      }
-      updateSelBar();
-      return;
-    }
-    var dbody = await dr.json();
-    if (mine !== devicesRefreshGeneration) return;
-    var devs = dbody.devices || [];
-    var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
-    devTotal = dbody.total || 0;
-    devOffset = dbody.offset || 0;
-    if (targetWarning) {
-      targetWarning.textContent = (dbody.target_warnings || []).join(' · ');
-    }
-    if (devicesPageWentEmpty(devs)) return refreshDevices();
-    var imgs = ir.ok ? ((await ir.json()).images || []) : [];
-    imageListOk = ir.ok;
-    imageIds = imgs.map(function (i) { return i.id; });
-    imageFilenames = Object.create(null);
-    imageQuarantined = Object.create(null);
-    imgs.forEach(function (i) {
-      imageFilenames[i.id] = i.filename || '';
-      imageQuarantined[i.id] = !!i.quarantined;
-    });
-    if (cr.ok) credOpts = (await cr.json()).profiles || [];
-    if (cr.ok !== credListOk) {
-      credListOk = cr.ok;
-      if (!credListOk) {
-        devStatus.textContent = 'Credential list unavailable (' + cr.status +
-          '); credential pickers are disabled until it loads.';
-      }
-    }
-    // Fix wave 1 (reviewer finding): the job listing is OPTIONAL polish on
-    // top of the device rows /api/v1/devices already returned above -- a
-    // network-level rejection on it must never take the other four fetches
-    // down with it, so jobsPromise (above) resolves to null on EITHER a
-    // rejection or a non-2xx response rather than rejecting the shared
-    // Promise.all; the other four keep their pre-existing coupling
-    // (a real failure on any of THEM still aborts this refresh via the
-    // outer catch, unchanged -- out of scope for this fix). jobsBody null
-    // here just leaves the previous status-cell step/elapsed suffixes in
-    // place for this tick rather than blanking them; the plain
-    // onboarding…/undeploying… pill underneath (from /api/v1/devices, which
-    // DID gate this refresh above) is never affected.
-    if (jobsBody) {
-      var jobs = jobsBody.jobs || [];
-      LAST_JOBS_BY_DEVICE = bestJobForDevice(jobs);
-      var liveJobIds = {};
-      jobs.forEach(function (j) { liveJobIds[j.id] = true; });
-      Object.keys(lastJobStep).forEach(function (id) {
-        if (!liveJobIds[id]) delete lastJobStep[id];
-      });
-    }
-    if (mine !== devicesRefreshGeneration) return;
-    syncCredSelected();
-    LAST_DEVICES = devs;
-    LAST_DEV_NOW = devNow;
-    syncDeviceFilterOptions();
-    deviceSelectionQuery = selectionQuery;
-    deviceMatchIds = devOffset === 0 && devTotal === devs.length
-      && new Set(devs.map(function (d) { return d.device_id; })).size === devTotal
-      ? devs.map(function (d) { return d.device_id; }) : null;
-    renderDevices(devs, devNow, devTotal);
-  }
+    },
+    selectionChanged: updateSelBar,
+    report: function (message, failed) {
+      devStatus.textContent = message;
+      devStatus.classList.toggle('err', failed);
+      devStatus.classList.toggle('muted', !failed);
+    },
+    statusOptions: DEVICE_STATUS_OPTIONS,
+    statusLevel: function (key) { return STATUS_LEVELS[key] || 'inactive'; },
+    status: deviceStatusPresentation, assignedIds: rowAssignedIds,
+    seriesLabel: deviceSeriesLabel, installLabel: agentInstallLabel, installRefusal: installRefusal,
+    details: openDeployInfo, assign: openRowAssign,
+    scheduled: function (id) { return pendingScheduleText(id, SCHEDULES); }
+  });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) inventory.hide(); });
 
-  // Populate the credential filter from the profiles that actually exist,
-  // preserving the operator's current choice even if it is momentarily absent
-  // from a slow /api/v1/credentials response.
-  function syncDeviceFilterOptions() {
-    var sel = document.getElementById('dev-filter-cred');
-    if (sel) {
-      var keep = sel.value;
-      sel.innerHTML = ['<option value="">Credential: any</option>',
-                       '<option value="__none">— none —</option>']
-        .concat(credOpts.map(function (c) {
-          return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
-        })).join('');
-      sel.value = keep;
-      if (sel.value !== keep) sel.value = '';
-    }
-    var roleSel = document.getElementById('dev-filter-role');
-    if (!roleSel) return;
-    var keepRole = roleSel.value;
-    var roles = Object.keys(
-      (((peerPolicy || {}).roles || {}).members || {})).sort();
-    if (keepRole && keepRole !== '__none' && roles.indexOf(keepRole) === -1) {
-      roles.push(keepRole);
-      roles.sort();
-    }
-    roleSel.innerHTML = ['<option value="">Role: any</option>',
-                         '<option value="__none">— no role —</option>']
-      .concat(roles.map(function (role) {
-        return '<option value="' + esc(role) + '">' + esc(role) + '</option>';
-      })).join('');
-    roleSel.value = keepRole;
-  }
-
-  // All structured filters share one expandable panel. Keep wire values
-  // stable: series labels are presentation, not a new targeting taxonomy.
-  var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
-                          'dev-filter-telemetry', 'dev-filter-peer',
-                          'dev-filter-role', 'dev-filter-model-family',
-                          'dev-filter-os-family', 'dev-filter-platform', 'dev-filter-status'];
-  function updateMoreFiltersSummary() {
-    // Magnetic Filter bar > Anatomy fixes the overflow button's format as
-    // "<icon> + Filters", so the label lives in its own span and the icon
-    // beside it survives the write -- textContent on the <summary> itself
-    // would delete the svg. The applied-filter count stays appended: the
-    // panel is closed most of the time and the operator has to be able to
-    // see that something inside it is narrowing the table.
-    var el = document.getElementById('more-filters-label');
-    if (!el) return;
-    var n = MORE_FILTER_IDS.filter(function (id) {
-      var f = document.getElementById(id);
-      return f && f.value !== '';
-    }).length;
-    el.textContent = 'Filters' + (n ? ' (' + n + ')' : '');
-  }
-  // Reset is "displayed when at least one filter has been selected or a
-  // search term has been entered" (Magnetic Filter bar > Anatomy) -- it used
-  // to sit there permanently, offering to clear nothing.
-  var ALL_FILTER_IDS = ['dev-filter-q'].concat(MORE_FILTER_IDS);
-  function updateFilterBarState() {
-    var reset = document.getElementById('dev-filter-clear');
-    if (!reset) return;
-    reset.hidden = !ALL_FILTER_IDS.some(function (id) {
-      var f = document.getElementById(id);
-      return f && f.value !== '';
-    });
-    var chips = document.getElementById('dev-filter-chips');
-    if (!chips) return;
-    chips.replaceChildren();
-    ALL_FILTER_IDS.forEach(function (id) {
-      var field = document.getElementById(id);
-      if (!field || !field.value) return;
-      var chip = document.createElement('button');
-      chip.type = 'button'; chip.className = 'filter-chip';
-      var label = field.tagName === 'SELECT' ? field.selectedOptions[0].textContent : field.value;
-      chip.textContent = label + ' ×';
-      chip.setAttribute('aria-label', 'Remove filter: ' + label);
-      chip.addEventListener('click', function () {
-        field.value = ''; applyDeviceFilters();
-        document.getElementById('more-filters-summary').focus();
-      });
-      chips.appendChild(chip);
-    });
-    chips.hidden = !chips.childElementCount;
-  }
-  function renderDevices(devs, devNow, total) {
-    var filters = deviceFilterState();
-    // devs is already the server's own page for this exact filter (issue
-    // #112 prerequisite 1 -- gui_server.py's _row_matches_extra_filters
-    // mirrors deviceMatchesFilters condition-for-condition), so this is a
-    // defensive RE-check, not the primary filter any more: it can only ever
-    // narrow an already-matching page, never explain away a row the
-    // server's own `total` already counted as a match.
-    devs = devs.filter(function (d) { return deviceMatchesFilters(d, filters, devNow); });
-    document.getElementById('dev-rows').innerHTML = devs.length ? devs.map(function (d) {
-      var rowIds = rowAssignedIds(d);
-      var assignLabel = rowIds.length ? (rowIds.length + ' image(s)') : '— assign —';
-      var credSel = credListOk
-        ? ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
-            return '<option value="' + esc(c.id) + '"' + (c.id === d.credential_profile_id ? ' selected' : '') + '>' + esc(c.id) + '</option>';
-          })).join('')
-        // profile list unavailable: show what the inventory says, read-only
-        : '<option value="' + esc(d.credential_profile_id || '') + '" selected>' +
-          (d.credential_profile_id ? esc(d.credential_profile_id) : '— no credential —') + '</option>';
-      var credAttrs = credListOk ? '' :
-        ' disabled title="Credential list unavailable; showing the assignment as recorded in the inventory"';
-      var platVal = d.platform || '';
-      // Offer only the installs this row can actually take. The server's
-      // fleet store refuses the rest (a router management type runs the
-      // router recipe or the IOx app, xr-host only the appmgr container),
-      // and an operator who picked one used to watch the dropdown silently
-      // snap back on the next refresh with the reason parked in the status
-      // line. A refused choice is now unselectable and says why; the stored
-      // value stays selectable even when it is one the row could no longer
-      // take, so what the inventory actually holds is never hidden.
-      var allowed = Array.isArray(d.install_options) ? d.install_options : null;
-      var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map(function (key) {
-        var label = key ? agentInstallLabel(key) : '— auto —';
-        var refused = allowed && key && key !== platVal && allowed.indexOf(key) === -1;
-        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') +
-          (refused ? ' disabled title="' + esc(installRefusal(d, key)) + '"' : '') +
-          '>' + esc(label) + '</option>';
-      }).join('');
-      var status = deviceStatusHtml(d, devNow);
-      var scheduled = pendingScheduleText(d.device_id, SCHEDULES);
-      var managementType = d.management_type || 'legacy';
-      var managementTypeDetail = managementType.indexOf('router-') === 0
-        ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
-        : (' / ' + (d.inband_vlan || d.iris_vlan || ''));
-      var managementTypeLabel = (managementType === 'legacy_routed' || managementType === 'legacy')
-        ? 'Inventory only — management type not chosen'
-        : managementType === 'xr-host' ? 'XR host'
-        : (managementType + managementTypeDetail);
-      return '<tr data-id="' + esc(d.device_id) + '" tabindex="0" aria-selected="' +
-        (!!SELECTED[d.device_id]) + '" aria-label="' + esc(d.device_id) +
-        '" aria-description="Press Space or Enter to select or deselect this device.">' +
-        '<td class="dev-id"><button type="button" class="linkish dinfo">' + esc(d.device_id) + '</button></td><td class="dev-role">' + dash(d.role) + '</td>' +
-        '<td class="machine">' + dash(d.device_ip) + '</td>' +
-        '<td class="dev-series" title="' + esc(d.model || d.heartbeat_model || '') + '">' +
-        esc(deviceSeriesLabel(d.model_family, d.model || d.heartbeat_model)) + '</td>' +
-        '<td>' + esc(managementTypeLabel) + '</td>' +
-        '<td><select class="platform">' + platSel + '</select></td>' +
-        '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
-        '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
-        '<td>' + telemetryCell(d) + ' ' + peerTlsCell(d) + '</td>' +
-        '<td><span class="peer-intent badge ' + (peerPolicyAssigned(d.device_id) ? 'badge-fail' : 'badge-off') + '">' +
-        (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
-        '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
-        'title="' + (peerPolicyAssigned(d.device_id) ? 'Release device from quarantine' : 'Quarantine device') + '" aria-label="' +
-        (peerPolicyAssigned(d.device_id) ? 'Release ' : 'Quarantine ') + esc(d.device_id) + '"' +
-        (peerPolicyBusy[d.device_id] ? ' disabled' : '') + '>' +
-        (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
-        '<td>' + instructionCell(d) + '</td>' +
-        '<td>' + status +
-        (scheduled ? ' <span class="sched-chip badge badge-off" title="' +
-          esc(scheduled) + '">Scheduled</span>' : '') +
-        ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
-    }).join('') : '<tr><td colspan="12" class="muted">' +
-      (total ? 'No devices match the current filters.' : 'No devices yet.') + '</td></tr>';
-    document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        openRowAssign(btn.closest('tr').getAttribute('data-id'), btn);
-      });
-    });
-    document.querySelectorAll('#dev-rows .cred').forEach(function (sel) {
-      sel.addEventListener('change', async function () {
-        var id = sel.closest('tr').getAttribute('data-id');
-        var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/credential', { credential_profile_id: sel.value });
-        devStatus.textContent = r.ok ? ('Credential updated for ' + id) : 'Credential update failed';
-      });
-    });
-    document.querySelectorAll('#dev-rows .platform').forEach(function (sel) {
-      sel.addEventListener('change', async function () {
-        var id = sel.closest('tr').getAttribute('data-id');
-        var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/platform', { platform: sel.value });
-        if (r.ok) {
-          devStatus.textContent = 'Agent install updated for ' + id;
-        } else {
-          // surface the real reason and revert the dropdown to the saved value
-          devStatus.textContent = 'Agent install update failed: ' + ((await r.json()).error || r.status);
-          refreshDevices();
-        }
-      });
-    });
-    document.querySelectorAll('#dev-rows .dinfo').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        openDeployInfo(btn.closest('tr').getAttribute('data-id'));
-      });
-    });
-    document.querySelectorAll('#dev-rows .peer-quarantine').forEach(function (btn) {
-      btn.addEventListener('click', function () { setQuarantine(btn); });
-    });
-    // The filter bar's Total (Magnetic Filter bar > Anatomy, "<number> +
-    // results"). One readout, in the bar the filters live in: the page used
-    // to carry two, "N devices" up in the table-level toolbar and "showing X
-    // of N" down in the filter row, which said the same thing twice in two
-    // different vocabularies and left the reader checking both.
-    // Plural agreement follows `total` in BOTH branches: in the "X of N"
-    // form the noun belongs to N, so filtering twelve devices down to one
-    // reads "1 of 12 results", not "1 of 12 result". Agreeing with the
-    // matched count instead put a grammar error on screen for the single
-    // most common thing the search box does.
-    document.getElementById('dev-count').textContent =
-      (devs.length === total ? String(total) : devs.length + ' of ' + total) +
-      ' result' + (total === 1 ? '' : 's');
-    updateDevPager(total);
-    updateMoreFiltersSummary();
-    updateFilterBarState();
-    updateSelBar();
-  }
-  // Prev/Next paging over the CURRENT filter's match set (issue #112 step
-  // 3 -- the table only pages once prerequisites 1 and 2 above hold). Hidden
-  // entirely when everything fits on one page, so an unpaged fleet reads
-  // exactly as it always did.
-  function updateDevPager(total) {
-    var pager = document.getElementById('dev-pager');
-    if (!pager) return;
-    pager.hidden = total <= DEV_PAGE_SIZE;
-    var pages = Math.max(1, Math.ceil(total / DEV_PAGE_SIZE));
-    var page = Math.floor(devOffset / DEV_PAGE_SIZE) + 1;
-    var pos = document.getElementById('dev-page-pos');
-    if (pos) pos.textContent = 'Page ' + page + ' of ' + pages;
-    var prev = document.getElementById('dev-page-prev');
-    if (prev) prev.disabled = devOffset <= 0;
-    var next = document.getElementById('dev-page-next');
-    if (next) next.disabled = devOffset + DEV_PAGE_SIZE >= total;
-  }
   // React owns the details DOM and async lifetimes. Shared Inventory status
   // derivation stays here so table, Overview and drawer cannot disagree.
   function deviceDetailsCommand(action, options) {
@@ -1427,8 +799,7 @@
       if (!document.getElementById('view-devices').hidden) return pollDevices();
     },
     reportCount: function (count, error) {
-      document.getElementById('dev-activity').textContent = 'Activity' +
-        (error ? ' (unavailable)' : count ? ' (' + count + ')' : '');
+      inventory.update({activityLabel: 'Activity' + (error ? ' (unavailable)' : count ? ' (' + count + ')' : '')});
     },
     outcome: function (message, failed) {
       devStatus.textContent = message;
@@ -1436,7 +807,7 @@
       devStatus.classList.toggle('muted', !failed);
     }
   }});
-  document.getElementById('dev-activity').addEventListener('click', function () { activityCommand('open'); });
+  onInventoryAction('dev-activity', function () { activityCommand('open'); });
   window.addEventListener('hashchange', function () { closeActivity(false); });
   document.addEventListener('visibilitychange', function () {
     activityCommand('visibility', {visible: !document.hidden && !document.getElementById('view-devices').hidden});
@@ -1456,60 +827,7 @@
     flags.log = !!(log && log.checked);
     return flags;
   }
-  // Page selection never silently expands to the rest of the fleet.
-  document.getElementById('mark-all').addEventListener('click', function () {
-    cancelSelectAllMatching();
-    var rows = Array.from(document.querySelectorAll('#dev-rows tr[data-id]'));
-    var clear = rows.length > 0 && rows.every(function (row) { return !!SELECTED[row.dataset.id]; });
-    rows.forEach(function (row) {
-      var id = row.dataset.id;
-      if (clear) delete SELECTED[id]; else SELECTED[id] = true;
-    });
-    updateSelBar();
-  });
-  // Bulk bar's "Select all N matching devices" (spec §5 scope copy, below in
-  // updateSelBar): walks every page of the CURRENT filter server-side and
-  // adds every id it returns to SELECTED. This is a REAL fetch, not a
-  // shortcut into Select page, which only sees
-  // the page in the DOM, so replaying its click handler here would have
-  // silently selected "this page" while the button claims "every matching
-  // device" (the exact defect issue #112 flags).
-  document.getElementById('sel-scope-all').addEventListener('click', function () {
-    selectAllMatchingDevices();
-  });
-  // ---- menus / selection bar (toolbar rework, spec 2026-08-12) ----
-  // CSP-safe popovers: static hidden panels toggled by their trigger; a click
-  // on .menu-close (menu items, the Start button) closes; outside click and
-  // Escape close; the onboard popover's checkboxes keep it open.
-  var openMenuPanel = null;
-  function closeMenus() {
-    document.querySelectorAll('.menu').forEach(function (p) { p.hidden = true; });
-    document.querySelectorAll('.menu-wrap [aria-expanded]').forEach(function (b) {
-      b.setAttribute('aria-expanded', 'false');
-    });
-    openMenuPanel = null;
-  }
-  function wireMenu(btnId, panelId) {
-    var btn = document.getElementById(btnId), panel = document.getElementById(panelId);
-    btn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      var opening = panel.hidden;
-      closeMenus();
-      if (opening) { panel.hidden = false; btn.setAttribute('aria-expanded', 'true'); openMenuPanel = panel; }
-    });
-    panel.addEventListener('click', function (e) {
-      if (e.target.closest('.menu-close')) closeMenus();
-      else e.stopPropagation();
-    });
-  }
-  document.addEventListener('click', function () { if (openMenuPanel) closeMenus(); });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
-  wireMenu('csv-menu-btn', 'csv-menu');
-  // Bulk-bar action cap (Magnetic Table > Bulk action bar allows up to four
-  // actions): Adopt/Quarantine/Release/Set-credential/Delete live inside this
-  // overflow dropdown -- same generic menu machinery as every other menu-wrap
-  // on the page, no action-specific wiring here.
-  wireMenu('more-menu-btn', 'more-pop');
+  function closeMenus() { inventory.update({menu: ''}); }
   // ---- bulk-action modals -------------------------------------------------
   // Onboard / Undeploy / Set credential used to be .menu popovers hanging off
   // caret buttons in the bulk bar, each carrying form controls and its own
@@ -1587,13 +905,13 @@
   wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
   wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
   wireModal('sched-modal', ['sched-modal-cancel', 'sched-modal-x']);
-  document.getElementById('onboard-selected').addEventListener('click', function () {
+  onInventoryAction('onboard-selected', function () {
     openModal('onboard-modal');
   });
-  document.getElementById('undeploy-selected').addEventListener('click', function () {
+  onInventoryAction('undeploy-selected', function () {
     openModal('undeploy-modal');
   });
-  document.getElementById('set-cred-selected').addEventListener('click', function () {
+  onInventoryAction('set-cred-selected', function () {
     if (!credListOk) {
       devStatus.textContent = 'Credential list unavailable; not opening the picker. ' +
         'Retry once the profile list loads.';
@@ -1604,111 +922,17 @@
     syncCredSelected();
     openModal('cred-modal');
   });
-  wireMenu('status-legend-btn', 'status-legend-pop');
-  // Status column legend (density pass, Task 8): one row per
-  // DEVICE_STATUS_OPTIONS entry (the SAME 12-level Magnetic mapping the
-  // Status filter and the cell itself already derive from -- STATUS_LEVELS,
-  // Task 4), so the legend can never list a level a real pill cannot show.
-  // image-failed's own ratio-driven warning/severe split is per-row, not
-  // meaningful for a static legend, so it renders at its base 'warning'
-  // level here.
-  (function () {
-    var pop = document.getElementById('status-legend-pop');
-    if (!pop) return;
-    pop.innerHTML = '<div class="legend-title">Status legend</div>' +
-      DEVICE_STATUS_OPTIONS.map(function (o) {
-        return '<div class="legend-row">' +
-          levelPillHTML(STATUS_LEVELS[o[0]] || 'inactive', o[1]) + '</div>';
-      }).join('');
-  })();
   function updateSelBar() {
-    // n is the REAL selection size -- every device_id in SELECTED, which
-    // survives paging, filtering and a poll's re-render (issue #112
-    // prerequisite 2). m is the server's own total for the CURRENT filter,
-    // never the rendered row count: under paging those two only agree once
-    // the filter fits on one page, and using the DOM count here is exactly
-    // how "select all" used to come to silently mean "select this page".
-    var n = Object.keys(SELECTED).length;
-    var m = devTotal;
-    document.getElementById('sel-bar').hidden = n === 0;
-    document.getElementById('sel-count').textContent = n + ' selected';
-    var rows = Array.from(document.querySelectorAll('#dev-rows tr[data-id]'));
-    var selectedOnPage = rows.filter(function (row) { return !!SELECTED[row.dataset.id]; }).length;
-    var matchesKnown = deviceSelectionQuery !== null
-      && deviceSelectionQuery === deviceFilterQuery(deviceFilterState());
-    var completeMatches = matchesKnown && deviceMatchIds !== null && deviceMatchIds.length === m;
-    var matchingSelected = completeMatches ? deviceMatchIds.filter(function (id) { return !!SELECTED[id]; }).length : null;
-    var allSelected = m > 0 && completeMatches && matchingSelected === m;
-    // Off-page selections may belong to an earlier filter. Say only what
-    // the confirmed IDs prove, and keep Select all available even if n >= m.
-    var scopeText = document.getElementById('sel-scope-text');
-    var scopeAll = document.getElementById('sel-scope-all');
-    var scope = allSelected ? '· All ' + m + ' matching devices selected' : '';
-    var outside = n - (completeMatches ? matchingSelected : selectedOnPage);
-    if (!matchesKnown && n) scope = '· Selection kept; current matches are unconfirmed';
-    else if (outside > 0) scope += (scope ? '; ' : '· ') + outside + ' selected outside this ' + (completeMatches ? 'filter' : 'page');
-    scopeText.textContent = scope;
-    scopeText.hidden = !scope;
-    scopeAll.hidden = allSelected || n === 0 || !matchesKnown || m <= 0;
-    scopeAll.disabled = !!(selectAllMatchingBusy || bulkBusy);
-    scopeAll.textContent = selectAllMatchingBusy ? '· Selecting…' : '· Select all ' + m + ' matching devices';
-    // The count lives in the bar's own indicator (Magnetic Table > Bulk
-    // action bar: "An indicator displays the number of selected rows"), so
-    // the buttons stop restating it. They used to read "Start onboard (3)"
-    // and "Assign images to 3 devices…", which re-measured and reflowed the
-    // whole bar on every row click -- Magnetic Button > Wrapping and
-    // truncation wants button text brief and settled. Each modal repeats the
-    // count in its own title instead, where it is the thing being confirmed.
-    ['onboard', 'undeploy', 'cred'].forEach(function (k) {
-      var el = document.getElementById(k + '-modal-count');
+    var n = selectedIds().length;
+    ['onboard', 'undeploy', 'cred'].forEach(function (key) {
+      var el = document.getElementById(key + '-modal-count');
       if (el) el.textContent = n + ' selected';
     });
-    var pageSize = rows.length;
-    rows.forEach(function (tr) {
-      var selected = !!SELECTED[tr.dataset.id];
-      tr.classList.toggle('sel', selected);
-      tr.setAttribute('aria-selected', String(selected));
-    });
-    // Reflect row clicks immediately, not only after the next table refresh.
-    // Off-page selections must never change this page's toggle action.
-    var markAll = document.getElementById('mark-all');
-    if (markAll) {
-      markAll.disabled = pageSize === 0;
-      markAll.textContent = pageSize > 0 && selectedOnPage === pageSize ? 'Clear page selection' : 'Select page';
+    if (!n) {
+      if (inventory.snapshot().menu === 'more') closeMenus();
+      BULK_MODALS.forEach(closeModal);
     }
-    // An empty selection closes the selection-scoped popovers — but never
-    // the Status legend (density pass, Task 8):
-    // the 10s devices poll re-renders the (empty) table and lands here with
-    // n === 0, and yanking an open informational panel out from under the
-    // operator reads as a broken control.
-    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'status-legend-pop') closeMenus();
-    // The bulk modals are scoped to the selection exactly the way those
-    // popovers were: with the last row deselected they are asking the
-    // operator to confirm an action on nothing, so they close with the bar.
-    if (n === 0) BULK_MODALS.forEach(closeModal);
   }
-  function toggleDeviceRow(row) {
-    cancelSelectAllMatching();
-    var id = row.dataset.id;
-    if (SELECTED[id]) delete SELECTED[id]; else SELECTED[id] = true;
-    updateSelBar();
-  }
-  document.getElementById('dev-rows').addEventListener('click', function (e) {
-    if (e.button !== 0 || e.target.closest('button,a,input,select,textarea,label,summary,[role="button"],[contenteditable="true"]')) return;
-    var row = e.target.closest('tr[data-id]');
-    // Copying a device address should not also change the bulk target set.
-    if (row && window.getSelection().isCollapsed) toggleDeviceRow(row);
-  });
-  document.getElementById('dev-rows').addEventListener('keydown', function (e) {
-    if (!e.target.matches('tr[data-id]') || (e.key !== ' ' && e.key !== 'Enter')) return;
-    e.preventDefault();
-    if (!e.repeat) toggleDeviceRow(e.target);
-  });
-  document.getElementById('sel-clear').addEventListener('click', function () {
-    cancelSelectAllMatching();
-    SELECTED = Object.create(null);
-    updateSelBar();
-  });
   // Existing option forms/selection are passed to the React batch controller.
   // Hold the shared bulk lock until every submission has a known or unknown
   // outcome; closing the viewer never aborts or replays an accepted request.
@@ -1733,83 +957,9 @@
     startBatch('undeploy');
   });
 
-  // ---- bulk row actions (adopt / delete / assign credential) ----
-  // Every bulk action reads the SELECTED id set, never the DOM rows, which
-  // only represent the current page (issue #112 prerequisite 2).
-  function selectedIds() {
-    return Object.keys(SELECTED);
-  }
-  // The one way to select every device the CURRENT FILTER matches, not just
-  // what happens to be loaded (issue #112 prerequisite 2's other half): a
-  // real walk of every server page for the active filter, adding each id it
-  // returns to SELECTED. Wired to #sel-scope-all's click, above.
-  var selectAllMatchingBusy = false;
-  var selectAllMatchingRun = null;
-  function cancelSelectAllMatching() {
-    if (!selectAllMatchingRun) return;
-    selectAllMatchingRun.controller.abort();
-    selectAllMatchingRun = null;
-    selectAllMatchingBusy = false;
-    updateSelBar();
-  }
-  window.addEventListener('hashchange', cancelSelectAllMatching);
-  async function selectAllMatchingDevices() {
-    var base = deviceFilterQuery(deviceFilterState());
-    if (selectAllMatchingBusy || bulkBusy || deviceSelectionQuery !== base || devTotal <= 0) return;
-    var run = {controller: new AbortController()};
-    selectAllMatchingRun = run;
-    selectAllMatchingBusy = true;
-    updateSelBar();
-    function current() { return selectAllMatchingRun === run && base === deviceFilterQuery(deviceFilterState()); }
-    try {
-      // The server's own page cap (gui_server.MAX_PAGE_LIMIT) -- the widest
-      // page it will ever hand back, so this walks the fewest requests a
-      // filtered set of any size can be collected in.
-      var batch = 1000;
-      var offset = 0, total = null, revision = null, ids = new Set();
-      while (total === null || offset < total) {
-        var qs = (base ? base + '&' : '') + 'limit=' + batch + '&offset=' + offset;
-        var r = await fetch('/api/v1/devices?' + qs, {signal: run.controller.signal});
-        if (!current()) return;
-        if (!r.ok) throw new Error('Device list unavailable');
-        var body = await r.json();
-        if (!current()) return;
-        if (!body || !Number.isSafeInteger(body.total) || body.total < 0 || body.offset !== offset
-          || !Number.isSafeInteger(body.revision) || body.revision < 0
-          || !Array.isArray(body.devices) || body.devices.length > batch
-          || (total !== null && (body.total !== total || body.revision !== revision))) throw new Error('Device list changed');
-        total = body.total;
-        revision = body.revision;
-        var got = body.devices;
-        if (offset + got.length > total || (!got.length && offset < total)) throw new Error('Incomplete device list');
-        got.forEach(function (d) {
-          if (!d || typeof d.device_id !== 'string' || !d.device_id || ids.has(d.device_id)) throw new Error('Invalid device list');
-          ids.add(d.device_id);
-        });
-        offset += got.length;
-      }
-      // Apply once, after every page has been checked. A filter/selection
-      // change or failed page never leaves a silently expanded partial set.
-      if (!current()) return;
-      ids.forEach(function (id) { SELECTED[id] = true; });
-      deviceMatchIds = Array.from(ids);
-      devStatus.textContent = 'Selected ' + ids.size + ' matching device' + (ids.size === 1 ? '' : 's') + '. Previous selections are kept.';
-      devStatus.classList.toggle('err', false);
-      devStatus.classList.toggle('muted', true);
-    } catch (e) {
-      if (current()) {
-        devStatus.textContent = 'Could not select all matching devices. Your selection is unchanged. Try again.';
-        devStatus.classList.toggle('err', true);
-        devStatus.classList.toggle('muted', false);
-      }
-    } finally {
-      if (selectAllMatchingRun === run) {
-        selectAllMatchingRun = null;
-        selectAllMatchingBusy = false;
-        updateSelBar();
-      }
-    }
-  }
+  // Dialogs capture explicit IDs from the same model as the table.
+  function selectedIds() { return inventory.selectedIds(); }
+  function cancelSelectAllMatching() { inventory.cancelSelection(); }
   // Every selected-action shares one lock. Without it a delete could fire while
   // an onboard batch is still starting, removing inventory out from under a
   // running job — onboard/undeploy previously guarded only each other.
@@ -1830,17 +980,17 @@
   var bulkBusy = false;
   function setBulkBusy(busy) {
     bulkBusy = busy;
+    inventory.update({bulkBusy: busy});
     BULK_BTNS.concat(BULK_OPENERS).forEach(function (id) {
       var el = document.getElementById(id);
-      if (el) el.disabled = busy;
+      if (el && !el.closest('[data-inventory-react]')) el.disabled = busy;
     });
     syncRoleActionAvailability();
-    document.getElementById('sel-scope-all').disabled = !!(busy || selectAllMatchingBusy);
   }
   // Claim the lock for a selected-action, returning the checked ids (or null if
   // another action holds it or nothing is selected).
   function claimSelection() {
-    if (bulkBusy) return null;
+    if (bulkBusy || inventory.snapshot().rowBusy.size) return null;
     cancelSelectAllMatching();
     var ids = selectedIds();
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return null; }
@@ -1891,7 +1041,8 @@
   // two callers need it: each row's assign button, and the conflict retry in
   // assignImagesTo -- a lost race must re-open the very control the operator
   // was using, on the set that is really stored now.
-  function openRowAssign(id, btn) {
+  function openRowAssign(id) {
+    if (bulkBusy || inventory.snapshot().rowBusy.has(id)) return;
     if (!imageListOk) {
       devStatus.textContent = 'Image list unavailable; not opening the picker. ' +
         'Retry once the Images list loads.';
@@ -1908,15 +1059,12 @@
       // has one; for anything else it is one unchecked box away from
       // wiping the assigned set by accident, so confirm before it posts.
       if (!ids.length && !confirm('Unassign all images from ' + id + '?')) return;
-      // ONE row is not a selected-action, so this must never touch the
-      // shared bulk lock: releasing it here re-enabled every bulk button
-      // mid-batch. The row's own button carries the busy state instead.
-      if (btn) btn.disabled = true;
+      // The same row lock covers assignment, credential, install and
+      // quarantine edits. It never releases a different action's bulk lock.
+      if (!inventory.claimRow(id)) return;
       assignImagesTo([id], ids, { ownsBulkLock: false, expect: expect })
-        .then(function () {
-          // the refresh may have re-rendered this row out from under us
-          if (btn && btn.isConnected) btn.disabled = false;
-        });
+        .catch(function () { devStatus.textContent = 'Assignment outcome is unknown. Refresh before trying again.'; })
+        .finally(function () { inventory.releaseRow(id); });
     });
   }
   var imgPickerOpener = null;
@@ -2129,7 +1277,7 @@
       if (ids.length === 1 && conflicts.length === 1) openRowAssign(conflicts[0], null);
     });
   }
-  document.getElementById('delete-selected').addEventListener('click', async function () {
+  onInventoryAction('delete-selected', async function () {
     var ids = claimSelection();
     if (!ids) return;
     if (!confirm(delWarning(ids))) { setBulkBusy(false); return; }
@@ -2142,94 +1290,8 @@
     // prerequisite 2), so nothing else would ever clear it. Ids that failed
     // to delete stay selected; the operator can see them in the status line
     // and retry.
-    ids.forEach(function (id) {
-      if (failedIds.indexOf(id) === -1) delete SELECTED[id];
-    });
-    updateSelBar();
+    inventory.removeSelection(ids.filter(function (id) { return failedIds.indexOf(id) === -1; }));
   });
-  // ---- Devices: filter wiring ----
-  // The Status options are generated from the same list the cell derives from,
-  // so a state can never be renderable but unfilterable.
-  (function () {
-    var sel = document.getElementById('dev-filter-status');
-    if (!sel) return;
-    // '__attention' is appended here, NOT added to DEVICE_STATUS_OPTIONS
-    // itself -- that array is specifically "every key deviceStatus() can
-    // produce" (test_every_status_the_cell_can_show_is_filterable enforces
-    // it), and '__attention' is a rollup over several of those keys, not a
-    // producible status of its own.
-    // Alphabetical by LABEL, which is what an operator scans. The array itself
-    // stays in derivation order next to deviceStatus() (that order documents
-    // the precedence, and the status legend reads it), so this sorts a COPY.
-    // "Status: any" stays pinned first and the '__attention' rollup stays
-    // pinned last: neither is a status, so neither belongs in the alphabet.
-    sel.innerHTML = '<option value="">Status: any</option>' +
-      DEVICE_STATUS_OPTIONS.slice().sort(function (a, b) {
-        return a[1].localeCompare(b[1]);
-      }).map(function (o) {
-        return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
-      }).join('') +
-      '<option value="__attention">Needs attention (any)</option>';
-  })();
-  (function organizeDeviceFilters() {
-    var panel = document.querySelector('#more-filters .more-filters-body');
-    ['dev-filter-status', 'dev-filter-platform'].forEach(function (id) {
-      panel.prepend(document.getElementById(id));
-    });
-    panel.prepend(document.getElementById('dev-filter-model-family'));
-    panel.querySelectorAll('select').forEach(function (field) {
-      var label = document.createElement('label');
-      label.className = 'device-filter-field';
-      var caption = document.createElement('span');
-      caption.textContent = field.getAttribute('aria-label').replace(/^Filter by /, '');
-      label.appendChild(caption); field.before(label); label.appendChild(field);
-    });
-    document.getElementById('more-filters-summary').addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') document.getElementById('more-filters').open = false;
-    });
-    panel.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') {
-        document.getElementById('more-filters').open = false;
-        document.getElementById('more-filters-summary').focus();
-      }
-    });
-  })();
-  ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
-   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
-   'dev-filter-model-family', 'dev-filter-os-family',
-   'dev-filter-status'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input',
-                        applyDeviceFilters);
-  });
-  (function () {
-    var clear = document.getElementById('dev-filter-clear');
-    if (!clear) return;
-    clear.addEventListener('click', function () {
-      ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
-       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
-       'dev-filter-model-family', 'dev-filter-os-family',
-       'dev-filter-status'].forEach(function (id) {
-        var el = document.getElementById(id);
-        if (el) el.value = '';
-      });
-      applyDeviceFilters();
-    });
-  })();
-  (function () {
-    var prev = document.getElementById('dev-page-prev');
-    var next = document.getElementById('dev-page-next');
-    if (prev) prev.addEventListener('click', function () {
-      devOffset = Math.max(0, devOffset - DEV_PAGE_SIZE);
-      refreshDevices();
-    });
-    if (next) next.addEventListener('click', function () {
-      devOffset += DEV_PAGE_SIZE;
-      refreshDevices();
-    });
-  })();
-
   // ---- Role workflow ----
   // Consume the count-only view explicitly. Never render arbitrary policy or
   // status objects: role member counts are the only dynamic keyed collection.
@@ -2237,47 +1299,6 @@
     return Number.isSafeInteger(value) && value >= 0 ? value : '—';
   }
   // ---- Instruction status projection ----
-  function instructionBadgeClass(state) {
-    if (state === 'applied') return 'badge-ok';
-    if (state === 'pending') return 'badge-running';
-    if (state === 'rejected' || state === 'revoked' || state === 'forbidden') return 'badge-fail';
-    if (state === 'pre-instructions' || state === 'none' || state === 'tracker-only') return 'badge-off';
-    return 'badge-queued';
-  }
-  function instructionCell(device) {
-    var instruction = device && device.instruction;
-    if (!instruction || typeof instruction !== 'object' || Array.isArray(instruction)) {
-      return '<span class="badge badge-queued">unknown</span>';
-    }
-    var state = typeof instruction.display_state === 'string'
-      ? instruction.display_state : 'unknown';
-    var label = typeof instruction.label === 'string'
-      ? instruction.label : 'unknown';
-    var detail = [];
-    if (typeof instruction.evidence === 'string') detail.push(instruction.evidence);
-    if (instruction.underlying_state && instruction.underlying_state !== state) {
-      detail.push('last agent report (agent-asserted): ' + instruction.underlying_state);
-    }
-    if (typeof instruction.reason === 'string') {
-      detail.push('reason: ' + instruction.reason);
-    }
-    if (Number.isSafeInteger(instruction.report_age_seconds)
-        && instruction.report_age_seconds >= 0) {
-      detail.push('report ' + instruction.report_age_seconds + 's old');
-    } else {
-      detail.push('report age unavailable');
-    }
-    if (instruction.pointer_skew === true) detail.push('pointer skew');
-    if (Number.isSafeInteger(instruction.qos_drift_count)
-        && instruction.qos_drift_count >= 0) {
-      detail.push(instruction.qos_drift_count + ' QoS drift violation' +
-        (instruction.qos_drift_count === 1 ? '' : 's'));
-    } else {
-      detail.push('QoS drift unavailable');
-    }
-    return '<span class="badge ' + instructionBadgeClass(state) + '">' +
-      esc(label) + '</span><div class="muted">' + detail.map(esc).join(' · ') + '</div>';
-  }
   function decimalRevisionCompare(a, b) {
     a = String(a); b = String(b);
     return a.length === b.length ? (a < b ? -1 : a > b ? 1 : 0)
@@ -2386,7 +1407,7 @@
   }
   function syncRoleActionAvailability() {
     var unavailable = !!roleCapabilityMessage();
-    document.getElementById('set-role-selected').disabled = bulkBusy || unavailable;
+    inventory.update({roleAvailable: !unavailable, policy: peerPolicy, policyOk: peerPolicyReadOk});
     document.getElementById('apply-role-selected').disabled =
       unavailable || roleRequestBusy || (bulkBusy && !rolePreview);
   }
@@ -2469,7 +1490,7 @@
     return 'Set role was refused' + (body.error ? ': ' + body.error : ' (' + status + ')') +
       '. Refresh and preview again.';
   }
-  document.getElementById('set-role-selected').addEventListener('click', function () {
+  onInventoryAction('set-role-selected', function () {
     if (bulkBusy || !selectedIds().length) return;
     var warning = roleCapabilityMessage();
     if (warning) { devStatus.textContent = warning; return; }
@@ -3131,14 +2152,14 @@
       refreshDevices().catch(function () {});
     }
   }
-  document.getElementById('quarantine-selected').addEventListener('click', function () {
+  onInventoryAction('quarantine-selected', function () {
     bulkQuarantine(true);
   });
-  document.getElementById('release-selected').addEventListener('click', function () {
+  onInventoryAction('release-selected', function () {
     bulkQuarantine(false);
   });
 
-  document.getElementById('adopt-selected').addEventListener('click', async function () {
+  onInventoryAction('adopt-selected', async function () {
     var ids = claimSelection();
     if (!ids) return;
     if (!confirm('Adopt ' + ids.length + ' device(s)?\n\n' + ids.join(', ') +
@@ -3193,7 +2214,7 @@
     }
     return byId;
   }
-  document.getElementById('assign-images-selected').addEventListener('click', async function () {
+  onInventoryAction('assign-images-selected', async function () {
     var ids = selectedIds();
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
     if (!imageListOk) {
@@ -3201,9 +2222,7 @@
         'Retry once the Images list loads.';
       return;
     }
-    this.disabled = true;
-    var byId;
-    try { byId = await fetchDeviceRows(ids); } finally { this.disabled = false; }
+    var byId = await fetchDeviceRows(ids);
     // Pre-check the INTERSECTION of the selection's current sets: pre-
     // checking the UNION would silently ADD an image to a device that does
     // not have it the moment ANY other selected device does; pre-checking
@@ -3386,7 +2405,7 @@
     }
   }
   document.getElementById('df-model').addEventListener('change', refreshInstallOptions);
-  document.getElementById('add-dev').addEventListener('click', function () {
+  onInventoryAction('add-dev', function () {
     // populate the credential dropdown from the latest profiles
     var sel = document.getElementById('df-cred');
     sel.innerHTML = credListOk
@@ -3474,14 +2493,14 @@
     if (body.error === 'role_not_found') detail += '. Define the role in Policies before importing.';
     return detail.slice(0, 1200);
   }
-  document.getElementById('import-csv').addEventListener('click', function () { document.getElementById('csv-file').click(); });
+  onInventoryAction('import-csv', function () { document.getElementById('csv-file').click(); });
   document.getElementById('csv-file').addEventListener('change', async function (e) {
     var f = e.target.files[0];
     e.target.value = '';
     if (!f || csvImportBusy) return;
     if (f.size > 8 * 1024 * 1024) { csvImportStatus('Import failed: CSV exceeds 8 MiB. No request sent.', true); return; }
     csvImportBusy = true;
-    document.getElementById('import-csv').disabled = true;
+    inventory.update({csvBusy: true});
     csvImportStatus('Reading CSV…', false);
     try {
       var csv;
@@ -3511,7 +2530,7 @@
       catch (e) { csvImportStatus('Import completed; inventory refresh unavailable. Refresh the page.', false); }
     } finally {
       csvImportBusy = false;
-      document.getElementById('import-csv').disabled = false;
+      inventory.update({csvBusy: false});
     }
   });
   // ---- End device CSV import ----
@@ -3527,8 +2546,8 @@
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(a.href);
   }
-  document.getElementById('export-csv').addEventListener('click', function () { downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
-  document.getElementById('example-csv').addEventListener('click', function () { downloadCsv('/api/v1/devices/example-csv', 'devices-example.csv'); });
+  onInventoryAction('export-csv', function () { return downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
+  onInventoryAction('example-csv', function () { return downloadCsv('/api/v1/devices/example-csv', 'devices-example.csv'); });
   // ---- schedules panel and the "Schedule…" action ----
   // The schedules a pending window could touch, read alongside the device
   // table so a row can say so before an operator assigns over it. A failed
@@ -3539,18 +2558,6 @@
   var schedPanel = document.getElementById('sched-panel');
   var schedStatus = document.getElementById('sched-status');
   var schedRefreshGeneration = 0;
-
-  async function refreshScheduleList(signal) {
-    try {
-      var response = await fetch('/api/v1/schedules', signal ? { signal: signal } : {});
-      if (!response.ok) return;
-      var body = await response.json();
-      if (!body || !Array.isArray(body.schedules)) return;
-      SCHEDULES = body.schedules;
-    } catch (e) {
-      if (e && e.name === 'AbortError') throw e;
-    }
-  }
 
   // The occurrence the row reports on: the newest one, which is the last page
   // of an ascending history. Two small reads per schedule beat inventing a
@@ -3623,6 +2630,7 @@
     var body = await response.json();
     if (mine !== schedRefreshGeneration) return;
     SCHEDULES = body.schedules || [];
+    inventory.update({schedules: SCHEDULES});
     var latest = Object.create(null);
     for (var i = 0; i < SCHEDULES.length && i < SCHED_HISTORY_ROWS; i++) {
       try {
@@ -3679,7 +2687,7 @@
         're-resolves it at each run, so that set can differ when it fires.';
   }
 
-  document.getElementById('schedule-selected').addEventListener('click', function () {
+  onInventoryAction('schedule-selected', function () {
     if (bulkBusy || !selectedIds().length) return;
     var images = document.getElementById('sched-modal-images');
     images.innerHTML = imageIds.map(function (id) {
@@ -3760,7 +2768,7 @@
     }
   });
 
-  document.getElementById('manage-schedules').addEventListener('click', function () {
+  onInventoryAction('manage-schedules', function () {
     schedPanel.hidden = !schedPanel.hidden;
     if (!schedPanel.hidden) renderSchedules();
   });
@@ -3811,7 +2819,7 @@
     document.getElementById('cred-form').reset();
     document.getElementById('cf-err').textContent = '';
   });
-  document.getElementById('manage-creds').addEventListener('click', function () {
+  onInventoryAction('manage-creds', function () {
     credPanel.hidden = !credPanel.hidden;
     if (!credPanel.hidden) renderCreds();
   });
@@ -6171,11 +5179,8 @@
       cancelPolicyReads();
       closeModal('role-def-modal');
       closeModal('policy-advanced-modal');
-    } else {
-      // A late Inventory read must not replace this route's policy state.
-      devicesRefreshGeneration++;
-      if (devicesRefreshController) devicesRefreshController.abort();
     }
+    if (view !== 'devices') inventory.hide();
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });

@@ -20,6 +20,8 @@ function el(id) {
   return elements.get(id);
 }
 const document = {getElementById: el};
+const inventory = {state: {csvBusy: false}, update(patch) { this.state = {...this.state, ...patch}; }};
+function onInventoryAction(id, handler) { el(id).listeners.click = handler; }
 const csrfHdr = headers => ({...headers, 'X-CSRF-Token':'test-csrf'});
 let calls = [], replies = [], refreshes = 0;
 async function fetch(url, options) {
@@ -34,7 +36,7 @@ async function select(file = {size:10, text:async ()=>'device_id\nexample'}) {
   const input = el('csv-file'); input.value='same.csv'; input.files=[file];
   await input.listeners.change({target:input});
   assert.equal(input.value, '', 'Same file must be selectable again');
-  assert.equal(el('import-csv').disabled, false);
+  assert.equal(inventory.state.csvBusy, false);
 }
 ''' + source + '\n(async () => {\n' + scenario + r'''
 })().catch(error => {console.error(error); process.exitCode=1;});

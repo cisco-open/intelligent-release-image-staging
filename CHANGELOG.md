@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move Inventory's table, filters, selection and row edits into React. Keep
+  keyboard focus during refreshes, reject stale response bodies and show
+  unavailable credentials or policy explicitly. Coordinate row edits with
+  bulk actions and report unknown write results without retrying.
+
 - Order Inventory, Overview and sharing-policy status reads to reduce file-read
   contention. Read current state for every request, leave writes independent,
   and return a retryable 503 if a read waits too long to start.

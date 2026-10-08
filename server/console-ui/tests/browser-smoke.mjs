@@ -212,7 +212,7 @@ try {
         '/api/v1/devices': { devices: [
           { device_id: 'edge-01', device_ip: '192.0.2.10', model: '8201', model_family: 'XR8000', management_type: 'xr-host', assigned_images: [] },
           { device_id: 'edge-02', device_ip: '192.0.2.11', model: 'NCS-540', model_family: 'NCS', management_type: 'xr-host', assigned_images: [] },
-        ], total: 2, offset: 0 },
+        ], total: 2, offset: 0, revision: 1, now: 2000000000 },
         '/api/v1/onboard/jobs': { jobs: [
           { id: 'job-1', device_id: 'edge-01', state: 'done', action: 'onboard', last_line: 'onboard complete' },
           { id: 'job-2', device_id: 'edge-02', state: 'done', action: 'onboard', last_line: 'onboard complete' },
@@ -223,7 +223,7 @@ try {
           ports: { tracker: 6969, catalog: 8443, artifacts: 8000, swarm: 8080, console: 8082 },
           sessions: { active: 1, idle_ttl_minutes: 30 }, ...settingsState },
         '/api/v1/help': { version: 'UI test build', deployment_id: 'fixture-deployment' },
-        '/api/v1/peer-policy': { revision: 1, roles_supported: true, roles: { defined: 3, restricted: 2, members: { staging: 2, branch: 5, isolated: 1 } },
+        '/api/v1/peer-policy': { revision: 1, quarantine_assignments: [], roles_supported: true, roles: { defined: 3, restricted: 2, members: { staging: 2, branch: 5, isolated: 1 } },
           enforcement: {state: 'enforced', stale: false, mutual_origin: {mode: 'preflight', newly_denied_device_count: 1}},
           role_drift: { count: 0 }, outbox: { unacknowledged: 0, capacity: 256 } },
         '/api/v1/peer-policy/roles': { revision: 1, roles: {

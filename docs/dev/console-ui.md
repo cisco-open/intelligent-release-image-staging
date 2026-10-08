@@ -17,7 +17,8 @@ Console](../zensical/user-guide/console.md) for that.
 
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
-and Inventory's device-details and Activity drawers with React.
+and Inventory's table, filters, selection, device-details and Activity drawers
+with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
 
@@ -47,6 +48,16 @@ change. Polling leaves expanded audit pages intact; local deployment-log filters
 work over the newest 200 results. The `iris:monitoring-command` adapter supplies
 authenticated reads and the existing visible-view timer.
 
+Inventory's table uses `inventory-controller.mjs`, `inventory-model.mjs` and
+`inventory.jsx`. React owns filter debounce, paging, selection and row edits.
+Three mount roots keep the existing inline forms between the controls and the
+table. The `irisInventory` adapter supplies authenticated transport and lets
+the remaining dialogs read selected IDs and register actions; it never writes
+into those roots. All response bodies are checked before one current-generation
+snapshot is published. Hidden views cancel reads, and keyed rows keep keyboard
+focus during refreshes. Row locks cover assignments, credentials, agent-install
+choices and quarantine; an unknown write result is never retried.
+
 Inventory's device-details workflow uses `device-details-controller.mjs` and
 `device-details.jsx`. The `iris:device-details-command` adapter supplies shared
 status calculations and authenticated transport. Record and log reads run
@@ -62,8 +73,8 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. The Inventory table and forms
-still use the older controller.
+write result is reported without retrying. Inventory's add-device, credential,
+assignment and schedule dialogs still use the older controller.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -115,6 +126,9 @@ reads, revision changes, retained selections, off-filter counts and cancellation
 of stale reads. Select all checks a consistent fleet revision, page totals,
 offsets and unique IDs before adding them to the explicit selection. It does
 not retain all-matches coverage after a newer partial-page read.
+Table checks also cover delayed response bodies, unavailable credentials and
+policy, row-write locks, revision preconditions, server-clock TLS freshness,
+unknown write results, hidden-view reads and keyboard focus across polling.
 
 ## Building the browser assets
 

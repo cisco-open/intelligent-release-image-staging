@@ -60,7 +60,7 @@ try {
         '/api/v1/session': {username: 'Monitoring fixture', csrf: 'fixture-only'},
         '/api/v1/help': {version: 'fixture', deployment_id: 'fixture-only'},
         '/api/v1/overview': {images: 0, devices: 0, assigned: 0, staged: 0, rollout: []},
-        '/api/v1/images': {images: []}, '/api/v1/devices': {devices: []},
+        '/api/v1/images': {images: []}, '/api/v1/devices': {devices: [], total: 0, offset: 0, revision: 1, now: 2000000000},
         '/api/v1/deployment': {layout: 'single-container', components: []},
         '/api/v1/telemetry/health': {otlp_export: {state: 'off'}},
       };

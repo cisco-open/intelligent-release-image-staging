@@ -41,8 +41,8 @@ def test_policy_definitions_and_editor_belong_to_the_policies_page():
                     "role-def-modal", "role-def-rows", "role-def-save"):
         assert "view-policies" in parser.owners[element], element
         assert "view-devices" not in parser.owners[element], element
-    for element in ("inventory-role-capability-banner", "set-role-selected",
-                    "role-modal", "apply-role-selected", "dev-filter-role"):
+    for element in ("inventory-role-capability-banner", "iris-inventory-root",
+                    "role-modal", "apply-role-selected", "iris-inventory-selection-root"):
         assert "view-devices" in parser.owners[element], element
     assert parser.owners["iris-settings-navigation-root"] == ("view-settings",)
     assert 'class="policy-diagnostics"' in html
@@ -55,9 +55,9 @@ def test_policy_navigation_and_visible_poll_are_wired():
     assert "else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }" in js
     assert "if (view !== 'policies') {\n      cancelPolicyReads();" in js
     assert "closeModal('role-def-modal');" in js
-    assert "policyMine === peerPolicyReadGeneration" in js.split(
-        "async function refreshDevices() {", 1)[1].split(
-            "// Populate the credential filter", 1)[0]
+    assert "policyTicket === peerPolicyReadGeneration" in js.split(
+        "publish: function (state, policyTicket) {", 1)[1].split(
+            "selectionChanged: updateSelBar", 1)[0]
 
 
 def _run_policy_reads(script):
@@ -177,7 +177,7 @@ peerPolicyReadOk = false;
 renderPeerPolicyPanel();
 assert.equal(el('inventory-role-capability-banner').hidden, false);
 assert.equal(el('inventory-role-capability-banner').textContent, el('role-capability-banner').textContent);
-assert.equal(el('set-role-selected').disabled, true);
+assert.equal(inventory.state.roleAvailable, false);
 ''')
 
 

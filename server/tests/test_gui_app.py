@@ -159,17 +159,15 @@ def test_devices_polling_has_a_single_owner():
 
 
 def test_devices_poll_wrapper_keeps_the_focused_row_and_error_guards():
-    """The retired scheduleDevices() never redrew #dev-rows while the
-    operator's focus was inside it (would yank an open dropdown/select out
-    from under a mid-edit operator), and surfaced a failed refresh via
-    devStatus rather than failing silently. Both guards must survive inside
-    the function the router now polls Devices with."""
-    js = _app_js()
-    fn = js.split("function pollDevices() {", 1)[1].split("\n  }", 1)[0]
-    assert "document.activeElement" in fn
-    assert "a.closest('#dev-rows')" in fn
-    assert "refreshDevices()" in fn
-    assert "Device refresh unavailable; retrying" in fn
+    """Keyed React rows preserve focus; failures remain visible in the table."""
+    from pathlib import Path
+    root = Path(gui_server.WEBROOT).parent / 'console-ui/src'
+    component = (root / 'inventory.jsx').read_text()
+    controller = (root / 'inventory-controller.mjs').read_text()
+    assert '<tr key={id}' in component
+    assert 'state.error ||' in component and 'Results unavailable' in component
+    assert 'Device target preview unavailable' in controller
+    assert 'function pollDevices() { return refreshDevices(); }' in _app_js()
 
 
 def test_devices_poll_wrapper_is_the_devices_view_poll_fn():

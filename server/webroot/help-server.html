@@ -106,6 +106,10 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       or damaged ciphertext; check the reported cause before changing state.</li>
       <li>Check Monitoring → Audit trail for the last settings or device
       action, and the device job log for onboarding or undeploy failures.</li>
+      <li>If Inventory shows unavailable credentials or sharing policy, check
+      the server connection before editing those fields. An unknown edit
+      outcome means the response was lost or unreadable; check the refreshed
+      row before trying again.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>

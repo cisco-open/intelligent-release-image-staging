@@ -38,6 +38,14 @@ Series, with legacy and unknown categories retained. Hover a series cell to see
 the stored model. For the role filter and **Set role**, see
 [Control which devices share with each other](roles.md).
 
+The table refreshes every ten seconds while Inventory is visible. Your filters,
+selection and keyboard focus stay in place. If the device list cannot be read,
+the selection remains, but its match to the current filter is unconfirmed.
+
+Credential and sharing-policy controls are disabled when their current data
+is unavailable. If an edit reports an unknown outcome, check the refreshed row
+before trying again.
+
 ### Run a toolbar action
 
 | Action | Effect |
