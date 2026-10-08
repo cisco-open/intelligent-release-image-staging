@@ -21,6 +21,9 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
+      IRIS_RUNTIME_LAYOUT: "docker-split"
+      IRIS_RUNTIME_NAME: "${IRIS_CONSOLE_CONTAINER:-iris-console}"
+      IRIS_RUNTIME_HOST: "${IRIS_CONSOLE_BIND_IP}"
       IRIS_GUI_HOST: "0.0.0.0"
       IRIS_GUI_PORT: "8080"
       IRIS_GUI_CERT: "/run/iris-console/cert.pem"

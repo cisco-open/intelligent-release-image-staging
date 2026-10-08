@@ -16,12 +16,49 @@ import re
 import api_problem
 import api_routes
 import instructions
+import key_maintenance
+import tls_rotation
+import trust_rotation
 import peer_policy
 import schedules
+import deployment_info
 
 
 ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
                   416, 422, 428, 429, 500, 502, 503)
+
+
+def _maintenance_policy_schema():
+    return _schedule_object({
+        'id': {'type': 'string', 'format': 'uuid'},
+        'family': {'enum': list(key_maintenance.FAMILIES)},
+        'target': {'type': 'string', 'minLength': 1}, 'enabled': {'type': 'boolean'},
+        'next_at': _schedule_integer(), 'interval_days': _schedule_integer(1, 365),
+        'window_minutes': _schedule_integer(5, 1440),
+    })
+
+
+def _maintenance_schema():
+    family = _schedule_object({name: {'type': 'string'} for name in ('id', 'label', 'action', 'requirement', 'guide')})
+    family['properties']['id'] = {'enum': list(key_maintenance.FAMILIES)}
+    family['properties']['action'] = {'enum': ['prepare', 'rotate', 'review']}
+    job = _schedule_object({
+        'id': {'type': 'string', 'format': 'uuid'}, 'policy_id': {'type': 'string', 'format': 'uuid'},
+        'family': {'enum': list(key_maintenance.FAMILIES)}, 'target': {'type': 'string'},
+        'state': {'enum': sorted(key_maintenance.STATES)}, 'due_at': _schedule_integer(),
+        'updated_at': _schedule_integer(), 'detail': {'type': 'string', 'maxLength': 300},
+        'before': {'type': ['string', 'null'], 'pattern': '^[0-9a-f]{64}$'},
+        'after': {'type': ['string', 'null'], 'pattern': '^[0-9a-f]{64}$'},
+    })
+    return _schedule_object({
+        'schema': {'const': 1}, 'revision': _schedule_integer(),
+        'observed_at': {'type': ['integer', 'null']},
+        'worker': {'enum': ['not-observed', 'observed', 'stale', 'clock-error']},
+        'policies': {'type': 'array', 'maxItems': 32, 'items': _maintenance_policy_schema()},
+        'jobs': {'type': 'array', 'maxItems': 256, 'items': job},
+        'families': {'type': 'array', 'items': family}, 'peer_leaf_renewal': {'type': 'string'},
+    })
+
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
 POLICY_MUTATIONS = {
     ("PUT", "/peer-policy/roles/{name}"),
@@ -29,6 +66,7 @@ POLICY_MUTATIONS = {
     ("DELETE", "/peer-policy/roles/{name}"),
     ("PUT", "/peer-policy/qos"),
     ("POST", "/devices/{device_id}/role"),
+    ("POST", "/devices/{device_id}/peer-telemetry"),
     ("POST", "/devices/bulk-role"),
 }
 
@@ -889,6 +927,9 @@ def _policy_business_errors(route):
             409: ("role_reserved_name", "role_shadowed_by_assignment"),
             422: ("bad_role", "invalid_policy", "incomparable_role_change"),
             503: ("fleet_write_failed",)},
+        ("POST", "/devices/{device_id}/peer-telemetry"): {
+            404: ("device_not_found",),
+            422: ("peer_telemetry_unsupported", "invalid_policy")},
         ("POST", "/devices/bulk-role"): {
             404: ("role_not_found",),
             409: ("role_reserved_name", "role_shadowed_by_assignment"),
@@ -952,6 +993,8 @@ def _qos_schema(scope):
                 value["anyOf"] = [{"const": 0}, {"minimum": peer_policy._MIN_RATE_BPS}]
             if key == "catalog_tick_s":
                 value["multipleOf"] = 60
+            if key == "peer_telemetry_interval_s":
+                value["enum"] = [10, 60]
         properties[key] = value
     return {"type": "object", "properties": properties,
             "additionalProperties": False,
@@ -1042,6 +1085,11 @@ def _swarm_peer_schema():
                 required.append("device_id")
                 properties["device_id"] = {"type": "string"}
                 properties["peer_tls"] = _peer_tls_schema(projected=True)
+                properties["peer_telemetry"] = {"type": "object",
+                    "additionalProperties": False,
+                    "properties": {"supported": {"type": "boolean"},
+                        "requested_interval_s": {"enum": [10, 60, None]},
+                        "effective_interval_s": {"type": ["integer", "null"]}}}
                 for name in ("model", "current_image_id", "stage_state"):
                     properties[name] = {"type": "string"}
                 for name in ("staged_image_ids", "errored_image_ids"):
@@ -1049,6 +1097,27 @@ def _swarm_peer_schema():
         variants.append({"type": "object", "additionalProperties": False,
                          "required": required, "properties": properties})
     return {"oneOf": variants}
+
+
+def _swarm_edge_properties():
+    fields = {
+        "source_device_id": {"type": "string"},
+        "target_device_id": {"type": "string"},
+        "reporter_device_id": {"type": "string"},
+        "bytes_per_second": {"type": "integer", "minimum": 1},
+        "connection_count": {"type": "integer", "minimum": 1, "maximum": 32},
+        "rate_field": {"enum": ["send_bps", "receive_bps"]},
+        "identity_basis": {"enum": ["tracker_endpoint", "unique_tracker_address"]},
+        "received_at": {"type": "number"},
+        "observed_at": {"type": ["number", "null"]},
+        "age_s": {"type": "integer", "minimum": 0},
+        "valid_for_s": {"type": "integer", "minimum": 1, "maximum": 120},
+    }
+    return {"peer_edges": {"type": "array", "maxItems": 1024,
+                "items": {"type": "object", "properties": fields,
+                          "required": list(fields), "additionalProperties": False}},
+            "peer_edges_truncated": {"type": "boolean"},
+            "unattributed_peer_connections": {"type": "integer", "minimum": 0}}
 
 
 def _blast_example():
@@ -1751,6 +1820,8 @@ _JSON_REQUESTS = {
                                       ("platform",), True),
     "/devices/{device_id}/forget-host-key": ({}, (), False),
     "/devices/{device_id}/request-report": ({}, (), False),
+    "/devices/{device_id}/peer-telemetry": (
+        {"interval_s": 10, "confirm_token": "candidate-bound-sha256"}, ("interval_s",), True),
     "/devices/{device_id}/adopt": ({"acknowledge_adopt": True},
                                    ("acknowledge_adopt",), True),
     "/devices/{device_id}/onboard": (
@@ -1768,6 +1839,34 @@ _JSON_REQUESTS = {
         {"current": "current-password", "new": "new-password",
          "confirm": "new-password"}, ("current", "new", "confirm"), True),
     "/settings/sessions/revoke-others": ({}, (), False),
+    "/settings/certificates/instruction/request": ({}, (), False),
+    '/settings/certificates/browser/rotation': (
+        {'action': 'prepare', 'request_id': '00000000-0000-0000-0000-000000000001',
+         'names': ['console.example.com'], 'mode': 'ca'}, ('action', 'request_id', 'names', 'mode'), True),
+    '/settings/service-credentials': (
+        {'action': 'replace', 'family': 'metrics-token', 'request_id': '00000000-0000-0000-0000-000000000001',
+         'confirm': True, 'token': 'example-new-scrape-token-0123456789'},
+        ('action', 'family', 'request_id', 'confirm', 'token'), True),
+    "/settings/key-maintenance": (
+        {'action': 'save-policy', 'revision': 0, 'policy': {
+            'id': '00000000-0000-0000-0000-000000000001', 'family': 'online-signer',
+            'target': 'deployment', 'enabled': False, 'next_at': 1790294400,
+            'interval_days': 14, 'window_minutes': 30}}, ('action', 'revision', 'policy'), True),
+    "/settings/certificates/instruction/rotation": (
+        {"action": "prepare", "request_id": "00000000-0000-0000-0000-000000000001"},
+        ("action", "request_id"), True),
+    "/settings/backups": ({"action": "backup", "allow_downtime": True,
+                            "request_id": "00000000-0000-0000-0000-000000000001"},
+                           ("action", "allow_downtime", "request_id"), True),
+    '/settings/deployment-rotation': ({'action': 'rotate', 'allow_downtime': True,
+        'request_id': '00000000-0000-0000-0000-000000000001', 'family': 'management-tls'},
+        ('action', 'allow_downtime', 'request_id', 'family'), True),
+    '/settings/trust-rotation': ({'action': 'prepare', 'family': 'peer-ca',
+        'request_id': '00000000-0000-0000-0000-000000000001'}, ('action', 'family', 'request_id'), True),
+    "/settings/certificates/instruction/renew": (
+        {"certificate": "ssh-ed25519-cert-v01@openssh.com ...",
+         "public_key_sha256": "00" * 32, "certificate_sha256": "11" * 32},
+        ("certificate", "public_key_sha256", "certificate_sha256"), True),
     "/settings/peer-tls": ({"mode": "required", "expected_mode": "disabled"},
                            ("mode", "expected_mode"), True),
     "/settings/image-verification": ({"mode": "daily", "hour_utc": 3},
@@ -1798,6 +1897,10 @@ _JSON_REQUESTS = {
     "/v1/devices/{device_id}/telemetry": (
         {"schema": "v2", "image_id": "image-01", "state": "complete",
          "timestamp": 1788470400}, ("schema", "image_id"), True),
+    "/v1/devices/{device_id}/live-telemetry": (
+        {"telemetry_observation": {"v": 2, "obs_state": "rpc_unavailable",
+            "observed_at": 1788470400, "image_id": "image-01",
+            "transfer_id": "a" * 32, "sample_seq": 1}}, ("telemetry_observation",), True),
     "/v1/devices/{device_id}/peer-tls": ({"csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."}, ("csr",), True),
     "/v1/devices/{device_id}/token-refresh": ({}, (), False),
 }
@@ -1833,6 +1936,90 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix.startswith("/settings/certificates/instruction/"):
+        schema["additionalProperties"] = False
+        if suffix.endswith("/renew"):
+            schema["properties"]["certificate"]["maxLength"] = 65536
+            for field in ("public_key_sha256", "certificate_sha256"):
+                schema["properties"][field]["pattern"] = "^[0-9a-f]{64}$"
+    if suffix == '/settings/service-credentials':
+        variants = []
+        for family, extra in [('metrics-token', {'token': {'type': 'string', 'minLength': 32, 'maxLength': 256, 'writeOnly': True}}),
+                ('collector-headers', {'headers': {'type': 'object', 'minProperties': 1, 'maxProperties': 16, 'writeOnly': True,
+                    'additionalProperties': {'type': 'string', 'minLength': 1, 'maxLength': 4096}},
+                    'endpoint': {'type': 'string', 'maxLength': 2048, 'pattern': '^https://'}})]:
+            variants.append(_schedule_object({'action': {'const': 'replace'}, 'family': {'const': family},
+                'request_id': {'type': 'string', 'format': 'uuid'}, 'confirm': {'const': True}, **extra}))
+        variants.append(_schedule_object({'action': {'enum': ['retire', 'revert']},
+            'family': {'enum': ['metrics-token', 'collector-headers']},
+            'request_id': {'type': 'string', 'format': 'uuid'}, 'confirm': {'const': True}}))
+        schema = {'oneOf': variants}
+    if suffix == '/settings/deployment-rotation':
+        schema = _schedule_object({'action': {'enum': ['rotate', 'recover-rotation']}, 'allow_downtime': {'const': True},
+            'request_id': {'type': 'string', 'format': 'uuid'},
+            'family': {'enum': ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce']}})
+    if suffix == '/settings/trust-rotation':
+        variants = []
+        for family, action, extra in [
+            ('device-tls', 'prepare', {'names': {'type': 'array', 'minItems': 1, 'maxItems': 16,
+                'items': {'type': 'string', 'maxLength': 253}}, 'mode': {'enum': ['ca', 'self-signed']}}),
+            ('peer-ca', 'prepare', {}),
+            ('instruction-roots', 'prepare', {'roots': {'type': 'object', 'minProperties': 2, 'maxProperties': 2,
+                'additionalProperties': {'type': 'string', 'maxLength': 4096}}, 'keylist_signer': {'type': 'string', 'maxLength': 64}}),
+            ('device-tls', 'approve', {'certificate': {'type': 'string', 'maxLength': 65536}}),
+            ('instruction-roots', 'approve', {'certificate': {'type': 'string', 'maxLength': 65536},
+                'keylist': {'type': 'string', 'maxLength': 174764}}),
+            ('instruction-roots', 'attestation-request', {'root_id': {'type': 'string', 'maxLength': 64}}),
+            ('instruction-roots', 'attestation-apply', {'root_id': {'type': 'string', 'maxLength': 64},
+                'keylist': {'type': 'string', 'maxLength': 174764}}),
+            *[(family, 'cancel', {}) for family in trust_rotation.FAMILIES]]:
+            variants.append(_schedule_object({'family': {'const': family}, 'action': {'const': action},
+                'request_id': {'type': 'string', 'format': 'uuid'}, **extra}))
+        schema = {'oneOf': variants}
+    if suffix == '/settings/certificates/browser/rotation':
+        variants = []
+        for action, extra in [('prepare', {'names': {'type': 'array', 'minItems': 1, 'maxItems': 16,
+                'uniqueItems': True, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 253}},
+                'mode': {'enum': ['ca', 'self-signed']}}),
+                ('approve', {'certificate': {'type': 'string', 'maxLength': 65536}}),
+                ('apply', {'confirm': {'const': True}}), ('cancel', {})]:
+            variants.append(_schedule_object({'action': {'const': action},
+                'request_id': {'type': 'string', 'format': 'uuid'}, **extra}))
+        schema = {'oneOf': variants}
+    if suffix == '/settings/key-maintenance':
+        schema = {'oneOf': [
+            _schedule_object({'action': {'const': 'save-policy'}, 'revision': _schedule_integer(),
+                              'policy': _maintenance_policy_schema()}),
+            _schedule_object({'action': {'enum': ['retry', 'reviewed', 'retire-management', 'reconcile-management']},
+                              'job_id': {'type': 'string', 'format': 'uuid'}, 'confirm': {'const': True}})]}
+    if suffix == "/settings/certificates/instruction/rotation":
+        variants = []
+        for action, extra in (
+                ('prepare', {}), ('cancel', {}),
+                ('activate', {'certificate': {'type': 'string', 'maxLength': 65536}, 'confirm': {'const': True}}),
+                ('retirement-request', {'root_id': {'type': 'string', 'maxLength': 64}}),
+                ('retire', {'artifact': {'type': 'string', 'maxLength': 174764}, 'confirm': {'const': True}})):
+            properties = {'action': {'const': action}, 'request_id': {'type': 'string', 'format': 'uuid'}, **extra}
+            variants.append({'type': 'object', 'additionalProperties': False,
+                             'properties': properties, 'required': list(properties)})
+        schema = {'oneOf': variants}
+    if suffix == "/settings/backups":
+        schema = {'oneOf': [
+            {'type': 'object', 'additionalProperties': False,
+             'required': ['action', 'allow_downtime', 'request_id'],
+             'properties': {'action': {'const': 'backup'}, 'allow_downtime': {'const': True},
+                            'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}},
+            {'type': 'object', 'additionalProperties': False,
+             'required': ['action', 'backup_id', 'request_id'],
+             'properties': {'action': {'enum': ['verify', 'extract']},
+                            'backup_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'},
+                            'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}},
+            {'type': 'object', 'additionalProperties': False,
+             'required': ['action', 'backup_id', 'request_id', 'allow_downtime', 'confirm_restore'],
+             'properties': {'action': {'enum': ['restore', 'recover-restore']},
+                            'backup_id': {'type': 'string', 'format': 'uuid'},
+                            'request_id': {'type': 'string', 'format': 'uuid'},
+                            'allow_downtime': {'const': True}, 'confirm_restore': {'const': True}}}]}
     if suffix == "/settings/peer-tls":
         schema["additionalProperties"] = False
         for field in ("mode", "expected_mode"):
@@ -1873,6 +2060,7 @@ def _request_body(route):
             "are rejected with 422.")
     if route.service == "catalog" and path.endswith("/heartbeat"):
         schema["properties"]["peer_tls"] = _peer_tls_schema()
+        schema["properties"]["peer_telemetry_v"] = {"type": "integer", "const": 1}
         return {"required": required_body, "content": {
             "application/json": _instruction_attestation_request(schema, example)}}
     if suffix == "/settings/image-verification":
@@ -1910,9 +2098,38 @@ def _request_body(route):
     # silently accepted as alternate credentials.
     if suffix in ("/login", "/setup") or path.endswith("/authorizations"):
         schema["additionalProperties"] = False
+    if path == "/v1/devices/{device_id}/live-telemetry":
+        schema["additionalProperties"] = False
+        integer = {"type": "integer", "minimum": 0}
+        rate = dict(integer, maximum=10 ** 12)
+        schema["properties"]["telemetry_observation"] = {
+            "type": "object", "required": ["v", "obs_state", "observed_at"],
+            "description": "At most 8192 serialized bytes. Requires current device credentials, an active ten-second signed policy, streaming enabled and a recent heartbeat. Unknown fields are discarded. Peer rows beyond 32 are truncated.",
+            "properties": {
+                "v": {"const": 2}, "obs_state": {"enum": ["observed", "not_due", "paused", "disabled", "not_active", "rpc_unavailable"]},
+                "observed_at": {"type": "number", "minimum": 0},
+                "image_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+                "transfer_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+                "sample_seq": integer, "sampling_class": {"enum": ["good", "constrained"]},
+                "aria": {"type": "object", "required": ["completed_content_bytes", "total_content_bytes", "receive_bps", "send_bps", "connections"],
+                    "properties": {"status": {"enum": ["active", "waiting", "paused", "complete", "error", "removed"]},
+                        "completed_content_bytes": dict(integer, maximum=2 ** 53),
+                        "total_content_bytes": dict(integer, maximum=2 ** 53),
+                        "receive_bps": rate, "send_bps": rate,
+                        "connections": dict(integer, maximum=1024)}},
+                "peer_connections": {"type": "array", "items": {"type": "object", "required": ["ip"],
+                    "properties": {"ip": {"type": "string", "format": "ipv4"},
+                        "port": dict(integer, maximum=65535), "send_bps": rate, "receive_bps": rate,
+                        "peer_client_name": {"type": "string", "maxLength": 64},
+                        "progress": {"type": "number", "minimum": 0, "maximum": 100}}}}},
+            "if": {"properties": {"obs_state": {"const": "observed"}}},
+            "then": {"required": ["sample_seq", "sampling_class", "aria"]},
+            "else": {"not": {"anyOf": [{"required": [name]} for name in ("sampling_class", "aria", "peer_connections")]}}}
     if _policy_mutation(route):
         schema["additionalProperties"] = False
         schema["properties"]["confirm_token"]["type"] = ["string", "null"]
+        if suffix == "/devices/{device_id}/peer-telemetry":
+            schema["properties"]["interval_s"]["enum"] = [10, 60]
         if suffix == "/peer-policy/roles/{name}":
             schema["properties"].update(_role_definition_schema()["properties"])
         if suffix == "/peer-policy/qos":
@@ -1938,6 +2155,8 @@ def _request_body(route):
 def _json_success_example(route):
     """Return the actual stable fields for a JSON success response."""
     suffix = _resource_suffix(route)
+    if suffix in ('/settings/backups', '/settings/deployment-rotation') and route.method == "POST":
+        return {"job_id": "00000000-0000-0000-0000-000000000001"}
 
     exact = {
         "/peer-policy/roles": {"revision": 4, "degraded": False, "fail_closed": False,
@@ -1945,6 +2164,8 @@ def _json_success_example(route):
         "/peer-policy/roles/{name}": _policy_write_example(),
         "/peer-policy/roles/import-csv": {**_policy_write_example(), "roles": 2},
         "/peer-policy/qos": _policy_write_example(),
+        "/devices/{device_id}/peer-telemetry": {
+            **_policy_write_example(), "device_id": "edge-01", "requested_interval_s": 10},
         "/devices/{device_id}/role": {**_policy_write_example(), "partial": False,
             "applied": 1, "failed": {}, "direction": "tighten",
             "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
@@ -2085,6 +2306,13 @@ def _json_success_example(route):
             "rollout": [{"image_id": "image-01", "filename": "image.bin",
                          "assigned": 1, "staged": 1}],
             "swarm_map_url": "/swarmmap"},
+        "/deployment": {
+            "layout": "docker", "source": "managed-worker", "observed_at": 1788470400,
+            "instance": "iris", "namespace": None, "note": None,
+            "components": [{"role": "server", "kind": "container", "name": "iris-server",
+                            "host": "staging-host", "address": None, "image": "iris:latest",
+                            "state": "running / healthy", "os": "Debian GNU/Linux",
+                            "architecture": "x86_64", "kernel": "6.8.0"}]},
         "/swarm": {
             "now": 1788470400.0,
             "server": {
@@ -2120,6 +2348,48 @@ def _json_success_example(route):
                             "effective_enabled": True}},
         "/settings/password": {"ok": True},
         "/settings/sessions/revoke-others": {"revoked": 2},
+        "/settings/certificates": {
+            "observed_at": 1788470400, "scope": "server-certificate-files",
+            "items": [{"id": "instruction-signer", "label": "Instruction signing certificate",
+                       "kind": "certificate",
+                       "state": "renewal-due", "source": "server-file",
+                       "fingerprint_sha256": "00" * 32, "valid_from": 1787000000,
+                       "expires_at": 1789592000, "renew_at": 1788296000,
+                       "refuse_at": 1788987200, "impact": "Renew with offline root approval."}],
+            "custody": None,
+            "note": "Validity dates do not prove trust, key availability or the certificate loaded by a listener."},
+        "/settings/certificates/instruction/request": {
+            "public_key": "ssh-ed25519 ...", "public_key_sha256": "00" * 32,
+            "certificate_sha256": "11" * 32},
+        "/settings/certificates/instruction/renew": {
+            "applied": True, "expires_at": 1789592000, "refuse_at": 1788987200,
+            "status_refreshed": True},
+        '/settings/service-credentials': {'items': [dict(family=family, request_id=None,
+            state='deployment-managed', previous_retained=False, started_at=None, observed_at=None, endpoint=None)
+            for family in ('metrics-token', 'collector-headers')]},
+        '/settings/certificates/browser/rotation': {
+            'request_id': None, 'state': 'idle', 'names': [], 'mode': None,
+            'csr': None, 'certificate': None, 'created_at': None, 'fingerprint_sha256': None},
+        '/settings/key-maintenance': {
+            'schema': 1, 'revision': 0, 'policies': [], 'jobs': [], 'observed_at': None,
+            'worker': 'not-observed', 'families': [dict(id=k, label=v[0], action=v[1], requirement=v[2], guide=v[3])
+                for k, v in key_maintenance.FAMILIES.items()],
+            'peer_leaf_renewal': 'Device-managed; one-day certificates renew six hours before expiry.'},
+        "/settings/certificates/instruction/rotation": {
+            "state": "idle", "request_id": None, "previous_public_key": None,
+            "public_key": None, "previous_sha256": None, "replacement_sha256": None,
+            "created_at": None, "activated_at": None, "retired_keylist_seq": None,
+            "root_ids": ["root-a", "root-b"],
+            "note": "Server-side evidence; confirm device acceptance separately."},
+        "/settings/backups": {
+            "available": False, "target": "unavailable", "storage": "unavailable",
+            "can_verify": False, "can_extract": False, "can_restore": False, "jobs": [],
+            "note": "Configure the lifecycle worker on the installer host."},
+        '/settings/deployment-rotation': {
+            'available': False, 'target': 'unavailable', 'can_rotate': False,
+            'families': [], 'jobs': [], 'note': 'Configure deployment maintenance and recovery access.'},
+        '/settings/trust-rotation': {'items': [trust_rotation._view(None, family, live=False) for family in trust_rotation.FAMILIES],
+            'drain': {'ready': True, 'blocked_device_ids': [], 'removed_device_ids': []}} if route.method == 'GET' else trust_rotation._view(None, 'peer-ca', live=False),
         "/settings/setup-status": {
             "admin": {"state": "ok", "username": "admin"},
             "telemetry": {"state": "ok", "endpoint":
@@ -2188,6 +2458,7 @@ def _json_success_example(route):
         "/v1/devices/{device_id}/heartbeat": {
             "ok": True, "stream_every": 4, "stream_pause": False},
         "/v1/devices/{device_id}/telemetry": {"ok": True},
+        "/v1/devices/{device_id}/live-telemetry": {"ok": True},
         "/v1/devices/{device_id}/peer-tls": {
             "mode": "required", "certificate": "-----BEGIN CERTIFICATE-----\n...",
             "ca": "-----BEGIN CERTIFICATE-----\n...", "renew_before_seconds": 21600},
@@ -2249,6 +2520,20 @@ def _success(route):
         return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix == "/deployment":
+        nullable = {"type": ["string", "null"], "maxLength": 256}
+        component = _schedule_object({field: dict(nullable) for field in deployment_info.FIELDS})
+        component["properties"]["role"] = {"enum": ["server", "console"]}
+        component["properties"]["kind"] = {"enum": ["container", "pod", "process"]}
+        schema = _schedule_object({
+            "layout": {"enum": list(deployment_info.LAYOUTS)},
+            "source": {"enum": ["managed-worker", "runtime"]},
+            "observed_at": {"type": "integer", "minimum": 0},
+            "instance": dict(nullable), "namespace": dict(nullable), "note": dict(nullable),
+            "components": {"type": "array", "maxItems": 64, "items": component},
+        })
+        return "200", {"description": "Read-only deployment inventory or explicitly limited runtime observations",
+                       "content": {"application/json": _media(schema, _json_success_example(route))}}
     if suffix == "/settings/peer-tls":
         example = _json_success_example(route)
         schema = _schema_for_example(example, "PeerTlsSettings")
@@ -2521,6 +2806,7 @@ def _success(route):
         normal_schema["properties"]["images"]["items"]["properties"][
             "total_bytes"] = {"type": ["integer", "null"]}
         normal_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
+        normal_schema["properties"]["images"]["items"]["properties"].update(_swarm_edge_properties())
         empty_schema = {"type": "object", "maxProperties": 0}
         if route.service == "telemetry":
             variants = [normal_schema, empty_schema]
@@ -2544,6 +2830,7 @@ def _success(route):
             paged_schema["properties"]["images"]["items"]["properties"][
                 "total_bytes"] = {"type": ["integer", "null"]}
             paged_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
+            paged_schema["properties"]["images"]["items"]["properties"].update(_swarm_edge_properties())
             paged_schema["properties"]["peers_limit"] = {
                 "type": ["integer", "null"]}
             unavailable_schema = _schema_for_example(
@@ -2606,6 +2893,104 @@ def _success(route):
             "off", "daily", "weekly"]
         schema["properties"]["hour_utc"].update(
             {"minimum": 0, "maximum": 23})
+    elif suffix == '/settings/service-credentials':
+        schema = _schedule_object({'items': {'type': 'array', 'minItems': 2, 'maxItems': 2, 'items': _schedule_object({
+            'family': {'enum': ['metrics-token', 'collector-headers']}, 'request_id': {'type': ['string', 'null'], 'format': 'uuid'},
+            'state': {'enum': ['deployment-managed', 'awaiting-verification', 'completed', 'reverted']},
+            'previous_retained': {'type': 'boolean'}, 'started_at': {'type': ['integer', 'null']},
+            'observed_at': {'type': ['integer', 'null']}, 'endpoint': {'type': ['string', 'null']}})}})
+    elif suffix == '/settings/certificates/browser/rotation':
+        properties = {
+            'request_id': {'type': ['string', 'null'], 'format': 'uuid'}, 'state': {'enum': list(tls_rotation.STATES)},
+            'names': {'type': 'array', 'items': {'type': 'string'}}, 'mode': {'enum': [None, 'ca', 'self-signed']},
+            'csr': {'type': ['string', 'null']}, 'certificate': {'type': ['string', 'null']},
+            'created_at': {'type': ['integer', 'null']}, 'fingerprint_sha256': {'type': ['string', 'null']}}
+        schema = _schedule_object(properties)
+        if route.method == 'POST':
+            schema['properties'] = {**properties, 'applied': {'type': 'boolean'}, 'note': {'type': ['string', 'null']},
+                'gui_cert': _schedule_object({field: {'type': 'string'} for field in
+                    ('source', 'subject', 'issuer', 'not_after', 'fingerprint_sha256')})}
+    elif suffix == '/settings/key-maintenance':
+        schema = _maintenance_schema()
+    elif suffix == "/settings/certificates/instruction/rotation":
+        schema['additionalProperties'] = False
+        schema['properties']['state'] = {'enum': ['idle', 'awaiting-approval', 'committing',
+            'retirement-pending', 'retiring', 'completed', 'cancelled']}
+        for name in ('request_id', 'previous_public_key', 'public_key', 'previous_sha256', 'replacement_sha256'):
+            schema['properties'][name] = {'type': ['string', 'null']}
+        for name in ('created_at', 'activated_at', 'retired_keylist_seq'):
+            schema['properties'][name] = {'type': ['integer', 'null']}
+        if route.method == 'POST':
+            schema = {'oneOf': [schema, {'type': 'object', 'additionalProperties': False,
+                'required': ['request_id', 'payload', 'root_id'], 'properties': {
+                    'request_id': {'type': 'string', 'format': 'uuid'}, 'payload': {'type': 'string'},
+                    'root_id': {'type': 'string'}}}]}
+    elif suffix == '/settings/trust-rotation':
+        item = _schedule_object({'family': {'enum': list(trust_rotation.FAMILIES)},
+            'request_id': {'type': ['string', 'null'], 'format': 'uuid'},
+            'state': {'enum': ['idle', *trust_rotation.STATES]},
+            'created_at': {'type': ['integer', 'null']}, 'names': {'type': 'array', 'items': {'type': 'string'}},
+            'mode': {'type': ['string', 'null']}, 'csr': {'type': ['string', 'null']},
+            'certificate': {'type': ['string', 'null']}, 'fingerprint_sha256': {'type': ['string', 'null']},
+            'roots': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+            'online_public_key': {'type': ['string', 'null']}, 'keylist_payload': {'type': ['string', 'null']},
+            'keylist_signer': {'type': ['string', 'null']}, 'requires_reonboarding': {'type': 'boolean'},
+            'requires_package_rebuild': {'type': 'boolean'},
+            'attestation_request_id': {'type': ['string', 'null'], 'format': 'uuid'},
+            'attestation_root_id': {'type': ['string', 'null']},
+            'attested_root_ids': {'type': 'array', 'items': {'type': 'string'}}})
+        schema = _schedule_object({'items': {'type': 'array', 'minItems': 3, 'maxItems': 3, 'items': item},
+            'drain': _schedule_object({'ready': {'type': 'boolean'}, 'blocked_device_ids': {'type': 'array', 'items': {'type': 'string'}},
+                'removed_device_ids': {'type': 'array', 'items': {'type': 'string'}}})}) if route.method == 'GET' else {'oneOf': [item,
+                    _schedule_object({'request_id': {'type': 'string', 'format': 'uuid'}, 'root_id': {'type': 'string'},
+                                      'payload': {'type': 'string'}})]}
+    elif suffix == '/settings/deployment-rotation' and route.method == 'GET':
+        schema = _schedule_object({'available': {'type': 'boolean'}, 'target': {'enum': ['single-docker', 'split-docker', 'kubernetes', 'unavailable']},
+            'can_rotate': {'type': 'boolean'}, 'note': {'type': 'string'},
+            'families': {'type': 'array', 'items': {'enum': ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce']}},
+            'jobs': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+                'required': ['id', 'action', 'family', 'state', 'started_at', 'detail', 'proof'],
+                'properties': {'id': {'type': 'string', 'format': 'uuid'}, 'action': {'const': 'rotate'},
+                    'family': {'type': 'string'}, 'state': {'type': 'string'}, 'started_at': {'type': 'integer'},
+                    'finished_at': {'type': 'integer'}, 'detail': {'type': 'string'},
+                    'proof': {'type': ['object', 'null'], 'additionalProperties': False, 'properties': {
+                        'management_https': {'const': 'verified'}, 'certificate_sha256': {'type': 'string'},
+                        'console_consumers': {'type': 'array', 'minItems': 1, 'items': _schedule_object({
+                            'pod_uid': {'type': 'string'}, 'certificate_sha256': {'type': 'string'},
+                            'management_https': {'const': 'verified'}})},
+                        'dedicated_management_key': {'const': 'verified'}, 'age_files': {'type': 'integer'},
+                        'service_recipient': {'type': 'string'}, 'recovery_recipient': {'type': 'string'},
+                        'independent_decryption': {'const': 'verified'},
+                        'seeded_torrents': {'type': 'integer'}, 'credential_changed': {'const': True},
+                        'isolated_tracker_proof': {'const': 'verified'}, 'restarted_tracker_proof': {'const': 'verified'},
+                        'family': {'enum': list(trust_rotation.FAMILIES)}, 'request_id': {'type': 'string', 'format': 'uuid'},
+                        'packages_verified': {'const': True}, 'device_consumers': {'const': 're-onboarding-required'},
+                        'catalog_tls_sha256': {'type': 'string'}, 'peer_ca_sha256': {'type': 'string'},
+                        'origin_mode': {'enum': ['required', 'disabled']},
+                        'root_sha256': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+                        'keylist_seq': {'type': 'integer'}}}}}}})
+    elif suffix == "/settings/backups" and route.method == "GET":
+        schema['properties']['restore_scope'] = {'type': 'string', 'enum': ['same-deployment-same-security-generation']}
+        schema["properties"]["jobs"]["items"] = {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "action", "backup_id", "state", "started_at", "detail"],
+            "properties": {
+                "id": {"type": "string"}, "backup_id": {"type": "string"},
+                "action": {"enum": ["backup", "verify", "extract", "restore"]},
+                "state": {"enum": ["running", "recovery-required", "captured", "failed",
+                                   "verified-files", "verified-isolated-files", "restored", "refused"]},
+                "started_at": {"type": "integer"}, "finished_at": {"type": "integer"},
+                "detail": {"type": "string"},
+                "proof": {"type": ["object", "null"], "additionalProperties": True}}}
+    elif suffix == "/settings/certificates":
+        item = schema["properties"]["items"]["items"]
+        for field in ("valid_from", "expires_at", "renew_at", "refuse_at"):
+            item["properties"][field] = {"type": ["integer", "null"]}
+        item["properties"]["fingerprint_sha256"] = {"type": ["string", "null"]}
+        item["properties"]["state"]["enum"] = [
+            "unknown", "within-validity", "not-yet-valid", "expired", "signing-refused", "renewal-due", "public-key-present"]
+        item["properties"]["kind"]["enum"] = ["certificate", "public-key"]
+        schema["properties"]["custody"] = {"type": ["object", "null"], "additionalProperties": True}
     elif suffix == "/settings/setup-status":
         packages = schema["properties"]["packages"]
         packages["properties"]["reference_fingerprint"] = {

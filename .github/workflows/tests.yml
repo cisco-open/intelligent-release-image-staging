@@ -91,6 +91,16 @@ jobs:
             server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ \
             lab/tests/ device/test_verify_image.py tools/test_api_exercise.py
 
+      - name: Managed-worker custody and private-umask regressions
+        if: ${{ !cancelled() }}
+        # These use disposable filesystem fixtures, not real host services.
+        # Root is required to exercise ownership checks instead of skipping them.
+        run: |
+          sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+            -p no:cacheprovider -q server/tests/test_managed_worker.py
+          sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+            -p no:cacheprovider -q server/tests/test_installer_install.py -k umask
+
       - name: bats
         # Report the shell suite even when pytest failed: one push should
         # surface every failure, not just the first step's. Not always(),

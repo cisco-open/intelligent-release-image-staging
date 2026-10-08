@@ -27,6 +27,10 @@ IRIS_STATE="${IRIS_STATE:-/var/lib/iris}"
 IRIS_CONFIG="${IRIS_CONFIG:-/etc/iris}"
 IRIS_LOG="${IRIS_LOG:-/var/log/iris}"
 IRIS_RUN="${IRIS_RUN:-/run/iris}"
+# PID 1 must also handle termination before the full supervisor is ready.
+# Startup interruption never earns a clean-writer shutdown proof.
+trap 'exit 1' TERM INT
+rm -f "$IRIS_RUN/maintenance-ready"
 IRIS_AGE_BIN="${IRIS_AGE_BIN:-age}"
 IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
 # TLS trust + console-cert override (console-managed; absent = today's behavior)
@@ -95,7 +99,8 @@ elif [ -L "$instruction_key_enc" ] || [ ! -f "$instruction_key_enc" ]; then
   echo "FATAL: instruction signing key ciphertext must be a regular non-symlink file (fail closed)" >&2
   exit 1
 else
-  mkdir -p "$IRIS_RUN/instr"
+  mkdir -p -m 700 "$IRIS_RUN/instr"
+  chmod 700 "$IRIS_RUN/instr"
   rm -f "$instruction_key_out" "$instruction_key_out.pub" \
     "$instruction_runtime_cert"
   IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$script_dir" python3 - \
@@ -129,7 +134,39 @@ chmod 600 "$IRIS_RUN/tls/cert.pem"
 # The exported CA contains public certificate material only and is the one
 # narrow shared bootstrap file the state-free console needs before HTTPS can
 # carry its tier credential.
-if [ "${IRIS_MANAGEMENT_API_GENERATE_CERT:-0}" = "1" ]; then
+# A lifecycle-managed identity has independent encrypted custody. Never fall
+# back to a device key when either half of an admitted replacement is missing.
+if [ -e "$IRIS_CONFIG/tls/management-key.pem.age" ] || \
+   [ -L "$IRIS_CONFIG/tls/management-key.pem.age" ] || \
+   [ -e "$IRIS_CONFIG/tls/management-crt.pem" ] || \
+   [ -L "$IRIS_CONFIG/tls/management-crt.pem" ]; then
+  IRIS_MANAGEMENT_API_KEY="$IRIS_RUN/tls/management-key.pem"
+  IRIS_MANAGEMENT_API_CERT="$IRIS_RUN/tls/management-crt.pem"
+  IRIS_CONFIG="$IRIS_CONFIG" IRIS_RUN="$IRIS_RUN" \
+    IRIS_AGE_KEY_FILE="$IRIS_AGE_KEY_FILE" IRIS_AGE_BIN="$IRIS_AGE_BIN" \
+    PYTHONPATH="$script_dir" python3 - <<'PY' || {
+import os, ssl
+from pathlib import Path
+import instruction_keys
+import secretfs
+config = Path(os.environ['IRIS_CONFIG']) / 'tls'
+runtime = Path(os.environ['IRIS_RUN']) / 'tls'
+# Strict regular-file reads reject symlink and special-file custody.
+instruction_keys._read_regular(config / 'management-key.pem.age', 65536,
+    unavailable='Management key unavailable', too_large='Management key oversized')
+certificate = instruction_keys._read_regular(config / 'management-crt.pem', 65536,
+    unavailable='Management certificate unavailable', too_large='Management certificate oversized')
+secretfs.decrypt_to(str(config / 'management-key.pem.age'),
+                    str(runtime / 'management-key.pem'), os.environ['IRIS_AGE_KEY_FILE'],
+                    age_bin=os.environ['IRIS_AGE_BIN'])
+instruction_keys._atomic_write(runtime / 'management-crt.pem', certificate, mode=0o644)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(runtime / 'management-crt.pem', runtime / 'management-key.pem')
+PY
+    echo "FATAL: lifecycle management TLS identity incomplete; preserve custody and recover the approved operation" >&2
+    exit 1
+  }
+elif [ "${IRIS_MANAGEMENT_API_GENERATE_CERT:-0}" = "1" ]; then
   mgmt_tmp="$IRIS_RUN/tls/.management-crt.pem.tmp"
   openssl req -x509 -new -key "$IRIS_MANAGEMENT_API_KEY" -days 3650 \
     -subj "/CN=iris" \
@@ -274,6 +311,20 @@ export IRIS_STATE IRIS_CONFIG IRIS_RUN
 export IRIS_SECRETS="$IRIS_RUN/secrets.json"
 export IRIS_RPC_SECRET_FILE="$IRIS_RUN/rpc-secret"
 export IRIS_CERT="$IRIS_RUN/tls/cert.pem"
+if [ "${IRIS_MAINTENANCE_SEEDER_ONLY:-0}" = "1" ]; then
+  # Private loopback proof without bypassing hostname verification or changing
+  # the durable device-pinned certificate. This runtime is discarded when the
+  # isolated maintenance container is removed by its host worker.
+  openssl req -x509 -new -key "$IRIS_RUN/tls/key.pem" -days 1 \
+    -subj '/CN=iris-maintenance' -addext 'subjectAltName=IP:127.0.0.1' \
+    -out "$IRIS_RUN/tls/maintenance-crt.pem" >/dev/null 2>&1
+  cat "$IRIS_RUN/tls/maintenance-crt.pem" "$IRIS_RUN/tls/key.pem" > "$IRIS_CERT"
+  chmod 600 "$IRIS_CERT"
+  export IRIS_TRACKER_ANNOUNCE='https://127.0.0.1:6969/announce'
+  export IRIS_TRACKER_CA="$IRIS_RUN/tls/maintenance-crt.pem"
+  export IRIS_TELEMETRY_CERT="$IRIS_CERT"
+  export IRIS_TELEMETRY_CA="$IRIS_TRACKER_CA"
+fi
 export IRIS_TELEMETRY_CERT="${IRIS_TELEMETRY_CERT:-$IRIS_CERT}"
 export IRIS_TELEMETRY_CA="${IRIS_TELEMETRY_CA:-$IRIS_CONFIG/tls/crt.pem}"
 export IRIS_AUDIT="${IRIS_AUDIT:-$IRIS_CONFIG/audit.jsonl}"
@@ -336,11 +387,22 @@ PYTHONPATH="$script_dir" python3 "$script_dir/migrate_tracker_announces.py" \
 
 cd /opt/iris/server
 PIDS=()
+CHILD_RESULTS=()
+# An exact pod UID plus a fresh process-start nonce prevents a prior container
+# restart in the same pod from being mistaken for this shutdown's evidence.
+if [ -n "${IRIS_INSTALLER_SHUTDOWN_PROOF:-}" ]; then
+  python3 "$script_dir/installer_shutdown.py" prepare
+fi
 
 stop_services() {
+  CHILD_RESULTS=()
   if [ "${#PIDS[@]}" -gt 0 ]; then
     kill "${PIDS[@]}" 2>/dev/null || true
-    wait "${PIDS[@]}" 2>/dev/null || true
+    for child in "${PIDS[@]}"; do
+      status=0
+      wait "$child" 2>/dev/null || status=$?
+      CHILD_RESULTS+=("$child:$status")
+    done
   fi
 }
 
@@ -348,13 +410,25 @@ on_shutdown() {
   trap - TERM INT
   echo "iris container stopping"
   stop_services
-  exit 0
+  clean_exit=0
+  for result in "${CHILD_RESULTS[@]}"; do
+    case "$result" in
+      *:0) ;;
+      *) clean_exit=1 ;;
+    esac
+  done
+  if [ -n "${IRIS_INSTALLER_SHUTDOWN_PROOF:-}" ]; then
+    python3 "$script_dir/installer_shutdown.py" record "${CHILD_RESULTS[@]}" || clean_exit=1
+  fi
+  exit "$clean_exit"
 }
 
 trap on_shutdown TERM INT
 
 python3 tracker.py & T=$!
-python3 catalog.py & C=$!
+if [ "${IRIS_MAINTENANCE_SEEDER_ONLY:-0}" != "1" ]; then
+  python3 catalog.py & C=$!
+fi
 # The seeder's first announces must wait for the tracker to bind. The gate
 # replaces itself with the recipe, preserving S for shutdown and supervision.
 RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
@@ -363,6 +437,21 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
   SEEDER_LOG=- \
   ARIA2=/opt/iris/bin/aria2c \
   python3 wait_for_tracker.py python3 peer_tls_seed.py seed-launch.sh & S=$!
+# The host lifecycle worker runs this mode only after proving normal writers
+# stopped, with no published ports and a dedicated isolated network. It keeps
+# the authenticated tracker evidence and aria RPC alive without starting any
+# catalog, artifact or management writer. An environment flag alone is not a
+# maintenance authorization; the host worker owns those deployment checks.
+if [ "${IRIS_MAINTENANCE_SEEDER_ONLY:-0}" = "1" ]; then
+  PIDS=("$T" "$S")
+  # Kubernetes must not admit maintenance exec/cleanup while PID 1 is still
+  # bootstrapping. This marker is on fresh runtime tmpfs, never the data PVC.
+  : > "$IRIS_RUN/maintenance-ready"
+  echo "iris maintenance: tracker and seeder only; normal writers are not started"
+  wait -n "$T" "$S" || true
+  stop_services
+  exit 1
+fi
 # Artifact server (HTTPS): explicit API consumers authenticate with resource-
 # bound device Basic credentials before path translation/existence. Unchanged
 # Guest Shell onboarding still pulls the explicit static files and time-bounded

@@ -171,13 +171,18 @@ pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9)
 PYTHON
   cp "$BATS_TEST_TMPDIR/aria2c" "$BATS_TEST_TMPDIR/ssh-keygen"
   printf 'license fixture\n' > "$BATS_TEST_TMPDIR/ssh-keygen.LICENCE"
+  # Keep this packaging-only test independent of ignored native build output.
+  # The same amd64 header satisfies the real architecture guard; never execute it.
+  cp "$BATS_TEST_TMPDIR/aria2c" "$BATS_TEST_TMPDIR/iris-aead"
+  printf 'license fixture\n' > "$BATS_TEST_TMPDIR/iris-aead.LICENCE"
   roots="$BATS_TEST_TMPDIR/roots.d"; mkdir "$roots"
   for name in root-a root-b; do
     ssh-keygen -q -t ed25519 -N '' -C test-only \
       -f "$BATS_TEST_TMPDIR/$name"
     cp "$BATS_TEST_TMPDIR/$name.pub" "$roots/$name.pub"
   done
-  run bash "$REPO/server/pack-agent-bundle.sh" "$DEVICE" \
+  run env IRIS_AEAD_HELPER="$BATS_TEST_TMPDIR/iris-aead" \
+    bash "$REPO/server/pack-agent-bundle.sh" "$DEVICE" \
     "$BATS_TEST_TMPDIR/aria2c" "$out" --instruction-roots-dir "$roots" \
     --ssh-keygen "$BATS_TEST_TMPDIR/ssh-keygen"
   [ "$status" -eq 0 ]

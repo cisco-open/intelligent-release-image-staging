@@ -8,6 +8,8 @@ import { createRoot } from 'react-dom/client';
 const sections = [
   ['general', 'General', 'Server details, administrator access, and sessions.'],
   ['tls', 'TLS & trust', 'Manage the Console certificate and trusted certificate authorities.'],
+  ['certificates', 'Certificates & keys', 'Review certificate deadlines and renew the instruction signing certificate.'],
+  ['backups', 'Backup & restore', 'Capture encrypted deployment files and verify isolated recovery.'],
   ['telemetry', 'Telemetry', 'Choose where IRIS sends progress and health reports.'],
   ['bulkhash', 'Image verification', 'Configure image authenticity checks and review their results.'],
   ['packages', 'Device packages', 'Review agent packages before onboarding devices.'],

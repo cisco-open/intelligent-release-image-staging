@@ -667,7 +667,8 @@ def test_role_global_base_and_only_differing_device_overrides(tmp_path):
         "role_of": {"device-1": "edge"},
         "qos_default": {"max_peers": 10, "telemetry_pause": False},
         "qos_device": {"device-1": {
-            "max_peers": 30, "telemetry_pause": True}},
+            "max_peers": 30, "telemetry_pause": True,
+            "peer_telemetry_interval_s": 10}},
     }
     peer_policy.validate_document(document)
     policy = _policy_result(document)
@@ -680,7 +681,9 @@ def test_role_global_base_and_only_differing_device_overrides(tmp_path):
         document["roles"]["defs"]["edge"], base, effective, NOW,
         NOW + 600)
     assert part["qos_override"] == {"max_peers": 30}
-    assert part["control_override"] == {"telemetry_pause": True}
+    assert part["control_override"] == {"telemetry_pause": True,
+                                        "peer_telemetry_interval_s": 10}
+    assert "peer_telemetry_interval_s" not in semantic["control"]
 
 
 def test_tracker_state_revision_does_not_change_instruction_artifacts_or_envelope(
@@ -2168,9 +2171,12 @@ def test_static_net_cap_uses_full_publication_at_1000_and_tracker_only_at_1001(
         _record()["value"]))[3] == part
 
 
-def test_live_snapshot_accepts_real_untruncated_v2_shape(tmp_path):
+@pytest.mark.parametrize("interval", [None, 10, 60, 240, 3600])
+def test_live_snapshot_accepts_real_untruncated_v2_shape(tmp_path, interval):
     paths, *_ = _setup(tmp_path)
     snapshot = _observed_snapshot()
+    if interval is not None:
+        snapshot["samples"]["device-1"]["interval_s"] = interval
     assert "peer_connections_truncated" not in snapshot["samples"]["device-1"]
     Path(paths.live_samples).write_text(json.dumps(snapshot, sort_keys=True))
     assert stamper._live_connections(paths, "device-1", NOW) == (

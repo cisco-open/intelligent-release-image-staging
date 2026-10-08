@@ -34,6 +34,7 @@ import peer_policy as _peer_policy
 import origin_qos as _origin_qos
 import reconciler_status as _status_codes
 import secrets_store
+import service_shutdown
 import telemetry
 from peer_registry import PeerRegistry, INTERVAL, NUMWANT_CAP
 
@@ -875,16 +876,21 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
     return srv
 
 
-def _start_pruner(registry):
+def _start_pruner(registry, stop_event=None):
+    stop_event = stop_event if stop_event is not None else threading.Event()
+
     def tick():
-        try:
-            registry.prune_all()
-        except Exception:
-            pass        # one bad pass must not end periodic pruning
-        t = threading.Timer(INTERVAL, tick)
-        t.daemon = True
-        t.start()
-    tick()
+        while not stop_event.is_set():
+            try:
+                registry.prune_all()
+            except Exception:
+                pass        # one bad pass must not end periodic pruning
+            stop_event.wait(INTERVAL)
+
+    thread = service_shutdown.WriterThread(target=tick, name="tracker-pruner",
+                                           daemon=True, stop_event=stop_event)
+    thread.start()
+    return thread
 
 
 # ---------------------------------------------------------------------------
@@ -1057,14 +1063,18 @@ class TrackerReconciler:
         return True
 
     def start(self):
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = service_shutdown.WriterThread(
+            target=self._loop, name="tracker-reconciler", daemon=True,
+            stop_event=self._stop)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout=5):
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=max(0, timeout))
+            return not self._thread.is_alive() and self._thread.clean_exit
+        return True
 
     def _loop(self):
         # Startup always applies once (force full valid desired).
@@ -1730,8 +1740,8 @@ def main():
     # Prometheus /metrics exposure stays startup-gated below.
     hub = telemetry.from_env()
     registry = hub.registry
-    _start_pruner(registry)
-    hub.start()
+    stop = threading.Event()
+    servers = []
     mport = telemetry.metrics_port()
     if mport is not None:
         # External Prometheus-format /metrics is gated on IRIS_OBSERVABILITY
@@ -1776,7 +1786,7 @@ def main():
                 certfile=os.environ.get("IRIS_TELEMETRY_CERT")
                 or os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem"),
                 keyfile=os.environ.get("IRIS_TELEMETRY_KEY") or None)
-            threading.Thread(target=msrv.serve_forever, daemon=True).start()
+            servers.append(msrv)
             print("swarm JSON on https://%s:%d/swarm "
                   "(management bearer required)%s"
                   % (mhost, mport,
@@ -1815,10 +1825,15 @@ def main():
         print("iris-tracker: TLS certificate unusable; refusing plaintext "
               "tracker transport", file=sys.stderr, flush=True)
         sys.exit(2)
+    pruner = _start_pruner(registry, stop)
+    hub.start()
     reconciler.start()
     print("tracker on https://%s:%d/announce" % (host, port), flush=True)
-    srv.serve_forever()
+    return service_shutdown.serve(
+        [srv, *servers],
+        [lambda left: service_shutdown.stop_thread(pruner, stop, left),
+         reconciler.stop, hub.stop])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

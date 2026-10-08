@@ -17,6 +17,121 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Prepare both IOx architectures with verified SHA512 package manifests for
+  native Polaris signing. Exclude signature files from manifests and refuse
+  to rewrite signed wrappers. Keep image payloads and OCI digests unchanged.
+
+## [2026.10.08]
+
+- Refresh the instruction-encryption helper's OpenSSL build pins and matching
+  notices after Alpine withdrew the previous packages. Keep the standalone,
+  server and device builds aligned.
+
+- Show directional device-to-device transfers on the Swarm Map using fresh,
+  identity-matched peer observations. Add a per-device 10-second telemetry
+  option in the Console, delivered through signed policy, while keeping the
+  60-second default and normal device control polling unchanged. Correct the
+  server's peer-row cap so reporting cadence does not truncate peer lists.
+
+- Remove the repeated "Stage only" label from the Console header.
+
+- Support a chosen host image folder for managed Docker installations, including
+  backup and restore. Check read access before changing an existing mount and
+  preserve separate Console upload storage.
+
+- Show deployment layout, hosts, container or pod names, images and observed
+  runtime state on the Console dashboard, with explicit limited-inventory and
+  unavailable states. Managed inventory remains read-only and deployment-scoped.
+
+- Replace installer desktop windows with terminal commands for setup and host
+  recovery. Add `iris-key-setup` to guide key holders through creating protected
+  signing keys, creating recovery keys, approving requests and copying public
+  files. Private signing roots stay off the server.
+
+- Remove the active IOS-XR peer identity during verified agent teardown, while
+  preserving staged images and public certificate generations. Re-onboarding
+  can enroll against the selected deployment without retaining the previous CA.
+
+- Authenticate public release assets, including the Ubuntu installer, with
+  GitHub-hosted workflow attestations bound to the release tag and source commit.
+  Publish source inventories, both aria2 clients and their corresponding source.
+
+- Provision a persistent, deployment-bound maintenance service and separate
+  private backup directories during installation. Preserve operator storage
+  choices across offline signing approval. Add host controls for service health,
+  recovery-key access and independently trusted public backup signers.
+
+- Add confirmed restore cutover for an existing managed Docker, split Docker or
+  Kubernetes deployment. Verify both encrypted backup sets, fence writers,
+  reject changed security authority and preserve current instruction replay
+  floors before replacing saved data. Retain original files and recover an
+  interrupted cutover under the same operation ID. Verify restarted services
+  and every Console consumer before reporting completion.
+
+- Extend the Ubuntu installer to split Docker and Kubernetes with
+  explicit remote custody, cluster/resource ownership, native package builds,
+  topology-aware cold backups and seven deployment credential workflows.
+  Verify every Console consumer, preserve management-token overlap on failed
+  synchronization, and require pod/process-bound shutdown proof for PVC capture.
+  Keep the Kubernetes lifecycle worker outside the cluster behind mutual TLS.
+  Add host controls for same-key renewal of that worker's CA and connection certificates,
+  including recovery after expiry. Drain HTTP requests, publishers, exports and
+  background writers before admitting clean-stop backup evidence. Handle Console
+  pod termination gracefully and distinguish an idle seeder from an unreachable
+  active BitTorrent listener during installation checks. Bind credential-use
+  evidence to the exact running consumer and recover interrupted Kubernetes
+  token publication only under its original operation. Batch small PVC backup
+  reads and bulk resource lookups within each check while retaining ownership,
+  identity and digest verification; do not cache checks between transfers.
+  Wait for shutdown-safe seeder-helper readiness and accept Kubernetes' omitted
+  empty environment values without weakening checks for other runtime changes.
+
+- Add planned single-Docker credential maintenance in the Console for management
+  and device TLS, peer CA, offline signing roots, server age identity and seeder
+  credentials. Require independently verified cold backups, stopped writers,
+  bounded recovery and consumer evidence. Rebuild native packages when signing
+  roots change; require device removal and re-onboarding for changed trust.
+  Package terminal tools for offline key generation/approval, independent recovery
+  recipient replacement and host recovery. Preserve access to older backup sets.
+
+- Add owner-only Console browser TLS request, public CA approval, explicit
+  self-signed replacement and recoverable publication with listener reload.
+  Add encrypted metrics-token and destination-bound collector credential
+  overrides, consumer-use evidence, confirmed retirement and pending rollback.
+  Keep deployment mounts unchanged for these browser and telemetry overrides.
+
+- Add opt-in UTC key maintenance schedules and Console controls for signer
+  preparation, device instruction-key rotation and Docker management-token
+  rotation. Preserve overlap, require offline approvals or consumer verification,
+  and stop for review after interrupted operations. Other credential families
+  have review reminders, not automated replacement. Include the private-swarm
+  CA in recipient re-encryption and reject rekey with a pending signer candidate.
+
+- Add guided online instruction-signing key rotation in the Console, with
+  offline public approvals, crash-safe activation and signed retirement of the
+  previous key. Preserve device roots and replay state. Include fresh Guest
+  Shell publication verification alongside both IOx packages and the XR RPM
+  in the Ubuntu installer.
+
+- Add Console certificate/key inventory and guarded same-key instruction
+  certificate renewal, encrypted cold backups, signed manifests, isolated file
+  recovery and scoped Console worker controls.
+
+- Add an Ubuntu 24.04 installer `.deb` with managed host dependencies,
+  isolated single-host source builds, an installation journal, offline signing
+  approval/resume, required peer TLS by default and automatic IOx/ARM64/XR
+  package builds. Keep account claim explicit. Source builds require network
+  access; this package is not an offline kit.
+
+- Start the production installer foundation with scoped runtime package checks
+  for Docker and Kubernetes. Check package/certificate readability as the server
+  identity instead of accepting host-root reads, and publish public IOx artifacts
+  with explicit modes under restrictive umasks.
+
+- Retain signature-verified offline hash feeds for later image imports for seven
+  days, rechecking signatures on every use. Explain uninitialized instruction
+  signing in IOx onboarding failures instead of reporting a generic rejection.
+
 - Preserve required peer TLS in Catalyst 8000 Guest Shell onboarding, reject
   invalid modes before contacting a device, separate signing-root commands by
   key holder, and correct the distributed aria2c license reference to GPLv3.

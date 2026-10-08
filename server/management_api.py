@@ -25,6 +25,7 @@ import shutil
 import signal
 import ssl
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -49,6 +50,14 @@ import gui_auth
 import gui_fleet
 import gui_onboard
 import gui_tls
+import tls_rotation
+import trust_rotation
+import service_credentials
+import certificate_lifecycle
+import instruction_rotation
+import key_maintenance
+import lifecycle_client
+import deployment_info
 import instruction_keys
 import instruction_stamper
 import instructions
@@ -1542,6 +1551,7 @@ _CA_JOB_TTL = 3600                  # evict terminal refresh jobs after (s)
 # polls. Per-process: a restart abandons in-flight jobs.
 _CA_JOBS = {}
 _CA_JOBS_LOCK = threading.Lock()
+_CA_JOB_THREADS = {}
 
 
 def _validate_ca_url(raw):
@@ -1627,6 +1637,7 @@ def start_ca_refresh(url, audit_fn=None, download_fn=None):
                  and j["finished_at"] <= now - _CA_JOB_TTL]
         for jid in stale:
             del _CA_JOBS[jid]
+            _CA_JOB_THREADS.pop(jid, None)
         _CA_JOBS[job_id] = job
 
     def run():
@@ -1642,8 +1653,16 @@ def start_ca_refresh(url, audit_fn=None, download_fn=None):
             job["certs"] = certs
             job["finished_at"] = time.time()
 
-    threading.Thread(target=run, daemon=True).start()
+    thread = _ManagedWriterThread(target=run)
+    with _CA_JOBS_LOCK:
+        _CA_JOB_THREADS[job_id] = thread
+    thread.start()
     return job_id
+
+
+def _manual_ca_writers():
+    with _CA_JOBS_LOCK:
+        return list(_CA_JOB_THREADS.values())
 
 
 def get_ca_job(job_id):
@@ -3416,6 +3435,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     ("DELETE", "/internal/v1/peer-policy/roles/{name}"),
                     ("PUT", "/internal/v1/peer-policy/qos"),
                     ("POST", "/internal/v1/devices/{device_id}/role"),
+                    ("POST", "/internal/v1/devices/{device_id}/peer-telemetry"),
                     ("POST", "/internal/v1/devices/bulk-role"),
                 }
                 # Admission follows tier auth, browser session/CSRF, and
@@ -3657,7 +3677,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             exactly what device/xr-uninstall.sh removes: the appmgr
             application, its registered package source, the RPM staged at
             harddisk: root, and the agent's iris-work/ control-file
-            directory. Every other management type here is IOS-XE and runs its
+            directory, plus the three active peer identity files after their
+            IRIS manifest/layout ownership is verified. Public certificate
+            generation directories remain untouched. Every other management type here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
             iox = resolved.get("platform") == "iox"
@@ -3685,6 +3707,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                      "path": "harddisk:iris-xr.rpm"},
                     {"kind": "agent-work-dir", "ownership": "iris-created",
                      "path": "harddisk:iris-work"},
+                    {"kind": "agent-peer-identity", "ownership": "iris-created",
+                     "paths": ["harddisk:peer-tls/current.json",
+                               "harddisk:peer-tls/node.key",
+                               "harddisk:peer-tls/enrollment.lock"]},
                 ]
             resources = [{"kind": "guestshell", "ownership": "iris-created"}]
             if management_type == "routed":
@@ -4865,6 +4891,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if data is None:
                     self._json(404, {"error": "not found"}); return
                 self._send(200, "text/plain; charset=utf-8", data); return
+            if path == "/api/deployment":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                console = deployment_info.read_console(self.headers.get(deployment_info.HEADER))
+                self._json(200, deployment_info.summary(console)); return
             if path == "/api/overview":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -4926,6 +4957,70 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     path[len("/api/settings/audit-export/run/"):])
                 self._json(200, job) if job else self._json(
                     404, {"error": "no such job"})
+                return
+            if path == "/api/settings/certificates":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                self._json(200, certificate_lifecycle.inventory())
+                return
+            if path == '/api/settings/service-credentials':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                try:
+                    self._json(200, service_credentials.status())
+                except (OSError, ValueError):
+                    self._json(503, {'error': 'Service credential state unavailable'})
+                return
+            if path == '/api/settings/certificates/browser/rotation':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                try:
+                    self._json(200, tls_rotation.status())
+                except (ValueError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except OSError:
+                    self._json(503, {'error': 'TLS rotation status unavailable'})
+                return
+            if path == "/api/settings/key-maintenance":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    self._json(200, key_maintenance.Maintenance().status())
+                except (key_maintenance.MaintenanceError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {"error": str(exc)})
+                except (OSError, ValueError):
+                    self._json(503, {"error": "key maintenance status unavailable"})
+                return
+            if path == "/api/settings/certificates/instruction/rotation":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    self._json(200, instruction_rotation.status())
+                except instruction_keys.InstructionKeyError as exc:
+                    self._json(409, {"error": str(exc)})
+                except (OSError, ValueError):
+                    self._json(503, {"error": "rotation status unavailable; inspect custody before retrying"})
+                return
+            if path == '/api/settings/deployment-rotation':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                self._json(200, lifecycle_client.rotation_status())
+                return
+            if path == '/api/settings/trust-rotation':
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {'error': 'unauthorized'}); return
+                try:
+                    self._json(200, {'items': [trust_rotation.status(family) for family in trust_rotation.FAMILIES],
+                                     'drain': trust_rotation.drain_status()})
+                except (trust_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self._json(503, {'error': 'Trust approval state unavailable; preserve existing requests'})
+                return
+            if path == "/api/settings/backups":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                self._json(200, lifecycle_client.status())
                 return
             if path == "/api/settings/setup-status":
                 info = app.session_info(self._sid())
@@ -5770,6 +5865,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         definition = {key: value for key, value in body.items()
                                       if key != "confirm_token"}
                         committed = coordinator.define_role(name, definition, actor, **options)
+                elif path.startswith("/api/devices/") and path.endswith("/peer-telemetry"):
+                    did = unquote(path[len("/api/devices/"):-len("/peer-telemetry")])
+                    if set(body) - {"interval_s", "confirm_token"} \
+                            or type(body.get("interval_s")) is not int \
+                            or body["interval_s"] not in (10, 60):
+                        raise ValueError("bad peer telemetry interval")
+                    if fleet is None or fleet.get_device(did) is None:
+                        raise peer_policy.PolicyError("device not found", code="device_not_found")
+                    record = catalog.get_device(did) if catalog is not None else None
+                    if body["interval_s"] == 10 and (not record or
+                            record.get("peer_telemetry_v") != 1 or
+                            not 0 <= time.time() - record.get("last_seen", 0) <= 600):
+                        raise peer_policy.PolicyError(
+                            "Update the device agent before selecting 10 seconds",
+                            code="peer_telemetry_unsupported")
+                    qos = dict(loaded.document.get("roles", {}).get("qos_device", {}).get(did, {}))
+                    if body["interval_s"] == 60:
+                        qos.pop("peer_telemetry_interval_s", None)
+                    else:
+                        qos["peer_telemetry_interval_s"] = 10
+                    committed = coordinator.set_qos(qos, actor, device_id=did, **options)
+                    extra.update(device_id=did, requested_interval_s=body["interval_s"])
                 elif path == "/api/peer-policy/qos":
                     if set(body) - {"qos", "qos_state", "role", "confirm_token"} or \
                             not ({"qos", "qos_state"} & set(body)):
@@ -6367,6 +6484,141 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="publishing in place from %s" % src,
                            src_ip=self._client_ip())
                 self._json(200, {"job_id": images.start_publish(src)}); return
+            if path == '/api/settings/deployment-rotation':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if data.get('action') not in ('rotate', 'recover-rotation'):
+                    self._json(400, {'error': 'Choose a scoped credential rotation'}); return
+                try:
+                    result = lifecycle_client.call(data)
+                except ValueError as exc:
+                    self._json(400, {'error': str(exc)}); return
+                except lifecycle_client.LifecycleUnavailable as exc:
+                    self._json(503, {'error': str(exc)}); return
+                self._audit('deployment_rotation', 'security', action=data['action'],
+                    actor=actor, target=data['family'], detail='Maintenance request accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path == '/api/settings/trust-rotation':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = trust_rotation.operate(data)
+                    self._audit('trust_approval', 'security', action=data.get('action'), actor=actor,
+                        target=data.get('family'), detail='Public trust approval state updated', src_ip=self._client_ip())
+                    self._json(200, result)
+                except (trust_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self._json(503, {'error': 'Trust operation incomplete; refresh the request before retrying'})
+                return
+            if path == "/api/settings/backups":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if data.get('action') not in ('backup', 'verify', 'extract', 'restore', 'recover-restore'):
+                    self._json(400, {"error": "Choose backup, verify, extraction or deployment restore"}); return
+                try:
+                    result = lifecycle_client.call(data)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                except lifecycle_client.LifecycleUnavailable as exc:
+                    self._json(503, {"error": str(exc)}); return
+                self._audit('deployment_maintenance', 'security', action=data['action'],
+                            actor=actor, target='deployment-backup',
+                            detail='maintenance request accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path == '/api/settings/service-credentials':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = service_credentials.operate(data)
+                    self._audit('service-credential-rotation', 'settings', action=data.get('action'),
+                        target=data.get('family'), actor=actor, detail='Service credential state updated', src_ip=self._client_ip())
+                    self._json(200, result)
+                except service_credentials.CredentialError as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, subprocess.SubprocessError, tier_auth.CredentialUnavailable):
+                    self._json(503, {'error': 'Credential operation incomplete; refresh before retrying'})
+                return
+            if path == '/api/settings/certificates/browser/rotation':
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = tls_rotation.operate(data)
+                    if data.get('action') == 'apply':
+                        result['applied'] = reload_tls()
+                    self._audit('browser-tls-rotation', 'settings', action=data.get('action'),
+                        target='browser-tls', actor=actor, detail='TLS rotation state updated', src_ip=self._client_ip())
+                    self._json(200, result)
+                except (tls_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                    self._json(409, {'error': str(exc)})
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                    self._json(503, {'error': 'TLS operation incomplete; refresh and preserve the request for recovery'})
+                return
+            if path == "/api/settings/key-maintenance":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    maintenance = key_maintenance.Maintenance()
+                    result = (maintenance.update(data) if data.get('action') == 'save-policy'
+                              else maintenance.act(data, presented=tier_auth.bearer(self.headers)))
+                except (key_maintenance.MaintenanceError, instruction_keys.InstructionKeyError, tier_auth.CredentialUnavailable) as exc:
+                    self._json(409, {"error": str(exc)}); return
+                except (OSError, ValueError):
+                    self._json(503, {"error": "maintenance outcome unavailable; refresh before retrying"}); return
+                self._audit('key_maintenance', 'security', action=data['action'], actor=actor,
+                            target='key-maintenance', detail='maintenance operation accepted', src_ip=self._client_ip())
+                self._json(200, result); return
+            if path == "/api/settings/certificates/instruction/rotation":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                try:
+                    result = instruction_rotation.operate(data)
+                except instruction_keys.InstructionKeyError as exc:
+                    self._audit('instruction_signer_rotation', 'security', action='rotation',
+                        actor=actor, result='fail', target='online-signer',
+                        detail='rotation request rejected', src_ip=self._client_ip())
+                    self._json(409, {"error": str(exc)}); return
+                except (OSError, ValueError):
+                    self._json(503, {"error": "rotation outcome unavailable; refresh and retry the same request"}); return
+                self._audit('instruction_signer_rotation', 'security', action=data['action'],
+                    actor=actor, target='online-signer', detail='rotation operation accepted',
+                    src_ip=self._client_ip())
+                self._json(200, result); return
+            if path in ("/api/settings/certificates/instruction/request",
+                        "/api/settings/certificates/instruction/renew"):
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                operation = "request" if path.endswith("/request") else "renew"
+                try:
+                    if operation == "request":
+                        if data != {}:
+                            raise instruction_keys.InstructionKeyError("request takes no fields")
+                        result = instruction_keys.online_renewal_request(
+                            instruction_keys.InstructionPaths.from_env())
+                    else:
+                        result = certificate_lifecycle.renew(data)
+                except instruction_keys.InstructionKeyError as exc:
+                    self._audit("instruction_certificate_" + operation, "security",
+                               action=operation, actor=actor, result="fail",
+                               target="instruction-certificate", detail="certificate operation rejected",
+                               src_ip=self._client_ip())
+                    self._json(409, {"error": str(exc)}); return
+                except (OSError, ValueError):
+                    self._json(503, {"error": "certificate operation unavailable; recheck before retrying"}); return
+                self._audit("instruction_certificate_" + operation, "security",
+                           action=operation, actor=actor, target="instruction-certificate",
+                           detail="public renewal request prepared" if operation == "request"
+                           else "same-key certificate renewal applied",
+                           src_ip=self._client_ip())
+                self._json(200, result); return
             if path == "/api/settings/password":
                 data = self._json_body(raw)
                 if data is None:
@@ -6955,7 +7207,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            result="ok" if applied else "fail")
                 self._json(200, {"ok": True, "applied": applied,
                                  "failed": failed}); return
-            if path.startswith("/api/devices/") and path.endswith("/role"):
+            if path.startswith("/api/devices/") and path.endswith(("/role", "/peer-telemetry")):
                 self._policy_mutation(path, actor, raw)
                 return
             if path.startswith("/api/devices/") and path.endswith("/assign"):
@@ -7365,7 +7617,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, {"deleted": existed}); return
             if path == "/api/settings/gui-cert":
                 was_active = gui_tls.override_active()
-                gui_tls.remove_override()
+                try:
+                    gui_tls.remove_override()
+                except (ValueError, instruction_keys.InstructionKeyError):
+                    self._json(409, {'error': 'Resolve the pending TLS publication before clearing the certificate'}); return
                 reload_tls()  # fall back to the built-in IRIS_CERT chain
                 self._audit("gui-cert-revert", "settings", action="revert",
                            target="gui-cert", actor=actor,
@@ -7694,6 +7949,45 @@ class _TerminationRequested(BaseException):
     """Internal unwind used to route container SIGTERM through cleanup."""
 
 
+class _ManagedWriterThread(threading.Thread):
+    """Retain completion/failure evidence for daemon writers at pod shutdown."""
+
+    def __init__(self, *, target, args=()):
+        super().__init__(target=target, args=args, daemon=True)
+        self.start_attempted = False
+        self.writer_failed = False
+        self.writer_finished = threading.Event()
+
+    def start(self):
+        # TERM can interrupt Thread.start before ident is populated. Recording
+        # admission first prevents that race from looking like an unused thread.
+        self.start_attempted = True
+        super().start()
+
+    def run(self):
+        try:
+            super().run()
+        except BaseException:
+            self.writer_failed = True
+            print('iris-management: a background writer failed; clean shutdown cannot be attested',
+                  file=sys.stderr, flush=True)
+        finally:
+            self.writer_finished.set()
+
+
+def _drain_management_writers(threads, *, timeout=30):
+    """One total deadline, with failure sticky even after a daemon has exited."""
+    deadline = time.monotonic() + timeout
+    clean = True
+    for thread in threads:
+        if not thread.start_attempted:
+            continue
+        finished = thread.writer_finished.wait(max(0.0, deadline - time.monotonic()))
+        if not finished or thread.writer_failed:
+            clean = False
+    return clean
+
+
 class _SigtermLatch(object):
     """Install TERM protection before local admission can begin."""
 
@@ -7832,7 +8126,8 @@ def main():
     images = gui_images.ImageService(
         state_dir, images_dir, audit_fn=_bg_audit,
         verification_fn=lambda _entry: bulkhash_refresh.run_refresh(
-            "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True))
+            "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True,
+            use_offline_cache=True))
     term_latch = _SigtermLatch()
     term_latch.install()
     iox_controller = None
@@ -7958,40 +8253,41 @@ def main():
     # all state-owner adapters were constructed. Importing or calling
     # make_server() remains inert.
     schedule_stop = threading.Event()
-    schedule_thread = threading.Thread(
-        target=schedule_service.run, args=(schedule_stop,), daemon=True)
+    schedule_thread = _ManagedWriterThread(
+        target=schedule_service.run, args=(schedule_stop,))
     custody_stop = threading.Event()
     instruction_stop = threading.Event()
     ca_stop = threading.Event()
     bulkhash_stop = threading.Event()
     export_stop = threading.Event()
+    maintenance_stop = threading.Event()
+    maintenance_thread = _ManagedWriterThread(
+        target=key_maintenance.Maintenance(state_dir).run, args=(maintenance_stop,))
+    writer_threads = [schedule_thread, maintenance_thread]
+
+    def start_writer(target, args):
+        thread = _ManagedWriterThread(target=target, args=args)
+        writer_threads.append(thread)
+        thread.start()
 
     def start_management():
         # All admission starts under the termination latch. A signal during
         # construction skips this callback; a signal or failure within it
         # still enters the same cleanup path with any started work owned.
         schedule_thread.start()
+        maintenance_thread.start()
         # Maintenance stays in this process, sharing its trusted stores.
-        threading.Thread(
-            target=instruction_keys.status_loop,
-            args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
-            daemon=True).start()
-        threading.Thread(
-            target=instruction_stamper.status_loop,
-            args=(instruction_stop, instruction_stamper.InstructionStamper(
-                fleet=fleet, catalog_store=catalog)),
-            daemon=True).start()
-        threading.Thread(target=ca_trust_refresh_loop,
-                         args=(ca_stop, state_dir, _bg_audit),
-                         daemon=True).start()
-        threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
-                         args=(bulkhash_stop, state_dir, catalog, _bg_audit),
-                         daemon=True).start()
+        start_writer(instruction_keys.status_loop,
+                     (custody_stop, instruction_keys.InstructionPaths.from_env()))
+        start_writer(instruction_stamper.status_loop,
+                     (instruction_stop, instruction_stamper.InstructionStamper(
+                         fleet=fleet, catalog_store=catalog)))
+        start_writer(ca_trust_refresh_loop, (ca_stop, state_dir, _bg_audit))
+        start_writer(bulkhash_refresh.bulkhash_refresh_loop,
+                     (bulkhash_stop, state_dir, catalog, _bg_audit))
         # Read export credentials through the accessor at each run.
-        threading.Thread(target=audit_export.export_loop,
-                         args=(export_stop, audit_path, state_dir,
-                               creds.audit_export_secrets, _bg_audit),
-                         daemon=True).start()
+        start_writer(audit_export.export_loop,
+                     (export_stop, audit_path, state_dir, creds.audit_export_secrets, _bg_audit))
         control_server.start()
     scheme = "https" if srv.tls_active else "http"
     if not srv.tls_active:
@@ -8002,15 +8298,20 @@ def main():
     print("iris-management on %s://%s:%d/internal/v1" %
           (scheme, host, port), flush=True)
     def shutdown_management():
+        srv.stop_request_admission()
         for stop in (schedule_stop, custody_stop, instruction_stop, ca_stop,
-                     bulkhash_stop, export_stop):
+                     bulkhash_stop, export_stop, maintenance_stop):
             stop.set()
         schedule_service.stop()
-        if schedule_thread.ident is not None:
-            schedule_thread.join(timeout=10)
-        if schedule_thread.is_alive():
-            print("iris-management: schedule runner did not stop within 10s",
-                  file=sys.stderr, flush=True)
+        # Drain API handlers before snapshotting manual CA jobs: an admitted
+        # request may still be about to enqueue its download. An unfinished
+        # request already makes this shutdown ineligible for a clean proof.
+        clean_requests = srv.drain_requests(timeout=30)
+        writer_deadline = time.monotonic() + 30
+        clean_images = images.shutdown(timeout=max(0.0, writer_deadline - time.monotonic()))
+        clean_exports = audit_export.drain_exports(timeout=max(0.0, writer_deadline - time.monotonic()))
+        clean_writers = _drain_management_writers(writer_threads + _manual_ca_writers(),
+            timeout=max(0.0, writer_deadline - time.monotonic()))
         try:
             control_server.close()
         finally:
@@ -8021,6 +8322,8 @@ def main():
                     onboard.shutdown()
                 finally:
                     iox_controller.close()
+        if not clean_requests or not clean_writers or not clean_images or not clean_exports:
+            raise RuntimeError('Management writers did not finish cleanly; consistent backup refused')
 
     _serve_with_shutdown(
         srv, shutdown_management, latch=term_latch,

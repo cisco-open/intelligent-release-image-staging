@@ -6,6 +6,67 @@ SPDX-License-Identifier: Apache-2.0
 
 # Back up and restore
 
+## Console backup controls
+
+**Settings → Backup & restore** connects to the installer host's lifecycle
+worker. For installer-owned Docker, split Docker and Kubernetes deployments,
+**Back up now**
+stops the server and Console, captures encrypted data and a separate identity
+recovery set, then starts the services that were running. Confirm the downtime
+before proceeding. The host worker continues while the Console is unavailable.
+Backups include Console uploads and the host image folder recorded by the
+managed Docker installer. A restore puts both back as they were in the backup;
+keep the host folder dedicated to IRIS and avoid editing it during maintenance.
+For an interrupted credential rotation, use the
+[host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped)
+even while the Console is stopped.
+
+**Verify backup** checks the signature, decryption and every captured file in
+both sets. **Extract for isolated recovery** writes to a new protected directory.
+The operator must provision recovery access on the worker first. Keep encrypted
+copies and the trusted backup public key off the deployment host.
+
+The Ubuntu installer starts the worker as a managed host service for all three
+layouts. It restarts at boot and after a process failure. Data archives and
+identity archives use separate private directories created by the installer.
+The default directories share the host's storage. Copy both encrypted sets and
+the trusted public backup key to independently protected storage.
+
+Use `irisctl worker-status --state-dir <installation-state-directory>` on the
+installer host to check service and storage health. Set recovery access with:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris configure-recovery \
+  --identity /protected/path/recovery.age --independent-copy
+```
+
+Keep that recovery key outside deployment and backup folders. The command
+checks its public recipient and retains protected access on this host.
+Keep an independent copy away from the host. Use the `disable-recovery` action
+when finished; retained keys remain available for older backups.
+
+Choose separate mounted storage during installation when required. The worker
+records those mounts and refuses new work if they disappear or change. Reconnect
+the recorded storage before restarting the service. For Kubernetes,
+`irisctl maintenance` also shows connection status and works locally when
+the connection certificates need renewal.
+
+!!! warning "Recovery scope"
+
+    These controls require an installer-owned deployment and its recorded topology.
+    Restore requires current security records from the same deployment.
+    Missing records, changed credentials or changed sharing rules block restoration.
+    Keep separate copies for recovery from host loss. Scheduled retention remains
+    a separate operation. See
+    [Install the Ubuntu package](../install/managed-package.md) for managed deployment setup.
+
+Split Docker also captures encrypted Console custody from the recorded remote
+host. Kubernetes stops every Console replica and the server, checks clean writer
+shutdown evidence tied to the exact pod and process start, then captures the
+server PVC. A vanished or forcibly terminated pod is not sufficient evidence.
+The service age identity remains in the separate recovery set. The external
+worker and its transport credentials must remain available during downtime.
+
 ## What to back up
 
 Back up before an upgrade, a key rotation, a move, or a reset.
@@ -45,12 +106,45 @@ Keep the age identity in its separate protected backup. After a loss, see
 
 ## Restore a backup
 
-1. Stop the server.
-2. Restore the state, the configuration, and the images from one point in time.
-3. Put the age identity back where `IRIS_AGE_KEY_FILE_HOST` points.
-4. Restore the credentials and certificates on the host or cluster that owns them.
-5. Start the stack with the same files, project names, and volume paths.
-6. Check file ownership on the restored volumes, and repair it if it changed. Sign in to the Console: it lists what was in the backup.
+For an installer-owned deployment:
+
+1. Set recovery access on the installer host as described above. Set the trusted
+   backup signer with `irisctl maintenance --state-dir <installation-state-directory>
+   trust-signer --signer /protected/path/backup-signer.pub`, using `sudo`.
+   Check this public key against your independently held record.
+2. In **Settings → Backup & restore**, select the captured backup and choose
+   **Restore selected backup**. From the host terminal, use the maintenance
+   action `restore --job-id <backup-job-id> --allow-downtime` instead.
+3. Review the selected backup and confirm downtime and replacement of deployment
+   data. Keep the same hosts, storage, deployment configuration and service images.
+4. Wait for `restored`. The worker checks both encrypted sets, stops every writer,
+   restores file ownership and data, and starts the server followed by the Console.
+   Completion includes an authenticated management request from the Console.
+5. Sign in again. Restarting the Console invalidates existing sessions. Check the
+   restored inventory, jobs, assignments and images before continuing operations.
+
+The worker preserves current instruction counters, revocations, disclosure records
+and completed-operation evidence. It requires matching credentials, sharing rules,
+device ownership, account data, image quarantine decisions and external trust.
+A refusal before replacement resumes the original services. Original data remains
+available in protected directories beside restored storage after publication.
+
+!!! warning
+
+    An old backup cannot prove current revocations or instruction counters.
+    Missing current authority blocks restoration. Never bypass this refusal by
+    deleting journals, resetting counters or choosing a later timestamp.
+    Recovery onto a replacement host or cluster requires separate security review.
+
+If publication or restart fails, use **Recover approved operation** with the same
+operation ID with the [host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
+The worker keeps affected services stopped and resumes its approved publication.
+It preserves newer data written after a restart attempt.
+
+For deployments configured manually, stop all writers and restore matching state,
+configuration, images and identity together. Establish current revocation and
+instruction-counter authority before starting services. Use the same deployment
+files, project names and volume paths, then verify ownership and Console access.
 
 ## Repair volume ownership after a restore
 

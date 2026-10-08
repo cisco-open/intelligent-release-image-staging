@@ -113,6 +113,9 @@ SRC="$BUILD_OUT/$PKG_NAME"
 MANIFEST_SRC="$SRC.manifest"
 [ -f "$SRC" ] && [ -f "$MANIFEST_SRC" ] \
   || { echo "!! build did not produce $SRC and its provenance manifest" >&2; exit 1; }
+# These are public distribution bytes, never private keys. docker cp preserves
+# source modes, so a restrictive build umask must not leave them root-only.
+chmod 0444 "$SRC" "$MANIFEST_SRC"
 
 if [ "$PLACE_WITH_DOCKER" -eq 1 ]; then
   # Same atomic discipline as the host branch below: a device fetching the
@@ -133,6 +136,8 @@ else
   MANIFEST_TMP_DEST="$ARTIFACTS_DIR/.$PKG_NAME.manifest.tmp"
   cp "$SRC" "$TMP_DEST"
   cp "$MANIFEST_SRC" "$MANIFEST_TMP_DEST"
+  # cp applies the caller's umask when it creates a new destination.
+  chmod 0444 "$TMP_DEST" "$MANIFEST_TMP_DEST"
   rm -f "$MANIFEST_DEST"
   mv -f "$TMP_DEST" "$DEST"
   mv -f "$MANIFEST_TMP_DEST" "$MANIFEST_DEST"

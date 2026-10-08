@@ -351,11 +351,11 @@ def _rebake_rootfs_oci(members, byname, replacements, hit):
 
 
 def _mf(entries):
-    """entries: ordered (name, bytes) -> ioxclient-style SHA256 manifest."""
+    """entries: ordered (name, bytes) -> Polaris signing-input SHA512 manifest."""
     # CAF forbids the signature/certificate members from appearing in a
     # package manifest. Signed inputs are rejected before this point, and this
     # second gate keeps the invariant local to every manifest we generate.
-    return ("".join("SHA256(%s)= %s\n" % (n, _sha(b)) for n, b in entries
+    return ("".join("SHA512(%s)= %s\n" % (n, hashlib.sha512(b).hexdigest()) for n, b in entries
                     if not _is_signature_member(n))).encode()
 
 

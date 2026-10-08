@@ -24,7 +24,6 @@
 .iris-react-shell .iris-shell-icon { width: 20px; height: 20px; flex-shrink: 0; fill: currentColor; }
 .iris-react-shell .iris-brand { color: var(--iris-header-text); text-decoration: none; font-size: 20px; font-weight: 700; letter-spacing: 1px; }
 .iris-react-shell .iris-product-title { font-size: 14px; padding-left: 16px; border-left: 1px solid #64788a; }
-.iris-react-shell .iris-stage-label { font-size: 12px; padding: 4px 8px; border: 1px solid #718397; border-radius: var(--radius-control); white-space: nowrap; }
 .iris-react-shell .iris-header-spacer { flex: 1; }
 .iris-react-shell .iris-account { font-size: 14px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iris-react-shell .iris-connection { display: block; padding: 8px 24px; color: var(--text-heading); background: var(--warning-tint); border-bottom: 1px solid var(--warning); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
@@ -134,6 +133,28 @@
 .iris-react-shell .iris-settings-tabs a[aria-current="page"] { color: var(--action-active); border-bottom-color: var(--iris-action); }
 .iris-react-shell .iris-settings-tabs a:focus-visible { outline: 2px solid var(--iris-action); outline-offset: -2px; }
 .iris-react-shell .iris-settings-description { margin: 20px 0 24px; color: var(--iris-muted); }
+/* Maintenance evidence stays readable without letting fingerprints dictate
+   the table width. Status is text, not only a color. */
+.iris-react-shell #settings-pane-certificates :is(th,td) { text-align: left; vertical-align: top; }
+.iris-react-shell #certificate-rows td:first-child { min-width: 200px; max-width: 280px; }
+.iris-react-shell #certificate-rows small.machine { display: block; max-width: 32ch; overflow-wrap: anywhere; white-space: normal; margin-top: 6px; }
+.iris-react-shell :is(#settings-pane-certificates,#settings-pane-backups) button:disabled { opacity: .55; cursor: not-allowed; }
+.iris-react-shell #backup-selected { max-width: 100%; }
+.iris-react-shell .rotation-identities { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; padding: 16px 0; border-block: 1px solid var(--iris-rule); }
+.iris-react-shell .rotation-identities .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell #browser-tls-identity { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell #browser-tls-approved { max-width: 100%; min-width: 0; }
+.iris-react-shell .maintenance-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,240px),1fr)); gap: 16px; margin-block: 24px; align-items: end; }
+.iris-react-shell .maintenance-form[hidden] { display: none; }
+.iris-react-shell #deployment-rotation-workflow .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell #deployment-rotation-workflow input[type=file] { max-width: 100%; }
+.iris-react-shell .maintenance-form label { display: grid; gap: 6px; min-width: 0; }
+.iris-react-shell .maintenance-form .maintenance-enable { display: flex; align-items: center; align-self: center; }
+.iris-react-shell .maintenance-form input:not([type=checkbox]), .iris-react-shell .maintenance-form select { width: 100%; min-width: 0; box-sizing: border-box; }
+.iris-react-shell #maintenance-jobs td { overflow-wrap: anywhere; }
+.iris-react-shell #signer-rotation :is(input,select) { max-width: 100%; }
+.iris-react-shell #signer-rotation label { display: block; margin-top: 16px; }
+@media (max-width: 800px) { .iris-react-shell .rotation-identities { grid-template-columns: minmax(0,1fr); } }
 .iris-react-shell #view-settings .card { box-shadow: none; padding: 24px; min-width: 0; }
 .iris-react-shell #view-settings .card > h3 { margin: 0 0 16px; font-size: 16px; line-height: 24px; }
 .iris-react-shell #view-settings .card > .muted { max-width: 80ch; }
@@ -194,7 +215,6 @@
 }
 @media (max-width: 800px) {
   .iris-react-shell .iris-header { gap: 8px; padding: 0 12px; }
-  .iris-react-shell .iris-stage-label { display: none; }
   .iris-react-shell .iris-account { max-width: 90px; }
   .iris-react-shell .iris-connection { padding: 8px 16px; }
   .iris-react-shell #iris-navigation-root { position: fixed; top: 56px; left: 0; bottom: 0; width: 280px; z-index: 110; visibility: hidden; transform: translateX(-100%); }

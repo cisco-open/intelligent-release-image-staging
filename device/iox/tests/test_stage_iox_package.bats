@@ -67,7 +67,7 @@ B
 echo "$*" >> "$DOCKER_LOG"
 case "$1" in
   inspect) exit 0 ;;
-  cp) exit 0 ;;
+  cp) [ "$(stat -c %a "$2")" = 444 ] || exit 4 ;;
   exec) exit 0 ;;
   *) exit 0 ;;
 esac
@@ -75,6 +75,7 @@ D
   chmod +x "$STUB/bin/docker"
   # unwritable default artifacts dir -> the docker-cp branch
   mkdir -p "$STUB/artifacts"; chmod -w "$STUB/artifacts"
+  umask 077
   run env PATH="$STUB/bin:$PATH" IOXCLIENT=/bin/true bash "$STUB/tools/stage-iox-package.sh" --arch amd64
   chmod +w "$STUB/artifacts"
   [ "$status" -eq 0 ]
@@ -105,6 +106,24 @@ B
   [ "$(cat "$ART/iris-amd64.tar")" = "pkg bytes" ]
   [ "$(cat "$ART/iris-amd64.tar.manifest")" = "provenance" ]
   ! find "$ART" -maxdepth 1 -name '.iris-amd64.tar*' | grep -q .
+}
+
+@test "host publication makes public packages readable under umask 077" {
+  STUB="$BATS_TEST_TMPDIR/private-build"
+  mkdir -p "$STUB/tools" "$STUB/device/iox"
+  ln -s "$HELPER" "$STUB/tools/stage-iox-package.sh"
+  cat > "$STUB/device/iox/build.sh" <<'B'
+#!/usr/bin/env bash
+printf 'pkg bytes\n' > "$1/$PACKAGE_NAME"
+printf 'provenance\n' > "$1/$PACKAGE_NAME.manifest"
+B
+  chmod +x "$STUB/device/iox/build.sh"
+  umask 077
+  run env PATH="$NODOCKER:$PATH" IOXCLIENT=/bin/true bash "$STUB/tools/stage-iox-package.sh" \
+    --arch amd64 --artifacts-dir "$ART"
+  [ "$status" -eq 0 ]
+  [ "$(stat -c %a "$ART/iris-amd64.tar")" = 444 ]
+  [ "$(stat -c %a "$ART/iris-amd64.tar.manifest")" = 444 ]
 }
 
 @test "arm64 emulation readiness is read from binfmt_misc before any image is pulled" {

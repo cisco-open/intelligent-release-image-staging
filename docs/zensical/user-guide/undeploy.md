@@ -11,6 +11,11 @@ SPDX-License-Identifier: Apache-2.0
 Undeploy removes the IRIS agent and leaves the device running. Staged images
 stay. Use it when a device leaves the swarm or you replace hardware.
 
+On IOS-XR, undeploy verifies the IRIS peer identity's public manifest and
+certificate layout before removing its private key, enrollment lock and active
+manifest. Public certificate directories remain. The next onboarding creates
+a fresh peer identity for the selected server.
+
 ## In the Console
 
 Undeploy runs from the deployment record, the record of what IRIS applied.
@@ -98,7 +103,7 @@ Management type is how the agent reaches the network: on its own address, on you
 | Routed | The IRIS VLAN and SVI, the IRIS VLAN in the app-hosting trunk's allowed list, and the agent with its files. | Any other VLAN on that trunk, and anything the record does not name as created by IRIS. |
 | Inband | The app footprint (Guest Shell or the IOx app), the IRIS EEM applets, the agent files, and every global with the IRIS name: the IRISQ logging discriminator, `crypto pki trustpoint IRIS`, and `ip http client secure-trustpoint IRIS`. | Your VLAN, SVI, routes, and VRF. The VLAN stays in the trunk's allowed list. |
 | Router routed and router NAT | The agent, the IRIS VirtualPortGroup and its app subnet, and the NAT rules IRIS created. | Device-wide NAT state, your routes, and any `ip nat outside` marking that existed before onboarding. |
-| XR host | The recorded appmgr application and its package source, the agent RPM and runtime certificate, the contents of `iris-work/`, and torrent sidecars from the `harddisk:` root. | The router's networking configuration, the staged images, and the empty `iris-work/` directory. |
+| XR host | The recorded appmgr application and its package source, the agent RPM and runtime certificate, the contents of `iris-work/`, the active peer identity after ownership checks, and torrent sidecars from the `harddisk:` root. | The router's networking configuration, staged images, public peer-certificate generations, and the empty `iris-work/` directory. |
 
 ## Who owns the SCP server after an IOx undeploy
 

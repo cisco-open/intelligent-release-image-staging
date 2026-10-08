@@ -16,7 +16,7 @@ The navigation rail lists nine areas.
 
 | Area | What it does |
 | --- | --- |
-| Overview | Rollout counters and per-image staging progress. Carries the telemetry export badge. |
+| Overview | Deployment layout, hosts, containers or pods, rollout counters and per-image staging progress. Carries the telemetry export badge. |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on the server's disk. |
 | Inventory | Lists known devices with their management type, **Agent install** choice, assigned images, and recent reports. Assign or clear device roles here. |
 | Policies | Creates, edits, imports, and exports role definitions. Shows sharing-policy health and instruction delivery diagnostics. |
@@ -51,6 +51,20 @@ off, or unknown, and mark an observation that has gone stale. This is the
 policy the transfer daemon reports, not proof that a connection was encrypted.
 The peer drawer adds the configured mode and the heartbeat time. Per-device
 status is on [Assign images and check staging status](assignments.md).
+
+### Peer transfers
+
+On the Swarm Map, green arrows show server-to-device traffic. Blue arrows show
+device-to-device traffic reported by an agent. Select a device for direction,
+speed and report age. Gray spokes show participation. Old observations expire;
+connections with no unique device match remain unattributed.
+
+In the device details, use **Peer telemetry** to choose **60 seconds** (the
+default) or **10 seconds**, then **Save interval**. Faster reporting applies to
+that device and needs the updated agent. Allow its next normal check-in to
+apply the setting, then check **Reported interval**. Paused telemetry and
+resource limits take precedence. While active, this adds up to six small
+telemetry reports a minute. Image transfer settings stay unchanged.
 
 ## Settings
 
@@ -154,6 +168,23 @@ what the encrypted transport proves.
 audit trail, the recipient it is encrypted to, the SCP password, and a daily
 schedule. It carries **Export now** and the outcome of the last run. To run
 one, see [Routine maintenance tasks](../admin-guide/maintenance.md).
+
+## Deployment information
+
+The **Deployment** panel on Overview shows Docker on one host, Docker on separate
+hosts, or Kubernetes. Each row identifies the Console or tracker/distribution
+component, its host or node, container or pod name, image and observed state.
+Runtime details include the operating system, architecture and shared host kernel
+when reported. Kubernetes rows also show the pod IP and deployment namespace.
+
+Managed installs read their own containers or pods through the host maintenance
+worker. Inventory is cached for 30 seconds; the panel shows its observation time.
+Other installs show the server and Console serving the current request, with a
+notice that the full inventory is unavailable. **Not reported** means that the
+runtime could not provide that fact. A container hostname is not a host address.
+
+The default Docker layout has two containers on one host. A combined runtime is
+labelled **Single container** only when its deployment metadata declares that layout.
 
 ## Sessions and idle timeout
 

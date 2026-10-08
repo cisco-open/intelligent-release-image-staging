@@ -28,6 +28,36 @@ Open **Policies → Advanced → Instruction delivery and key custody**. The pan
 shows signing status, certificate and keylist age, ceremony status, and
 attested roots; the terms it uses are in the next section.
 
+## Renew the instruction signing certificate
+
+To change the key itself, use [Rotate the online signer](signer-rotation.md).
+
+1. Open **Settings → Certificates & keys**. Check the renewal date and the
+   **Signing stops** deadline, which is seven days before expiry.
+2. Select **Download public renewal request**. Send `iris-online.pub` to the
+   offline key holder, who selects **Approve server request** in
+   [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
+   To provide the filenames directly:
+
+   ```bash
+   iris-key-setup approve --request iris-online.pub \
+     --root-key /offline/root-a --output online-cert.pub
+   ```
+
+3. Return only `online-cert.pub`. Select it in the Console and choose
+   **Validate and apply renewal**.
+4. Check the new expiry and signing cutoff. A changed online key or certificate
+   invalidates a pending request; prepare it again before importing.
+
+Renewal keeps the online key, device trust and instruction counters. It checks
+the configured root, principal, key match and validity before publication.
+Private roots remain with their custodians. Bare public keys have no expiry;
+their certificates and custody records have separate deadlines.
+
+The inventory reads server files. Its dates alone do not prove which certificate
+a listener is serving or whether signing custody is healthy. The panel reports
+the existing custody status separately.
+
 ## What you see
 
 | Term | What it is |
@@ -62,6 +92,10 @@ online key is `$IRIS_CONFIG/instr/signing-key.age`; the runtime plaintext is
 states](../reference/state-and-data.md).
 
 ### Quarterly two-root ceremony
+
+Use the [Console root attestation procedure](deployment-rotation.md#attest-existing-signing-roots)
+for initial and quarterly confirmations by both holders. Renew the online
+certificate separately when due. The commands below are the CLI alternative.
 
 1. Have both custodians confirm they hold their private key at separate sites.
    Compare public fingerprints with the approved inventory by running

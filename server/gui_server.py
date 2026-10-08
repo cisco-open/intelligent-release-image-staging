@@ -29,6 +29,8 @@ from urllib.parse import urlsplit
 import api_problem
 import api_routes
 import bounded_pool
+import deployment_info
+import service_shutdown
 import tier_auth
 
 
@@ -75,6 +77,7 @@ _HOP_HEADERS = {
     "forwarded", "x-forwarded-for", "x-forwarded-host",
     "x-forwarded-proto", "x-real-ip", "x-iris-client-ip",
     "x-iris-client-scheme",
+    "x-iris-console-runtime",
 }
 _RESPONSE_DROP = _HOP_HEADERS | {"server", "date"}
 _HANDSHAKE_TIMEOUT = 30
@@ -492,6 +495,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             outgoing["X-IRIS-Client-IP"] = self.client_address[0]
             outgoing["X-IRIS-Client-Scheme"] = (
                 "https" if srv.tls_active else "http")
+            if urlsplit(self.path).path in ("/api/v1/deployment", "/api/deployment"):
+                outgoing[deployment_info.HEADER] = deployment_info.console_header()
             return outgoing
 
         def _authorize_mutation(self, target):
@@ -631,11 +636,13 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 refresh = (response.status < 300 and public_path ==
                            "/api/v1/settings/gui-cert" and
                            self.command in ("POST", "DELETE"))
+                rotation_response = (response.status < 300 and public_path ==
+                    '/api/v1/settings/certificates/browser/rotation' and self.command == 'POST')
                 local_settings = (response.status == 200 and
                                   self.command == "GET" and
                                   public_path == "/api/v1/settings")
                 body = None
-                if refresh or local_settings:
+                if refresh or local_settings or rotation_response:
                     raw = response.read(4 * 1024 * 1024 + 1)
                     if len(raw) > 4 * 1024 * 1024:
                         raise ConsoleConfigurationError("settings response is oversized")
@@ -645,6 +652,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                             raise ValueError()
                     except (ValueError, UnicodeError):
                         raise ConsoleConfigurationError("settings response is invalid") from None
+                    if rotation_response:
+                        refresh = payload.get('state') == 'published'
                     if refresh:
                         applied = False
                         with srv.certificate_lock:
@@ -664,7 +673,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                         payload["applied"] = applied
                         payload["note"] = (None if applied else
                             "saved; restart the Console to apply the certificate")
-                    payload["gui_cert"] = dict(srv.certificate_info)
+                    if refresh or local_settings:
+                        payload["gui_cert"] = dict(srv.certificate_info)
                     body = json.dumps(payload, separators=(",", ":")).encode()
                 self.send_response(response.status, response.reason)
                 has_cache = False
@@ -840,8 +850,8 @@ def main():
         sys.exit(2)
     print("iris-console on %s://%s:%d/" % (
         "http" if plaintext else "https", host, port), flush=True)
-    server.serve_forever()
+    return service_shutdown.serve([server])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

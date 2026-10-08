@@ -43,6 +43,7 @@ import keyed_state
 import live_samples
 import secretfs
 import secrets_store
+import service_shutdown
 import tracker_announce
 import torrent_personalize
 import transfer_lifecycle
@@ -199,6 +200,14 @@ class InstructionBootstrapUnavailable(RuntimeError):
 
     def __init__(self):
         super().__init__("instruction bootstrap unavailable")
+
+
+class InstructionSigningNotInitialized(InstructionBootstrapUnavailable):
+    """A public setup precondition, with no private signing details."""
+
+    def __init__(self):
+        RuntimeError.__init__(self, "instruction signing is not initialized; "
+                             "complete Install > Turn on instruction signing")
 
 
 def _audit_id(value):
@@ -2269,6 +2278,8 @@ def sanitize_heartbeat(data, src_ip):
         "peer_tls": _hb_peer_tls(data.get("peer_tls")),
         "telemetry_stream_enabled": _hb_bool(
             data.get("telemetry_stream_enabled")),
+        "peer_telemetry_v": 1 if type(data.get("peer_telemetry_v")) is int
+            and data["peer_telemetry_v"] == 1 else None,
         # Multi-image staging state (issue: multi-image assignment).
         # Sanitised via _id_list: absence/malformed input stores None
         # (a legacy or misbehaving agent), never an invented [] --
@@ -2328,6 +2339,7 @@ class Catalog:
             INSTR_REQUEST_BURST, INSTR_REQUEST_REFILL_SECONDS,
             INSTR_LIMITER_MAX_DEVICES, INSTR_LIMITER_IDLE_SECONDS)
         self._peer_tls_limiter = _InstructionLimiter(2, 300, 10000, 3600)
+        self._peer_telemetry_limiter = _InstructionLimiter(2, 10, 10000, 600)
         self._instruction_counter_lock = threading.Lock()
         self._instruction_counters = {name: 0 for name in _INSTRUCTION_COUNTERS}
         self.live_table = live_table
@@ -2409,6 +2421,8 @@ class Catalog:
             except stamper.StamperError as exc:
                 if exc.code == "key_superseded" and attempt == 0:
                     continue
+                if exc.code == "uninitialized":
+                    raise InstructionSigningNotInitialized() from exc
                 raise InstructionBootstrapUnavailable() from exc
             except Exception as exc:
                 raise InstructionBootstrapUnavailable() from exc
@@ -2751,9 +2765,62 @@ class Catalog:
         except OSError:
             return self._json(404, {"error": "no such torrent"})
 
+    def _peer_telemetry_control(self, row, now):
+        """No cadence fallback on the accelerated path: require current policy."""
+        try:
+            stamp = instructions.validate_stamp(copy.deepcopy(row["instr"]))
+            if not stamp["issued_at"] <= now < stamp["expires_at"]:
+                return None
+            stamper, paths = self._stamper_paths()
+            snapshot = stamper.read_role_artifact_snapshot(paths, stamp)
+            control = dict(snapshot["role"]["control"])
+            control.update(stamp["part"]["control_override"])
+            instructions.validate_control(control)
+            return control
+        except Exception:
+            return None
+
     def _route_post(self, path, body, src_ip=None, store=None, index=None,
                     token=None):
         parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
+                and parts[3] == "live-telemetry":
+            # This route updates only ephemeral observations, never the device
+            # heartbeat, instruction clock, assignment, or completion history.
+            did = parts[2]
+            if self.live_table is None:
+                return self._json(503, {"error": "live telemetry unavailable"})
+            row = self.store.read_policy_row_snapshot(did)
+            approved = _normalize_policy(row)["approved_image_ids"]
+            record = self.store.get_device(did) or {}
+            now = time.time()
+            control = self._peer_telemetry_control(row, now) or {}
+            every = control.get("telemetry_every_ticks")
+            if control.get("peer_telemetry_interval_s") != 10 \
+                    or control.get("telemetry_pause") is not False or every != 1 \
+                    or not approved or record.get("telemetry_enabled") is not True \
+                    or record.get("telemetry_stream_enabled") is not True \
+                    or not 0 <= now - record.get("last_seen", 0) <= 180:
+                self.live_table.withdraw(did, "paused")
+                return self._json(409, {"error": "accelerated telemetry is not active"})
+            try:
+                data = parse_json_body(body)
+                if not isinstance(data, dict) or set(data) != {"telemetry_observation"}:
+                    raise ValueError("bad live observation")
+                clean, _truncated = live_samples.sanitize_observation(
+                    data["telemetry_observation"], approved,
+                    live_samples.LIVE_PEER_ROWS_HARD_CAP)
+                if clean.get("image_id") in (record.get("errored_image_ids") or []):
+                    raise ValueError("image staging error")
+                if clean.get("image_id") == record.get("current_image_id") and (
+                        record.get("stage_error") or record.get("stage_state") == "error"):
+                    raise ValueError("image staging error")
+            except (ValueError, TypeError):
+                self.live_table.reject()
+                return self._json(400, {"error": "bad live observation"})
+            clean["interval_s"] = 10
+            self.live_table.observe(did, clean, now, every)
+            return self._json(200, {"ok": True})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "heartbeat":
             try:
@@ -2818,7 +2885,9 @@ class Catalog:
                 elif obs is not None:
                     try:
                         clean, _trunc = live_samples.sanitize_observation(
-                            obs, approved, every)
+                            obs, approved, live_samples.LIVE_PEER_ROWS_HARD_CAP)
+                        clean["interval_s"] = 60 * max(every, live_samples.TIER_TICKS.get(
+                            clean.get("sampling_class"), 1))
                         self.live_table.observe(
                             parts[2], clean, time.time(), every)
                     except ValueError:
@@ -3166,7 +3235,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
             is_device_bound = (
                 len(parts) == 4
                 and parts[:2] == ["v1", "devices"]
-                and parts[3] in ("heartbeat", "token-refresh", "telemetry",
+                and parts[3] in ("heartbeat", "token-refresh", "telemetry", "live-telemetry",
                                  "policy", "instructions", "peer-tls",
                                  "instruction-keylist")
             )
@@ -3489,6 +3558,12 @@ def make_server(host, port, store, secrets_path, certfile=None,
             if api_routes.match("catalog", "POST", self.path) is None:
                 self._problem(404, "route-not-found", "Route not found")
                 return
+            if len(parts) == 4 and parts[3] == "live-telemetry":
+                retry = cat._peer_telemetry_limiter.charge(auth_ctx.principal.id)
+                if retry is not None:
+                    self._problem(429, "rate-limit-exceeded", "Rate limit exceeded",
+                                  (("Retry-After", str(retry)),))
+                    return
             # A chunked (or otherwise length-less) POST is refused rather than
             # read as an empty body: on the heartbeat route an empty body IS
             # the device's whole stored record, so silently accepting one
@@ -3611,11 +3686,11 @@ def main():
     deployment_checkpoint = (os.path.join(
         state_dir, "identity-compatible-ready") if require_identity_gate else None)
     stop = threading.Event()
-    threading.Thread(
+    writer = service_shutdown.WriterThread(
         target=live_samples.writer_loop,
         args=(live_table, os.path.join(state_dir, "live-samples.json"),
               live_samples.SNAPSHOT_WRITE_INTERVAL, stop),
-        daemon=True).start()
+        name="catalog-live-samples", daemon=True, stop_event=stop)
     srv = make_server(host, port, store, secrets_path, certfile=certfile,
                       live_table=live_table, stream_settings=stream_settings,
                       deployment_checkpoint=deployment_checkpoint,
@@ -3624,9 +3699,11 @@ def main():
                       management_previous_token_file=os.environ.get(
                           "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE") or None)
     scheme = "https" if certfile else "http"
+    writer.start()
     print("catalog on %s://%s:%d/v1/images" % (scheme, host, port), flush=True)
-    srv.serve_forever()
+    return service_shutdown.serve(
+        [srv], [lambda left: service_shutdown.stop_thread(writer, stop, left)])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

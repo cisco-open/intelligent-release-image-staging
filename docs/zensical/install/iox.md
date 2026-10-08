@@ -27,6 +27,16 @@ series takes.
     install does not prove that activation will succeed once verification is
     restored.
 
+## Native package signing
+
+Both IOx builds produce unsigned packages with SHA512 entries in `package.mf`.
+For native Polaris signing, send these completed packages to your authorized
+signing service. It signs the exact `package.mf` bytes and adds `package.sign`.
+The manifest excludes itself, `package.sign` and `package.cert`. Keep signed
+packages unchanged, refresh their provenance sidecars after signing, and verify
+them on the target device with package verification enabled. IRIS instruction
+keys are separate from native package signing.
+
 ## Signature verification is a device-wide setting { #device-global-package-verification }
 
 Verification is device-global, so a change affects every IOx app on the device.

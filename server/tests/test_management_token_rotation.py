@@ -128,7 +128,7 @@ def test_rotation_keeps_old_credential_accepted_at_durability_boundaries(
         {"Authorization": "Bearer " + new}, str(current), str(previous)) == replaced_current
     for path in (current, previous):
         assert path.stat().st_mode & 0o777 == 0o600
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["current.json", "previous.json"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [".rotation.lock", "current.json", "previous.json"]
     output = capsys.readouterr()
     assert output.out == output.err == ""
 

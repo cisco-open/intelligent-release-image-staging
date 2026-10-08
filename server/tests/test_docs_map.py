@@ -1911,3 +1911,24 @@ def test_docs_phase2_csv_template_and_validation_are_mapped():
     current = _changelog_release("2026.09.10.1", lower=True)
     for entry in ("schedule", "wave", "target"):
         assert entry in current, entry
+
+
+def test_installer_guides_use_terminal_key_and_recovery_tools():
+    """A headless install must not send readers to removed desktop windows."""
+    for page in (
+        "install/managed-package.md", "install/offline-approval.md",
+        "install/signing-roots.md", "admin-guide/backups.md",
+        "admin-guide/recovery.md", "admin-guide/deployment-rotation.md",
+    ):
+        content = _page(page)
+        assert "custody-ui" not in content, page
+        assert "maintenance-ui" not in content, page
+        assert "desktop display" not in content, page
+    keys = _page("install/offline-approval.md")
+    for required in ("iris-key-setup", "separate offline machine", "SHA256",
+                     "Copy public file", "independent copy", "Private roots stay"):
+        assert required in keys, required
+    recovery = _page("admin-guide/recovery.md")
+    for required in ("irisctl maintenance", "--job-id", "--allow-downtime",
+                     "--independent-copy"):
+        assert required in recovery, required

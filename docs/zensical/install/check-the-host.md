@@ -144,6 +144,8 @@ Store Cisco image files outside Git, normally under `/opt/images`. The tree
 bind-mounted there (`IRIS_IMAGE_ROOT`) must be readable and traversable by uid
 `10001`, the user both containers run as. A `755` tree works; a `700`
 root-owned tree fails.
+With the managed package, select this folder using `--image-root /opt/images`.
+Without that option, it uses `images` inside the installation's state directory.
 
 ## Verify
 

@@ -6,7 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Install IRIS
 
-Read this guide once, in order. At the end you have a running server and Console, device packages the server serves, and one device staging one image.
+On Ubuntu 24.04 amd64, start with the [managed package procedure](managed-package.md).
+It handles dependencies, builds, deployment identities and the maintenance service,
+with explicit offline signing approval and first-account setup.
+
+The pages below describe manual provisioning for deployments not owned by the
+installer. Read them in order to deploy the services and stage your first image.
 
 ## Choose a layout
 
@@ -26,7 +31,7 @@ On separate Docker hosts, the server publishes private port 9443 for the Console
 3. [Open the required ports](open-ports.md)
 4. [Download the tools that build device packages](build-tools.md)
 5. [Build the server and Console images](build-images.md)
-6. [Create the two offline signing keys](signing-roots.md)
+6. [Create the two offline signing keys](signing-roots.md) and use the [key setup script](offline-approval.md)
 7. Your layout: [Install on one Docker host](one-docker-host.md), [Install on separate Docker hosts](separate-docker-hosts.md), or [Install on Kubernetes](kubernetes.md), which also adds Kubernetes sections to steps 5 and 11
 8. [Sign in for the first time](first-sign-in.md)
 9. [Turn on instruction signing](activate-signing.md)

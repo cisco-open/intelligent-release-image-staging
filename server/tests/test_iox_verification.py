@@ -1738,7 +1738,7 @@ def test_production_bash_recipe_accepts_exact_two_revision_instruction_commit(
     assert _command_calls(factory, "app_start")
 
 
-@pytest.mark.parametrize("outcome", ["raises", "empty", "oversize"])
+@pytest.mark.parametrize("outcome", ["raises", "uninitialized", "empty", "oversize"])
 def test_instruction_materialization_failure_precedes_prepare_journal_and_mutation(
         tmp_path, outcome):
     timeline = []
@@ -1748,6 +1748,9 @@ def test_instruction_materialization_failure_precedes_prepare_journal_and_mutati
 
     def materializer(device_id):
         timeline.append(("instruction_bootstrap_materializer", device_id))
+        if outcome == "uninitialized":
+            from catalog import InstructionSigningNotInitialized
+            raise InstructionSigningNotInitialized()
         if outcome == "raises":
             raise RuntimeError("sensitive materialization detail")
         if outcome == "empty":
@@ -1766,7 +1769,13 @@ def test_instruction_materialization_failure_precedes_prepare_journal_and_mutati
         controller.close()
     assert result["result_code"] == 2
     assert result["error_category"] == "rejected"
-    assert result["detail"] == "IOx install controller failed"
+    expected = {
+        "uninitialized": "instruction signing is not initialized; complete "
+                         "Install > Turn on instruction signing",
+        "raises": "instruction bootstrap unavailable; check "
+                  "instruction signing status and producer health",
+    }.get(outcome, "IOx install controller failed")
+    assert result["detail"] == expected
     assert not [call for call in timeline if call[0] in ("prepare", "iox_begin")]
     assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
     assert not [call for call in timeline if call[0] == "upload"]
@@ -4251,6 +4260,19 @@ def test_control_server_close_is_bounded_with_an_incomplete_client(
     assert close_errors == []
     assert dispatched == []
     assert not (tmp_path / "iox" / "control.sock").exists()
+
+
+def test_control_server_close_refuses_a_surviving_accept_thread(tmp_path):
+    module = _module()
+    server = module.IoxControlServer(str(tmp_path), "c" * 32, lambda request: None)
+    class StillAccepting:
+        def join(self, timeout):
+            pass
+        def is_alive(self):
+            return True
+    server.thread = StillAccepting()
+    with pytest.raises(RuntimeError, match="admission workers"):
+        server.close()
 
 
 @pytest.mark.parametrize("shape", ["symlink", "nonsocket"])

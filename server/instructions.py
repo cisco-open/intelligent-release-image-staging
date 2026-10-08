@@ -37,6 +37,7 @@ QOS_FIELDS = (
 )
 CONTROL_FIELDS = ("catalog_tick_s", "telemetry_every_ticks",
                   "telemetry_pause")
+OPTIONAL_CONTROL_FIELDS = ("peer_telemetry_interval_s",)
 QOS_RANGES = {
     "max_peers": (1, 1000),
     "seed_up_bps": (0, 10_000_000_000),
@@ -464,9 +465,12 @@ def validate_qos(value, partial=False):
 
 def validate_control(value, partial=False):
     _closed(value, () if partial else CONTROL_FIELDS,
-            CONTROL_FIELDS if partial else ())
+            (CONTROL_FIELDS if partial else ()) + OPTIONAL_CONTROL_FIELDS)
     for key, item in value.items():
-        if key == "telemetry_pause":
+        if key == "peer_telemetry_interval_s":
+            if type(item) is not int or item not in (10, 60):
+                raise InstructionError("invalid peer_telemetry_interval_s")
+        elif key == "telemetry_pause":
             if not isinstance(item, bool):
                 raise InstructionError("invalid telemetry_pause")
         else:

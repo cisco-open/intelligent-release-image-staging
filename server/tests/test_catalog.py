@@ -308,7 +308,8 @@ def test_route_post_records_model_and_source_ip(tmp_path):
     assert rec["swarm_ip"] == "127.0.0.1"
 
 
-def test_route_post_rejects_wrong_device_token(tmp_path):
+@pytest.mark.parametrize("resource", ["heartbeat", "live-telemetry"])
+def test_route_post_rejects_wrong_device_token(tmp_path, resource):
     """The real guard must reject a heartbeat for device A presented with a
     token bound to device B — and must NOT record any heartbeat for A.  This is
     the device-binding the direct route_post() call used to skip."""
@@ -320,7 +321,7 @@ def test_route_post_rejects_wrong_device_token(tmp_path):
     port = srv.server_address[1]
     try:
         status, _, _ = _req(
-            port, "POST", "/v1/devices/device-a/heartbeat", token=tok_b,
+            port, "POST", "/v1/devices/device-a/" + resource, token=tok_b,
             body=json.dumps({"current_image_id": "img1",
                              "model": "C9300-48UXM"}))
         assert status == 401
@@ -4356,7 +4357,7 @@ def test_task14_heartbeat_uses_authoritative_attestation_sanitizer():
         "current_image_id", "free_flash_bytes", "version", "stage_state",
         "stage_error", "target_fs", "model", "telemetry_enabled",
         "telemetry_stream_enabled", "staged_image_ids", "errored_image_ids",
-        "swarm_ip", "peer_tls", *expected}
+        "swarm_ip", "peer_tls", "peer_telemetry_v", *expected}
 
 
 def test_assignment_result_and_unchanged_cas_are_decided_inside_policy_callback(tmp_path):

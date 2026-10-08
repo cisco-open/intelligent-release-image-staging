@@ -205,6 +205,10 @@ def _custody_lock(paths):
         0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # Finish an approved interrupted key replacement before any reader or
+        # signer observes a mixed durable/runtime authority tuple.
+        import instruction_rotation
+        instruction_rotation.recover_locked(paths)
         yield
     finally:
         try:
@@ -1034,7 +1038,7 @@ def export_online_public(paths, destination=None, *, timeout=SSH_TIMEOUT,
 
 def import_online_certificate(paths, candidate, roots, *, now=None,
                               timeout=SSH_TIMEOUT,
-                              ssh_keygen="ssh-keygen"):
+                              ssh_keygen="ssh-keygen", renewal=None):
     now = int(time.time()) if now is None else now
     if not _is_int(now):
         raise InstructionKeyError("certificate validation time is invalid")
@@ -1048,10 +1052,41 @@ def import_online_certificate(paths, candidate, roots, *, now=None,
             candidate, MAX_CERTIFICATE_BYTES,
             unavailable="online certificate is unavailable",
             too_large="online certificate is too large")
+        # Console renewal is a compare-and-swap of a certificate, NEVER key
+        # generation or producer initialization. The same custody lock also
+        # serializes CLI imports, signing and keylist changes.
+        previous = None
+        if renewal is not None:
+            if (not isinstance(renewal, dict)
+                    or set(renewal) != {"public_key_sha256", "certificate_sha256"}
+                    or any(not isinstance(value, str) or not _SHA256.fullmatch(value)
+                           for value in renewal.values())):
+                raise InstructionKeyError("invalid renewal request")
+            previous = _read_regular(
+                paths.certificate, MAX_CERTIFICATE_BYTES,
+                unavailable="existing online certificate is unavailable",
+                too_large="existing online certificate is too large")
+            if hashlib.sha256(public).hexdigest() != renewal["public_key_sha256"]:
+                raise InstructionKeyError("online key changed; prepare renewal again")
+            if (hashlib.sha256(previous).hexdigest() != renewal["certificate_sha256"]
+                    and previous != candidate_bytes):
+                raise InstructionKeyError("online certificate changed; prepare renewal again")
         info, _ = _certificate_operation_locked(
             paths, private, public, candidate_bytes, roots, now=now,
             krl=krl, body=None,
             timeout=timeout, ssh_keygen=ssh_keygen)
+        if renewal is not None:
+            if info["valid_before"] - now <= CERTIFICATE_REFUSE_SECONDS:
+                raise InstructionKeyError("renewed certificate must have more than seven days remaining")
+            # Parse an immutable public snapshot, not a path a concurrent
+            # process could replace. Expired certificates can still be renewed.
+            with tempfile.TemporaryDirectory(dir=_runtime_directory(paths)) as directory:
+                old_path = os.path.join(directory, "previous-cert.pub")
+                _atomic_write(old_path, previous)
+                _start, old_end, _principals = _certificate_fields(
+                    old_path, timeout=timeout, ssh_keygen=ssh_keygen)
+            if previous != candidate_bytes and info["valid_before"] <= old_end:
+                raise InstructionKeyError("renewed certificate must extend the existing expiry")
         try:
             # The runtime copy is a disposable cache.  Finish its fallible
             # publication before committing the durable authority.  The
@@ -1064,6 +1099,20 @@ def import_online_certificate(paths, candidate, roots, *, now=None,
             raise InstructionKeyError(
                 "online certificate publication failed") from None
         return info
+
+
+def online_renewal_request(paths, *, timeout=SSH_TIMEOUT, ssh_keygen="ssh-keygen"):
+    """Return only public material and concurrency guards for existing custody."""
+    with _custody_lock(paths):
+        _private, public = _ensure_runtime_key_locked(
+            paths, required=True, timeout=timeout, ssh_keygen=ssh_keygen)
+        certificate = _read_regular(
+            paths.certificate, MAX_CERTIFICATE_BYTES,
+            unavailable="existing online certificate is unavailable",
+            too_large="existing online certificate is too large")
+        return {"public_key": public.decode("ascii"),
+                "public_key_sha256": hashlib.sha256(public).hexdigest(),
+                "certificate_sha256": hashlib.sha256(certificate).hexdigest()}
 
 
 def sign_instruction(paths, data, roots, *, now=None, timeout=SSH_TIMEOUT,

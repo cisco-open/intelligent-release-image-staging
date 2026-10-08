@@ -1049,6 +1049,21 @@ def policy_tiers(tmp_path, monkeypatch, request):
     yield request, fleet, store
 
 
+@pytest.mark.parametrize("tier", ["management", "console"])
+def test_peer_interval_roundtrip_over_both_authenticated_tiers(policy_tiers, tier):
+    request, _fleet, store = policy_tiers
+    path = "/devices/d1/peer-telemetry"
+    store.record_heartbeat("d1", {"peer_telemetry_v": 1})
+    assert request(tier, "POST", path, {"interval_s": 10}, authorized=False)[0] == 401
+    assert request(tier, "POST", path, {"interval_s": 10}, match=False)[0] == 428
+    for interval in (10, 60):
+        status, _, preview = request(tier, "POST", path + "?dry_run=1", {"interval_s": interval})
+        assert status == 200
+        status, _, saved = request(tier, "POST", path, {"interval_s": interval,
+            "confirm_token": preview["confirm_token"]})
+        assert status == 200 and saved["requested_interval_s"] == interval
+
+
 @pytest.mark.parametrize("failure", ["console-construction", "login-upstream"])
 def test_policy_tiers_setup_failure_closes_started_servers(
         tmp_path, monkeypatch, failure):
@@ -1445,6 +1460,7 @@ def _state_qos_legacy_rows():
         ("max_concurrent", 100), ("request_peer_speed_limit_bps", 51200),
         ("announce_min_interval_s", 30), ("numwant", 50), ("handout_budget", 0),
         ("catalog_tick_s", 60), ("telemetry_every_ticks", 1),
+        ("peer_telemetry_interval_s", 60),
         ("telemetry_pause", False), ("on_stale", "defaults"),
         ("origin_up_bps", 0), ("origin_per_torrent_up_bps", 0),
         ("origin_max_peers", 55),

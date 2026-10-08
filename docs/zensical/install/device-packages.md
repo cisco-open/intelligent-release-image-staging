@@ -238,6 +238,11 @@ missing, stale or unverifiable.
 A row is ready when the readable wrapper bytes match the adjacent provenance
 manifest, so keep each `.manifest` beside its package.
 
+The Docker helper also reads mounted packages and the distributed certificate
+as the server identity (uid/gid 10001), even when invoked as host root.
+A stopped server, incorrect identity or unreadable file fails verification.
+Package readiness alone does not establish signing or installation readiness.
+
 The same status compares the certificate the live services present with the
 public copy onboarding distributes.
 

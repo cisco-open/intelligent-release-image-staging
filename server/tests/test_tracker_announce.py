@@ -18,6 +18,19 @@ import tracker
 import tracker_announce
 
 
+def test_only_isolated_maintenance_accepts_its_exact_loopback_endpoint(monkeypatch):
+    endpoint = 'https://127.0.0.1:6969/announce'
+    monkeypatch.delenv('IRIS_MAINTENANCE_SEEDER_ONLY', raising=False)
+    with pytest.raises(ValueError):
+        tracker_announce.validate(endpoint)
+    monkeypatch.setenv('IRIS_MAINTENANCE_SEEDER_ONLY', '1')
+    assert tracker_announce.validate(endpoint) == endpoint
+    for changed in ('https://127.0.0.2:6969/announce', 'https://127.0.0.1:6968/announce',
+                    endpoint + '?token=secret', 'http://127.0.0.1:6969/announce'):
+        with pytest.raises(ValueError):
+            tracker_announce.validate(changed)
+
+
 def test_resolve_derives_https_url_with_default_or_configured_port():
     assert tracker_announce.resolve({"IRIS_HOST_IP": "100.64.0.1"}) == \
         "https://100.64.0.1:6969/announce"
@@ -190,6 +203,9 @@ def test_task13_main_wires_state_handout_path_through_real_construction(
         def start(self):
             calls.append("hub-start")
 
+        def stop(self, timeout=5):
+            return True
+
         def note_announce(self):
             pass
 
@@ -208,6 +224,9 @@ def test_task13_main_wires_state_handout_path_through_real_construction(
         def start(self):
             calls.append("reconciler-start")
 
+        def stop(self, timeout=5):
+            return True
+
     class Server:
         def serve_forever(self):
             calls.append("serve")
@@ -216,7 +235,9 @@ def test_task13_main_wires_state_handout_path_through_real_construction(
     captured = {}
     monkeypatch.setattr(tracker.telemetry, "from_env", lambda: Hub())
     monkeypatch.setattr(tracker.telemetry, "metrics_port", lambda: None)
-    monkeypatch.setattr(tracker, "_start_pruner", lambda _registry: None)
+    monkeypatch.setattr(tracker, "_start_pruner", lambda _registry, _stop: None)
+    monkeypatch.setattr(tracker.service_shutdown, "serve",
+                        lambda servers, _writers: servers[0].serve_forever())
     monkeypatch.setattr(
         tracker, "_build_reconciler_from_env",
         lambda *_args, **_kwargs: Reconciler())

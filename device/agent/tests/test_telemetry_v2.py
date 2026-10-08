@@ -318,8 +318,7 @@ def test_steady_seeder_reports_upload_rate_without_changing_completed_report():
     calls = []
     deps = _deps(cat, {"/stage/img1.bin": 5},
                  aria_stats=lambda p: calls.append(p) or stats,
-                 aria_peers=lambda p: (_ for _ in ()).throw(
-                     AssertionError("steady sampling must not inspect peers")))
+                 aria_peers=lambda p: [{"ip": "192.0.2.9", "send_bps": 2097152}])
     tele = {"report_pending": False, "report_sent_ts": 1.0,
             "event": "staging-complete", "done_ts": 50.0,
             "peers_v2": {"10.0.0.1": {"observations": 4}},
@@ -334,6 +333,7 @@ def test_steady_seeder_reports_upload_rate_without_changing_completed_report():
     assert obs["obs_state"] == "observed"
     assert obs["aria"]["send_bps"] == 2097152
     assert obs["aria"]["receive_bps"] == 0
+    assert obs["peer_connections"] == [{"ip": "192.0.2.9", "send_bps": 2097152}]
     assert calls == ["/stage/img1.bin"]
     assert cat.telemetry == []
     for key, value in frozen.items():

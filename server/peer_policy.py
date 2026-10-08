@@ -93,6 +93,7 @@ QOS_DEFAULTS = {
     "handout_budget": 0,
     "catalog_tick_s": 60,
     "telemetry_every_ticks": 1,
+    "peer_telemetry_interval_s": 60,
     "telemetry_pause": False,
     "on_stale": "defaults",
     "origin_up_bps": 0,
@@ -117,6 +118,7 @@ QOS_UNITS = {
     "handout_budget": "handouts_per_window",
     "catalog_tick_s": "seconds",
     "telemetry_every_ticks": "ticks",
+    "peer_telemetry_interval_s": "seconds",
     "telemetry_pause": "boolean",
     "on_stale": "enum",
     "origin_up_bps": "bytes_per_second",
@@ -145,6 +147,7 @@ _QOS_RANGES = {
     "handout_budget": (0, 1000),
     "catalog_tick_s": (60, 900),
     "telemetry_every_ticks": (1, 60),
+    "peer_telemetry_interval_s": (10, 60),
     "origin_up_bps": (0, 10_000_000_000),
     "origin_per_torrent_up_bps": (0, 10_000_000_000),
     "origin_max_peers": (1, 1000),
@@ -159,6 +162,7 @@ _QOS_SCOPES = {
         "max_peers", "per_peer_bps", "fanout", *PER_TORRENT_RATE_KEYS,
         "overall_up_bps", "overall_down_bps", "max_concurrent",
         "catalog_tick_s", "telemetry_every_ticks", "telemetry_pause")}
+_QOS_SCOPES["peer_telemetry_interval_s"] = frozenset(("device",))
 _QOS_SCOPES.update({
     key: _GLOBAL_ROLE for key in (
         "request_peer_speed_limit_bps", "announce_min_interval_s",
@@ -338,6 +342,8 @@ def _validate_qos(qos, scope):
                               (_MIN_RATE_BPS, key))
         if key == "catalog_tick_s" and value % 60:
             raise PolicyError("catalog_tick_s must be a launcher tick multiple")
+        if key == "peer_telemetry_interval_s" and value not in (10, 60):
+            raise PolicyError("peer telemetry interval must be 10 or 60 seconds")
 
 
 def _validate_qos_state(qos_state):

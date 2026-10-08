@@ -210,12 +210,30 @@ def test_issuer_rejects_unsupported_csr_key(enrollment, tmp_path):
         issuer.issue(cfg['device_id'], csr.decode())
 
 
+def _write_ready_seed(script, *, include_mode=False):
+    # The readiness row must come from the exec'd child AFTER installing its
+    # cooperative TERM handler. A shell PID printed before exec leaves a race
+    # where a correct immediate supervisor stop kills an unready child.
+    row = ("os.environ['IRIS_PEER_TLS_MODE'] + ' ' + str(os.getpid())"
+           if include_mode else "str(os.getpid())")
+    script.write_text(
+        "exec python3 - <<'PY'\n"
+        "import os, signal, sys\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "with open(os.environ['IRIS_TEST_STARTS'], 'a') as starts:\n"
+        "    starts.write(" + row + " + '\\n')\n"
+        "    starts.flush()\n"
+        "while True:\n"
+        "    signal.pause()\n"
+        "PY\n")
+
+
 def test_origin_supervisor_replaces_child_on_certificate_rotation(enrollment, tmp_path):
     import os
     cfg, client, issuer = enrollment
     script = tmp_path / 'seed.sh'
     starts = tmp_path / 'starts'
-    script.write_text('printf "%s\\n" "$$" >> "$IRIS_TEST_STARTS"\nexec sleep 120\n')
+    _write_ready_seed(script)
     root = Path(__file__).resolve().parents[1]
     proc = subprocess.Popen(['python3', str(root / 'peer_tls_seed.py'), str(script)],
                             env=dict(os.environ, IRIS_TEST_STARTS=str(starts)),
@@ -257,7 +275,7 @@ def test_origin_supervisor_applies_mode_and_stops_on_invalid_settings(enrollment
     settings.save('disabled')
     script = tmp_path / 'mode-seed.sh'
     starts = tmp_path / 'mode-starts'
-    script.write_text('printf "%s %s\\n" "$IRIS_PEER_TLS_MODE" "$$" >> "$IRIS_TEST_STARTS"\nexec sleep 120\n')
+    _write_ready_seed(script, include_mode=True)
     root = Path(__file__).resolve().parents[1]
     process = subprocess.Popen(['python3', str(root/'peer_tls_seed.py'), str(script)],
                                env=dict(os.environ, IRIS_TEST_STARTS=str(starts)),
@@ -267,7 +285,13 @@ def test_origin_supervisor_applies_mode_and_stops_on_invalid_settings(enrollment
         while time.monotonic() < deadline:
             assert process.poll() is None
             if settings.origin_status() == {'state': state, 'active_mode': mode}:
-                return
+                if mode is None:
+                    return
+                rows = starts.read_text().splitlines() if starts.exists() else []
+                # A supervisor status update alone does not prove that the
+                # newly exec'd fixture installed its signal handler yet.
+                if rows and len(rows[-1].split()) == 2 and rows[-1].split()[0] == mode:
+                    return
             time.sleep(.1)
         pytest.fail('origin did not reach expected mode/state')
     try:

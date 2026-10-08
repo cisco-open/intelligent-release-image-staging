@@ -1,0 +1,68 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Authenticated release
+
+on:
+  push:
+    tags:
+      - 'v20*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'cisco-open/intelligent-release-image-staging'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check tag and prepare artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$(cat VERSION)"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          mkdir release-assets
+          python3 tools/build-installer-package.py --out release-assets
+          bash tools/make-release.sh
+          gh release download aria2c-2.5.6-p10 \
+            --repo cisco-open/intelligent-release-image-staging \
+            --pattern aria2c-2.5.6-p10-source.tar.gz --dir release-assets
+          python3 tools/release-auth.py prepare --out release-assets --tag "$RELEASE_TAG"
+          (cd release-assets && sha256sum --check SHA256SUMS && sha256sum --check aria2c.sha256)
+      - name: Attest every publication asset
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-assets/*
+      - name: Verify the signed assets before publication
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          cp "$BUNDLE_PATH" release-assets/attestations.jsonl
+          python3 tools/release-auth.py verify --directory release-assets \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+      - name: Publish the complete authenticated release
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo cisco-open/intelligent-release-image-staging --verify-tag \
+            --title "IRIS $RELEASE_TAG" --generate-notes

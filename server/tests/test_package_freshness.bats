@@ -10,6 +10,8 @@ setup() {
   ARTIFACTS="$BATS_TEST_TMPDIR/artifacts"
   mkdir -p "$STUB" "$ARTIFACTS"
   export OPENSSL_LOG="$BATS_TEST_TMPDIR/openssl.log"
+  export DOCTOR_SOURCE_ROOT="$BATS_TEST_DIRNAME/../.."
+  export FAKE_ARTIFACTS="$ARTIFACTS"
   : > "$OPENSSL_LOG"
 
   cat > "$STUB/openssl" <<'STUB'
@@ -41,6 +43,22 @@ STUB
 case "$1" in
   inspect) exit 0 ;;
   cp) printf '%s\n' "${FAKE_DISTRIBUTED_CERT:-served}" > "$3" ;;
+  exec)
+    [ "${FAKE_RUNTIME_FAILURE:-}" != 1 ] || exit 1
+    # Exercise the real streamed probe against fixture files, not a canned
+    # success JSON. Only the container identity and PEM fixture are simulated.
+    python3 -c '
+import os, sys
+sys.path.insert(0, os.environ["DOCTOR_SOURCE_ROOT"] + "/server")
+import setup_status
+setup_status.read_pem_fingerprint = lambda path: ":".join(["AB"] * 32)
+os.geteuid = lambda: int(os.environ.get("FAKE_RUNTIME_UID", "10001"))
+os.getegid = lambda: 10001
+os.environ["IRIS_ARTIFACTS_DIR"] = os.environ["FAKE_ARTIFACTS"]
+sys.argv = ["-"] + (["--optional-xr"] if "--optional-xr" in sys.argv else [])
+exec(compile(sys.stdin.read(), "<runtime-probe>", "exec"))
+' "$@"
+    ;;
   *) exit 1 ;;
 esac
 STUB
@@ -157,6 +175,8 @@ _run_check() {
   local repo="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$repo/tools" "$repo/server"
   cp "$CHECK" "$repo/tools/check-package-freshness.sh"
+  cp "$DOCTOR_SOURCE_ROOT/tools/irisctl" "$repo/tools/irisctl"
+  cp -r "$DOCTOR_SOURCE_ROOT/tools/iris_installer" "$repo/tools/iris_installer"
   cp "$BATS_TEST_DIRNAME/../setup_status.py" "$repo/server/setup_status.py"
   cat > "$repo/tools/provision-iox-packages.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -184,4 +204,20 @@ STUB
   run bash "$CHECK" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"--rebuild"* ]]
+}
+
+@test "host-readable wrappers cannot pass when the runtime probe fails" {
+  _make_required_packages
+  FAKE_RUNTIME_FAILURE=1 _run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NOT READY: runtime package/certificate evidence"* ]]
+  [[ "$output" != *"verified: required package bytes"* ]]
+}
+
+@test "a root-configured container is never accepted as service readability proof" {
+  _make_required_packages
+  FAKE_RUNTIME_UID=0 _run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unexpected-runtime-identity"* ]]
+  [[ "$output" != *"verified: required package bytes"* ]]
 }

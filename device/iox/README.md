@@ -60,6 +60,14 @@ canonical image provenance. The manifest does not validate a native signature;
 the device's app-hosting verifier does. See
 [What onboarding puts on the device](../../docs/zensical/install/iox.md#what-onboarding-puts-on-the-device).
 
+Both IOx builds produce unsigned inputs for native signing. The build verifies
+the original package hashes, then writes a SHA512 `package.mf` covering every
+payload member. The manifest excludes itself, `package.sign` and `package.cert`.
+Image blobs and OCI digests remain unchanged. An existing native signature
+causes preparation to fail rather than being invalidated. The Polaris signing
+step signs the final `package.mf` bytes and adds `package.sign`; it requires an
+authorized signing service and is separate from IRIS instruction signing.
+
 ## Config delivery
 
 `device/container/entrypoint.sh` (PID 1) generates `iris/iris-agent.conf` under the CAF persistent

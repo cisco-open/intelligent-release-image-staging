@@ -330,6 +330,8 @@ def test_main_passes_previous_mount_to_startup_and_runtime(monkeypatch):
 
     monkeypatch.setattr(gui_server, "fetch_console_certificate", fetch)
     monkeypatch.setattr(gui_server, "make_server", make)
+    monkeypatch.setattr(gui_server.service_shutdown, "serve",
+                        lambda servers: servers[0].serve_forever())
     gui_server.main()
     assert [item[0] for item in observed] == ["fetch", "server"]
     assert all(item[2]["previous_token_file"] == "/run/tokens/previous"

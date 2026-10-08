@@ -22,6 +22,11 @@ Both roots are scanned recursively. A publish happens in place: the seeder
 reads the image where it sits, and the `.torrent` goes under the state
 directory. See [Data formats and states](../reference/state-and-data.md).
 
+With the managed Docker installer, the host import folder defaults to `images`
+inside the installation's state directory. To use `/opt/images` on the host,
+[connect that folder](../install/managed-package.md#use-an-existing-image-folder).
+Console uploads remain in the separate uploads volume.
+
 !!! warning "Reseeding on restart trusts the recorded directory"
 
     On restart, the server reseeds each image from its catalog entry's
@@ -146,6 +151,16 @@ in progress, the button and the API both say so instead of starting a second.
 A server with no internet access uploads the feed archive instead. The same
 pane takes a raw `.tar` of up to 256 MiB and runs the identical signature check
 and parse.
+
+The server retains a successfully verified offline archive for seven days
+after upload. Images published during that window automatically use it, even
+if the archive was uploaded before any images. Every use rechecks the signature;
+the status records the source as `offline`. Upload a fresh signed archive when
+the cache expires. This upload-age limit does not establish the age of Cisco's
+feed contents. **Refresh now** and scheduled runs still fetch the online feed;
+they do not silently fall back to the offline archive.
+Successful online refreshes replace an existing cached archive so subsequent
+imports do not revert to the older uploaded feed.
 
 The status line shows the last run's time, source, outcome, and its matched,
 mismatched and not-in-feed counts. Every run is audited as `bulkhash-refresh`,

@@ -6,6 +6,68 @@ SPDX-License-Identifier: Apache-2.0
 
 # Recover from an interrupted job or damaged state
 
+## Recover a deployment rotation while the Console is stopped
+
+For an installer-owned Docker, split Docker or Kubernetes deployment, connect
+to the installer host over SSH. Use the same private state directory as the
+maintenance worker:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris status
+```
+
+Find the rotation or restore marked `recovery-required`. Check its operation ID,
+backup or key type, and recorded results. Resume that operation:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris recover \
+  --job-id <operation-id> --allow-downtime
+```
+
+Confirm when asked, then run `status` again to check completion. The worker uses
+the saved operation record. An accepted request is not proof of completion.
+
+The installer manages the worker as a host service outside the containers or pods.
+If it is unavailable, check `irisctl worker-status` and use
+`irisctl worker-service --action restart` with `sudo`. Pass the same `--state-dir` to both.
+Reconnect recorded backup storage before restarting a worker that reports
+missing or changed storage.
+
+!!! warning
+
+    Preserve the operation journal and encrypted backup. Recovery refuses
+    changed authority; do not delete the journal or reset keys to bypass that
+    refusal. Restore requires the same owned deployment, matching credentials
+    and current instruction counters and revocations. A lost host or missing
+    current security records requires separate review before service startup.
+
+Restore recovery resumes the recorded replacements and verifies server health
+and authenticated Console access. A failed restart may have written newer state;
+the worker preserves it when resuming. Use the same operation ID and retain its
+original data directories. For a new restore, follow
+[Restore a backup](backups.md#restore-a-backup).
+
+## Replace the independent recovery recipient
+
+Create the replacement with
+[iris-key-setup](../install/offline-approval.md#create-an-independent-recovery-identity).
+Keep an independent private copy off the deployment host. Put a protected copy
+of this recovery key on the installer host, outside deployment and backup folders.
+Then run:
+
+```bash
+sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris replace-recovery \
+  --identity /protected/path/recovery.age --independent-copy --allow-downtime
+```
+
+Compare the public recipient with your independent copy and confirm when asked.
+Use `status` to check the operation. This private recovery key stays outside the
+Console. Private signing roots must remain on their holders' machines.
+
+Finish an active rotation before preparing another recipient. Existing backups
+still require their original recovery keys. Retain those keys and your
+independent copies after the new recipient is active.
+
 ## What this is for
 
 A job that stops partway through, or storage that comes back with the wrong
@@ -190,6 +252,18 @@ as for a cut-off IOx attempt above.
 `record.iox_verification` and the `iox_verification_obligations` summary.
 `POST /api/v1/devices/<id>/undeploy` runs a teardown; send `{"force": true}`
 for Force. Both are described in [Console API](../reference/console-api.md).
+
+## Certificate renewal and backup jobs
+
+| Result | Next step |
+| --- | --- |
+| Online key or certificate changed | Prepare a new request in **Settings → Certificates & keys**, then obtain approval for the current key. |
+| Renewed certificate must extend the existing expiry | Check the file returned by the custodian; an older approval cannot replace a newer certificate. |
+| Lifecycle worker unavailable | Check the worker on the installer host and its dedicated control mount. See [Back up and restore](backups.md#console-backup-controls). |
+| Backup refused for storage sharing, space or an unclean stop | Correct the reported host condition before retrying. Check that the original services recovered. |
+| `recovery-required` | Preserve `backup-operation.json` and `lifecycle-jobs.json` in the installer's private state directory. Review service state and unfinished files with the deployment maintainer; clearing the record does not repair an interrupted capture. |
+| Backup signature rejected | Compare the signer with the independently recorded public key. Do not replace trusted signer material with a key supplied beside an unverified archive. |
+| `verified-isolated-files` | File extraction passed. Keep the target isolated until former-primary fencing, instruction history and revocations have been reconciled. |
 
 ## Related
 

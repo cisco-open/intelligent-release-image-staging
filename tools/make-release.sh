@@ -72,6 +72,9 @@ SHIP=(
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-device-image.sh tools/build-xr-package.sh
   tools/check-package-freshness.sh
+  tools/irisctl tools/iris_installer tools/iris-key-setup
+  tools/release-auth.py
+  tools/build-installer-package.py
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py

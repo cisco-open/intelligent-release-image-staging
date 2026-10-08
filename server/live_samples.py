@@ -430,12 +430,21 @@ def writer_loop(table, path, interval, stop_event):
     import time
     was_nonempty = False
     last_err = 0.0
-    while not stop_event.wait(interval):
+    last_write = 0.0
+    # Batch accelerated observations at most once per five seconds, only while
+    # they are fresh. Normal deployments retain their existing writer cadence.
+    while not stop_event.wait(min(interval, 5)):
         try:
-            snap = table.snapshot(time.time())
+            now = time.time()
+            snap = table.snapshot(now)
+            fast = any(entry.get("interval_s") == 10 and entry.get("valid")
+                       for entry in snap["samples"].values())
+            if now - last_write < (min(interval, 5) if fast else interval):
+                continue
             nonempty = bool(snap["samples"])
             if nonempty or was_nonempty:
                 _atomic_write_json(path, snap)
+            last_write = now
             was_nonempty = nonempty
         except Exception as exc:
             now = time.time()

@@ -710,6 +710,111 @@ def test_run_refresh_success_survives_a_broken_settings_write(
 # is never called at all.
 # ---------------------------------------------------------------------------
 
+def test_offline_feed_uploaded_before_image_is_reused_after_restart(tmp_path, signing_key):
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    state = tmp_path / "state"
+    store = _store(state)
+    result = bulkhash_refresh.run_refresh(
+        "offline", str(state), store, tar_path=fixture, cert_path=cert)
+    assert result["matched"] == 0
+    os.unlink(fixture)
+    store = _store(state)
+    store.save_image(_entry("image1", "image1.bin"))
+
+    def no_network(*args):
+        raise AssertionError("offline cache must not require DNS or internet")
+
+    result = bulkhash_refresh.run_refresh(
+        "manual", str(state), store, cert_path=cert, use_offline_cache=True,
+        _fetch_fn=no_network, wait=True)
+    assert result["outcome"] == "ok" and result["matched"] == 1
+    assert bulkhash_refresh.read_settings(str(state / bulkhash_refresh.BASENAME))[
+        "last_run"]["source"] == "offline"
+    assert (state / bulkhash_refresh.OFFLINE_CACHE).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("damage", ["tampered", "expired", "future", "symlink"])
+def test_cached_feed_fails_closed_without_touching_verdicts(tmp_path, signing_key, damage):
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    state = tmp_path / "state"
+    store = _store(state)
+    bulkhash_refresh.run_refresh("offline", str(state), store,
+                                 tar_path=fixture, cert_path=cert)
+    cache = state / bulkhash_refresh.OFFLINE_CACHE
+    if damage == "tampered":
+        cache.write_bytes(b"invalid signature/archive")
+    elif damage == "symlink":
+        cache.unlink()
+        cache.symlink_to(fixture)
+    else:
+        when = time.time() + (3600 if damage == "future" else
+                              -bulkhash_refresh.OFFLINE_CACHE_MAX_AGE - 1)
+        os.utime(cache, (when, when))
+    store.save_image(_entry("image1", "image1.bin"))
+    before = store.list_images()
+    result = bulkhash_refresh.run_refresh(
+        "manual", str(state), store, cert_path=cert, use_offline_cache=True)
+    assert result["outcome"] == "fail"
+    assert store.list_images() == before
+
+
+def test_rejected_offline_upload_preserves_previous_cache(tmp_path, signing_key):
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    state = tmp_path / "state"
+    store = _store(state)
+    bulkhash_refresh.run_refresh("offline", str(state), store,
+                                 tar_path=fixture, cert_path=cert)
+    cache = state / bulkhash_refresh.OFFLINE_CACHE
+    before = cache.read_bytes(), cache.stat().st_mtime_ns
+    bad = _unsigned_fixture(tmp_path, REAL_ROW)
+    result = bulkhash_refresh.run_refresh("offline", str(state), store,
+                                          tar_path=bad, cert_path=cert)
+    assert result["outcome"] == "fail"
+    assert (cache.read_bytes(), cache.stat().st_mtime_ns) == before
+
+
+def test_explicit_online_refresh_does_not_silently_use_offline_cache(tmp_path, signing_key):
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    state = tmp_path / "state"
+    store = _store(state)
+    bulkhash_refresh.run_refresh("offline", str(state), store,
+                                 tar_path=fixture, cert_path=cert)
+    calls = []
+
+    def offline(*args):
+        calls.append(args)
+        raise OSError("network unavailable")
+
+    result = bulkhash_refresh.run_refresh("manual", str(state), store,
+                                          cert_path=cert, _fetch_fn=offline)
+    assert result["outcome"] == "fail" and len(calls) == 1
+
+
+def test_successful_online_refresh_replaces_existing_offline_cache(tmp_path, signing_key):
+    cert, key = signing_key
+    state = tmp_path / "state"
+    store = _store(state)
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    bulkhash_refresh.run_refresh("offline", str(state), store,
+                                 tar_path=fixture, cert_path=cert)
+    updated = _signed_fixture(tmp_path, REAL_ROW.replace('image1.bin', 'image2.bin'),
+                              key, name="newer")
+
+    def fetch(url, timeout, out):
+        with open(updated, 'rb') as src, open(out, 'wb') as dst:
+            dst.write(src.read())
+
+    result = bulkhash_refresh.run_refresh("manual", str(state), store,
+                                          cert_path=cert, _fetch_fn=fetch)
+    assert result["outcome"] == "ok"
+    with open(updated, 'rb') as src:
+        assert (state / bulkhash_refresh.OFFLINE_CACHE).read_bytes() == src.read()
+
+
 def test_run_refresh_offline_tar_path_skips_fetch(tmp_path, signing_key):
     cert, key = signing_key
     fixture = _signed_fixture(tmp_path, REAL_ROW, key)

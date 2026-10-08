@@ -576,13 +576,22 @@ import sys
 from instruction_keys import render_device_trust
 render_device_trust(sys.argv[1], sys.argv[2])
 PY
-  cp "$DOCKERFILE" "$ENTRYPOINT" "$CONTAINER_DIR/reconcile.sh" "$CTX/"
+  # Match the public compiler inputs staged by tools/build-device-image.sh.
+  # These build-only sources remain outside the final runtime image.
+  cp "$DOCKERFILE" "$ENTRYPOINT" "$CONTAINER_DIR/reconcile.sh" \
+    "$CONTAINER_DIR/rebuild-xml.py" "$CTX/"
+  cp "$REPO/tools/iris-aead.c" "$REPO/tools/build-instruction-crypto-inner.sh" \
+    "$REPO/tools/licenses/musl-COPYRIGHT" "$CTX/"
 }
 
 @test "XR build context includes rendered public trust without private keys" {
   _stage_build_context
   [ -s "$CTX/agent/iris-signers.allowed_signers" ]
   [ -s "$CTX/agent/iris-root.allowed_signers" ]
+  cmp "$CONTAINER_DIR/rebuild-xml.py" "$CTX/rebuild-xml.py"
+  cmp "$REPO/tools/iris-aead.c" "$CTX/iris-aead.c"
+  cmp "$REPO/tools/build-instruction-crypto-inner.sh" "$CTX/build-instruction-crypto-inner.sh"
+  cmp "$REPO/tools/licenses/musl-COPYRIGHT" "$CTX/musl-COPYRIGHT"
   [ ! -e "$CTX/key.pem" ]
   run grep -R -l -E 'BEGIN (OPENSSH |RSA |EC )?PRIVATE KEY' "$CTX"
   [ "$status" -eq 1 ]

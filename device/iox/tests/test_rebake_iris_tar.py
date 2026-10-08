@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 
@@ -27,6 +28,15 @@ import rebake_iris_tar as rb  # noqa: E402
 
 def _sha(b):
     return hashlib.sha256(b).hexdigest()
+
+
+def _verify_manifest(manifest, members):
+    """Check either input format independently of the production generator."""
+    for line in manifest.decode().splitlines():
+        match = re.fullmatch(r"(SHA256|SHA512)\(([^)]+)\)= ([0-9a-f]+)", line)
+        assert match is not None
+        algorithm, name, expected = match.groups()
+        assert hashlib.new(algorithm.lower(), members[name]).hexdigest() == expected
 
 
 def _tar_bytes(members, gz=False):
@@ -177,20 +187,14 @@ def _verify_chain(pkg_path):
     rootfs member map."""
     with tarfile.open(pkg_path) as t:
         outer = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
-    for line in outer["package.mf"].decode().strip().splitlines():
-        name = line[len("SHA256("):line.index(")")]
-        want = line.split("= ")[1]
-        assert _sha(outer[name]) == want, "outer mf mismatch for %s" % name
+    _verify_manifest(outer["package.mf"], outer)
     with tarfile.open(fileobj=io.BytesIO(outer["envelope_package.tar.gz"]), mode="r:gz") as t:
         env = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
-    for line in env["package.mf"].decode().strip().splitlines():
-        name = line[len("SHA256("):line.index(")")]
-        want = line.split("= ")[1]
-        assert _sha(env[name]) == want, "inner mf mismatch for %s" % name
+    _verify_manifest(env["package.mf"], env)
     assert env["artifacts.tar.gz"] == outer["artifacts.tar.gz"]
     with tarfile.open(fileobj=io.BytesIO(outer["artifacts.tar.gz"]), mode="r:gz") as t:
         rootfs = t.extractfile("rootfs.tar").read()
-    assert ("SHA256(rootfs.tar)= %s" % _sha(rootfs)) in outer["artifacts.mf"].decode()
+    _verify_manifest(outer["artifacts.mf"], {"rootfs.tar": rootfs})
     with tarfile.open(fileobj=io.BytesIO(rootfs)) as t:
         rf = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
     idx = json.loads(rf["index.json"])
@@ -251,6 +255,8 @@ def test_sha512_manifest_order_is_preserved_without_signing_members():
     manifest = rb._mf([(name, name.encode()) for name in present])
     assert b"package.sign" not in manifest
     assert b"package.cert" not in manifest
+    assert all(line.startswith(b"SHA512(") for line in manifest.splitlines())
+    _verify_manifest(manifest, {name: name.encode() for name in present})
 
 
 def test_rebake_replaces_files_and_keeps_chain_valid(tmp_path):
@@ -451,20 +457,14 @@ def _verify_classic_chain(pkg_path):
     (rootfs member map, artifacts member map)."""
     with tarfile.open(pkg_path) as t:
         outer = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
-    for line in outer["package.mf"].decode().strip().splitlines():
-        name = line[len("SHA256("):line.index(")")]
-        assert _sha(outer[name]) == line.split("= ")[1], "outer mf mismatch for %s" % name
+    _verify_manifest(outer["package.mf"], outer)
     with tarfile.open(fileobj=io.BytesIO(outer["envelope_package.tar.gz"]), mode="r:gz") as t:
         env = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
-    for line in env["package.mf"].decode().strip().splitlines():
-        name = line[len("SHA256("):line.index(")")]
-        assert _sha(env[name]) == line.split("= ")[1], "inner mf mismatch for %s" % name
+    _verify_manifest(env["package.mf"], env)
     assert env["artifacts.tar.gz"] == outer["artifacts.tar.gz"]
     with tarfile.open(fileobj=io.BytesIO(outer["artifacts.tar.gz"]), mode="r:gz") as t:
         art = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
-    for line in outer["artifacts.mf"].decode().strip().splitlines():
-        name = line[len("SHA256("):line.index(")")]
-        assert _sha(art[name]) == line.split("= ")[1], "artifacts.mf mismatch for %s" % name
+    _verify_manifest(outer["artifacts.mf"], art)
     rootfs = art["rootfs.tar"]
     with tarfile.open(fileobj=io.BytesIO(rootfs)) as t:
         rf = {m.name: (t.extractfile(m).read() if m.isfile() else m.linkname) for m in t}

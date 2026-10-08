@@ -18,6 +18,7 @@ import secrets
 import socket
 import ssl
 import threading
+import service_shutdown
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,8 +30,10 @@ import bounded_pool
 import api_problem
 import api_routes
 import tier_auth
+import service_credentials
 import keyed_state
 import live_samples
+import swarm_edges
 import instruction_keys
 import metrics
 import otlp
@@ -656,7 +659,7 @@ class Telemetry:
                  policy_info=None, enforcement_info=None, peer_ledger=None,
                  assignments_info=None, transfer_lifecycle=None,
                  attestations_info=None, instruction_status_info=None,
-                 report_attribution=None, origin_endpoints_info=None):
+                 report_attribution=None, origin_endpoints_info=None, headers_provider=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
         # Pinned per-report sender classification (report_attribution), so a
@@ -722,12 +725,13 @@ class Telemetry:
         # sampler consults at the top of every pass; a non-null file field
         # overrides the deployment env captured here, per field. None
         # (tests, direct construction) -> the explicitly passed exporters
-        # are kept as-is forever. Headers stay startup-env (secrets) and are
-        # re-applied to every rebuilt exporter.
+        # are kept as-is forever. Deployment headers are the fallback;
+        # an encrypted Console override is resolved for every sample pass.
         self._dest = dest_settings
         self._env_endpoint = (env_endpoint or "").strip()
         self._env_enabled = bool(env_enabled)
         self._headers = dict(headers or {})
+        self._headers_provider = headers_provider
         self._effective = None      # (endpoint, enabled) the exporters match
         # Optional callable -> the catalog's live-samples.json doc (spec 6.3);
         # aggregated per image each sample() pass. None -> no live streaming
@@ -808,6 +812,7 @@ class Telemetry:
                           "announces_refused_expired_total": 0}
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._thread = None
         # When no registry is supplied, own one wired to our event hook — this
         # breaks the construction cycle (registry needs the hook, hook needs us).
         if registry is None:
@@ -1057,13 +1062,23 @@ class Telemetry:
         endpoint = self._env_endpoint if file_endpoint is None \
             else file_endpoint
         enabled = self._env_enabled if file_enabled is None else file_enabled
+        headers, credential_id = self._headers, None
+        if self._headers_provider is not None:
+            try:
+                headers, credential_id = self._headers_provider(endpoint, self._headers)
+            except (OSError, ValueError):
+                # Missing custody or a changed destination must not silently
+                # send old credentials, or retry anonymously at another host.
+                headers, credential_id, enabled = {}, 'unavailable', False
         effective = (endpoint, bool(enabled))
+        if self._headers_provider is not None:
+            effective += (credential_id,)
         if effective == self._effective:
             return
         self._effective = effective
         sender = self._log_sender
         authenticated_plaintext = bool(
-            self._headers and endpoint
+            headers and endpoint
             and urlparse(endpoint).scheme.lower() != "https")
         if enabled and endpoint and not authenticated_plaintext:
             # Task 22: swap ONLY the mutable transport; the hub-owned
@@ -1071,9 +1086,9 @@ class Telemetry:
             # destination flush to the new one. Metrics stay conflating (no
             # queue) and are rebuilt wholesale.
             self._log_transport = otlp.OTLPLogTransport(
-                endpoint, sender=sender, headers=self._headers)
+                endpoint, sender=sender, headers=headers)
             self.metrics_exporter = otlp.OTLPMetricsExporter(
-                endpoint, headers=self._headers)
+                endpoint, headers=headers)
         else:
             # Disabled, or no endpoint anywhere: drop the transport but RETAIN
             # the queue (no fake success — queued events wait for a live
@@ -1804,6 +1819,8 @@ class Telemetry:
             matching_ids = image_ids.get(str(info_hash), [])
             if len(matching_ids) == 1:
                 image["image_id"] = matching_ids[0]
+            image.update(swarm_edges.project(
+                peers, live_by_device, image.get("image_id"), now))
             images.append(image)
         return {
             "now": now,
@@ -2022,10 +2039,17 @@ class Telemetry:
                 pass                        # never let the sampler die
 
     def start(self):
-        threading.Thread(target=self.run_forever, daemon=True).start()
+        self._thread = service_shutdown.WriterThread(
+            target=self.run_forever, name="telemetry-sampler", daemon=True,
+            stop_event=self._stop)
+        self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout=5):
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(0, timeout))
+            return not self._thread.is_alive() and self._thread.clean_exit
+        return True
 
 
 def _read_rpc_secret(env):
@@ -2050,9 +2074,8 @@ def from_env(env=None):
     no assumptions about any observability stack being around."""
     env = os.environ if env is None else env
     endpoint = env.get("IRIS_OTLP_ENDPOINT", "").strip()
-    # Headers stay startup-env only (they are secrets with an existing
-    # file-based path — never console-editable); read unconditionally so a
-    # console enable-from-off still authenticates to the collector.
+    # Read deployment headers even while export is off. Console-managed
+    # credentials override this fallback through the encrypted secrets store.
     headers = otlp.read_headers_env(env)
     device_metrics = env.get("IRIS_OTLP_DEVICE_METRICS",
                              "").strip().lower() in ("1", "true", "yes", "on")
@@ -2137,6 +2160,7 @@ def from_env(env=None):
                     env_endpoint=endpoint,
                     env_enabled=observability_enabled(env),
                     headers=headers,
+                    headers_provider=service_credentials.collector_headers,
                     policy_info=policy_info,
                     enforcement_info=enforcement_info,
                     peer_ledger=ledger,
@@ -2287,6 +2311,16 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
         dobs = _device_observation(live_by_device.get(device_id), now)
         if dobs is not None:
             row["device_observation"] = dobs
+        requested = None
+        if policy is not None and not getattr(policy, "fail_closed", True):
+            requested = _peer_policy.compile_qos(
+                policy.document, device_id).get("peer_telemetry_interval_s", 60)
+        row["peer_telemetry"] = {
+            "supported": rec.get("peer_telemetry_v") == 1 and
+                0 <= now - (rec.get("last_seen") or 0) <= 600,
+            "requested_interval_s": requested,
+            "effective_interval_s": dobs.get("interval_s") if dobs else None,
+        }
         report = report_by_device.get(device_id)
         if report is not None:
             row["latest_report"] = report
@@ -2365,6 +2399,9 @@ def _device_observation(entry, now):
     if not valid:
         # Stale / withdrawn: retained context only; omit all fresh counters.
         return out
+
+    out["interval_s"] = entry.get("interval_s", 60 * live_samples.TIER_TICKS.get(
+        entry.get("sampling_class", "good"), 1))
 
     if schema == "v1":
         # v1 rollout: map its legacy fields with explicit v1-source names; do
@@ -2852,10 +2889,9 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                 pass
             elif path == "/metrics":
                 try:
-                    allowed = tier_auth.authorized(
+                    allowed = service_credentials.metrics_authorized(
                         self.headers, observability_token_file,
-                        observability_previous_token_file,
-                        scope="observability")
+                        observability_previous_token_file)
                 except tier_auth.CredentialUnavailable:
                     allowed = False
                 if not allowed:
@@ -2904,6 +2940,7 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
             if path == "/metrics" and provider is not None:
                 self._send(200, provider().encode(),
                            "text/plain; version=0.0.4; charset=utf-8")
+                service_credentials.observed_scrape(self.headers)
             elif path == "/healthz":
                 # Anonymous probes deliberately disclose no exporter or
                 # listener topology. /healthz proves this process can answer;
@@ -2957,8 +2994,9 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                 code = "management-authentication-required"
                 title = "Management authentication required"
             try:
-                allowed = tier_auth.authorized(
-                    self.headers, current, previous, scope=scope)
+                allowed = (service_credentials.metrics_authorized(self.headers, current, previous)
+                           if scope == 'observability' else
+                           tier_auth.authorized(self.headers, current, previous, scope=scope))
             except tier_auth.CredentialUnavailable:
                 allowed = False
             if not allowed:

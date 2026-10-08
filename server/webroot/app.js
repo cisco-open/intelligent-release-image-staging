@@ -4751,6 +4751,64 @@
   // call -- a visibilitychange-triggered immediate refresh racing the
   // interval tick, or a rapid nav-away-and-back -- is a real possibility, so
   // a superseded call must not clobber a newer one's render.
+  var deploymentRefreshController = null;
+  async function refreshDeployment() {
+    if (deploymentRefreshController) deploymentRefreshController.abort();
+    var controller = new AbortController();
+    deploymentRefreshController = controller;
+    // Finish before the 10-second view poll, otherwise each new poll could
+    // abort its predecessor forever while old inventory still looked current.
+    var timer = setTimeout(function () { controller.abort(); }, 8000);
+    var layout = document.getElementById('deployment-layout');
+    var table = document.getElementById('deployment-table');
+    var note = document.getElementById('deployment-note');
+    try {
+      var response = await fetch('/api/v1/deployment', {signal: controller.signal});
+      if (!response.ok) throw new Error('unavailable');
+      var data = await response.json();
+      if (!Array.isArray(data.components) || data.components.length > 64) throw new Error('invalid');
+      if (deploymentRefreshController !== controller) return;
+      var labels = {docker: 'Docker · one host', 'docker-split': 'Docker · separate hosts',
+        kubernetes: 'Kubernetes', 'single-container': 'Single container', unknown: 'Layout not reported'};
+      layout.textContent = labels[data.layout] || labels.unknown;
+      var context = document.getElementById('deployment-context');
+      context.textContent = [data.instance && ('Instance: ' + data.instance), data.namespace && ('Namespace: ' + data.namespace)].filter(Boolean).join(' · ');
+      context.hidden = !context.textContent;
+      document.getElementById('deployment-observed').textContent = Number.isFinite(data.observed_at)
+        ? 'Observed ' + new Date(data.observed_at * 1000).toLocaleTimeString() : 'Observation time unavailable';
+      var rows = document.getElementById('deployment-rows');
+      rows.replaceChildren();
+      data.components.forEach(function (item) {
+        var row = document.createElement('tr');
+        function cell(main, details) {
+          var td = document.createElement('td');
+          td.textContent = main || 'Not reported';
+          (details || []).filter(Boolean).forEach(function (value) {
+            var small = document.createElement('small'); small.textContent = value; td.appendChild(small);
+          });
+          row.appendChild(td);
+        }
+        cell(item.role === 'server' ? 'Tracker / distribution' : item.role === 'console' ? 'Console' : 'Component',
+          [(item.kind === 'pod' ? 'Pod: ' : item.kind === 'container' ? 'Container: ' : 'Runtime: ') + (item.name || 'Not reported')]);
+        cell(item.host, [item.address && ((item.kind === 'pod' ? 'Pod IP: ' : 'Host address: ') + item.address)]);
+        cell([item.os, item.architecture].filter(Boolean).join(' · ') || (item.kind === 'pod' ? 'Pod container' : 'Container'),
+          [[item.image && ('Image: ' + item.image), item.kernel && ('Kernel: ' + item.kernel)].filter(Boolean).join(' · ')]);
+        cell(item.state);
+        rows.appendChild(row);
+      });
+      table.hidden = !data.components.length;
+      note.textContent = data.note || '';
+      note.hidden = !note.textContent;
+    } catch (error) {
+      if (deploymentRefreshController !== controller) return;
+      layout.textContent = 'Unavailable';
+      table.hidden = true;
+      document.getElementById('deployment-context').hidden = true;
+      document.getElementById('deployment-observed').textContent = '';
+      note.hidden = false;
+      note.textContent = 'Deployment information could not be refreshed. Retrying automatically.';
+    } finally { clearTimeout(timer); }
+  }
   var overviewRefreshGeneration = 0, overviewRefreshController = null;
   async function refreshOverview() {
     var mine = ++overviewRefreshGeneration;
@@ -4761,6 +4819,7 @@
     // refresh. Deliberately not awaited with the overview fetch: a slow or
     // unreachable collector must not delay the cards.
     refreshTelemetryHealth();
+    refreshDeployment();
     // /api/v1/overview is the PRIMARY fetch -- Fleet Totals and Rollout need
     // nothing else, so its own failure is still a hard bail (matches the
     // pre-existing behavior: no data, nothing to render).
@@ -6099,6 +6158,768 @@
     refreshSettings();
   });
 
+  // ---- Certificate lifecycle ----
+  var certificateRequest = null, certificateBusy = false, certificateRead = 0;
+  function certificateControls() {
+    document.getElementById('certificate-request').disabled = certificateBusy;
+    document.getElementById('certificate-approved').disabled = certificateBusy || !certificateRequest;
+    document.getElementById('certificate-renew').disabled = certificateBusy || !certificateRequest;
+  }
+  async function refreshCertificates() {
+    var generation = ++certificateRead;
+    var rows = document.getElementById('certificate-rows');
+    var observed = document.getElementById('certificate-observed');
+    rows.textContent = '';
+    observed.textContent = 'Checking certificate files…';
+    try {
+      var r = await fetch('/api/v1/settings/certificates');
+      if (!r.ok) throw new Error('Certificate inventory unavailable. Retry after checking the server connection.');
+      var data = await r.json();
+      if (generation !== certificateRead) return;
+      if (!Array.isArray(data.items)) throw new Error('Certificate inventory is incomplete.');
+      rows.innerHTML = data.items.map(function (item) {
+        function date(value) { return value == null ? 'Unknown' : fmtDate(value); }
+        return '<tr><td>' + esc(item.label) + '<br><small class="machine">' +
+          esc(item.fingerprint_sha256 || 'Fingerprint unavailable') + '</small></td><td>' +
+          esc(item.state.replaceAll('-', ' ')) + '</td><td>' + esc(item.kind === 'public-key' ? 'Policy / custody review' : date(item.renew_at)) + '</td><td>' +
+          esc(item.kind === 'public-key' ? 'No expiry' : date(item.expires_at)) + '</td><td>' + esc(item.impact) +
+          (item.refuse_at == null ? '' : '<br>Signing stops: ' + esc(date(item.refuse_at))) + '</td></tr>';
+      }).join('');
+      observed.textContent = 'Observed ' + fmtDate(data.observed_at) +
+        '. Signing custody: ' + (data.custody ? data.custody.state : 'unknown; status evidence unavailable') + '.';
+    } catch (error) {
+      if (generation !== certificateRead) return;
+      rows.textContent = '';
+      observed.textContent = error.message || 'Certificate inventory unavailable.';
+    }
+  }
+  document.getElementById('certificate-refresh').addEventListener('click', refreshCertificates);
+  document.getElementById('certificate-request').addEventListener('click', async function () {
+    if (certificateBusy) return;
+    certificateBusy = true; certificateRequest = null; certificateControls();
+    var result = document.getElementById('certificate-renew-result');
+    document.getElementById('certificate-approved').value = '';
+    result.textContent = 'Preparing public renewal request…';
+    try {
+      var r = await fetch('/api/v1/settings/certificates/instruction/request', {
+        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: '{}'
+      });
+      var data = await r.json();
+      if (!r.ok) throw new Error(data.error || data.detail || 'Could not prepare renewal.');
+      if (typeof data.public_key !== 'string' || !data.public_key.startsWith('ssh-ed25519 ') ||
+          !/^[0-9a-f]{64}$/.test(data.public_key_sha256) || !/^[0-9a-f]{64}$/.test(data.certificate_sha256)) {
+        throw new Error('Public renewal request is incomplete.');
+      }
+      certificateRequest = data;
+      var url = URL.createObjectURL(new Blob([data.public_key], {type: 'text/plain'}));
+      var link = document.createElement('a');
+      link.href = url; link.download = 'iris-online.pub'; link.click();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      result.textContent = 'Send iris-online.pub to your offline custodian. Return the approved certificate, never the private root key. If you reopen this page, prepare the request again before importing.';
+    } catch (error) { certificateRequest = null; result.textContent = error.message || 'Could not prepare renewal.'; }
+    finally { certificateBusy = false; certificateControls(); }
+  });
+  document.getElementById('certificate-renew-form').addEventListener('submit', async function (event) {
+    event.preventDefault();
+    if (certificateBusy || !certificateRequest) return;
+    var file = document.getElementById('certificate-approved').files[0];
+    var result = document.getElementById('certificate-renew-result');
+    if (!file || file.size > 16384) { result.textContent = 'Choose a public OpenSSH certificate smaller than 16 KiB.'; return; }
+    certificateBusy = true; certificateControls();
+    result.textContent = 'Validating and applying the approved certificate…';
+    try {
+      var certificate = await file.text();
+      if (!certificate.startsWith('ssh-ed25519-cert-v01@openssh.com ') || certificate.includes('PRIVATE KEY')) {
+        throw new Error('Choose the public certificate returned by your custodian, not a private key.');
+      }
+      var r = await fetch('/api/v1/settings/certificates/instruction/renew', {
+        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}),
+        body: JSON.stringify({certificate: certificate,
+          public_key_sha256: certificateRequest.public_key_sha256,
+          certificate_sha256: certificateRequest.certificate_sha256})
+      });
+      var data = await r.json();
+      if (!r.ok || !data.applied) throw new Error(data.error || data.detail || 'Renewal was not confirmed. Refresh before retrying.');
+      result.textContent = 'Renewal applied. Expires ' + fmtDate(data.expires_at) +
+        '; signing stops ' + fmtDate(data.refuse_at) + '. The signing key and device trust are unchanged.' +
+        (data.status_refreshed ? '' : ' Custody status refresh is pending; check again shortly.');
+      certificateRequest = null;
+      document.getElementById('certificate-approved').value = '';
+      await refreshCertificates();
+    } catch (error) { result.textContent = error.message || 'Renewal was not confirmed. Refresh before retrying.'; }
+    finally { certificateBusy = false; certificateControls(); }
+  });
+  // ---- End certificate lifecycle ----
+
+  // ---- Journalled online signer rotation ----
+  function maintenanceRequestId() {
+    var bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    var hex = Array.from(bytes).map(function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
+    return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+  }
+  var rotationStatus = null, rotationBusy = false, rotationNonce = null, rotationRead = 0;
+  var rotationUrl = '/api/v1/settings/certificates/instruction/rotation';
+  function validRotationStatus(data) {
+    return data && ['idle', 'awaiting-approval', 'committing', 'retirement-pending', 'retiring', 'completed', 'cancelled'].includes(data.state) &&
+      Array.isArray(data.root_ids) && data.root_ids.every(function (id) { return typeof id === 'string'; });
+  }
+  function renderRotation() {
+    var state = rotationStatus ? rotationStatus.state : 'unknown';
+    document.getElementById('rotation-state').textContent = 'Rotation: ' + state.replaceAll('-', ' ') +
+      (state === 'completed' ? '. Previous key revoked at keylist sequence ' + rotationStatus.retired_keylist_seq + '.' : '.');
+    document.getElementById('rotation-previous').textContent = rotationStatus && rotationStatus.previous_sha256 || 'No rotation evidence';
+    document.getElementById('rotation-replacement').textContent = rotationStatus && rotationStatus.replacement_sha256 || 'No rotation evidence';
+    document.getElementById('rotation-prepare').disabled = rotationBusy || !['idle', 'completed', 'cancelled'].includes(state);
+    document.getElementById('rotation-approval').hidden = state !== 'awaiting-approval';
+    document.getElementById('rotation-retirement').hidden = !['retirement-pending', 'retiring'].includes(state);
+    document.querySelectorAll('#rotation-approval button,#rotation-approval input,#rotation-retirement button,#rotation-retirement input,#rotation-retirement select').forEach(function (el) { el.disabled = rotationBusy || !rotationStatus; });
+    var root = document.getElementById('rotation-root'), selected = root.value;
+    root.replaceChildren();
+    (rotationStatus && rotationStatus.root_ids || []).forEach(function (id) {
+      var option = document.createElement('option'); option.value = id; option.textContent = id; root.appendChild(option);
+    });
+    if (Array.from(root.options).some(function (option) { return option.value === selected; })) root.value = selected;
+  }
+  function rotationDownload(name, bytes) {
+    var url = URL.createObjectURL(new Blob([bytes], {type: 'application/octet-stream'}));
+    var link = document.createElement('a'); link.href = url; link.download = name; link.click();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  async function refreshRotation() {
+    if (rotationBusy) return;
+    var generation = ++rotationRead;
+    rotationStatus = null; renderRotation();
+    try {
+      var response = await fetch(rotationUrl), data = await response.json();
+      if (generation !== rotationRead) return;
+      if (!response.ok || !validRotationStatus(data)) throw new Error(data.error || 'Rotation status unavailable. Check custody before retrying.');
+      rotationStatus = data; renderRotation();
+    } catch (error) {
+      if (generation !== rotationRead) return;
+      rotationStatus = null; renderRotation();
+      document.getElementById('rotation-result').textContent = error.message;
+    }
+  }
+  async function rotateSigner(action) {
+    if (rotationBusy || !rotationStatus) return;
+    var result = document.getElementById('rotation-result');
+    var payload = {action: action, request_id: rotationStatus.request_id};
+    try {
+      if (action === 'prepare') {
+        if (!confirm('Prepare a new online signing key for offline approval? The current signer keeps working until you apply approval.')) return;
+        rotationNonce = rotationNonce || maintenanceRequestId(); payload.request_id = rotationNonce;
+      } else if (action === 'activate' || action === 'retire') {
+        var file = document.getElementById(action === 'activate' ? 'rotation-certificate' : 'rotation-keylist').files[0];
+        if (!file || file.size > (action === 'activate' ? 65536 : 131072)) throw new Error('Choose the bounded public approval file returned by your custodian.');
+        var raw = await file.text();
+        if (raw.includes('PRIVATE KEY') || !raw.startsWith(action === 'activate' ? 'ssh-ed25519-cert-v01@openssh.com ' : 'IRIS-KEYLIST/1\n')) throw new Error('Upload the public approval, never a private key.');
+        if (!confirm(action === 'activate' ? 'Switch to the approved replacement signer? This cannot be cancelled afterward. Device roots and counters stay unchanged.' : 'Publish the approved revocation of the previous signer? Devices must fetch current instructions and the new keylist. Verify fleet acceptance afterward.')) return;
+        payload.confirm = true;
+        if (action === 'activate') payload.certificate = raw;
+        else payload.artifact = btoa(raw);
+      } else if (action === 'retirement-request') payload.root_id = document.getElementById('rotation-root').value;
+      else if (action === 'cancel' && !confirm('Discard the pending replacement? The current signer will be kept.')) return;
+      rotationBusy = true; ++rotationRead; renderRotation(); result.textContent = 'Validating rotation request…';
+      var response = await fetch(rotationUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Rotation outcome unknown. Refresh and retry the same request.');
+      if (action === 'retirement-request') {
+        rotationDownload('keylist.payload', Uint8Array.from(atob(data.payload), function (c) { return c.charCodeAt(0); }));
+        result.textContent = 'Retirement request downloaded. Obtain approval from ' + data.root_id + ' on its offline station.';
+      } else {
+        if (!validRotationStatus(data)) throw new Error('Rotation outcome unknown. Refresh before continuing.');
+        rotationStatus = data; rotationNonce = null;
+        result.textContent = action === 'activate' ? 'Replacement signer active. Complete offline retirement approval next.' :
+          action === 'retire' ? 'Retirement approval validated and published.' :
+          action === 'cancel' ? 'Pending replacement cancelled; active signer unchanged.' : 'Replacement prepared. Download its public key for offline approval.';
+      }
+    } catch (error) { result.textContent = error.message || 'Rotation outcome unknown. Refresh and retry the same request.'; }
+    finally { rotationBusy = false; renderRotation(); }
+  }
+  document.getElementById('rotation-refresh').addEventListener('click', refreshRotation);
+  document.getElementById('rotation-download').addEventListener('click', function () {
+    if (rotationStatus && rotationStatus.public_key) rotationDownload('iris-replacement.pub', rotationStatus.public_key);
+  });
+  ['prepare', 'activate', 'cancel', 'retirement-request', 'retire'].forEach(function (action) {
+    document.getElementById('rotation-' + action).addEventListener('click', function () { rotateSigner(action); });
+  });
+  // ---- End signer rotation ----
+
+  // ---- Browser TLS public request and approval ----
+  var browserTls = null, browserTlsBusy = false, browserTlsRead = 0, browserTlsPending = null;
+  var browserTlsUrl = '/api/v1/settings/certificates/browser/rotation';
+  function browserTlsField(name) { return document.getElementById('browser-tls-' + name); }
+  function validBrowserTls(data) {
+    return data && ['idle', 'awaiting-approval', 'approved', 'committing', 'published', 'cancelled'].includes(data.state) &&
+      Array.isArray(data.names) && (data.request_id === null || typeof data.request_id === 'string');
+  }
+  function renderBrowserTls() {
+    var state = browserTls ? browserTls.state : 'unknown';
+    browserTlsField('state').textContent = 'Browser certificate: ' + state.replaceAll('-', ' ') + '.';
+    browserTlsField('identity').textContent = browserTls && browserTls.fingerprint_sha256 ?
+      'Replacement SHA256: ' + browserTls.fingerprint_sha256 : '';
+    browserTlsField('prepare').disabled = browserTlsBusy || !['idle', 'published', 'cancelled'].includes(state);
+    browserTlsField('csr').disabled = browserTlsBusy || !browserTls || !browserTls.csr;
+    browserTlsField('certificate').disabled = browserTlsBusy || !browserTls || !browserTls.certificate;
+    browserTlsField('cancel').disabled = browserTlsBusy || !['awaiting-approval', 'approved'].includes(state);
+    browserTlsField('apply').disabled = browserTlsBusy || !['approved', 'committing', 'published'].includes(state);
+    browserTlsField('apply').textContent = state === 'committing' ? 'Recover approved publication' : state === 'published' ? 'Retry Console certificate reload' : 'Apply approved certificate';
+    browserTlsField('approve-form').hidden = !['awaiting-approval', 'approved'].includes(state) || !browserTls || browserTls.mode !== 'ca';
+    ['approve', 'approved', 'names', 'mode'].forEach(function (name) { browserTlsField(name).disabled = browserTlsBusy || !browserTls; });
+  }
+  async function refreshBrowserTls() {
+    if (browserTlsBusy) return;
+    var generation = ++browserTlsRead;
+    browserTls = null; renderBrowserTls();
+    try {
+      var response = await fetch(browserTlsUrl), data = await response.json();
+      if (generation !== browserTlsRead) return;
+      if (!response.ok || !validBrowserTls(data)) throw new Error(data.error || 'Certificate request unavailable.');
+      browserTls = data; renderBrowserTls();
+      browserTlsField('result').textContent = 'Request status refreshed. Publication and browser trust are separate checks.';
+    } catch (error) { if (generation === browserTlsRead) browserTlsField('result').textContent = error.message; }
+  }
+  async function browserTlsAction(action) {
+    if (browserTlsBusy || !browserTls) return;
+    var result = browserTlsField('result');
+    var payload = {action: action, request_id: browserTls.request_id};
+    try {
+      if (action === 'prepare') {
+        var names = browserTlsField('names').value.split(',').map(function (name) { return name.trim(); });
+        var mode = browserTlsField('mode').value;
+        if (!confirm(mode === 'self-signed' ? 'Generate a replacement key and self-signed certificate? Browser trust must be updated before applying it.' : 'Generate an encrypted replacement key and a public certificate request for CA approval?')) return;
+        var parameters = JSON.stringify({names: names, mode: mode});
+        if (!browserTlsPending || browserTlsPending.parameters !== parameters) browserTlsPending = {parameters: parameters, id: maintenanceRequestId()};
+        payload = {action: action, request_id: browserTlsPending.id, names: names, mode: mode};
+      } else if (action === 'approve') {
+        var file = browserTlsField('approved').files[0];
+        if (!file || file.size > 65536) throw new Error('Choose a public PEM certificate chain smaller than 64 KiB.');
+        payload.certificate = await file.text();
+        if (payload.certificate.includes('PRIVATE KEY') || !payload.certificate.includes('BEGIN CERTIFICATE')) throw new Error('Upload the public certificate chain, never a private key.');
+      } else if (action === 'apply') {
+        if (!confirm('Have you approved browser trust for this certificate and verified its names? Apply it to this Console now. Existing browser connections may need a reload; other Console instances must be updated and verified separately.')) return;
+        payload.confirm = true;
+      } else if (action === 'cancel' && !confirm('Discard this replacement request? The active certificate remains unchanged.')) return;
+      browserTlsBusy = true; ++browserTlsRead; renderBrowserTls();
+      var response = await fetch(browserTlsUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok || !validBrowserTls(data)) throw new Error(data.error || 'Outcome unknown. Refresh the same request before retrying.');
+      browserTls = data; browserTlsPending = null;
+      result.textContent = action === 'apply' ? (data.applied ? 'Certificate published and this Console listener reloaded. Verify a new trusted browser connection.' : 'Certificate published; this Console has not confirmed reload. Preserve this request and retry the reload.') :
+        action === 'prepare' ? 'Replacement prepared. Download the public request or approved certificate before continuing.' :
+        action === 'approve' ? 'Certificate matches the replacement key, requested names and validity window. Review trust before applying.' : 'Replacement cancelled; active certificate unchanged.';
+      if (action === 'approve') browserTlsField('approved').value = '';
+    } catch (error) { result.textContent = error.message || 'Outcome unknown. Refresh the request before continuing.'; }
+    finally { browserTlsBusy = false; renderBrowserTls(); }
+  }
+  browserTlsField('names').value = location.hostname;
+  browserTlsField('refresh').addEventListener('click', refreshBrowserTls);
+  ['prepare', 'approve'].forEach(function (action) {
+    browserTlsField(action + '-form').addEventListener('submit', function (event) { event.preventDefault(); browserTlsAction(action); });
+  });
+  ['apply', 'cancel'].forEach(function (action) { browserTlsField(action).addEventListener('click', function () { browserTlsAction(action); }); });
+  ['csr', 'certificate'].forEach(function (kind) {
+    browserTlsField(kind).addEventListener('click', function () {
+      if (browserTls && browserTls[kind]) rotationDownload(kind === 'csr' ? 'iris-console.csr' : 'iris-console.crt', browserTls[kind]);
+    });
+  });
+
+  // ---- Opt-in key maintenance ----
+  var serviceCredentialState = null, serviceCredentialBusy = false, serviceCredentialRead = 0, serviceCredentialPending = null;
+  var serviceCredentialUrl = '/api/v1/settings/service-credentials';
+  function serviceCredentialField(name) { return document.getElementById('service-credential-' + name); }
+  function validServiceCredential(data) {
+    return data && Array.isArray(data.items) && data.items.length === 2 && data.items.every(function (item) {
+      return ['metrics-token', 'collector-headers'].includes(item.family) &&
+        ['deployment-managed', 'awaiting-verification', 'completed', 'reverted'].includes(item.state);
+    });
+  }
+  function renderServiceCredential() {
+    var family = serviceCredentialField('family').value;
+    var item = serviceCredentialState && serviceCredentialState.items.find(function (row) { return row.family === family; });
+    serviceCredentialField('metrics').hidden = family !== 'metrics-token';
+    serviceCredentialField('collector').hidden = family !== 'collector-headers';
+    serviceCredentialField('state').textContent = item ? item.state.replaceAll('-', ' ') +
+      (item.observed_at ? '. Successful use observed ' + new Date(item.observed_at * 1000).toISOString() + '.' : '. No replacement-use evidence recorded.') : 'Credential state unavailable. Refresh before changing credentials.';
+    serviceCredentialField('replace').disabled = serviceCredentialBusy || !item || item.state === 'awaiting-verification';
+    serviceCredentialField('retire').disabled = serviceCredentialBusy || !item || item.state !== 'awaiting-verification' || !item.observed_at;
+    serviceCredentialField('revert').disabled = serviceCredentialBusy || !item || item.state !== 'awaiting-verification';
+    document.querySelectorAll('#service-credential-workflow input,#service-credential-workflow select').forEach(function (el) { el.disabled = serviceCredentialBusy; });
+  }
+  function addServiceHeader() {
+    var container = serviceCredentialField('headers');
+    if (container.children.length >= 16) return;
+    var row = document.createElement('div'); row.className = 'maintenance-form';
+    var nameLabel = document.createElement('label'), valueLabel = document.createElement('label');
+    nameLabel.textContent = 'Header name'; valueLabel.textContent = 'Secret value';
+    var name = document.createElement('input'), value = document.createElement('input'), remove = document.createElement('button');
+    name.type = 'text'; name.value = container.children.length ? '' : 'Authorization'; name.dataset.field = 'name';
+    value.type = 'password'; value.autocomplete = 'new-password'; value.dataset.field = 'value';
+    remove.type = 'button'; remove.className = 'btn ghost'; remove.textContent = 'Remove header';
+    remove.addEventListener('click', function () { if (!serviceCredentialBusy) row.remove(); });
+    nameLabel.appendChild(name); valueLabel.appendChild(value); row.append(nameLabel, valueLabel, remove); container.appendChild(row);
+  }
+  async function refreshServiceCredential() {
+    if (serviceCredentialBusy) return;
+    var generation = ++serviceCredentialRead;
+    serviceCredentialState = null; renderServiceCredential();
+    try {
+      var response = await fetch(serviceCredentialUrl), data = await response.json();
+      if (generation !== serviceCredentialRead) return;
+      if (!response.ok || !validServiceCredential(data)) throw new Error(data.error || 'Credential state unavailable.');
+      serviceCredentialState = data; renderServiceCredential();
+    } catch (error) { if (generation === serviceCredentialRead) serviceCredentialField('result').textContent = error.message; }
+  }
+  async function changeServiceCredential(action) {
+    if (!serviceCredentialState || serviceCredentialBusy) return;
+    var family = serviceCredentialField('family').value;
+    var item = serviceCredentialState.items.find(function (row) { return row.family === family; });
+    var payload = {action: action, family: family, request_id: item.request_id, confirm: true};
+    try {
+      if (action === 'replace') {
+        if (family === 'metrics-token') payload.token = serviceCredentialField('token').value;
+        else {
+          payload.endpoint = serviceCredentialField('endpoint').value;
+          payload.headers = Object.create(null);
+          serviceCredentialField('headers').querySelectorAll('.maintenance-form').forEach(function (row) {
+            var name = row.querySelector('[data-field=name]').value.trim();
+            if (!name || Object.keys(payload.headers).some(function (known) { return known.toLowerCase() === name.toLowerCase(); })) throw new Error('Provide distinct authentication header names.');
+            payload.headers[name] = row.querySelector('[data-field=value]').value;
+          });
+        }
+        if (!confirm(family === 'metrics-token' ? 'Have you saved the replacement token for every scraper? Apply it while retaining the previous token?' : 'Use these new credentials only at the specified HTTPS collector? Keep the old credential valid there until verification.')) return;
+        var parameters = JSON.stringify(payload);
+        if (!serviceCredentialPending || serviceCredentialPending.parameters !== parameters) serviceCredentialPending = {parameters: parameters, id: maintenanceRequestId()};
+        payload.request_id = serviceCredentialPending.id;
+      } else if (!confirm(action === 'revert' ? 'Restore the previous IRIS credential setting? External scraper or collector changes will not be rolled back.' :
+        family === 'metrics-token' ? 'Have all scrapers moved to the replacement? At least one successful new-token scrape was observed. Remove the previous token now?' :
+        'Have you revoked the previous credential at the collector after moving every sender? Remove the stored previous value from IRIS now?')) return;
+      serviceCredentialBusy = true; ++serviceCredentialRead; renderServiceCredential();
+      var response = await fetch(serviceCredentialUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok || !validServiceCredential(data)) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
+      serviceCredentialState = data; serviceCredentialPending = null;
+      serviceCredentialField('token').value = '';
+      serviceCredentialField('headers').querySelectorAll('[data-field=value]').forEach(function (field) { field.value = ''; });
+      serviceCredentialField('result').textContent = action === 'replace' ? 'Replacement saved in encrypted storage. Update consumers and refresh evidence before finishing.' :
+        action === 'revert' ? 'Previous IRIS setting restored. Verify external consumers separately.' :
+        family === 'metrics-token' ? 'Previous scrape token retired. Verify every scraper continues working.' :
+        'Previous stored collector credentials removed after observed delivery and your retirement confirmation.';
+    } catch (error) { serviceCredentialField('result').textContent = error.message; }
+    finally { serviceCredentialBusy = false; renderServiceCredential(); }
+  }
+  serviceCredentialField('family').addEventListener('change', renderServiceCredential);
+  serviceCredentialField('refresh').addEventListener('click', refreshServiceCredential);
+  serviceCredentialField('add-header').addEventListener('click', addServiceHeader); addServiceHeader();
+  serviceCredentialField('generate').addEventListener('click', function () {
+    if (!serviceCredentialBusy) serviceCredentialField('token').value = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(function (v) { return v.toString(16).padStart(2, '0'); }).join('');
+  });
+  serviceCredentialField('download').addEventListener('click', function () {
+    var value = serviceCredentialField('token').value;
+    if (!/^[A-Za-z0-9._~+/-]{32,256}$/.test(value)) { serviceCredentialField('result').textContent = 'Generate or enter a valid replacement token first.'; return; }
+    rotationDownload('iris-metrics-token', value + '\n');
+    serviceCredentialField('result').textContent = 'Private credential downloaded. Store it securely and provision it only to authorized scrapers.';
+  });
+  ['replace', 'retire', 'revert'].forEach(function (action) { serviceCredentialField(action).addEventListener('click', function () { changeServiceCredential(action); }); });
+
+  var deploymentRotation = null, deploymentTrust = null, deploymentBusy = false, deploymentRead = 0, deploymentPending = null;
+  var deploymentRotationUrl = '/api/v1/settings/deployment-rotation', deploymentTrustUrl = '/api/v1/settings/trust-rotation';
+  function deploymentField(name) { return document.getElementById('deployment-rotation-' + name); }
+  function deploymentTrustItem() {
+    return deploymentTrust && deploymentTrust.items.find(function (item) { return item.family === deploymentField('family').value; });
+  }
+  function renderDeploymentRotation() {
+    var family = deploymentField('family').value, trust = ['device-tls', 'peer-ca', 'instruction-roots'].includes(family);
+    var item = deploymentTrustItem(), state = item ? item.state : 'unavailable';
+    var busyJob = deploymentRotation && deploymentRotation.jobs.some(function (job) { return ['running', 'recovery-required'].includes(job.state); });
+    var topologyLabels = {'single-docker': 'Docker on one host', 'split-docker': 'Docker on separate hosts', 'kubernetes': 'Kubernetes'};
+    deploymentField('worker').textContent = deploymentRotation ?
+      (topologyLabels[deploymentRotation.target] ? 'Deployment: ' + topologyLabels[deploymentRotation.target] + '. ' : '') + deploymentRotation.note :
+      'Worker state unavailable. Refresh before starting maintenance.';
+    deploymentField('state').textContent = trust ? 'Trust request: ' + state.replaceAll('-', ' ') + '. Publication requires stopped writers and confirmed device removal.' :
+      family === 'age-identity' ? 'Replace the server encryption identity and retain the independently held recovery recipient. Existing backups keep their original recovery requirements.' :
+      family === 'seeder-announce' ? 'Pause normal writers while an isolated tracker and seeder verify the replacement credential against published torrents.' :
+      'Replace the internal TLS key and certificate, update Console trust, and verify authenticated connections from every deployed Console.';
+    deploymentField('trust').hidden = !trust;
+    deploymentField('tls').hidden = family !== 'device-tls';
+    deploymentField('roots').hidden = family !== 'instruction-roots';
+    deploymentField('approval').hidden = !item || !['awaiting-approval', 'approved'].includes(state) || family === 'peer-ca' || item.mode === 'self-signed';
+    deploymentField('keylist-label').hidden = family !== 'instruction-roots';
+    var attest = family === 'instruction-roots' && ['idle', 'cancelled', 'published'].includes(state) && Object.keys(item.roots || {}).length === 2;
+    deploymentField('attestation').hidden = !attest;
+    var rootSelect = deploymentField('attestation-root'), selectedRoot = rootSelect.value;
+    rootSelect.replaceChildren();
+    if (attest) {
+      Object.keys(item.roots).forEach(function (name) { var option = document.createElement('option'); option.value = name; option.textContent = name; rootSelect.appendChild(option); });
+      if (Object.hasOwn(item.roots, selectedRoot)) rootSelect.value = selectedRoot;
+      else if (item.attestation_root_id && Object.hasOwn(item.roots, item.attestation_root_id)) rootSelect.value = item.attestation_root_id;
+      deploymentField('attested').textContent = 'Fresh signed custody evidence: ' + ((item.attested_root_ids || []).join(', ') || 'none') + '. Each root requires its own signed approval.';
+    }
+    ['attestation-request', 'attestation-apply'].forEach(function (name) { deploymentField(name).disabled = deploymentBusy || !attest || busyJob; });
+    deploymentField('fingerprint').textContent = item && item.fingerprint_sha256 ? 'Replacement SHA256: ' + item.fingerprint_sha256 : '';
+    if (trust && deploymentTrust && deploymentTrust.drain) deploymentField('state').textContent += deploymentTrust.drain.ready ?
+      ' Recorded deployments are removed; the worker will check again after stopping writers.' :
+      ' Removal required: ' + deploymentTrust.drain.blocked_device_ids.join(', ') + '.';
+    document.querySelectorAll('#deployment-rotation-workflow input,#deployment-rotation-workflow select').forEach(function (el) { el.disabled = deploymentBusy; });
+    deploymentField('prepare').disabled = deploymentBusy || !item || !['idle', 'published', 'cancelled'].includes(state) || busyJob;
+    deploymentField('approve').disabled = deploymentBusy || !item || !['awaiting-approval', 'approved'].includes(state) || busyJob;
+    deploymentField('cancel').disabled = deploymentBusy || !item || !['awaiting-approval', 'approved'].includes(state) || busyJob;
+    deploymentField('download').disabled = deploymentBusy || !item || !(item.csr || item.certificate || item.online_public_key);
+    deploymentField('apply').disabled = deploymentBusy || !deploymentRotation || !deploymentRotation.can_rotate || busyJob ||
+      !deploymentRotation.families.includes(family) || (trust && (state !== 'approved' || !deploymentTrust.drain || !deploymentTrust.drain.ready));
+    deploymentField('refresh').disabled = deploymentBusy;
+    deploymentField('jobs').replaceChildren();
+    if (deploymentRotation) deploymentRotation.jobs.slice().reverse().forEach(function (job) {
+      var row = document.createElement('tr');
+      [job.family + ' / ' + job.id, job.state.replaceAll('-', ' '), job.detail + (job.proof ? ' ' + JSON.stringify(job.proof) : '')].forEach(function (value) {
+        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      });
+      if (job.state === 'recovery-required') {
+        var recover = document.createElement('button'); recover.className = 'btn ghost'; recover.textContent = 'Recover approved operation';
+        recover.disabled = deploymentBusy || !deploymentRotation.can_rotate;
+        recover.addEventListener('click', function () { recoverDeploymentRotation(job); });
+        row.lastChild.appendChild(recover);
+      }
+      deploymentField('jobs').appendChild(row);
+    });
+  }
+  async function refreshDeploymentRotation() {
+    if (deploymentBusy) return;
+    var generation = ++deploymentRead;
+    deploymentRotation = null; deploymentTrust = null; renderDeploymentRotation();
+    try {
+      var results = await Promise.all([deploymentRotationUrl, deploymentTrustUrl].map(async function (url) {
+        try {
+        var response = await fetch(url), data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Maintenance status unavailable.');
+        return data;
+        } catch (error) { return {unavailable: error.message}; }
+      }));
+      if (generation !== deploymentRead) return;
+      if (!Array.isArray(results[0].jobs) || !Array.isArray(results[0].families) || typeof results[0].can_rotate !== 'boolean') throw new Error(results[0].unavailable || 'Maintenance response invalid; no changes enabled.');
+      deploymentRotation = results[0];
+      if (Array.isArray(results[1].items) && results[1].items.length === 3) deploymentTrust = results[1];
+      else deploymentField('result').textContent = results[1].unavailable || 'Trust requests unavailable. Independent credential operations remain available.';
+      renderDeploymentRotation();
+    } catch (error) { if (generation === deploymentRead) deploymentField('result').textContent = error.message; }
+  }
+  async function deploymentPublicFile(name, limit) {
+    var file = deploymentField(name).files[0];
+    if (!file || file.size > limit) throw new Error('Choose the required bounded public approval file.');
+    var value = await file.text();
+    if (/PRIVATE KEY|AGE-SECRET-KEY/i.test(value)) throw new Error('Private keys must stay with their custodian; upload only public material.');
+    return value;
+  }
+  async function recoverDeploymentRotation(job) {
+    if (deploymentBusy || !confirm('Resume only this previously approved operation? IRIS will recheck its backup and custody, stop writers and verify the replacement before restarting.')) return;
+    deploymentBusy = true; ++deploymentRead; renderDeploymentRotation();
+    try {
+      var response = await fetch(deploymentRotationUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}),
+        body: JSON.stringify({action: 'recover-rotation', family: job.family, request_id: job.id, allow_downtime: true})});
+      var data = await response.json();
+      if (!response.ok || data.job_id !== job.id) throw new Error(data.error || 'Recovery outcome unknown. Refresh the same operation.');
+      deploymentField('result').textContent = 'Recovery accepted for ' + job.id + '. Reconnect after downtime and check evidence.';
+    } catch (error) { deploymentField('result').textContent = error.message; }
+    finally { deploymentBusy = false; await refreshDeploymentRotation(); }
+  }
+  async function deploymentAction(action) {
+    if (deploymentBusy || !deploymentRotation) return;
+    var family = deploymentField('family').value, item = deploymentTrustItem();
+    if (['device-tls', 'peer-ca', 'instruction-roots'].includes(family) && !item) return;
+    var payload = {action: action, family: family, request_id: item && item.request_id}, endpoint = deploymentTrustUrl;
+    try {
+      if (action === 'prepare') {
+        if (family === 'device-tls') {
+          payload.names = deploymentField('names').value.split(',').map(function (value) { return value.trim(); });
+          payload.mode = deploymentField('mode').value;
+        } else if (family === 'instruction-roots') {
+          var first = deploymentField('root-a-name').value.trim(), second = deploymentField('root-b-name').value.trim();
+          if (!first || first === second) throw new Error('Provide two distinct existing root names.');
+          payload.roots = Object.create(null);
+          payload.roots[first] = await deploymentPublicFile('root-a', 4096);
+          payload.roots[second] = await deploymentPublicFile('root-b', 4096);
+          payload.keylist_signer = first;
+        }
+        if (!confirm('Prepare replacement trust? Active credentials remain unchanged until a separately confirmed maintenance operation.')) return;
+        payload.request_id = null;
+        var parameters = JSON.stringify(payload);
+        if (!deploymentPending || deploymentPending.parameters !== parameters) deploymentPending = {parameters: parameters, id: maintenanceRequestId()};
+        payload.request_id = deploymentPending.id;
+      } else if (action === 'attestation-request' || action === 'attestation-apply') {
+        payload.root_id = deploymentField('attestation-root').value;
+        if (action === 'attestation-apply') {
+          if (!item.attestation_request_id || item.attestation_root_id !== payload.root_id) throw new Error('Download and approve a request for the selected root first.');
+          payload.request_id = item.attestation_request_id;
+          payload.keylist = await deploymentPublicFile('attestation-keylist', 174764);
+        } else {
+          var attestationParameters = 'attestation:' + payload.root_id;
+          if (!deploymentPending || deploymentPending.parameters !== attestationParameters) deploymentPending = {parameters: attestationParameters, id: maintenanceRequestId()};
+          payload.request_id = deploymentPending.id;
+        }
+      } else if (action === 'approve') {
+        payload.certificate = await deploymentPublicFile('certificate', 65536);
+        if (family === 'instruction-roots') payload.keylist = await deploymentPublicFile('keylist', 174764);
+      } else if (action === 'rotate') {
+        if (!confirm('Stop this IRIS deployment, verify a cold backup, and rotate this credential? Trust changes require confirmed IRIS removal from devices. Wait for the recorded result and verify consumers before resuming use.')) return;
+        endpoint = deploymentRotationUrl;
+        if (!item) {
+          var key = 'rotate:' + family;
+          if (!deploymentPending || deploymentPending.parameters !== key) deploymentPending = {parameters: key, id: maintenanceRequestId()};
+          payload.request_id = deploymentPending.id;
+        }
+        payload.allow_downtime = true;
+      } else if (action === 'cancel' && !confirm('Discard this uncommitted trust request? Active trust will remain unchanged.')) return;
+      deploymentBusy = true; ++deploymentRead; renderDeploymentRotation();
+      var response = await fetch(endpoint, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
+      deploymentPending = null;
+      if (action === 'attestation-request') rotationDownload('keylist-payload.json', data.payload);
+      deploymentField('result').textContent = action === 'attestation-request' ? 'Public request downloaded. Approve it with the selected root in IRIS Offline signing, then import the signed revocation list here.' :
+        action === 'attestation-apply' ? 'Signed root attestation validated. Review each root’s fresh evidence.' :
+        action === 'rotate' ? 'Maintenance request accepted: ' + data.job_id + '. The Console will disconnect during downtime. Reconnect and refresh evidence; acceptance is not completion.' :
+        action === 'approve' ? 'Public approval validated. Schedule downtime before applying it.' : action === 'cancel' ? 'Replacement request cancelled.' : 'Replacement prepared. Download public files and complete required approvals.';
+    } catch (error) { deploymentField('result').textContent = error.message; }
+    finally { deploymentBusy = false; renderDeploymentRotation(); await refreshDeploymentRotation(); }
+  }
+  deploymentField('family').addEventListener('change', renderDeploymentRotation);
+  deploymentField('refresh').addEventListener('click', refreshDeploymentRotation);
+  ['prepare', 'approve', 'cancel', 'attestation-request', 'attestation-apply'].forEach(function (action) { deploymentField(action).addEventListener('click', function () { deploymentAction(action); }); });
+  deploymentField('apply').addEventListener('click', function () { deploymentAction('rotate'); });
+  deploymentField('download').addEventListener('click', function () {
+    var item = deploymentTrustItem();
+    if (!item || deploymentBusy) return;
+    [['csr', 'iris-device.csr'], ['certificate', 'iris-approved-certificate.pem'], ['online_public_key', 'online.pub'], ['keylist_payload', 'keylist-payload.json']].forEach(function (field) {
+      if (item[field[0]]) rotationDownload(field[1], item[field[0]]);
+    });
+    deploymentField('result').textContent = 'Public files downloaded. For signing roots, use IRIS Offline signing to approve the online key and preserved revocation list, then import both approvals here.';
+  });
+
+  var maintenanceState = null, maintenanceBusy = false, maintenanceRead = 0;
+  var maintenanceUrl = '/api/v1/settings/key-maintenance';
+  function maintenanceField(name) { return document.getElementById('maintenance-' + name); }
+  function validMaintenance(data) {
+    return data && Number.isInteger(data.revision) && Array.isArray(data.policies) &&
+      Array.isArray(data.jobs) && Array.isArray(data.families) && typeof data.worker === 'string';
+  }
+  function maintenanceControls() {
+    document.querySelectorAll('#maintenance-form input,#maintenance-form select,#maintenance-form button,#maintenance-jobs button').forEach(function (el) {
+      el.disabled = maintenanceBusy || !maintenanceState;
+    });
+    var device = maintenanceField('family').value === 'device-instruction';
+    maintenanceField('target').disabled = maintenanceBusy || !maintenanceState || !device;
+    maintenanceField('target').required = device;
+    maintenanceField('interval').min = device ? '8' : '1';
+    maintenanceField('interval').max = device ? '21' : '365';
+  }
+  function maintenanceEdit() {
+    var policy = maintenanceState && maintenanceState.policies.find(function (p) { return p.id === maintenanceField('policy').value; });
+    maintenanceField('family').value = policy ? policy.family : 'online-signer';
+    maintenanceField('target').value = policy && policy.target !== 'deployment' ? policy.target : '';
+    maintenanceField('next').value = new Date(policy ? policy.next_at * 1000 : Date.now() + 3600000).toISOString().slice(0, 19);
+    maintenanceField('interval').value = policy ? policy.interval_days : 14;
+    maintenanceField('window').value = policy ? policy.window_minutes : 30;
+    maintenanceField('enabled').checked = Boolean(policy && policy.enabled);
+    maintenanceControls();
+  }
+  function renderMaintenance() {
+    maintenanceControls();
+    if (!maintenanceState) { maintenanceField('worker').textContent = 'Scheduler status unavailable. Refresh before changing a schedule.'; return; }
+    var data = maintenanceState;
+    maintenanceField('worker').textContent = 'Scheduler: ' + data.worker.replaceAll('-', ' ') +
+      (data.observed_at === null ? '.' : '. Last check ' + new Date(data.observed_at * 1000).toISOString() + '.');
+    var familySelect = maintenanceField('family'), selectedFamily = familySelect.value;
+    familySelect.replaceChildren(); maintenanceField('families').replaceChildren();
+    data.families.forEach(function (family) {
+      var option = document.createElement('option'); option.value = family.id; option.textContent = family.label; familySelect.appendChild(option);
+      var row = document.createElement('tr');
+      [family.label, {prepare: 'Prepare for approval', rotate: 'Rotate credential', review: 'Review reminder'}[family.action], family.requirement].forEach(function (value) {
+        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      });
+      maintenanceField('families').appendChild(row);
+    });
+    if (selectedFamily) familySelect.value = selectedFamily;
+    var chosen = maintenanceField('policy').value;
+    maintenanceField('policy').replaceChildren(new Option('New schedule', ''));
+    data.policies.forEach(function (p) {
+      maintenanceField('policy').appendChild(new Option(p.family + ' / ' + p.target + (p.enabled ? ' — enabled' : ' — disabled'), p.id));
+    });
+    maintenanceField('policy').value = chosen;
+    maintenanceField('jobs').replaceChildren();
+    data.jobs.slice().reverse().forEach(function (job) {
+      var row = document.createElement('tr');
+      [job.family + ' / ' + job.target, new Date(job.due_at * 1000).toISOString(), job.state.replaceAll('-', ' ') + ': ' + job.detail].forEach(function (value) {
+        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      });
+      var actions = document.createElement('td'); row.appendChild(actions);
+      var action = job.state === 'review-required' ? 'reviewed' :
+        job.state === 'verification-required' && job.family === 'management-token' ? 'retire-management' :
+        job.state === 'intervention-required' && job.family === 'management-token' ? 'reconcile-management' :
+        job.state === 'intervention-required' && ['online-signer', 'device-instruction'].includes(job.family) ? 'retry' : null;
+      if (action) {
+        var button = document.createElement('button'); button.className = 'btn ghost';
+        button.textContent = {reviewed: 'Acknowledge review', 'retire-management': 'Retire previous credential', 'reconcile-management': 'Check credential recovery', retry: 'Retry after custody review'}[action];
+        button.addEventListener('click', function () { maintenanceAction(action, job.id); }); actions.appendChild(button);
+      } else if (job.state === 'approval-required') {
+        var link = document.createElement('a'); link.href = '#signer-rotation'; link.textContent = 'Complete signer approval above';
+        link.addEventListener('click', function (event) { event.preventDefault(); document.getElementById('signer-rotation').scrollIntoView(); refreshRotation(); });
+        actions.appendChild(link);
+      }
+      maintenanceField('jobs').appendChild(row);
+    });
+    if (!data.jobs.length) {
+      var empty = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 4;
+      cell.textContent = 'No maintenance operations yet.'; empty.appendChild(cell); maintenanceField('jobs').appendChild(empty);
+    }
+    maintenanceControls();
+  }
+  async function refreshMaintenance() {
+    if (maintenanceBusy) return;
+    var generation = ++maintenanceRead;
+    maintenanceState = null; renderMaintenance();
+    try {
+      var response = await fetch(maintenanceUrl), data = await response.json();
+      if (generation !== maintenanceRead) return;
+      if (!response.ok || !validMaintenance(data)) throw new Error(data.error || 'Maintenance status unavailable.');
+      maintenanceState = data; renderMaintenance(); maintenanceEdit();
+      maintenanceField('result').textContent = 'Maintenance status refreshed.';
+    } catch (error) { if (generation === maintenanceRead) maintenanceField('result').textContent = error.message; }
+  }
+  async function sendMaintenance(payload) {
+    if (maintenanceBusy || !maintenanceState) return;
+    maintenanceBusy = true; ++maintenanceRead; maintenanceControls();
+    try {
+      var response = await fetch(maintenanceUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (!response.ok || !validMaintenance(data)) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
+      maintenanceState = data;
+      renderMaintenance();
+      if (payload.action === 'save-policy') { maintenanceField('policy').value = payload.policy.id; maintenanceEdit(); }
+      maintenanceField('result').textContent = payload.action === 'save-policy' ? 'Schedule saved.' : 'Operation state updated; check the evidence below.';
+    } catch (error) {
+      maintenanceState = null; maintenanceField('result').textContent = error.message + ' Refresh maintenance before continuing.';
+    } finally { maintenanceBusy = false; renderMaintenance(); }
+  }
+  async function maintenanceAction(action, jobId) {
+    var message = action === 'retire-management' ? 'Have you updated and verified every Console instance with the replacement credential? Retire the previous credential now?' :
+      action === 'reviewed' ? 'Acknowledge that you reviewed the documented custody procedure? This does not record a completed rotation.' :
+      action === 'retry' ? 'Have you reviewed custody and the interrupted operation? Retry this operation now?' :
+      'Check the credential files against the interrupted operation? This does not retire either credential.';
+    if (confirm(message)) await sendMaintenance({action: action, job_id: jobId, confirm: true});
+  }
+  maintenanceField('refresh').addEventListener('click', refreshMaintenance);
+  maintenanceField('policy').addEventListener('change', maintenanceEdit);
+  maintenanceField('family').addEventListener('change', maintenanceControls);
+  maintenanceField('form').addEventListener('submit', async function (event) {
+    event.preventDefault();
+    if (!maintenanceState || maintenanceBusy) return;
+    var family = maintenanceField('family').value, enabled = maintenanceField('enabled').checked;
+    var next = Date.parse(maintenanceField('next').value + 'Z');
+    if (!Number.isFinite(next)) { maintenanceField('result').textContent = 'Choose a valid UTC start time.'; return; }
+    var capability = maintenanceState.families.find(function (item) { return item.id === family; });
+    if (enabled && !confirm('Enable ' + (capability.action === 'review' ? 'review reminders' : capability.action === 'prepare' ? 'signer preparation for offline approval' : 'credential rotation') + ' for this UTC schedule? ' + capability.requirement + '.')) return;
+    await sendMaintenance({action: 'save-policy', revision: maintenanceState.revision, policy: {
+      id: maintenanceField('policy').value || maintenanceRequestId(), family: family,
+      target: family === 'device-instruction' ? maintenanceField('target').value.trim() : 'deployment',
+      enabled: enabled, next_at: Math.floor(next / 1000), interval_days: Number(maintenanceField('interval').value),
+      window_minutes: Number(maintenanceField('window').value)
+    }});
+  });
+  // ---- End key maintenance ----
+
+  // ---- Deployment backup workflow ----
+  var backupStatus = null, backupBusy = false, backupRead = 0, backupPending = null;
+  function backupControls() {
+    var active = backupStatus && backupStatus.available;
+    var blocked = !active || backupBusy || backupStatus.jobs.some(function (job) {
+      return job.state === 'running' || job.state === 'recovery-required';
+    });
+    document.getElementById('backup-create').disabled = blocked;
+    document.getElementById('backup-selected').disabled = blocked;
+    var chosen = Boolean(document.getElementById('backup-selected').value);
+    document.getElementById('backup-verify').disabled = blocked || !chosen || !backupStatus.can_verify;
+    document.getElementById('backup-extract').disabled = blocked || !chosen || !backupStatus.can_extract;
+    document.getElementById('backup-restore').disabled = blocked || !chosen || !backupStatus.can_restore;
+    document.getElementById('backup-recover').disabled = !active || backupBusy || !backupStatus.jobs.some(function (job) {
+      return job.action === 'restore' && job.state === 'recovery-required';
+    });
+  }
+  async function refreshBackups() {
+    var generation = ++backupRead;
+    backupStatus = null; backupControls();
+    var note = document.getElementById('backup-worker-note');
+    try {
+      var r = await fetch('/api/v1/settings/backups');
+      if (!r.ok) throw new Error('Backup worker status unavailable. During capture the Console may be temporarily offline; refresh after it returns.');
+      var data = await r.json();
+      if (generation !== backupRead) return;
+      if (!Array.isArray(data.jobs) || typeof data.available !== 'boolean') throw new Error('Backup worker response is incomplete.');
+      backupStatus = data;
+      note.textContent = data.note;
+      document.getElementById('backup-job-rows').innerHTML = data.jobs.slice().reverse().map(function (job) {
+        return '<tr><td>' + esc(fmtDate(job.started_at)) + '</td><td>' + esc(job.action) +
+          '</td><td class="machine">' + esc(job.backup_id) + '</td><td>' + esc(job.state) +
+          '<br><small>' + esc(job.detail) + '</small></td></tr>';
+      }).join('');
+      var select = document.getElementById('backup-selected'), previous = select.value;
+      select.innerHTML = '<option value="">Choose a backup</option>' + data.jobs.filter(function (job) {
+        return job.action === 'backup' && job.state === 'captured';
+      }).map(function (job) { return '<option value="' + esc(job.backup_id) + '">' + esc(fmtDate(job.started_at) + ' · ' + job.backup_id) + '</option>'; }).join('');
+      select.value = previous;
+    } catch (error) {
+      if (generation !== backupRead) return;
+      backupStatus = null;
+      document.getElementById('backup-job-rows').textContent = '';
+      note.textContent = error.message || 'Backup status unavailable.';
+    }
+    backupControls();
+  }
+  async function requestBackupAction(action) {
+    if (backupBusy || !backupStatus || !backupStatus.available) return;
+    if (action === 'backup' && !confirm('Stop IRIS and the Console briefly to capture a consistent encrypted backup? Active transfers and management requests will be interrupted.')) return;
+    if (action === 'extract' && !confirm('Extract both sets into a new protected recovery directory? This includes secret recovery material. No services will be started.')) return;
+    if ((action === 'restore' || action === 'recover-restore') && !confirm('Restore this deployment from the selected backup? IRIS and the Console will stop. Saved content replaces current content only after security checks pass. The worker preserves current instruction counters and retains the previous files for recovery.')) return;
+    var selectedBackup = document.getElementById('backup-selected').value;
+    if (!backupPending || backupPending.action !== action || (action !== 'backup' && backupPending.backup_id !== selectedBackup)) {
+      var requestId = maintenanceRequestId();
+      backupPending = action === 'backup' ? {action: action, allow_downtime: true, request_id: requestId}
+        : {action: action, backup_id: selectedBackup, request_id: requestId};
+      if (action === 'restore' || action === 'recover-restore') {
+        backupPending.allow_downtime = true;
+        backupPending.confirm_restore = true;
+        if (action === 'recover-restore') {
+          var interrupted = backupStatus.jobs.find(function (job) { return job.action === 'restore' && job.state === 'recovery-required'; });
+          if (!interrupted) { backupPending = null; return; }
+          backupPending.request_id = interrupted.id;
+          backupPending.backup_id = interrupted.backup_id;
+        }
+      }
+    }
+    backupBusy = true; backupControls();
+    var result = document.getElementById('backup-operation-result');
+    result.textContent = 'Submitting maintenance request…';
+    try {
+      var r = await fetch('/api/v1/settings/backups', {
+        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(backupPending)
+      });
+      var data = await r.json();
+      if (!r.ok || typeof data.job_id !== 'string') throw new Error(data.error || data.detail || 'Request was not confirmed. Refresh history before retrying.');
+      backupPending = null;
+      result.textContent = 'Accepted. Refresh history to check the result. Backup and restore temporarily take the Console offline; the host worker continues running.';
+      await refreshBackups();
+    } catch (error) { result.textContent = error.message || 'Request was not confirmed. Refresh history before retrying.'; }
+    finally { backupBusy = false; backupControls(); }
+  }
+  document.getElementById('backup-refresh').addEventListener('click', refreshBackups);
+  document.getElementById('backup-selected').addEventListener('change', backupControls);
+  ['create', 'verify', 'extract', 'restore', 'recover'].forEach(function (name) {
+    document.getElementById('backup-' + name).addEventListener('click', function () {
+      requestBackupAction(name === 'create' ? 'backup' : name === 'recover' ? 'recover-restore' : name);
+    });
+  });
+  // ---- End deployment backup workflow ----
+
   // ---- Settings section routes (React renders the tab navigation) ----
   // refreshSettings() above always populates all panes' ids regardless of
   // which is visible, so switching sub-pages is pure class/hidden toggling.
@@ -6117,6 +6938,8 @@
   // The Image verification (KGV / Cisco Bulk Hash reconciler) pane rides the
   // same pane/nav id pattern; appended for the same reason.
   SETTINGS_SUBS.push('bulkhash');
+  SETTINGS_SUBS.push('certificates');
+  SETTINGS_SUBS.push('backups');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {
@@ -6129,6 +6952,8 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
+    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); refreshBrowserTls(); refreshServiceCredential(); refreshDeploymentRotation(); }
+    if (sub === 'backups') refreshBackups();
     refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):

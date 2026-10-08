@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent AES-SIV oracle, malformed pipe inputs and no plaintext on failure."""
 from pathlib import Path
+import re
 import struct
 import subprocess
 
@@ -77,3 +78,46 @@ def test_build_exports_helper_and_public_notice_with_explicit_modes():
     assert 'chmod 0755 /out/iris-aead' in script
     assert 'chmod 0644 /out/iris-aead.LICENCE' in script
     assert script.index('chmod 0644') > script.index('cat /src/musl-COPYRIGHT')
+
+
+def test_crypto_build_keeps_exact_matching_openssl_pins():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / 'tools/build-instruction-crypto-inner.sh').read_text()
+    command = next(line for line in script.splitlines() if line.startswith('apk add '))
+    assert command.startswith('apk add --no-cache ')
+    packages = command.split()[3:]
+    assert all(re.fullmatch(r'[a-z0-9-]+=[0-9][0-9A-Za-z._]*-r\d+', value)
+               for value in packages)
+    pins = dict(value.split('=', 1) for value in packages)
+    assert pins['openssl-dev'] == pins['openssl-libs-static']
+
+
+def test_contributor_guide_matches_the_linked_openssl():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / 'tools/build-instruction-crypto-inner.sh').read_text()
+    version = re.search(r'openssl-dev=([0-9.]+)-r\d+', script).group(1)
+    guide = (root / 'docs/dev/instruction-crypto.md').read_text()
+    assert re.findall(r'\bOpenSSL ([0-9]+\.[0-9]+\.[0-9]+)\b', guide) == [version]
+
+
+@pytest.mark.parametrize('dockerfile', [
+    'tools/build-instruction-crypto.Dockerfile',
+    'server/Dockerfile',
+    'device/container/Dockerfile',
+])
+def test_all_crypto_build_notices_match_the_linked_openssl(dockerfile):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / 'tools/build-instruction-crypto-inner.sh').read_text()
+    version = re.search(r'openssl-dev=([0-9.]+)-r\d+', script).group(1)
+    recipe = (root / dockerfile).read_text()
+    notices = [line for line in recipe.splitlines() if line.startswith('ADD ') and
+               line.endswith(' /src/openssl-LICENSE')]
+    assert len(notices) == 1
+    assert re.fullmatch(
+        r'ADD --checksum=sha256:[0-9a-f]{64} '
+        r'https://raw\.githubusercontent\.com/openssl/openssl/openssl-'
+        + re.escape(version) + r'/LICENSE\.txt /src/openssl-LICENSE', notices[0])
+    assert 'build-instruction-crypto-inner.sh /src/build.sh' in recipe
+    notice = (root / 'NOTICE').read_text()
+    assert 'with OpenSSL ' + version + ' libcrypto' in notice
+    assert 'https://github.com/openssl/openssl/tree/openssl-' + version in notice

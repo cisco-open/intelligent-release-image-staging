@@ -11,6 +11,8 @@ process and written only to the tier-auth volume; stdout contains status only.
 """
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import secrets
@@ -78,7 +80,29 @@ def _atomic_write(path, data):
             pass
 
 
+@contextmanager
+def locked():
+    current, _previous = _paths()
+    path = os.path.join(os.path.dirname(current), '.rotation.lock')
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise tier_auth.CredentialUnavailable('invalid management rotation lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise tier_auth.CredentialUnavailable('management rotation is busy') from None
+        yield
+    finally:
+        os.close(fd)
+
+
 def rotate():
+    with locked():
+        _rotate_locked()
+
+
+def _rotate_locked():
     current, previous = _paths()
     # Validate scope, length and permissions before copying the old credential
     # into the overlap slot. Refuse a symlink even though replacing one would
@@ -111,6 +135,11 @@ def rotate():
 
 
 def retire_previous():
+    with locked():
+        _retire_previous_locked()
+
+
+def _retire_previous_locked():
     _current, previous = _paths()
     try:
         st = os.lstat(previous)

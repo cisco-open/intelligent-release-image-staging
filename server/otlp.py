@@ -20,6 +20,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 import trust
+import service_credentials
 
 # OTLP severityNumber for INFO (see logs proto)
 _SEVERITY_INFO = 9
@@ -917,6 +918,7 @@ def _http_post(url, body, headers=None):
             urllib.request.HTTPSHandler(context=trust.ssl_context()))
         with opener.open(req, timeout=5) as resp:
             resp.read()
+        service_credentials.observed_delivery(url, headers)
     except Exception:
         # Deliberately generic: exception text from urllib can embed request
         # details; never let a header value ride out in an error message.

@@ -132,10 +132,21 @@ iris-arm64.tar|iox|linux/arm64|required|tools/provision-iox-packages.sh
 iris-xr.rpm|xr-appmgr|linux/amd64|optional|tools/build-xr-package.sh --out artifacts/
 EOF
 
-if [ "$TRUST_FAILURE" -eq 0 ] && [ ${#BROKEN[@]} -eq 0 ]; then
+echo
+# A privileged host read says nothing about the mounted file permissions seen
+# by onboarding. Check the actual running server identity and mounted bytes.
+# XR remains optional only when absent; a present but broken RPM always fails.
+RUNTIME_FAILURE=0
+if ! python3 "$HERE/irisctl" doctor --target docker --container "$IRIS_CONTAINER" --optional-xr; then
+  RUNTIME_FAILURE=1
+  echo "NOT READY: runtime package/certificate evidence is unavailable or failed"
+fi
+
+if [ "$TRUST_FAILURE" -eq 0 ] && [ "$RUNTIME_FAILURE" -eq 0 ] && [ ${#BROKEN[@]} -eq 0 ]; then
   echo
   echo "verified: required package bytes are readable and match their provenance manifests"
   echo "verified: the served and distributed onboarding certificates match"
+  echo "verified: native packages and distributed certificate are readable by runtime uid/gid 10001"
   exit 0
 fi
 

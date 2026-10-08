@@ -8,8 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 
 An instruction is the signed message the server sends a device saying which
 images to stage and how. This page gives the server the key that signs them. Do
-it before you onboard a device: until it is done, onboarding fails with
-`ERROR: instruction bootstrap unavailable`.
+it before you onboard a device: until it is done, IOx onboarding reports
+`instruction signing is not initialized`. Other instruction-production failures
+report `instruction bootstrap unavailable`; check signing status and producer
+health before retrying.
 
 ## Before you start
 
@@ -29,6 +31,11 @@ it before you onboard a device: until it is done, onboarding fails with
 
 The steps are the same in every layout. Only the way you reach the container
 changes.
+
+For each offline approval below, the key holder can use
+[iris-key-setup](offline-approval.md#approve-a-public-request) instead of
+the `ssh-keygen` command. Choose **Online signing certificate**, select
+`iris-online.pub`, and save the public approval as `iris-online-cert.pub`.
 
 !!! warning
     Copy the public half of the signing key out of the config volume, never from
@@ -110,8 +117,9 @@ A new deployment prints something close to this:
 
 - `state: keylist_missing`: the keylist is the signed list of withdrawn keys the
   server sends to devices. Onboarding works without it; install one for
-  production, see
-  [Replace or recover signing keys](../admin-guide/instruction-keys.md#instruction-root-ceremony-and-recovery).
+  production through the
+  [Console root attestation procedure](../admin-guide/deployment-rotation.md#attest-existing-signing-roots).
+  Complete it independently with both root holders.
 - `root_ceremony_overdue`, `root_quorum_degraded` and `roots_attested_180d`:
   nobody has attested these root keys yet. Expected on a new deployment.
 - `certificate_days_to_expiry`: the server stops signing with seven days or

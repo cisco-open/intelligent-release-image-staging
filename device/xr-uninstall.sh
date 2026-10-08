@@ -23,6 +23,9 @@
 # exactly the same footprint -- FORCE exists for interface parity with the
 # router/IOx uninstallers (a device stranded mid-onboard, no record to hand
 # this script), not because XR needs a reduced-scope path the way they do.
+# The active peer identity files are additionally removed only after their
+# private-directory layout, public generation manifest and certificate file
+# layout prove IRIS ownership. Public certificate generations remain inert.
 #
 # 'appmgr package uninstall source <name>' is the Cisco 8000 form (this
 # script's only target platform; see plan Out of scope). The fallback form,
@@ -50,14 +53,15 @@
 #
 # --- Teardown-speed composite (agentinfo/specs/2026-08-31-xr-teardown-speed.md
 # section 2A) -----------------------------------------------------------------
+# A present peer identity adds one bounded read-only generation-ownership
+# login between the two sessions below. An absent identity uses two logins.
 # The per-step design used to make 6-11 separate lab/xr-run.sh logins per
 # teardown (agentinfo/xr-support/teardown-speed-recon.md section 2.1) -- every
 # one of those a full opportunity to burn the session wall-clock bound if
 # 8010-R1's intermittent exec-spawn stall hit (the same recon's timing table:
 # every live-recovered teardown burned ~3 stalled-to-the-bound sessions,
-# 15.5-16 minutes total). Below, this collapses into AT MOST TWO bounded
-# logins (spec amendment, review of this task's original design: two, not
-# one -- see the "why two, not one" paragraph below), split on a SAFETY
+# 15.5-16 minutes total). Below, this uses two bounded mutation/probe
+# logins plus at most one read-only peer ownership login, split on a SAFETY
 # boundary, not a topical one:
 #
 #   session 1/2 (setup_request/run_setup): READ-ONLY probe + the one
@@ -102,8 +106,8 @@
 # two separate logins -- never within a single one, no matter what CLI
 # syntax the destructive step itself uses. At most two logins is still a
 # large win over the old per-step design's 6-11: worst case, a wedged router
-# now burns at most 2x the session bound per teardown, not ~3x-11x, and a
-# healthy teardown is one or two short logins instead of six-to-eleven.
+# now burns at most 3x the session bound per teardown, not ~3x-11x, and a
+# healthy teardown uses two or three short logins instead of six-to-eleven.
 #
 # Per-step honesty is unchanged in kind, not just carried over as a slogan:
 # every step still gets its own [n/5] marker on this script's OWN stdout (the
@@ -182,6 +186,7 @@ FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 WORK_DIR_PATH="/misc/disk1/iris-work"
 RPM_PATH="/misc/disk1/$SOURCE_NAME.rpm"
 CERT_PATH="/misc/disk1/iris-catalog.pem"
+PEER_DIR_PATH="/misc/disk1/peer-tls"
 
 # Shared marker family every request below uses -- defined up front (ahead of
 # the DEVICE_IP/RUN() setup further down) so dry-run can call the SAME
@@ -208,6 +213,13 @@ commit
 ! ${VERIFY_MARKER}RECHECK__
 show appmgr application-table
 ! ${VERIFY_MARKER}RECHECK_END__
+! ${VERIFY_MARKER}PEERROOT__
+dir harddisk:
+! ${VERIFY_MARKER}PEERCUSTODY__
+dir harddisk:/peer-tls
+! ${VERIFY_MARKER}PEERMANIFEST__
+more harddisk:/peer-tls/current.json
+! ${VERIFY_MARKER}PEERCUSTODY_END__
 EOF
 }
 
@@ -255,6 +267,15 @@ sweep_verify_request() {
     destructive="$(printf 'appmgr package uninstall source %s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s/*\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/*.torrent\ndelete /noprompt harddisk:/*.aria2\ndelete /noprompt harddisk:/*.peers.json\n' \
       "$SOURCE_NAME" "${RPM_PATH##*/}" "${CERT_PATH##*/}" \
       "${WORK_DIR_PATH##*/}" "${WORK_DIR_PATH##*/}")"
+    # These three exact files are the active IRIS peer identity. Public
+    # certificate-generation directories remain inert; native images and
+    # every unrelated file are preserved. Never recursively sweep peer-tls.
+    # Keep the ownership manifest until last so an interrupted cleanup can
+    # prove ownership again and safely finish deleting any remaining file.
+    destructive="$destructive
+delete /noprompt harddisk:/peer-tls/node.key
+delete /noprompt harddisk:/peer-tls/enrollment.lock
+delete /noprompt harddisk:/peer-tls/current.json"
   fi
 cat <<EOF
 $destructive
@@ -266,6 +287,8 @@ show appmgr source-table
 dir harddisk:
 ! ${VERIFY_MARKER}WORKDIR__
 dir harddisk:/iris-work
+! ${VERIFY_MARKER}PEERCUSTODY__
+dir harddisk:/peer-tls
 ! ${VERIFY_MARKER}DONE__
 EOF
 }
@@ -394,6 +417,61 @@ table_contains() {
 # into a pattern must be ere_escape()'d at the call site first.
 files_line_match() {
   printf '%s\n' "$1" | grep -qE "$2"
+}
+
+# Native directory rows expose type/mode without reading private key bytes.
+# Refuse symlink traversal or an unexpected object at any deletion target.
+# The application has already been independently proved stopped before this
+# guard runs. Missing roots are safe; a present root must be the private
+# directory shape created by peer_tls.ensure().
+peer_custody_safe() {
+  python3 -c 'import re, sys
+import json
+root, contents, manifest, phase = sys.argv[1:]
+if not re.search(r"^Directory of harddisk:/?\s*$", root, re.M):
+    sys.exit(1)
+def rows(text, name):
+    return [line for line in text.splitlines()
+            if "#" not in line and re.search(r"(?:^|\s)" + re.escape(name) + r"(?:\s|$)", line)]
+def missing(text, path):
+    lines = [line.strip() for line in text.splitlines() if line.strip()
+             and "#" not in line and line.strip() != "!"
+             and not re.fullmatch(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC", line.strip())]
+    return len(lines) == 1 and re.fullmatch(
+        r"(?:%?Error opening harddisk:/?" + re.escape(path) +
+        r" \(No such file or directory\)|No such file(?: or directory)?)", lines[0])
+found = rows(root, "peer-tls")
+if not found:
+    # A truncated root listing cannot overrule a successful child listing.
+    # Both independent reads must agree on absence, with no positive rows,
+    # directory header or unexplained error mixed into the response.
+    sys.exit(0 if missing(contents, "peer-tls") and
+             (phase == "after" or missing(manifest, "peer-tls/current.json")) else 1)
+if len(found) != 1 or not re.search(r"(?:^|\s)drwx------[.+]?(?:\s|$)", found[0]):
+    sys.exit(1)
+if not re.search(r"^Directory of harddisk:/?peer-tls\s*$", contents, re.M):
+    sys.exit(1)
+for name in ("current.json", "node.key", "enrollment.lock"):
+    entries = rows(contents, name)
+    if len(entries) > 1 or any(not re.search(r"(?:^|\s)-[rwx-]{9}[.+]?(?:\s|$)", line) for line in entries):
+        sys.exit(1)
+if not any(rows(contents, name) for name in ("current.json", "node.key", "enrollment.lock")):
+    sys.exit(0 if phase == "after" or missing(manifest, "peer-tls/current.json") else 1)
+documents = [line.strip() for line in manifest.splitlines() if line.strip().startswith("{")]
+try:
+    if len(documents) != 1:
+        raise ValueError()
+    record = json.loads(documents[0])
+    if set(record) != {"generation"} or not re.fullmatch(r"[0-9a-f]{64}", record["generation"]):
+        raise ValueError()
+    generation = record["generation"]
+    entries = rows(contents, generation)
+    if len(entries) != 1 or not re.search(r"(?:^|\s)drwx------[.+]?(?:\s|$)", entries[0]):
+        raise ValueError()
+except (ValueError, TypeError, KeyError):
+    sys.exit(1)
+print(generation)
+' "$1" "$2" "$3" "${4:-before}"
 }
 
 # Run-4/5/6 fix wave: distinguishes an EMPTY iris-work directory (inert
@@ -621,6 +699,46 @@ fi
 # else: probe showed it present and deactivate was not rejected -- proceed;
 # [5/5] below is the sole arbiter of whether it actually worked.
 
+PEERROOT="$(printf '%s' "$SETUP_OUT" | verify_section PEERROOT)" || exit 1
+PEERCUSTODY="$(printf '%s' "$SETUP_OUT" | verify_section PEERCUSTODY)" || exit 1
+PEERMANIFEST="$(printf '%s' "$SETUP_OUT" | verify_section PEERMANIFEST)" || exit 1
+if ! printf '%s' "$SETUP_OUT" | end_after_start "${VERIFY_MARKER}PEERROOT__" "${VERIFY_MARKER}PEERCUSTODY_END__" \
+   || ! section_has_device_output "$PEERROOT" "$SETUP_REQ" \
+   || ! section_has_device_output "$PEERCUSTODY" "$SETUP_REQ" \
+   || xr_command_rejected "$PEERROOT" || xr_command_rejected "$PEERCUSTODY" \
+   || xr_command_rejected "$PEERMANIFEST" \
+   || ! PEER_GENERATION="$(peer_custody_safe "$PEERROOT" "$PEERCUSTODY" "$PEERMANIFEST")"; then
+  echo "ERROR: peer identity custody could not be safely verified; refusing file cleanup on $DEVICE_IP" >&2
+  exit 1
+fi
+if [ -n "$PEER_GENERATION" ]; then
+  # One bounded read-only login proves that the public manifest references
+  # the exact two certificate files created by IRIS. Never read node.key.
+  PEER_REQ="! ${VERIFY_MARKER}PEERGENERATION__
+dir harddisk:/peer-tls/$PEER_GENERATION
+! ${VERIFY_MARKER}PEERGENERATION_END__"
+  PEER_OUT="$(printf '%s\n' "$PEER_REQ" | RUN 2>/dev/null)"
+  PEER_RC=$?
+  PEER_CERTS="$(printf '%s' "$PEER_OUT" | verify_section PEERGENERATION)" || exit 1
+  if [ "$PEER_RC" -ne 0 ] \
+     || ! printf '%s' "$PEER_OUT" | end_after_start "${VERIFY_MARKER}PEERGENERATION__" "${VERIFY_MARKER}PEERGENERATION_END__" \
+     || ! section_has_device_output "$PEER_CERTS" "$PEER_REQ" \
+     || xr_command_rejected "$PEER_CERTS" \
+     || ! printf '%s\n' "$PEER_CERTS" | python3 -c 'import re,sys
+text = sys.stdin.read()
+if not re.search(r"^Directory of harddisk:/?peer-tls/" + re.escape(sys.argv[1]) + r"\s*$", text, re.M):
+    sys.exit(1)
+lines = text.splitlines()
+for name in ("node.crt", "ca.crt"):
+    rows = [line for line in lines if "#" not in line and re.search(r"(?:^|\s)" + re.escape(name) + r"(?:\s|$)", line)]
+    if len(rows) != 1 or not re.search(r"(?:^|\s)-[rwx-]{9}[.+]?(?:\s|$)", rows[0]):
+        sys.exit(1)
+' "$PEER_GENERATION"; then
+    echo "ERROR: peer identity generation ownership was not proved; refusing file cleanup on $DEVICE_IP" >&2
+    exit 1
+  fi
+fi
+
 # Reaching here means session 1's paired adjudication did NOT conclude a
 # real failure (the elif branch above already exited otherwise) -- session 2
 # is safe to compose, destructive commands included. No sidecar listing to
@@ -659,6 +777,8 @@ FILES="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
   || { echo "ERROR: undeploy verify did not return the harddisk: file check; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
 WORKDIR="$(printf '%s' "$VERIFY_OUT" | verify_section WORKDIR)" \
   || { echo "ERROR: undeploy verify did not return the iris-work directory listing; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
+PEERCUSTODY="$(printf '%s' "$VERIFY_OUT" | verify_section PEERCUSTODY)" \
+  || { echo "ERROR: undeploy verify did not return the peer identity listing; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
 if ! printf '%s' "$VERIFY_OUT" | end_after_start "${VERIFY_MARKER}FILES__" "${VERIFY_MARKER}DONE__"; then
   echo "ERROR: undeploy verify was truncated before its end marker; refusing to declare $DEVICE_IP clean" >&2
   exit 1
@@ -670,7 +790,7 @@ fi
 # section_has_device_output). This also covers an rc-0 session that dropped
 # BEFORE a given marker executed: that section then resolves inside the upfront
 # echo and carries no device content.
-for _section_name in APPS SOURCES FILES WORKDIR; do
+for _section_name in APPS SOURCES FILES WORKDIR PEERCUSTODY; do
   eval "_section_text=\"\$$_section_name\""
   if ! section_has_device_output "$_section_text" "$VERIFY_REQ"; then
     echo "ERROR: undeploy verify's $_section_name read returned no device output (only the transport's echo of the request); refusing to declare $DEVICE_IP clean" >&2
@@ -681,7 +801,7 @@ done
 # table: a refused `show appmgr source-table` or `dir harddisk:` otherwise
 # reads as an empty table, which is exactly "nothing left" -- five residue
 # checks cleared at once by an error message.
-for _section_name in APPS SOURCES FILES; do
+for _section_name in APPS SOURCES FILES PEERCUSTODY; do
   eval "_section_text=\"\$$_section_name\""
   if xr_command_rejected "$_section_text"; then
     echo "ERROR: undeploy verify's $_section_name read was rejected by the device; refusing to declare $DEVICE_IP clean" >&2
@@ -690,6 +810,10 @@ for _section_name in APPS SOURCES FILES; do
 done
 
 forbidden=""
+if ! peer_custody_safe "$FILES" "$PEERCUSTODY" "" after >/dev/null \
+   || files_line_match "$PEERCUSTODY" '(^|[[:space:]])(current\.json|node\.key|enrollment\.lock)([[:space:]]|$)'; then
+  forbidden="active peer identity in $PEER_DIR_PATH"
+fi
 if table_contains "$APPS" "$APPID"; then
   forbidden="${forbidden}${forbidden:+, }appmgr application $APPID"
 fi
