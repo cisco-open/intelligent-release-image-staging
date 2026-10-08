@@ -140,11 +140,14 @@ profiles:
     conn_timeout: 1000
 IOXCFG
 fi
-( cd "$PKG" && HOME="$IOX_HOME" "$IOXCLIENT" package . )
+( cd "$PKG" && HOME="$IOX_HOME" "$IOXCLIENT" package --skip-signing . )
+# Polaris signs the final SHA512 package.mf, not the OCI image or our
+# provenance sidecar. Prepare unsigned bytes before calculating wrapper_sha256.
+python3 "$HERE/package_manifest.py" "$PKG/package.tar" "$CTX/package-sha512.tar"
 artifact_tmp="$(mktemp "$OUT/.${PACKAGE_NAME}.XXXXXX")"
 manifest_tmp="$(mktemp "$OUT/.${PACKAGE_NAME}.manifest.XXXXXX")"
 trap 'rm -rf "$CTX"; rm -f "$artifact_tmp" "$manifest_tmp"' EXIT
-cp "$PKG/package.tar" "$artifact_tmp"
+cp "$CTX/package-sha512.tar" "$artifact_tmp"
 WRAPPER_SHA="$(sha256sum "$artifact_tmp" | awk '{print $1}')"
 {
   echo 'format=iris-device-wrapper-v1'

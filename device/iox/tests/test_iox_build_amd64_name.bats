@@ -67,7 +67,7 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
 }
 
 @test "build.sh packages the staged directory, not a daemon-side save" {
-  run grep -F '"$IOXCLIENT" package .' "$BUILD"
+  run grep -F '"$IOXCLIENT" package --skip-signing .' "$BUILD"
   [ "$status" -eq 0 ]
   run grep -F '"$IOXCLIENT" docker package' "$BUILD"
   [ "$status" -ne 0 ]
@@ -85,7 +85,7 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   [ "$status" -eq 0 ]
   run grep -F 'iris-catalog.pem' "$BUILD"
   [ "$status" -ne 0 ]
-  run grep -F '( cd "$PKG" && HOME="$IOX_HOME" "$IOXCLIENT" package . )' "$BUILD"
+  run grep -F '( cd "$PKG" && HOME="$IOX_HOME" "$IOXCLIENT" package --skip-signing . )' "$BUILD"
   [ "$status" -eq 0 ]
   run grep -F '( cd "$CTX" && "$IOXCLIENT" package . )' "$BUILD"
   [ "$status" -ne 0 ]
@@ -116,6 +116,7 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   OUT="$BATS_TEST_TMPDIR/out"
   mkdir -p "$STUB/device/iox" "$STUB/tools" "$BIN" "$OUT"
   ln -s "$BUILD" "$STUB/device/iox/build.sh"
+  ln -s "$BATS_TEST_DIRNAME/../package_manifest.py" "$STUB/device/iox/package_manifest.py"
   printf 'descriptor\n' > "$STUB/device/iox/package.yaml"
   printf 'descriptor\n' > "$STUB/device/iox/package-amd64.yaml"
   printf '0.0.0-test\n' > "$STUB/VERSION"
@@ -147,21 +148,36 @@ rm -rf "$d"
 STUB_SKOPEO
   cat > "$BIN/ioxclient" <<'STUB_IOX'
 #!/usr/bin/env bash
-printf 'iox wrapper bytes\n' > package.tar
+python3 - <<'PY'
+import hashlib, io, tarfile
+payloads = {'package.yaml': b'descriptor\n', 'artifacts.tar.gz': b'unchanged image'}
+payloads['package.mf'] = ''.join(
+    'SHA256(%s)= %s\n' % (name, hashlib.sha256(data).hexdigest())
+    for name, data in payloads.items()).encode()
+with tarfile.open('package.tar', 'w') as archive:
+    for name, data in payloads.items():
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+PY
 STUB_IOX
   chmod +x "$STUB/tools/build-device-image.sh" "$BIN/skopeo" "$BIN/ioxclient"
 
+  for arch in arm64 amd64; do
   run env PATH="$BIN:$PATH" TEST_ROOT="$BATS_TEST_TMPDIR" \
-    bash "$STUB/device/iox/build.sh" "$OUT"
+    bash "$STUB/device/iox/build.sh" "--$arch" "$OUT"
   [ "$status" -eq 0 ]
-  [ -f "$OUT/iris-arm64.tar" ]
-  manifest="$OUT/iris-arm64.tar.manifest"
+  [ -f "$OUT/iris-$arch.tar" ]
+  manifest="$OUT/iris-$arch.tar.manifest"
   [ -f "$manifest" ]
   grep -q '^wrapper_kind=iox$' "$manifest"
-  grep -q '^platform=linux/arm64$' "$manifest"
+  grep -q "^platform=linux/$arch$" "$manifest"
   grep -q '^canonical_index_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb$' "$manifest"
   grep -q '^canonical_archive_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc$' "$manifest"
   grep -q '^canonical_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$' "$manifest"
-  grep -q "^wrapper_sha256=$(sha256sum "$OUT/iris-arm64.tar" | awk '{print $1}')$" "$manifest"
-  ! find "$OUT" -maxdepth 1 -name '.iris-arm64.tar.*' | grep -q .
+  grep -q "^wrapper_sha256=$(sha256sum "$OUT/iris-$arch.tar" | awk '{print $1}')$" "$manifest"
+  run python3 "$STUB/device/iox/package_manifest.py" "$OUT/iris-$arch.tar"
+  [ "$status" -eq 0 ]
+  ! find "$OUT" -maxdepth 1 -name ".iris-$arch.tar.*" | grep -q .
+  done
 }

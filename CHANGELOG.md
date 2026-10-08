@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Prepare both IOx architectures with verified SHA512 package manifests for
+  native Polaris signing. Exclude signature files from manifests and refuse
+  to rewrite signed wrappers. Keep image payloads and OCI digests unchanged.
+
 ## [2026.10.08]
 
 - Refresh the instruction-encryption helper's OpenSSL build pins and matching
