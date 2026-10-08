@@ -49,11 +49,20 @@ the gateway you name already exist.
 
 ### Assign a credential profile
 
+Open **Inventory → Manage credentials** to create a profile. Enter its id,
+device username and password, then choose **Save profile**. To change a profile,
+choose **Edit** and re-enter the device password. **New** starts another profile.
+Closing the panel or leaving the tab clears entered passwords.
+
+If the list is unavailable, **Refresh profiles** checks it again. The last
+successful list stays visible. An unknown save or delete result means the
+response was lost or incomplete; refresh and check before trying again.
+
 An imported device cannot be onboarded until you give it a profile.
 
 1. Open **Inventory** and select the imported rows.
-2. Pick a profile in the *credential for selected* dropdown.
-3. Press **Apply**. The rows become onboardable at once.
+2. Open **More actions → Set credential** and pick a profile.
+3. Press **Apply**.
 
 A re-import replaces a device's network fields and keeps its credential
 profile. A CSV that lists a `device_id` twice is rejected as a whole.
@@ -74,8 +83,14 @@ profile. A CSV that lists a `device_id` twice is rejected as a whole.
    [Supported devices and platforms](../install/supported-devices.md#which-delivery-path-each-device-family-uses).
 5. For Router routed and Router NAT, fill in the VirtualPortGroup number and
    the app addressing. Router NAT also asks for the outside interface.
-6. Select the device and press **Onboard**. The job starts and streams its
+6. Choose a credential profile and press **Save device**. If the profile list
+   is unavailable, you can save with **no credential** and assign one later.
+7. Select the device and press **Onboard**. The job starts and streams its
    progress.
+
+The form keeps your entries during Inventory refreshes. If the save outcome
+is unknown, check Inventory before saving again. Closing a form does not cancel
+a save already sent to the server.
 
 A device with no management type reads:
 

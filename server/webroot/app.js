@@ -106,6 +106,7 @@
   // React owns table state, filters and selected IDs. The remaining dialogs
   // read through this adapter rather than inspecting or rewriting its DOM.
   var inventory = window.irisInventory;
+  var deviceForms = window.irisDeviceForms;
   var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
   function deviceFilterState() {
@@ -718,6 +719,8 @@
     confirm: function (message) { return confirm(message); },
     isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
     beginPolicyRead: function () { return ++peerPolicyReadGeneration; },
+    beginCredentialRead: function () { return deviceForms.beginCredentialRead(); },
+    acceptCredentials: function (result, ticket) { return deviceForms.acceptCredentials(result, ticket); },
     publish: function (state, policyTicket) {
       LAST_DEVICES = state.rows; LAST_DEV_NOW = state.now; devTotal = state.total;
       imageListOk = state.imagesOk;
@@ -754,7 +757,10 @@
     details: openDeployInfo, assign: openRowAssign,
     scheduled: function (id) { return pendingScheduleText(id, SCHEDULES); }
   });
-  document.addEventListener('visibilitychange', function () { if (document.hidden) inventory.hide(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); }
+    else if (!document.getElementById('view-devices').hidden) deviceForms.resume();
+  });
 
   // React owns the details DOM and async lifetimes. Shared Inventory status
   // derivation stays here so table, Overview and drawer cannot disagree.
@@ -2317,161 +2323,31 @@
                      { device_ids: allIds, credential_profile_id: pid });
       });
   });
-  var devForm = document.getElementById('dev-form');
-  function updateDeviceFields() {
-    var managementType = document.getElementById('df-management-type').value;
-    var router = managementType === 'router-routed' || managementType === 'router-nat';
-    var switchNetwork = managementType === 'routed' || managementType === 'inband';
-    var appNetwork = switchNetwork || router;
-    // Only the operator's management type controls network-field visibility.
-    // XR host and an unchosen management type need no app-network fields.
-    document.getElementById('df-vlan').hidden = !switchNetwork;
-    document.getElementById('df-svi').hidden = managementType !== 'routed';
-    document.getElementById('df-vpg').hidden = !router;
-    document.getElementById('df-nat-interface').hidden = managementType !== 'router-nat';
-    document.getElementById('df-guest').hidden = !appNetwork;
-    document.getElementById('df-mask').hidden = !appNetwork;
-    document.getElementById('df-gateway').hidden = !appNetwork;
-  }
-  document.getElementById('df-management-type').addEventListener('change', function () {
-    updateDeviceFields();
-    return refreshInstallOptions();
-  });
-  // Management type bounds the install choices. Model compatibility can
-  // narrow them, but neither the model nor the installer changes that type.
-  var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;
-  function managementInstallOptions(managementType) {
-    if (managementType === 'xr-host') return ['xr-appmgr'];
-    if (managementType === 'router-routed' || managementType === 'router-nat') return ['router', 'iox'];
-    if (managementType === 'routed' || managementType === 'inband') return ['guestshell', 'iox'];
-    return [];
-  }
-  var installOptionsGen = 0;
   function deviceSeriesLabel(series, model) {
     var labels = { IE3x00: 'IE Switches', IR1x00: 'IR Routers',
       C8xxx: 'Catalyst Routers', C9xxx: 'Catalyst Switches',
       NCS: 'NCS', XR8000: 'Cisco 8000 Series' };
     return labels[series] || labels[model] || model || '—';
   }
-  async function refreshInstallOptions() {
-    var model = document.getElementById('df-model').value.trim();
-    var managementType = document.getElementById('df-management-type').value;
-    var platform = document.getElementById('df-platform');
-    var hint = document.getElementById('df-platform-hint');
-    var allowed = managementInstallOptions(managementType);
-    var gen = ++installOptionsGen;
-    function renderOptions(modelOptions, message) {
-      var options = allowed.filter(function (option) {
-        return modelOptions === null || modelOptions.indexOf(option) !== -1;
-      });
-      var kept = platform.value;
-      platform.disabled = options.length === 0;
-      hint.textContent = message || '';
-      if (!allowed.length) {
-        platform.innerHTML = '<option value="">Choose a management type first</option>';
-        return;
-      }
-      if (!options.length) {
-        platform.innerHTML = '<option value="">No compatible agent install</option>';
-        hint.textContent = 'This model and management type have no compatible agent install. Check either value.';
-        return;
-      }
-      platform.innerHTML = '<option value="" disabled selected>Choose an agent install</option>' +
-        options.map(function (option) {
-          return '<option value="' + esc(option) + '">' + esc(INSTALL_OPTION_LABELS[option]) + '</option>';
-        }).join('');
-      if (options.indexOf(kept) !== -1) platform.value = kept;
-      // XR host explicitly identifies its installer; router modes offer two.
-      // A model match alone never selects an installer for a switch.
-      else if (allowed.length === 1) platform.value = options[0];
+  // React owns the full device and credential forms. The adapter retains the
+  // existing authenticated transport and shared Inventory prerequisites.
+  deviceForms.connect({
+    fetch: fetch, post: jpost, headers: csrfHdr,
+    confirm: function (message) { return confirm(message); },
+    isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
+    refreshInventory: refreshDevices,
+    claimDevice: function (id) { return inventory.claimRow(id); },
+    releaseDevice: function (id) { inventory.releaseRow(id); },
+    report: function (message, failed) { inventory.report(message, failed); },
+    publishCredentials: function (state) {
+      credOpts = state.credentials; credListOk = state.credentialsOk;
+      inventory.update(state); syncCredSelected();
     }
-    renderOptions(null);
-    if (!model || !allowed.length) return;
-    try {
-      var r = await fetch('/api/v1/install-options?model=' + encodeURIComponent(model));
-      if (gen !== installOptionsGen) return;
-      if (!r.ok) throw new Error('Install options unavailable');
-      var options = (await r.json()).options;
-      // JSON parsing can yield too: a newer model/type may already be shown.
-      if (gen !== installOptionsGen) return;
-      if (options !== null && !Array.isArray(options)) throw new Error('Invalid install options');
-      renderOptions(options, options === null
-        ? 'Unrecognized model. Confirm agent support before onboarding.' : '');
-    } catch (e) {
-      if (gen !== installOptionsGen) return;
-      // Keep the chosen management type and its valid install choices. The
-      // backend still validates model compatibility when the device is saved.
-      renderOptions(null, 'Model compatibility could not be checked. It will be validated when saved.');
-    }
-  }
-  document.getElementById('df-model').addEventListener('change', refreshInstallOptions);
-  onInventoryAction('add-dev', function () {
-    // populate the credential dropdown from the latest profiles
-    var sel = document.getElementById('df-cred');
-    sel.innerHTML = credListOk
-      ? '<option value="">— no credential —</option>' +
-        credOpts.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>'; }).join('')
-      : '<option value="">— credential list unavailable; assign later —</option>';
-    devForm.hidden = !devForm.hidden;
-    if (!devForm.hidden) { updateDeviceFields(); refreshInstallOptions(); }
   });
-  document.getElementById('df-cancel').addEventListener('click', function () { devForm.hidden = true; });
-  devForm.addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var did = document.getElementById('df-id').value.trim();
-    var derr = document.getElementById('df-err'); derr.textContent = '';
-    if (!did) { derr.textContent = 'Device ID is required.'; return; }
-    if (!document.getElementById('df-model').value) { derr.textContent = 'Choose a model series.'; return; }
-    var managementType = document.getElementById('df-management-type').value;
-    if (!managementType) { derr.textContent = 'Choose a management type for this device.'; return; }
-    // The management type or explicit install choice identifies the installer.
-    // Letting this through blank handed the decision to a model guess, which
-    // is how an IOS-XR router was sent down an install its hardware cannot run.
-    var platformSel = document.getElementById('df-platform');
-    if (!platformSel.value) {
-      derr.textContent = platformSel.disabled
-        ? document.getElementById('df-platform-hint').textContent
-        : 'Choose an agent install for this device.';
-      return;
-    }
-    var vlan = document.getElementById('df-vlan').value.trim();
-    var mask = document.getElementById('df-mask').value.trim();
-    var body = {
-      device_id: did,
-      device_ip: document.getElementById('df-ip').value.trim() || did,
-      management_type: managementType,
-      model: document.getElementById('df-model').value.trim(),
-      platform: document.getElementById('df-platform').value,
-      credential_profile_id: document.getElementById('df-cred').value
-    };
-    if (managementType === 'xr-host') {
-      // XR host networking -- the agent shares the router's own network
-      // stack, so no app-network fields belong on this wire body.
-    } else if (managementType === 'inband') {
-      body.app_ip = document.getElementById('df-guest').value.trim();
-      body.app_mask = mask;
-      body.app_gateway = document.getElementById('df-gateway').value.trim();
-      body.inband_vlan = vlan;
-    } else if (managementType === 'router-routed' || managementType === 'router-nat') {
-      body.app_ip = document.getElementById('df-guest').value.trim();
-      body.app_mask = mask;
-      body.app_gateway = document.getElementById('df-gateway').value.trim();
-      body.vpg_number = document.getElementById('df-vpg').value.trim();
-      if (managementType === 'router-nat') {
-        body.nat_interface = document.getElementById('df-nat-interface').value.trim();
-      }
-    } else {
-      body.app_ip = document.getElementById('df-guest').value.trim();
-      body.app_mask = mask;
-      body.app_gateway = document.getElementById('df-gateway').value.trim();
-      body.iris_vlan = vlan;
-      body.svi_ip = document.getElementById('df-svi').value.trim();
-      body.svi_mask = mask;
-    }
-    var r = await jpost('/api/v1/devices', body);
-    if (!r.ok) { derr.textContent = 'Add failed: ' + ((await r.json()).error || r.status); return; }
-    devForm.hidden = true; devForm.reset(); refreshDevices();
-  });
+  // Opening a form is not a mutation. Keep its trigger usable while the
+  // controller's cancellable read runs, including close and immediate reopen.
+  onInventoryAction('add-dev', function () { deviceForms.toggleDevice(); });
+  onInventoryAction('manage-creds', function () { deviceForms.toggleCredentials(); });
   // ---- Device CSV import ----
   // A dedicated status survives inventory polls. Never replay an uncertain
   // write automatically, and clear the input so the same file can be retried.
@@ -2775,75 +2651,6 @@
   document.getElementById('sched-close').addEventListener('click', function () { schedPanel.hidden = true; });
   document.getElementById('sched-refresh').addEventListener('click', function () { renderSchedules(); });
 
-  var credPanel = document.getElementById('cred-panel');
-  var _credProfs = [];
-  async function renderCreds() {
-    var cr = await fetch('/api/v1/credentials'); var profs = cr.ok ? (await cr.json()).profiles : [];
-    credOpts = profs; _credProfs = profs;
-    syncCredSelected();
-    document.getElementById('cred-rows').innerHTML = profs.length
-      ? profs.map(function (p) {
-          return '<tr data-id="' + esc(p.id) + '"><td class="machine"><b>' + esc(p.id) + '</b></td><td>' +
-            esc(p.name || '') + '</td><td>' + esc(p.device_user || '') +
-            '</td><td><button class="linkish cred-edit">edit</button> · ' +
-            '<button class="linkish cred-del">delete</button></td></tr>'; }).join('')
-      : '<tr><td colspan="4" class="muted">No credential profiles yet.</td></tr>';
-    document.querySelectorAll('#cred-rows .cred-edit').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        var p = _credProfs.filter(function (x) { return x.id === id; })[0];
-        if (p) editCred(p);
-      });
-    });
-    document.querySelectorAll('#cred-rows .cred-del').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        if (!confirm('Delete credential profile ' + id + '?')) return;
-        await fetch('/api/v1/credentials/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
-        await renderCreds(); refreshDevices();
-      });
-    });
-  }
-  function editCred(p) {
-    document.getElementById('cf-id').value = p.id;
-    document.getElementById('cf-name').value = p.name || '';
-    document.getElementById('cf-user').value = p.device_user || '';
-    document.getElementById('cf-pass').value = '';
-    document.getElementById('cf-pass2').value = '';
-    document.getElementById('cf-en').value = '';
-    document.getElementById('cf-err').textContent =
-      'Editing "' + p.id + '" — re-enter the device password to save changes.';
-    document.getElementById('cf-pass').focus();
-  }
-  document.getElementById('cf-reset').addEventListener('click', function () {
-    document.getElementById('cred-form').reset();
-    document.getElementById('cf-err').textContent = '';
-  });
-  onInventoryAction('manage-creds', function () {
-    credPanel.hidden = !credPanel.hidden;
-    if (!credPanel.hidden) renderCreds();
-  });
-  document.getElementById('cf-close').addEventListener('click', function () { credPanel.hidden = true; });
-  document.getElementById('cred-form').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var err = document.getElementById('cf-err'); err.textContent = '';
-    var id = document.getElementById('cf-id').value.trim();
-    var pass = document.getElementById('cf-pass').value;
-    var pass2 = document.getElementById('cf-pass2').value;
-    if (!id) { err.textContent = 'Profile id is required.'; return; }
-    if (!pass) { err.textContent = 'Password is required.'; return; }
-    if (pass !== pass2) { err.textContent = 'Passwords do not match.'; return; }
-    var body = { id: id, name: document.getElementById('cf-name').value.trim() || id,
-                 device_user: document.getElementById('cf-user').value.trim(),
-                 device_pass: pass, enable_secret: document.getElementById('cf-en').value };
-    var r = await jpost('/api/v1/credentials', body);
-    if (!r.ok) { err.textContent = 'Save failed: ' + ((await r.json()).error || r.status); return; }
-    document.getElementById('cred-form').reset();
-    // Re-render the device rows too: their credential dropdowns are built from
-    // credOpts, so a device imported before any profile existed stays
-    // unassignable until the table is redrawn.
-    await renderCreds(); refreshDevices();
-  });
 
   // ---- Overview: "Needs attention" band (worst-of-group rollups) --------
   // Combined worst-of-group, per the Magnetic status-indicator guidance
@@ -5180,7 +4987,7 @@
       closeModal('role-def-modal');
       closeModal('policy-advanced-modal');
     }
-    if (view !== 'devices') inventory.hide();
+    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); }
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });
@@ -5203,7 +5010,7 @@
     else if (view === 'images') {
       refreshImages(); refreshImportable();
       poll = function () { refreshImages(); refreshImportable(); };
-    } else if (view === 'devices') { refreshDevices(); poll = pollDevices; }
+    } else if (view === 'devices') { refreshDevices(); deviceForms.resume(); poll = pollDevices; }
     else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'settings') { refreshSetup(); } // showSettingsSub already refreshes the form data.

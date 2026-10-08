@@ -17,7 +17,8 @@ Console](../zensical/user-guide/console.md) for that.
 
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
-and Inventory's table, filters, selection, device-details and Activity drawers
+and Inventory's table, filters, selection, Add Device and credential forms,
+device-details and Activity drawers
 with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
@@ -73,8 +74,17 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. Inventory's add-device, credential,
-assignment and schedule dialogs still use the older controller.
+write result is reported without retrying. Inventory's assignment, bulk credential
+and schedule dialogs still use the older controller.
+
+The Add Device and credential forms use `device-forms-controller.mjs`, a shared
+model and `device-forms.jsx`. Model lookups only narrow the chosen management
+type's install options. Credential list reads share ordering tickets with
+Inventory, so older panel or poll responses cannot restore outdated choices.
+Writes hold their lock through close and reopen. Failed reads keep the last
+list as unavailable, and unknown writes are reported without replaying them.
+Closing the credential panel, leaving Inventory or hiding the tab clears entered
+secrets. Inventory polling preserves form fields and keyboard focus.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -129,6 +139,13 @@ not retain all-matches coverage after a newer partial-page read.
 Table checks also cover delayed response bodies, unavailable credentials and
 policy, row-write locks, revision preconditions, server-clock TLS freshness,
 unknown write results, hidden-view reads and keyboard focus across polling.
+Form checks cover every management type's wire fields, model lookup races,
+credential read ordering, refused saves and deletes, close/reopen locks,
+secret clearing and the absence of secret text in error messages.
+`server/tests/test_device_forms_api.py` also runs the shipped serializers through
+temporary Console and management servers for all five management types. It
+checks sessions, CSRF, saved fields and public credential responses. The Console
+verifies management HTTPS with the fixture CA; its local browser hop uses HTTP.
 
 ## Building the browser assets
 

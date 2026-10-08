@@ -252,49 +252,7 @@
         <div class="dev-status-line muted" id="dev-status" role="status" aria-live="polite"></div>
         <p id="csv-import-status" role="status" aria-live="polite" hidden></p>
         <div id="iris-inventory-selection-root" data-inventory-react></div>
-        <form class="inline-form" id="dev-form" hidden>
-          <label class="field" for="df-id"><span class="field-label">Device ID / IP</span><input id="df-id" placeholder="e.g. 10.0.0.5"></label>
-          <label class="field" for="df-ip"><span class="field-label">Management IP</span><input id="df-ip" placeholder="e.g. 10.0.0.5"></label>
-          <label class="field" for="df-management-type"><span class="field-label">Management type</span><select id="df-management-type"><option value="">Choose…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option><option value="router-routed">Router routed - IRIS-managed VPG subnet</option><option value="router-nat">Router NAT - VPG behind NAT</option><option value="xr-host">XR host - router's own network stack</option></select></label>
-          <label class="field" for="df-vlan"><span class="field-label">VLAN</span><input id="df-vlan" placeholder="e.g. 100"></label>
-          <label class="field" for="df-svi"><span class="field-label">SVI IP (routed only)</span><input id="df-svi" placeholder="e.g. 10.0.1.1"></label>
-          <label class="field" for="df-vpg"><span class="field-label">VirtualPortGroup number (0-31)</span><input id="df-vpg" placeholder="e.g. 0" title="IOS interface VirtualPortGroup<N>" hidden></label>
-          <label class="field" for="df-nat-interface"><span class="field-label">NAT outside interface</span><input id="df-nat-interface" placeholder="e.g. GigabitEthernet0/0" hidden></label>
-          <label class="field" for="df-guest"><span class="field-label">App IP (Guest Shell)</span><input id="df-guest" placeholder="e.g. 10.0.2.5"></label>
-          <label class="field" for="df-mask"><span class="field-label">App mask</span><input id="df-mask" placeholder="e.g. 255.255.255.0"></label>
-          <label class="field" for="df-gateway"><span class="field-label">App gateway (VPG IP for routers)</span><input id="df-gateway" placeholder="e.g. 10.0.2.1" title="For router modes, this is the IP configured on VirtualPortGroup<N>"></label>
-          <label class="field" for="df-model"><span class="field-label">Model series</span><select id="df-model" required><option value="">Choose a series…</option><option value="IE3x00">IE Switches</option><option value="IR1x00">IR Routers</option><option value="C8xxx">Catalyst Routers</option><option value="C9xxx">Catalyst Switches</option><option value="NCS">NCS</option><option value="XR8000">Cisco 8000 Series</option></select></label>
-          <label class="field" for="df-platform"><span class="field-label">Agent install</span><select id="df-platform" aria-describedby="df-platform-hint"><option value="" disabled selected>Choose an agent install</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Guest Shell</option><option value="xr-appmgr">XR appmgr container</option></select></label>
-          <label class="field" for="df-cred"><span class="field-label">Credential</span><select id="df-cred"><option value="">— no credential —</option></select></label>
-          <div class="form-actions">
-            <button class="btn" type="submit">Save device</button>
-            <button class="btn ghost" type="button" id="df-cancel">Cancel</button>
-          </div>
-          <p class="muted form-help" id="df-platform-hint"></p>
-          <span class="err" id="df-err" role="alert"></span>
-        </form>
-        <div class="inline-form" id="cred-panel" hidden>
-          <div class="table-scroll">
-          <table class="tbl">
-            <thead><tr><th>Profile id</th><th>Name</th><th>Device username</th><th></th></tr></thead>
-            <tbody id="cred-rows"></tbody>
-          </table>
-          </div>
-          <form id="cred-form">
-            <label class="field" for="cf-id"><span class="field-label">Profile id</span><input id="cf-id" placeholder="e.g. lab-switches"></label>
-            <label class="field" for="cf-name"><span class="field-label">Display name</span><input id="cf-name" placeholder="e.g. Lab switches"></label>
-            <label class="field" for="cf-user"><span class="field-label">Device username</span><input id="cf-user" placeholder="admin" value="admin"></label>
-            <label class="field" for="cf-pass"><span class="field-label">Device password</span><input id="cf-pass" type="password" placeholder="Device password" autocomplete="new-password"></label>
-            <label class="field" for="cf-pass2"><span class="field-label">Confirm password</span><input id="cf-pass2" type="password" placeholder="Confirm password" autocomplete="new-password"></label>
-            <label class="field" for="cf-en"><span class="field-label">Enable secret</span><input id="cf-en" type="password" placeholder="Blank = same as password" autocomplete="new-password"></label>
-            <div class="form-actions">
-              <button class="btn" type="submit">Save profile</button>
-              <button class="btn ghost" type="button" id="cf-reset">New</button>
-              <button class="btn ghost" type="button" id="cf-close">Close</button>
-            </div>
-            <span class="err" id="cf-err" role="alert"></span>
-          </form>
-        </div>
+        <div id="iris-device-forms-root" data-device-forms-react></div>
         <!-- Schedules (Phase 2, Task 25): a list and one action, deliberately
              no deeper. Editing a window, its gate or its payload stays with
              the API and iris-schedule; what an operator needs on this screen

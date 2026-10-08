@@ -733,7 +733,8 @@ def test_bulk_row_actions_wired():
     assert "does NOT " in js and "undeploy" in js
     # creating or deleting a profile re-renders the device rows, so a device
     # imported before any profile existed becomes assignable immediately
-    assert js.count("renderCreds(); refreshDevices();") == 2
+    assert "await this.refreshCredentials(); await this.refreshInventory();" in _react_shell('device-forms-controller.mjs')
+    assert "inventory.update(state); syncCredSelected();" in js
     assert "function syncCredSelected(" in js
 
 
@@ -928,16 +929,11 @@ def test_buttons_have_tactile_states():
 
 
 def test_device_form_has_model_field():
-    """Source guard: the add-device form must expose a model input (used for
-    platform auto-detection; see gui_onboard.resolve_platform) and post it."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="df-model"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "df-model" in js
-    assert "model:" in js
+    """The explicit series input bounds install choices and is sent on save."""
+    form = _react_shell('device-forms.jsx')
+    assert 'id="df-model"' in form
+    assert "controller.setDevice('model', event.target.value)" in form
+    assert 'model: form.model.trim()' in _react_shell('device-forms-model.mjs')
 
 
 def test_settings_tls_trust_and_destination_sections_wired():
@@ -2192,16 +2188,21 @@ def test_credentials_crud_never_leaks_password(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        st, _, _ = _req(host, port, "POST", "/api/credentials",
+        st, _, saved = _req(host, port, "POST", "/api/credentials",
                         {"id": "lab", "name": "Lab", "device_user": "admin",
                          "device_pass": "topsecret"}, headers=hh)
         assert st == 200
+        assert json.loads(saved)["profile"]["id"] == "lab"
+        assert b"topsecret" not in saved
         st, _, b = _req(host, port, "GET", "/api/credentials", headers={"Cookie": ck})
         body = b.decode()
         assert "lab" in body and "admin" in body
         assert "topsecret" not in body     # password NEVER returned
-        st, _, _ = _req(host, port, "DELETE", "/api/credentials/lab", headers=hh)
+        st, _, deleted = _req(host, port, "DELETE", "/api/credentials/lab", headers=hh)
         assert st == 200
+        assert json.loads(deleted) == {"deleted": True}
+        st, _, deleted = _req(host, port, "DELETE", "/api/credentials/lab", headers=hh)
+        assert st == 200 and json.loads(deleted) == {"deleted": False}
     finally:
         stop()
 
@@ -8858,10 +8859,11 @@ def test_agent_install_rename_and_inventory_only_label():
     assert "['platform', 'platform', 'agent install', 'Agent install: any'" in component
     assert "['legacy', 'Inventory only — management type not chosen']" in component
     assert "'Agent install'" in component and 'aria-label={`Agent install for ${id}`}' in component
-    assert '<option value="" disabled selected>Choose an agent install</option>' in html
-    assert 'id="df-platform"' in html
+    form, form_model = _react_shell('device-forms.jsx'), _react_shell('device-forms-model.mjs')
+    assert '<option value="" disabled>' in form and 'Choose an agent install' in form
+    assert 'id="df-platform"' in form
     for value in ('guestshell', 'iox', 'router', 'xr-appmgr'):
-        assert 'value="' + value + '"' in html
+        assert "'" + value + "'" in form_model
         assert "'" + value + "'" in component
     assert "type === 'legacy' || type === 'legacy_routed'" in model
     assert "'Inventory only — management type not chosen'" in model
@@ -8879,10 +8881,10 @@ def test_agent_install_labels_name_the_runtime_not_router_networking():
     label_map = js.split("var AGENT_INSTALL_LABELS = {", 1)[1].split("\n  };", 1)[0]
     assert "router: 'Guest Shell'" in label_map
     assert "AGENT_INSTALL_LABELS[platform]" in label_fn
-    assert "var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;" in js
+    assert "router: 'Guest Shell'" in _react_shell('device-forms-model.mjs')
     assert "Router (VPG)" not in html + js
     assert "Router (Guest Shell via VirtualPortGroup)" not in html + js
-    assert '<option value="router">Guest Shell</option>' in html
+    assert '{installLabels[value]}' in _react_shell('device-forms.jsx')
     details = _react_shell("device-details-model.mjs")
     assert "router: 'Guest Shell'" in details
     assert "row('Agent install', lookup(platforms, res.platform" in details
@@ -8890,28 +8892,25 @@ def test_agent_install_labels_name_the_runtime_not_router_networking():
 
 def test_add_device_form_model_field_precedes_agent_install_select():
     """Model compatibility is entered before choosing an agent install."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
+    html = _react_shell('device-forms.jsx')
     assert html.index('id="df-model"') < html.index('id="df-platform"')
 
 
 def test_add_device_form_filters_install_options_live_by_model():
     """Model lookup narrows the selected management type's install choices.
     The behavior tests cover changes, failures and late lookup responses."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "getElementById('df-model').addEventListener('change'" in js
+    js = _react_shell('device-forms-controller.mjs')
+    assert "controller.setDevice('model', event.target.value)" in _react_shell('device-forms.jsx')
     assert "/api/v1/install-options?model=" in js
     assert "no agent install available yet" not in js
-    assert "'xr-appmgr'" in js and "XR appmgr container" in js
-    assert "refreshInstallOptions" in js
+    assert "'xr-appmgr'" in _react_shell('device-forms-model.mjs')
+    assert "refreshOptions" in js
 
 
 def test_xr_host_management_type_option_added_to_both_selects():
     html, component = _webroot('index.html'), _react_shell('inventory.jsx')
     assert "['xr-host', 'XR host']" in component
-    form = html.split('id="df-management-type"', 1)[1].split('</select>', 1)[0]
-    assert "XR host - router's own network stack</option>" in form and 'value="xr-host"' in form
+    assert '[\'xr-host\', "XR host - router\'s own network stack"]' in _react_shell('device-forms-model.mjs')
 
 
 # Management-type visibility and model lookup behavior are exercised against
@@ -8926,11 +8925,9 @@ def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
     an unhandled xr-host would have wrongly carried routed-mode addressing.
     An explicit xr-host branch must send NONE of the addressing keys at
     all: not the routed ones, not app_ip/app_mask/app_gateway either."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "if (managementType === 'xr-host') {" in js
-    xr_branch = js.split("if (managementType === 'xr-host') {", 1)[1].split(
-        "} else if (managementType === 'inband') {", 1)[0]
+    js = _react_shell('device-forms-model.mjs').split('export function deviceBody(form)', 1)[1]
+    assert "if (managementType === 'xr-host') return body;" in js
+    xr_branch = js.split("if (managementType === 'xr-host') return body;", 1)[0]
     for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
                 "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
         assert key not in xr_branch, "xr-host submit branch sends %s" % key
@@ -10414,8 +10411,6 @@ def test_forms_get_persistent_field_labels():
     assert "font-size: 12px" in css.split(".field-label {", 1)[1].split("}", 1)[0]
     # a representative sample across different forms, not every field
     samples = {
-        "dev-form": ("df-id", "df-management-type", "df-cred"),
-        "cred-form": ("cf-id", "cf-pass"),
         "pw-form": ("pw-cur", "pw-new", "pw-confirm"),
         "cert-form": ("cert-pem", "cert-key"),
         "trust-form": ("trust-pem",),
@@ -10427,6 +10422,13 @@ def test_forms_get_persistent_field_labels():
         form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
         for fid in field_ids:
             assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
+    form = _react_shell('device-forms.jsx')
+    assert '<label className="field" htmlFor={id}' in form
+    for fid in ('df-id', 'df-management-type', 'df-cred'):
+        assert '<Field id="%s" label=' % fid in form
+    for fid in ('cf-id', 'cf-pass'):
+        assert "'%s'," % fid in form
+    assert '<Field id={id} label={label}>' in form
     # the shared template (mounted into both Setup and Settings)
     for tpl_id, field_ids in (("tpl-td-form", ("td-endpoint",)),):
         tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
@@ -10441,12 +10443,15 @@ def test_error_and_status_regions_carry_live_roles():
     styles.css) get role=alert, so either outcome is announced without the
     operator having to go find the message by sight."""
     html = _webroot("index.html")
-    alert_ids = ("df-err", "cf-err", "pw-msg", "cert-msg",
+    alert_ids = ("pw-msg", "cert-msg",
                  "trust-msg", "ca-msg", "td-msg", "ae-msg",
                  "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg")
     for eid in alert_ids:
         tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
         assert 'role="alert"' in tag, eid
+    form = _react_shell('device-forms.jsx')
+    for eid in ('df-err', 'cf-err'):
+        assert 'role="alert"' in form.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
     status_ids = ("dev-status", "wz-progress", "wz-msg",
                   "cert-status", "td-status", "ae-status",
                   "sessions-info", "swarm-summary")
@@ -11409,7 +11414,7 @@ def test_credential_list_failure_is_not_rendered_as_no_credential():
     assert 'credentials: credentialsOk ? credentials.body.profiles : this.state.credentials' in _react_shell('inventory-controller.mjs')
     assert 'disabled={busy || state.bulkBusy || !state.credentialsOk}' in _react_shell('inventory.jsx')
     assert 'Credential list unavailable; showing the assignment as recorded' in _react_shell('inventory.jsx')
-    assert "credential list unavailable; assign later" in js
+    assert "credential list unavailable; assign later" in _react_shell('device-forms.jsx')
     assert "Credential list unavailable; not opening the picker." in js
 
 

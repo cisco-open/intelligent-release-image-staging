@@ -14,6 +14,19 @@ import pytest
 APP = Path(__file__).resolve().parents[1] / "webroot" / "app.js"
 
 
+def test_device_and_credential_forms_have_only_react_dom_owners():
+    legacy = APP.read_text()
+    html = APP.with_name("index.html").read_text()
+    entry = (APP.parent.parent / "console-ui/src/main.jsx").read_text()
+    for identifier in ("dev-form", "cred-panel", "cred-form", "cred-rows", "df-id", "cf-pass"):
+        assert "getElementById('%s')" % identifier not in legacy
+        assert 'id="%s"' % identifier not in html
+    assert 'id="iris-device-forms-root" data-device-forms-react' in html
+    assert "mountDeviceForms();" in entry
+    assert "deviceForms.acceptCredentials(result, ticket)" in legacy
+    assert "deviceForms.hide();" in legacy
+
+
 def test_session_status_and_logout_bridge_preserves_csrf_and_idle_semantics():
     if not shutil.which("node"):
         pytest.skip("Node is required for the browser-client bridge test")

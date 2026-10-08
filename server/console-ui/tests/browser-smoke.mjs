@@ -204,7 +204,7 @@ try {
           device_id: 'series-ui-test', device_ip: '192.0.2.99',
           model: 'XR8000', management_type: 'xr-host', platform: 'xr-appmgr', credential_profile_id: '',
         });
-        return route.fulfill({ status: 201, json: { device_id: 'series-ui-test' } });
+        return route.fulfill({ status: 200, json: { device: {device_id: 'series-ui-test'} } });
       }
       const fixtures = {
         '/api/v1/session': { username: 'UI test', csrf: 'test-only' },

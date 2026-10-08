@@ -13,6 +13,7 @@ import { mountMonitoring } from './monitoring.jsx';
 import { mountDeviceDetails } from './device-details.jsx';
 import { mountActivity } from './activity.jsx';
 import { mountInventory } from './inventory.jsx';
+import { mountDeviceForms } from './device-forms.jsx';
 import './shell.css';
 
 const primary = [
@@ -205,6 +206,7 @@ export function mountConsoleShell() {
     mountDeviceDetails();
     mountActivity();
     mountInventory();
+    mountDeviceForms();
   });
 }
 

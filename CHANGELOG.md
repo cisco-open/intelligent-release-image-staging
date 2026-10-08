@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move Add Device and credential profiles into React. Keep form entries during
+  polling, order shared credential reads, check save and delete outcomes, and
+  keep pending-write locks through close and reopen. Clear entered passwords
+  when the credential panel or tab is left; never repeat an uncertain write.
+
 - Move Inventory's table, filters, selection and row edits into React. Keep
   keyboard focus during refreshes, reject stale response bodies and show
   unavailable credentials or policy explicitly. Coordinate row edits with
