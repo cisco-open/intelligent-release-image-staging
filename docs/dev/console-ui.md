@@ -110,6 +110,11 @@ Device-details checks cover XR/XE records, per-image status, confirmed host-key
 writes, same-device reopen races, plain-text logs, keyboard focus and mobile use.
 Activity checks cover scoped cancellation, aborts, batch option snapshots,
 unknown write results, hidden views, independent streams and bounded output.
+Inventory selection checks use 1,001 fixture devices to cover complete page
+reads, revision changes, retained selections, off-filter counts and cancellation
+of stale reads. Select all checks a consistent fleet revision, page totals,
+offsets and unique IDs before adding them to the explicit selection. It does
+not retain all-matches coverage after a newer partial-page read.
 
 ## Building the browser assets
 

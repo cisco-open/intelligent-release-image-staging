@@ -131,6 +131,10 @@
   // selectAllMatchingDevices() (the real "every matching device" action);
   // never scraped from the DOM, which reflects only the current page.
   var SELECTED = Object.create(null);
+  // A count cannot prove that selected IDs match the current filter. Retain
+  // coverage only from a complete page or a successful all-pages read.
+  var deviceSelectionQuery = null;
+  var deviceMatchIds = null;
   // device_id -> the most relevant retained onboard/undeploy job (facelift
   // carried fix #2, step/elapsed in the status cell). Refreshed alongside
   // the devices table from the EXISTING GET /api/v1/onboard/jobs listing
@@ -726,6 +730,10 @@
     // Invalidate the previous query immediately, including during debounce.
     devicesRefreshGeneration++;
     if (devicesRefreshController) devicesRefreshController.abort();
+    deviceSelectionQuery = null;
+    deviceMatchIds = null;
+    cancelSelectAllMatching();
+    updateSelBar();
     updateMoreFiltersSummary();
     updateFilterBarState();
     applyDeviceFiltersTimer = setTimeout(function () {
@@ -1027,6 +1035,7 @@
     devicesRefreshController = new AbortController();
     var signal = devicesRefreshController.signal;
     applyPendingDevFilter();
+    var selectionQuery = deviceFilterQuery(deviceFilterState());
     var devicesQuery = devicesPageQuery();
     // Optional job listing -- decoupled from the other four fetches below
     // via its own .then/.catch (Task 7's refreshOverview pattern); see the
@@ -1049,6 +1058,10 @@
         peerPolicyReadOk = false;
         renderPeerPolicyPanel();
       }
+      if (mine === devicesRefreshGeneration) {
+        deviceSelectionQuery = null; deviceMatchIds = null;
+        updateSelBar();
+      }
       throw e;
     }
     var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jobsBody = results[4];
@@ -1067,6 +1080,7 @@
         ').';
       LAST_DEVICES = [];
       LAST_DEV_NOW = 0;
+      deviceSelectionQuery = null; deviceMatchIds = null;
       document.getElementById('dev-rows').innerHTML =
         '<tr><td colspan="12" class="muted">Device target preview unavailable.</td></tr>';
       document.getElementById('dev-count').textContent = 'Results unavailable';
@@ -1082,6 +1096,7 @@
         targetWarning.textContent =
           'Target preview unavailable — filters are not confirmed.';
       }
+      updateSelBar();
       return;
     }
     var dbody = await dr.json();
@@ -1137,6 +1152,10 @@
     LAST_DEVICES = devs;
     LAST_DEV_NOW = devNow;
     syncDeviceFilterOptions();
+    deviceSelectionQuery = selectionQuery;
+    deviceMatchIds = devOffset === 0 && devTotal === devs.length
+      && new Set(devs.map(function (d) { return d.device_id; })).size === devTotal
+      ? devs.map(function (d) { return d.device_id; }) : null;
     renderDevices(devs, devNow, devTotal);
   }
 
@@ -1439,6 +1458,7 @@
   }
   // Page selection never silently expands to the rest of the fleet.
   document.getElementById('mark-all').addEventListener('click', function () {
+    cancelSelectAllMatching();
     var rows = Array.from(document.querySelectorAll('#dev-rows tr[data-id]'));
     var clear = rows.length > 0 && rows.every(function (row) { return !!SELECTED[row.dataset.id]; });
     rows.forEach(function (row) {
@@ -1612,19 +1632,26 @@
     var m = devTotal;
     document.getElementById('sel-bar').hidden = n === 0;
     document.getElementById('sel-count').textContent = n + ' selected';
-    // Scope copy (spec §5, revised for paging): names whether the selection
-    // IS every device the filter matches or only part of it, and -- when
-    // it's only part -- offers a one-click way to the rest. Unlike before
-    // paging existed, that click can no longer be a shortcut into the
-    // page toggle (#mark-all only ever reaches the page in the DOM) --
-    // it runs selectAllMatchingDevices(), a real walk of every page.
+    var rows = Array.from(document.querySelectorAll('#dev-rows tr[data-id]'));
+    var selectedOnPage = rows.filter(function (row) { return !!SELECTED[row.dataset.id]; }).length;
+    var matchesKnown = deviceSelectionQuery !== null
+      && deviceSelectionQuery === deviceFilterQuery(deviceFilterState());
+    var completeMatches = matchesKnown && deviceMatchIds !== null && deviceMatchIds.length === m;
+    var matchingSelected = completeMatches ? deviceMatchIds.filter(function (id) { return !!SELECTED[id]; }).length : null;
+    var allSelected = m > 0 && completeMatches && matchingSelected === m;
+    // Off-page selections may belong to an earlier filter. Say only what
+    // the confirmed IDs prove, and keep Select all available even if n >= m.
     var scopeText = document.getElementById('sel-scope-text');
     var scopeAll = document.getElementById('sel-scope-all');
-    var allSelected = n > 0 && n === m;
-    scopeText.hidden = !allSelected;
-    if (allSelected) scopeText.textContent = '· All ' + m + ' matching devices selected';
-    scopeAll.hidden = allSelected || n === 0 || m <= n;
-    if (!scopeAll.hidden) scopeAll.textContent = '· Select all ' + m + ' matching devices';
+    var scope = allSelected ? '· All ' + m + ' matching devices selected' : '';
+    var outside = n - (completeMatches ? matchingSelected : selectedOnPage);
+    if (!matchesKnown && n) scope = '· Selection kept; current matches are unconfirmed';
+    else if (outside > 0) scope += (scope ? '; ' : '· ') + outside + ' selected outside this ' + (completeMatches ? 'filter' : 'page');
+    scopeText.textContent = scope;
+    scopeText.hidden = !scope;
+    scopeAll.hidden = allSelected || n === 0 || !matchesKnown || m <= 0;
+    scopeAll.disabled = !!(selectAllMatchingBusy || bulkBusy);
+    scopeAll.textContent = selectAllMatchingBusy ? '· Selecting…' : '· Select all ' + m + ' matching devices';
     // The count lives in the bar's own indicator (Magnetic Table > Bulk
     // action bar: "An indicator displays the number of selected rows"), so
     // the buttons stop restating it. They used to read "Start onboard (3)"
@@ -1636,12 +1663,11 @@
       var el = document.getElementById(k + '-modal-count');
       if (el) el.textContent = n + ' selected';
     });
-    var pageSize = 0, selectedOnPage = 0;
-    document.querySelectorAll('#dev-rows tr[data-id]').forEach(function (tr) {
+    var pageSize = rows.length;
+    rows.forEach(function (tr) {
       var selected = !!SELECTED[tr.dataset.id];
       tr.classList.toggle('sel', selected);
       tr.setAttribute('aria-selected', String(selected));
-      pageSize++; if (selected) selectedOnPage++;
     });
     // Reflect row clicks immediately, not only after the next table refresh.
     // Off-page selections must never change this page's toggle action.
@@ -1662,6 +1688,7 @@
     if (n === 0) BULK_MODALS.forEach(closeModal);
   }
   function toggleDeviceRow(row) {
+    cancelSelectAllMatching();
     var id = row.dataset.id;
     if (SELECTED[id]) delete SELECTED[id]; else SELECTED[id] = true;
     updateSelBar();
@@ -1678,6 +1705,7 @@
     if (!e.repeat) toggleDeviceRow(e.target);
   });
   document.getElementById('sel-clear').addEventListener('click', function () {
+    cancelSelectAllMatching();
     SELECTED = Object.create(null);
     updateSelBar();
   });
@@ -1716,37 +1744,70 @@
   // real walk of every server page for the active filter, adding each id it
   // returns to SELECTED. Wired to #sel-scope-all's click, above.
   var selectAllMatchingBusy = false;
+  var selectAllMatchingRun = null;
+  function cancelSelectAllMatching() {
+    if (!selectAllMatchingRun) return;
+    selectAllMatchingRun.controller.abort();
+    selectAllMatchingRun = null;
+    selectAllMatchingBusy = false;
+    updateSelBar();
+  }
+  window.addEventListener('hashchange', cancelSelectAllMatching);
   async function selectAllMatchingDevices() {
-    if (selectAllMatchingBusy) return;
+    var base = deviceFilterQuery(deviceFilterState());
+    if (selectAllMatchingBusy || bulkBusy || deviceSelectionQuery !== base || devTotal <= 0) return;
+    var run = {controller: new AbortController()};
+    selectAllMatchingRun = run;
     selectAllMatchingBusy = true;
-    var scopeAll = document.getElementById('sel-scope-all');
-    var savedLabel = scopeAll.textContent;
-    scopeAll.disabled = true;
-    scopeAll.textContent = '· Selecting…';
+    updateSelBar();
+    function current() { return selectAllMatchingRun === run && base === deviceFilterQuery(deviceFilterState()); }
     try {
-      var base = deviceFilterQuery(deviceFilterState());
       // The server's own page cap (gui_server.MAX_PAGE_LIMIT) -- the widest
       // page it will ever hand back, so this walks the fewest requests a
       // filtered set of any size can be collected in.
       var batch = 1000;
-      var offset = 0, total = null;
+      var offset = 0, total = null, revision = null, ids = new Set();
       while (total === null || offset < total) {
         var qs = (base ? base + '&' : '') + 'limit=' + batch + '&offset=' + offset;
-        var r;
-        try { r = await fetch('/api/v1/devices?' + qs); } catch (e) { break; }
-        if (!r.ok) break;
+        var r = await fetch('/api/v1/devices?' + qs, {signal: run.controller.signal});
+        if (!current()) return;
+        if (!r.ok) throw new Error('Device list unavailable');
         var body = await r.json();
-        total = typeof body.total === 'number' ? body.total : 0;
-        var got = body.devices || [];
-        got.forEach(function (d) { SELECTED[d.device_id] = true; });
-        if (!got.length) break;   // never spin forever on an unexpected reply
+        if (!current()) return;
+        if (!body || !Number.isSafeInteger(body.total) || body.total < 0 || body.offset !== offset
+          || !Number.isSafeInteger(body.revision) || body.revision < 0
+          || !Array.isArray(body.devices) || body.devices.length > batch
+          || (total !== null && (body.total !== total || body.revision !== revision))) throw new Error('Device list changed');
+        total = body.total;
+        revision = body.revision;
+        var got = body.devices;
+        if (offset + got.length > total || (!got.length && offset < total)) throw new Error('Incomplete device list');
+        got.forEach(function (d) {
+          if (!d || typeof d.device_id !== 'string' || !d.device_id || ids.has(d.device_id)) throw new Error('Invalid device list');
+          ids.add(d.device_id);
+        });
         offset += got.length;
       }
+      // Apply once, after every page has been checked. A filter/selection
+      // change or failed page never leaves a silently expanded partial set.
+      if (!current()) return;
+      ids.forEach(function (id) { SELECTED[id] = true; });
+      deviceMatchIds = Array.from(ids);
+      devStatus.textContent = 'Selected ' + ids.size + ' matching device' + (ids.size === 1 ? '' : 's') + '. Previous selections are kept.';
+      devStatus.classList.toggle('err', false);
+      devStatus.classList.toggle('muted', true);
+    } catch (e) {
+      if (current()) {
+        devStatus.textContent = 'Could not select all matching devices. Your selection is unchanged. Try again.';
+        devStatus.classList.toggle('err', true);
+        devStatus.classList.toggle('muted', false);
+      }
     } finally {
-      selectAllMatchingBusy = false;
-      scopeAll.disabled = false;
-      scopeAll.textContent = savedLabel;
-      renderDevices(LAST_DEVICES, LAST_DEV_NOW, devTotal);
+      if (selectAllMatchingRun === run) {
+        selectAllMatchingRun = null;
+        selectAllMatchingBusy = false;
+        updateSelBar();
+      }
     }
   }
   // Every selected-action shares one lock. Without it a delete could fire while
@@ -1774,11 +1835,13 @@
       if (el) el.disabled = busy;
     });
     syncRoleActionAvailability();
+    document.getElementById('sel-scope-all').disabled = !!(busy || selectAllMatchingBusy);
   }
   // Claim the lock for a selected-action, returning the checked ids (or null if
   // another action holds it or nothing is selected).
   function claimSelection() {
     if (bulkBusy) return null;
+    cancelSelectAllMatching();
     var ids = selectedIds();
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return null; }
     setBulkBusy(true);

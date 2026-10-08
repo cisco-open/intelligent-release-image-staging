@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Check selected device IDs before claiming all filter matches are selected.
+  Show selections outside the current page or filter. Apply Select all only
+  after every page succeeds; cancel stale reads when the target changes and
+  keep the previous selection on failure.
+
 - Move Inventory's Activity drawer and batch job control into React. Keep
   cancellation scoped to displayed jobs, preserve batch options, bound log
   memory and reject stale stream callbacks. Report unknown write results

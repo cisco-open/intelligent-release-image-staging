@@ -19,8 +19,14 @@ a credential or a role, or replace the images they stage.
 3. Read the selected count before you act on it.
 
 **Select page** and **Clear page selection** act on the visible page, **Select
-all N matching devices** takes every device the filter matches, and **Cancel**
-clears everything. A selection follows device IDs across pages.
+all N matching devices** adds every matching device, and **Cancel** clears
+everything. Selections stay selected across pages and filter changes. The bar
+also counts selections outside the current page or filter. Use **Cancel** first
+when you want to start a different group.
+
+**Select all** reads every page before adding devices. If a page cannot be
+read, nothing is added. Changing filters, changing the selection or leaving
+Inventory cancels that read.
 
 ### Search and filter
 

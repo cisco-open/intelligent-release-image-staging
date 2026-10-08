@@ -35,6 +35,10 @@ const document = {
   }
 };
 let SELECTED = {'off-page': true}, devTotal = 3, openMenuPanel = null;
+let deviceSelectionQuery = '', deviceMatchIds = null;
+let selectAllMatchingBusy = false, bulkBusy = false;
+function deviceFilterQuery() { return ''; }
+function deviceFilterState() { return {}; }
 const BULK_MODALS = [];
 function closeModal() {}
 function closeMenus() {}

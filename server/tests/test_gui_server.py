@@ -11039,7 +11039,10 @@ def test_bulk_bar_names_selection_scope():
     fn = js.split("function updateSelBar() {", 1)[1].split("\n  }", 1)[0]
     assert "var n = Object.keys(SELECTED).length;" in fn
     assert "var m = devTotal;" in fn
-    assert "var allSelected = n > 0 && n === m;" in fn
+    assert "deviceMatchIds.filter(function (id) { return !!SELECTED[id]; })" in fn
+    assert "var allSelected = m > 0 && completeMatches && matchingSelected === m;" in fn
+    assert "n === m" not in fn
+    assert "m <= n" not in fn
     assert "'· All ' + m + ' matching devices selected'" in fn
     assert "'· Select all ' + m + ' matching devices'" in fn
 
@@ -11054,7 +11057,7 @@ def test_bulk_bar_names_selection_scope():
     select_all_fn = js.split("async function selectAllMatchingDevices() {", 1)[1].split(
         "\n  }", 1)[0]
     assert "deviceFilterQuery(deviceFilterState())" in select_all_fn
-    assert "SELECTED[d.device_id] = true;" in select_all_fn
+    assert "ids.forEach(function (id) { SELECTED[id] = true; });" in select_all_fn
 
 
 def test_table_type_roles_are_magnetic_p3_p4():
@@ -12497,6 +12500,9 @@ var devTotal = 1, devOffset = 0, DEV_PAGE_SIZE = 200;
 var SELECTED = {'keep-selected': true};
 var peerPolicyReadOk = true, peerPolicy = {}, devStatus = el('dev-status');
 var selectAllMatchingBusy = false;
+var selectAllMatchingRun = null, bulkBusy = false;
+var deviceSelectionQuery = '', deviceMatchIds = null;
+function updateSelBar() {}
 function applyPendingDevFilter() {}
 function devicesPageQuery() { return ''; }
 function deviceFilterState() { return {}; }
@@ -12529,7 +12535,7 @@ async function fetch(url) {
   assert.equal(el('mark-all').disabled, true);
   assert.equal(el('mark-all').textContent, 'Select page');
   await selectAllMatchingDevices();
-  assert.deepEqual(replayed, []);
+  assert.equal(replayed, null, 'No selection read replays the unavailable page');
   assert.deepEqual(SELECTED, {'keep-selected': true});
 })().catch(error => { console.error(error); process.exit(1); });
 '''
