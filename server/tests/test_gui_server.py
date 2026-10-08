@@ -604,6 +604,9 @@ def test_no_orphaned_control_ids():
     assert 'id="iris-device-details-root"' in html
     assert 'mountDeviceDetails();' in _react_shell("main.jsx")
     html += _react_shell("device-details.jsx")
+    assert 'id="iris-activity-root"' in html
+    assert 'mountActivity();' in _react_shell("main.jsx")
+    html += _react_shell("activity.jsx")
     ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
     assert len(ids) > 30, "id extraction matched too little — patterns drifted"
@@ -821,25 +824,25 @@ def test_batch_onboard_panel_wired():
     """Source guards for parallel onboarding: bulk-onboard opens a batch panel
     with per-device live status (polled from GET /api/onboard/jobs), a per-row
     log action reusing the SSE log panel, and a cancel-queued control."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
+    html = _react_shell("activity.jsx")
     assert 'id="batch-panel"' in html
     assert 'id="batch-rows"' in html
     assert 'id="batch-summary"' in html
     assert 'id="batch-cancel"' in html
 
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
+    js = _react_shell("activity-controller.mjs")
     assert "'/api/v1/onboard/jobs'" in js or '"/api/v1/onboard/jobs"' in js
     assert "/api/v1/onboard/cancel-queued" in js
-    assert "batch-rows" in js and "batch-cancel" in js
+    assert "controller.cancelQueued()" in html and "controller.openLog(job.id)" in html
     # cancel is SCOPED to this panel's jobs — a bare cancel-all would nuke
     # other sessions' queued batches
-    assert "job_ids: Object.keys(batchJobs)" in js
+    assert "{job_ids: ids}" in js
+    assert "activityRows(this.state).filter(job => job.state === 'queued')" in js
     # durations come from the server clock in the listing, not Date.now()
-    assert "listing.now" in js
+    assert "now: body.now ?? null" in js
+    assert "job.finished_at ?? state.now" in _react_shell("activity-model.mjs")
     # a reload re-attaches to still-running onboards instead of losing them
-    assert "restoreBatch" in js
+    assert "async setVisible(visible)" in js and "return this.refresh()" in js
 
 
 def test_undeploy_and_status_ui_wired():
@@ -856,8 +859,8 @@ def test_undeploy_and_status_ui_wired():
     assert "undeploy-selected" in js
     assert "startBatch('undeploy')" in js        # button fires the undeploy action
     assert "confirm(" in js                      # destructive: must confirm
-    assert "j.action" in js                      # batch rows show the action
-    assert "queuePos" in js                      # queued rows show #N in line
+    assert "actionLabel(job.action)" in _react_shell("activity.jsx")
+    assert "queued.indexOf(job) + 1" in _react_shell("activity-model.mjs")
     assert "deployed" in js                      # devices tab staged indicator
     # job-aware statuses: post-onboard boot gap must not read as "not enrolled"
     assert "waiting for heartbeat" in js
@@ -8828,8 +8831,8 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
     html = _webroot("index.html")
     modal = html.split('id="undeploy-modal"', 1)[1].split(
         'class="modal-foot"', 1)[0]
-    confirm = _webroot("app.js").split("!confirm('Undeploy ", 1)[1].split(
-        "setBulkBusy(false)", 1)[0]
+    confirm = _react_shell("activity-controller.mjs").split("async start(action,", 1)[1].split(
+        "this.invalidateRead();", 1)[0]
     for text in (modal, confirm):
         for warning in ("resources listed as IRIS-owned", "staged images in device storage",
                         "Does not stop running jobs", "record and device identity checks",
@@ -10451,7 +10454,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
         between = before[last_open:]
         assert between.count("</div>") == 0, \
             "%s's table-scroll wrapper closed before the table opened" % tid
-    # the two unnamed tables (credential list, onboarding batch) get one too
+    # The unnamed credential table gets a wrapper too.
     assert html.count('<div class="table-scroll"') == html.count("<table")
     component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
     assert '<div className="table-scroll" tabIndex={0} role="region" aria-label="Image rollout">' in component
@@ -10472,6 +10475,10 @@ def test_every_operational_table_gets_a_scroll_wrapper():
         region = details.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
         assert '<table className="tbl" id="%s">' % tid in region
     assert details.count('className="table-scroll" tabIndex={0} role="region"') == 3
+    activity = _react_shell("activity.jsx")
+    region = activity.split('aria-label="Device jobs">', 1)[1].split('</div>', 1)[0]
+    assert '<table className="tbl" id="batch-table">' in region
+    assert 'className="table-scroll" tabIndex={0} role="region"' in activity
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10521,6 +10528,12 @@ def test_dialogs_get_dialog_role_honestly():
     assert "trapDialogFocus" not in details
     assert "controller.opener = document.activeElement" in details
     assert "close.current?.focus()" in details and "controller.opener.focus()" in details
+    activity = _react_shell("activity.jsx")
+    tag = activity.split('id="activity-panel"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in activity
+    assert "close.current?.focus()" in activity
+    assert "document.getElementById('dev-activity')?.focus()" in activity
 
 
 def test_forms_get_persistent_field_labels():

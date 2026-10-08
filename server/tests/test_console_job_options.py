@@ -55,37 +55,32 @@ def _run_js(expression, checked=None, mutate_after_first_post=False):
         pytest.skip("Node is required for Console job-option tests")
     source = (_WEBROOT / "app.js").read_text()
     functions = []
-    for name in ("telemetryFlags", "jobFlags", "jpost", "showActivity", "startBatch"):
+    for name in ("telemetryFlags", "jobFlags", "jpost", "startBatch"):
         match = re.search(
             r"^  (?:async )?function " + name + r"\([^\n]*\) \{.*?^  \}",
             source, re.MULTILINE | re.DOTALL)
         assert match, "Console function missing: " + name
         functions.append(match.group(0))
-    program = r"""
+    controller_url = (_WEBROOT.parent / "console-ui/src/activity-controller.mjs").as_uri()
+    program = "import {ActivityController} from " + json.dumps(controller_url) + ";\n" + r"""
 const controls = CHECKED;
 const elements = Object.fromEntries(
   Object.entries(controls).map(([id, checked]) => [id, { checked }]));
-for (const id of ['batch-rows', 'batch-summary', 'batch-panel']) elements[id] = {};
-// startBatch opens the shared activity drawer before posting. Use the real
-// drawer helper with its DOM dependencies rather than skipping that behavior.
-elements['activity-panel'] = { hidden: true };
-elements['deploy-info-panel'] = { hidden: true };
-elements['batch-close'] = { focus() { document.activeElement = this; } };
 const document = { getElementById: id => elements[id] || null };
 const requests = [];
 const busy = [];
 var outcome = null;
-var batchGen = 0;
-var batchJobs = {};
 function claimSelection() { return ['edge-1', '192.0.2.9']; }
 function confirm() { return true; }
 function setBulkBusy(value) { busy.push(value); }
-function stopBatchPoll() {}
-function closeDeployInfo() { throw new Error('fixture details drawer is already closed'); }
-function pollBatch() { return Promise.resolve(false); }
-function startBatchPoll() { throw new Error('unexpected poll start'); }
-function renderOnboardOutcome(action, started, failed) {
-  outcome = { action, started, failed };
+const devStatus = {classList: {add() {}, toggle() {}}};
+const controller = new ActivityController({setTimer: () => 1, clearTimer() {}});
+controller.visible = true;
+controller.connect({post: jpost, confirm, fetch: async () => ({ok: true, json: async () => ({jobs: [], now: 1000})}),
+  outcome: (message, failed) => { outcome = {message, failed}; }});
+function activityCommand(action, options) {
+  if (action !== 'start') throw new Error('Unexpected command');
+  return controller.start(options.jobAction, options.ids, options.options);
 }
 function csrfHdr(extra) { return extra; }
 function fetch(url, options) {
@@ -105,7 +100,7 @@ function fetch(url, options) {
     program += "\n(async () => { const result = " + expression + ";\n"
     program += "process.stdout.write(JSON.stringify(result)); })().catch(error => {\n"
     program += "console.error(error); process.exitCode = 1; });\n"
-    result = subprocess.run([node, "-"], input=program, text=True,
+    result = subprocess.run([node, "--input-type=module", "-"], input=program, text=True,
                             capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -160,8 +155,7 @@ def test_batch_posts_job_options_with_force_and_telemetry_preserved(action, forc
     controls.update({action + "-log": enabled, "undeploy-force": forced,
                      "onboard-telemetry": False, "onboard-telemetry-stream": True})
     result = _run_js("(await startBatch(%s), {requests, outcome, busy, "
-                     "activityVisible: !elements['activity-panel'].hidden, "
-                     "activityFocused: document.activeElement === elements['batch-close']})" %
+                     "activityVisible: controller.snapshot().open})" %
                      json.dumps(action), controls)
     expected = {"log": enabled}
     if action == "onboard":
@@ -175,10 +169,9 @@ def test_batch_posts_job_options_with_force_and_telemetry_preserved(action, forc
             "method": "POST", "headers": {"Content-Type": "application/json"},
             "body": expected,
         }
-    assert result["outcome"] == {"action": action, "started": 2, "failed": []}
+    assert result["outcome"] == {"message": "Started %s for 2 device(s)" % action, "failed": False}
     assert result["busy"] == [False]
     assert result["activityVisible"] is True
-    assert result["activityFocused"] is True
 
 
 @pytest.mark.parametrize("action", ["onboard", "undeploy"])

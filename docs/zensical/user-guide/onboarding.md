@@ -123,9 +123,17 @@ and IOS-XR. Guest Shell logging is set through `iris_log`; see
 ### Device activity
 
 **Inventory → Activity** opens recent jobs in a side panel. Choose **log** on a
-job to read its output; **Close** or **Esc** closes the viewer. **Abort** asks
-for confirmation, then cancels a queued job or stops a running installer, which
+job to read its output. Active jobs refresh every two seconds while Inventory
+is visible. Returning to a hidden tab refreshes the list; choose **Reconnect
+log** to resume output. **Close** or **Esc** closes the viewer and leaves jobs
+running.
+
+**Cancel queued** asks for confirmation and cancels only queued jobs in the
+displayed list. **Abort** asks for confirmation, then cancels a queued job or
+stops a running installer, which
 can leave the agent partly configured: onboard the device again or undeploy it.
+If a request's outcome is unknown, close and reopen Activity to check the job
+before trying again.
 
 ### Deployment logs
 

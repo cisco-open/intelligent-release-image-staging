@@ -543,6 +543,13 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 #deploy-info-panel .drawer-head > span { min-width:0; overflow-wrap:anywhere; }
 #deploy-info-panel .drawer-head .btn { flex-shrink:0; }
 #di-log-tbl { min-width:540px; }
+#batch-table { min-width:600px; }
+#activity-panel .job-log-head { flex-wrap:wrap; }
+#activity-panel .job-log-head h3 { min-width:0; overflow-wrap:anywhere; }
+.job-action-label { font-size:12px; color:var(--text-secondary); }
+@media (max-width:480px) {
+  #activity-panel .job-log-head h3 { flex-basis:100%; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .drawer { transition:none; }

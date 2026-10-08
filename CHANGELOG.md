@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move Inventory's Activity drawer and batch job control into React. Keep
+  cancellation scoped to displayed jobs, preserve batch options, bound log
+  memory and reject stale stream callbacks. Report unknown write results
+  without retrying, and keep jobs running when their viewer closes.
+
 - Move Inventory's device-details drawer into React. Keep record and log reads
   independent, reject stale responses after switching or reopening devices,
   and prevent duplicate host-key requests. Preserve image-error precedence,

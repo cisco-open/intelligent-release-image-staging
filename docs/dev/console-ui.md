@@ -17,7 +17,7 @@ Console](../zensical/user-guide/console.md) for that.
 
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
-and Inventory's device-details drawer with React.
+and Inventory's device-details and Activity drawers with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
 
@@ -52,8 +52,18 @@ Inventory's device-details workflow uses `device-details-controller.mjs` and
 status calculations and authenticated transport. Record and log reads run
 independently; closing or reopening the drawer invalidates old responses, even
 for the same device. Confirmed host-key writes keep a per-device lock until the
-request ends and are never automatically retried. The Inventory table, forms
-and activity streams still use the older controller.
+request ends and are never automatically retried.
+
+Activity owns job submissions, listing, cancellation and log streams in
+`activity-controller.mjs` and `activity.jsx`. The `iris:activity-command`
+adapter supplies authenticated transport and the existing option snapshot.
+Active jobs refresh every two seconds while Inventory is visible. Hiding the
+view pauses reads and closes streams; closing the drawer leaves jobs running.
+Log callbacks are tied to their stream instance. Each of the six cached logs
+keeps up to 500 lines with a separate character limit. Cancellation names the displayed
+queued IDs, and per-job write locks survive closing and reopening. An unknown
+write result is reported without retrying. The Inventory table and forms
+still use the older controller.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -98,6 +108,8 @@ Monitoring checks cover time bounds, pointer cancellation, keyboard selection,
 older pages, local filters, file-response races and plain-text event/log content.
 Device-details checks cover XR/XE records, per-image status, confirmed host-key
 writes, same-device reopen races, plain-text logs, keyboard focus and mobile use.
+Activity checks cover scoped cancellation, aborts, batch option snapshots,
+unknown write results, hidden views, independent streams and bounded output.
 
 ## Building the browser assets
 

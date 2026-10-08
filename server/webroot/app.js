@@ -1385,125 +1385,43 @@
   await deviceDetailsCommand('connect', {services: {fetch: fetch, post: jpost,
     confirm: function (message) { return confirm(message); }}});
 
-  // Job logs live in one activity drawer; each job retains its own bounded
-  // buffer/stream, but only the selected job is visible. Closing the drawer
-  // disconnects viewers, never cancels or aborts jobs.
-  var onboardPanels = {};        // job_id -> { root, es }
-  var onboardPanelOrder = [];    // job ids, oldest first
-  var MAX_ONBOARD_PANELS = 6;
-  var MAX_LOG_LINES = 500;
-  function deviceActionLabel(action) {
-    return {onboard: 'Onboard', undeploy: 'Undeploy',
-      'iox-recover': 'Recover', 'iox-reconcile-enabled': 'Reconcile'}[action] || 'Device action';
-  }
-  function closeJobLog(jobId) {
-    var p = onboardPanels[jobId];
-    if (!p) return;
-    if (p.es) { p.es.close(); p.es = null; }
-    p.root.remove();
-    delete onboardPanels[jobId];
-    var i = onboardPanelOrder.indexOf(jobId);
-    if (i > -1) onboardPanelOrder.splice(i, 1);
-  }
-  function openJobLog(jobId, deviceId, action, queued, finished) {
-    Object.keys(onboardPanels).forEach(function (id) { onboardPanels[id].root.hidden = true; });
-    if (onboardPanels[jobId]) {
-      if (onboardPanels[jobId].es) {
-        onboardPanels[jobId].root.hidden = false;
-        onboardPanels[jobId].root.focus();
-        return;
-      }
-      closeJobLog(jobId); // Reopening a paused stream really reconnects.
-    }
-    while (onboardPanelOrder.length >= MAX_ONBOARD_PANELS) closeJobLog(onboardPanelOrder[0]);
-    var root = document.createElement('div');
-    root.className = 'job-log-panel';
-    root.tabIndex = -1;
-    root.setAttribute('data-job', jobId);
-    var head = document.createElement('div'); head.className = 'job-log-head';
-    var title = document.createElement('h3');
-    title.textContent = deviceId + ' — ' + deviceActionLabel(action);
-    var abortBtn = document.createElement('button');
-    abortBtn.type = 'button'; abortBtn.className = 'btn ghost';
-    abortBtn.textContent = 'Abort';
-    abortBtn.hidden = !!finished;
-    head.appendChild(title); head.appendChild(abortBtn);
-    var log = document.createElement('pre'); log.className = 'log';
-    root.appendChild(head); root.appendChild(log);
-    document.getElementById('onboard-logs').appendChild(root);
-    var entry = { root: root, es: null };
-    onboardPanels[jobId] = entry;
-    onboardPanelOrder.push(jobId);
-    var lines = [], flushPending = false;
-    function flush() { flushPending = false; log.textContent = lines.join('\n') + (lines.length ? '\n' : ''); log.scrollTop = log.scrollHeight; }
-    function append(text) {
-      lines = lines.concat(String(text).split('\n')).slice(-MAX_LOG_LINES);
-      if (!flushPending) { flushPending = true; requestAnimationFrame(flush); }
-    }
-    // Tracks whether the job is still parked in the queue: log lines only
-    // exist once a job runs, so the first streamed message means it started.
-    var isQueued = !!queued;
-    if (queued) append('Queued: waiting for an available slot.');
-    var es = new EventSource('/api/v1/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
-    entry.es = es;
-    es.onmessage = function (e) { isQueued = false; append(e.data); };
-    es.addEventListener('end', function (e) {
-      // "idle": the server closed a stream with no progress for its idle
-      // budget; the job itself may still be running -- reopen to continue.
-      if (e.data === 'idle') append('Log paused. Reopen it to follow the job.');
-      else {
-        var actionName = deviceActionLabel(action);
-        var outcome = {done: 'completed', error: 'failed', cancelled: 'cancelled'}[e.data] || e.data;
-        var resultLine = actionName + ' ' + outcome + '.';
-        if (lines[lines.length - 1] !== resultLine) append(resultLine);
-      }
-      flush();
-      es.close(); entry.es = null; abortBtn.hidden = true;
-      refreshDevices().catch(function () {});
+  // React owns Activity, its timer, streams and batch request lifetimes.
+  // The adapter retains shared authentication and the Inventory selection lock.
+  function activityCommand(action, options) {
+    return new Promise(function (resolve, reject) {
+      window.dispatchEvent(new CustomEvent('iris:activity-command', {
+        detail: Object.assign({action: action, resolve: resolve, reject: reject}, options || {})
+      }));
     });
-    es.onerror = function () { append('[stream closed]'); if (entry.es) { entry.es.close(); entry.es = null; } };
-    abortBtn.addEventListener('click', async function () {
-      if (!confirm('Abort ' + action + ' for ' + deviceId + '?\n\n' +
-          'A running job may leave the device partially configured. ' +
-          'Onboard again or undeploy to clean up.')) return;
-      // A queued job has no registered process, so the abort route can only
-      // 409 — take it out of the queue instead, scoped to just this job
-      // (same endpoint the batch panel's cancel uses).
-      if (isQueued) {
-        var qr = await jpost('/api/v1/onboard/cancel-queued', { job_ids: [jobId] });
-        if (!qr.ok) { append('[cancel failed (' + qr.status + ')]'); return; }
-        var cancelled = 0;
-        try { cancelled = (await qr.json()).cancelled || 0; } catch (e2) { }
-        if (cancelled) { append('[cancelled while queued]'); return; }
-        isQueued = false;   // won a slot between open and click: abort the running job
-      }
-      var r = await jpost('/api/v1/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
-      append(r.ok ? '[abort requested]' : '[abort failed (' + r.status + ')]');
-    });
-    root.focus();
   }
-  function showActivity() {
-    if (!document.getElementById('deploy-info-panel').hidden) closeDeployInfo(false);
-    document.getElementById('activity-panel').hidden = false;
-    document.getElementById('batch-close').focus();
-  }
-  function closeActivity(restoreFocus) {
-    var panel = document.getElementById('activity-panel');
-    if (!panel || panel.hidden) return;
-    panel.hidden = true;
-    Object.keys(onboardPanels).forEach(closeJobLog);
-    if (restoreFocus) document.getElementById('dev-activity').focus();
-  }
-  document.getElementById('dev-activity').addEventListener('click', async function () {
-    showActivity();
-    document.getElementById('batch-panel').hidden = false;
-    document.getElementById('batch-summary').textContent = 'Loading activity…';
-    await restoreBatch(true);
-  });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeActivity(true);
-  });
+  function closeActivity(restoreFocus) { return activityCommand('close', {restoreFocus: restoreFocus}); }
+  await activityCommand('connect', {services: {
+    fetch: function (url, opts, fromPoll) {
+      if (fromPoll) backgroundPoll = true;
+      return fetch(url, opts);
+    },
+    post: jpost,
+    confirm: function (message) { return confirm(message); },
+    eventSource: function (url) { return new EventSource(url); },
+    show: function () { closeDeployInfo(false); },
+    refreshDevices: function () {
+      if (!document.getElementById('view-devices').hidden) return pollDevices();
+    },
+    reportCount: function (count, error) {
+      document.getElementById('dev-activity').textContent = 'Activity' +
+        (error ? ' (unavailable)' : count ? ' (' + count + ')' : '');
+    },
+    outcome: function (message, failed) {
+      devStatus.textContent = message;
+      devStatus.classList.toggle('err', failed);
+      devStatus.classList.toggle('muted', !failed);
+    }
+  }});
+  document.getElementById('dev-activity').addEventListener('click', function () { activityCommand('open'); });
   window.addEventListener('hashchange', function () { closeActivity(false); });
+  document.addEventListener('visibilitychange', function () {
+    activityCommand('visibility', {visible: !document.hidden && !document.getElementById('view-devices').hidden});
+  });
   // Telemetry flags for onboard job bodies (reports default on, streaming
   // default off — the server treats an absent key the same way).
   function telemetryFlags() {
@@ -1763,170 +1681,21 @@
     SELECTED = Object.create(null);
     updateSelBar();
   });
-  // ---- Batch onboarding ----
-  // "Onboard selected" fires every device's onboard POST; the SERVER caps how
-  // many installers run at once (OnboardService pool, default 25, env
-  // IRIS_ONBOARD_CONCURRENCY) and queues the rest. This panel polls
-  // GET /api/v1/onboard/jobs for live per-device state; a row's "log" action
-  // opens the SSE log panel for that job (streams once it starts running).
-  var batchJobs = {};    // job_id -> device_id for jobs tracked by this panel
-  var batchTimer = null;
-  var batchGen = 0;      // bumped by close/new batch so stale async work bails
-  var pollSeq = 0;       // drop out-of-order poll responses (slow poll racing a fresh one)
-  function jobBadge(state) {
-    var cls = { queued: 'badge-queued', running: 'badge-running', done: 'badge-ok',
-                error: 'badge-fail', cancelled: 'badge-cancelled' }[state] || 'badge-queued';
-    return '<span class="badge ' + cls + '">' + esc(state) + '</span>';
-  }
-  function jobDur(j, now) {
-    if (!j.started_at) return '';
-    var s = Math.max(0, Math.round((j.finished_at || now) - j.started_at));
-    return s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
-  }
-  function stopBatchPoll() {
-    if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
-  }
-  function startBatchPoll(gen) {
-    if (gen !== batchGen || batchTimer) return;
-    batchTimer = setTimeout(async function run() {
-      batchTimer = null;
-      var active;
-      backgroundPoll = true;   // timer-driven, not operator activity
-      try { active = await pollBatch(); }
-      catch (e) { document.getElementById('batch-summary').textContent = 'Job refresh unavailable; retrying…'; active = true; }
-      if (active && gen === batchGen) startBatchPoll(gen);
-    }, 2000);
-  }
-  function renderBatch(listing) {
-    // running durations are server-clock minus server-clock: the listing's
-    // "now" rides along precisely so a skewed lab VM can't distort them
-    var now = listing.now || Date.now() / 1000;
-    // queue position is GLOBAL (the pool is server-wide FIFO), so "#2 in
-    // line" is honest even when another session's batch is ahead of ours
-    var queuedAll = (listing.jobs || []).filter(function (j) { return j.state === 'queued'; });
-    var jobs = (listing.jobs || []).filter(function (j) { return batchJobs[j.id]; });
-    var counts = {};
-    document.getElementById('batch-rows').innerHTML = jobs.map(function (j) {
-      counts[j.state] = (counts[j.state] || 0) + 1;
-      var queuePos = j.state === 'queued' ? ('#' + (queuedAll.indexOf(j) + 1) + ' in line') : jobDur(j, now);
-      var act = (j.action === 'undeploy')
-        ? '<div class="job-action-undeploy">undeploy</div>' : '';
-      return '<tr data-job="' + esc(j.id) + '" data-dev="' + esc(j.device_id) + '"' +
-        ' data-state="' + esc(j.state) + '" data-action="' + esc(j.action || 'onboard') + '">' +
-        '<td class="machine">' + esc(j.device_id) + act + '</td>' +
-        '<td>' + jobBadge(j.state) + '</td>' +
-        '<td class="muted">' + queuePos + '</td>' +
-        '<td class="out machine">' + esc(j.last_line || '') + '</td>' +
-        '<td><button class="linkish blog">log</button></td></tr>';
-    }).join('');
-    var parts = ['queued', 'running', 'done', 'error', 'cancelled']
-      .filter(function (s) { return counts[s]; })
-      .map(function (s) { return counts[s] + ' ' + (s === 'error' ? 'failed' : s); });
-    document.getElementById('batch-summary').textContent =
-      jobs.length ? parts.join(' · ') : 'No recent device activity.';
-    document.getElementById('batch-cancel').hidden = !counts.queued;
-    document.getElementById('dev-activity').textContent = 'Activity' +
-      (counts.running || counts.queued ? ' (' + ((counts.running || 0) + (counts.queued || 0)) + ')' : '');
-    document.querySelectorAll('#batch-rows .blog').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var tr = btn.closest('tr');
-        openJobLog(tr.getAttribute('data-job'), tr.getAttribute('data-dev'),
-                   tr.getAttribute('data-action') || 'onboard',
-                   tr.getAttribute('data-state') === 'queued',
-                   ['queued', 'running'].indexOf(tr.getAttribute('data-state')) === -1);
-      });
-    });
-    return jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; });
-  }
-  async function pollBatch() {
-    var seq = ++pollSeq;
-    var r;
-    try { r = await fetch('/api/v1/onboard/jobs'); } catch (e) { return true; }
-    if (r.status === 401) {   // session gone: stop hammering, tell the operator
-      stopBatchPoll();
-      document.getElementById('batch-summary').textContent = 'session expired — sign in again';
-      return false;
-    }
-    if (!r.ok) return true;   // transient failure: keep polling
-    var listing = await r.json();
-    if (seq !== pollSeq) return true;   // a newer poll already rendered
-    var active = renderBatch(listing);
-    if (!active) { stopBatchPoll(); refreshDevices().catch(function () {}); }
-    return active;
-  }
-  // After a reload (or an accidental panel close + reload), re-attach to
-  // whatever the server is still onboarding instead of losing sight of it —
-  // the jobs live server-side; only this panel's tracking was in page memory.
-  async function restoreBatch(includeFinished) {
-    var r;
-    try { r = await fetch('/api/v1/onboard/jobs'); } catch (e) {
-      document.getElementById('batch-summary').textContent = 'Activity unavailable. Close and retry.'; return;
-    }
-    if (!r.ok) { document.getElementById('batch-summary').textContent = 'Activity unavailable (' + r.status + '). Close and retry.'; return; }
-    var listing = await r.json();
-    var jobs = listing.jobs || [];
-    if (!includeFinished && !jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; })) return;
-    var gen = ++batchGen;
-    batchJobs = {};
-    jobs.forEach(function (j) { batchJobs[j.id] = j.device_id; });
-    document.getElementById('batch-panel').hidden = false;
-    stopBatchPoll();
-    if (renderBatch(listing)) startBatchPoll(gen);
-  }
-  // Per-device submission rejections (a router preflight failure, a busy
-  // device, an unreachable device, etc.) must never read as a silent no-op:
-  // paint them in the same .err red the rest of the page uses for validation
-  // failures (see styles.css), one line per device, "<device_id>: <reason>".
-  function renderOnboardOutcome(action, startedCount, failed) {
-    var msg = 'Started ' + action + ' for ' + startedCount + ' device(s)';
-    if (failed.length) msg += '; refused: ' + failed.join(', ');
-    devStatus.textContent = msg;
-    devStatus.classList.toggle('err', failed.length > 0);
-    devStatus.classList.toggle('muted', failed.length === 0);
-  }
+  // Existing option forms/selection are passed to the React batch controller.
+  // Hold the shared bulk lock until every submission has a known or unknown
+  // outcome; closing the viewer never aborts or replays an accepted request.
   async function startBatch(action) {
     var ids = claimSelection();
     if (!ids) return;
     var forceEl = document.getElementById('undeploy-force');
-    var forced = action === 'undeploy' && forceEl && forceEl.checked;
-    var options = jobFlags(action, forced);
-    if (action === 'undeploy' &&
-        !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
-          ? '\n\nForce cleanup skips record and device identity checks. Removes only IRIS agent files and services; keeps VirtualPortGroup and NAT settings. Retires the old record on success.'
-          : '\n\nRemoves the IRIS agent and resources listed as IRIS-owned.') +
-                 '\n\nKeeps staged images in device storage. Does not stop running jobs.')) {
-      setBulkBusy(false); return;
-    }
-    var gen = ++batchGen;
-    stopBatchPoll();
-    batchJobs = {};
-    document.getElementById('batch-rows').innerHTML = '';
-    document.getElementById('batch-summary').textContent = 'starting…';
-    document.getElementById('batch-panel').hidden = false;
-    showActivity();
-    var failed = [];
+    var options = jobFlags(action, action === 'undeploy' && forceEl && forceEl.checked);
     try {
-      await Promise.all(ids.map(async function (id) {
-        try {
-          var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/' + action,
-                              options);
-          if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
-            // surface WHY it was refused — a bare id reads as a mystery
-            var reason = '';
-            try { reason = (await r.json()).error || ''; } catch (e2) { }
-            failed.push(reason ? id + ': ' + reason : id);
-          }
-        } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
-      }));
-    } finally {
-      setBulkBusy(false);
-    }
-    if (gen !== batchGen) return;    // panel was closed mid-start
-    renderOnboardOutcome(action, Object.keys(batchJobs).length, failed);
-    if (await pollBatch()) startBatchPoll(gen);
+      await activityCommand('start', {jobAction: action, ids: ids, options: options});
+    } catch (e) {
+      devStatus.textContent = 'Unable to start ' + action + '. Check Activity before trying again.';
+      devStatus.classList.add('err');
+    } finally { setBulkBusy(false); }
   }
-  // The bulk-bar buttons open their modal (wired above); the modal's own
-  // primary is what actually starts the batch.
   document.getElementById('onboard-confirm').addEventListener('click', function () {
     closeModal('onboard-modal');
     startBatch('onboard');
@@ -3466,20 +3235,6 @@
                      { device_ids: allIds, credential_profile_id: pid });
       });
   });
-  document.getElementById('batch-cancel').addEventListener('click', async function () {
-    // scoped to THIS panel's jobs — other sessions' queued batches and parked
-    // single-device onboards must survive our cancel
-    var r = await jpost('/api/v1/onboard/cancel-queued', { job_ids: Object.keys(batchJobs) });
-    if (r.ok) {
-      var n = (await r.json()).cancelled;
-      devStatus.textContent = 'Cancelled ' + n + ' queued onboard(s).';
-      pollBatch();
-    }
-  });
-  document.getElementById('batch-close').addEventListener('click', function () {
-    closeActivity(true);
-  });
-  restoreBatch();
   var devForm = document.getElementById('dev-form');
   function updateDeviceFields() {
     var managementType = document.getElementById('df-management-type').value;
@@ -6362,6 +6117,7 @@
       document.getElementById('view-' + v).hidden = v !== view;
     });
     if (view !== 'devices') closeDeployInfo(false);
+    activityCommand('visibility', {visible: view === 'devices' && !document.hidden});
     var swarmFrame = document.getElementById('swarm-frame');
     if (swarmFrame && swarmFrame.contentWindow) {
       swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);
