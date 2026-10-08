@@ -30,7 +30,8 @@ try {
   const settingsWrites = [];
   const defaultCA = 'https://www.cisco.com/security/pki/trs/ios.p7b';
   const settingsState = {gui_cert: {source: 'built-in', subject: 'CN=iris.example.test', not_after: 'Sep 18 12:00:00 2036 GMT', fingerprint_sha256: 'ab'.repeat(32)}, ca_trust: {url: defaultCA, auto: false}, trust: [],
-    telemetry_destination: {source: 'environment', effective_endpoint: '', effective_enabled: false}};
+    telemetry_destination: {source: 'env', effective_endpoint: '', effective_enabled: false},
+    audit_export: {host: '', port: 22, user: '', path: '', age_recipient: '', auto: false, password_set: false}};
   let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
   let certificateAvailable = true, renewalAccepted = false;
@@ -166,7 +167,9 @@ try {
           : {source: 'override', effective_endpoint: body.endpoint, effective_enabled: body.enabled};
         if (url.pathname === '/api/v1/settings/trust') settingsState.trust = [{name: 'fixture.pem', source: 'manual', subject: 'Fixture CA', cert_count: 1}];
         if (url.pathname === '/api/v1/settings/trust/fixture.pem') settingsState.trust = [];
-        return route.fulfill({json: {applied: true, revoked: 2}});
+        if (url.pathname === '/api/v1/settings/gui-cert') settingsState.gui_cert = {...settingsState.gui_cert, source: method === 'DELETE' ? 'built-in' : 'custom'};
+        return route.fulfill({json: {ok: true, applied: true, deleted: true, revoked: 2, gui_cert: settingsState.gui_cert,
+          ca_trust: settingsState.ca_trust, entry: settingsState.trust[0], endpoint: body?.endpoint, enabled: body?.enabled}});
       }
       if (url.pathname === '/api/v1/devices') deviceQueries.push(url.searchParams.toString());
       if (route.request().method() !== 'GET') writes.push(route.request().method() + ' ' + url.pathname);
@@ -321,7 +324,7 @@ try {
     await page.locator(`#settings-pane-${pane}`).waitFor({ state: 'visible' });
     assert.equal(await settings.getByRole('link', { name, exact: true }).getAttribute('aria-current'), 'page');
   }
-  assert.equal(await page.locator('#pw-new').inputValue(), 'example-passphrase', 'Navigation must not remount edited fields');
+  assert.equal(await page.locator('#pw-new').inputValue(), '', 'Navigation clears secret fields');
   await page.locator('#pw-new').fill('');
   // Settings controls exercise only intercepted requests, including failures.
   await page.locator('#pw-cur').fill('fixture-current');
@@ -384,12 +387,22 @@ try {
   await page.locator('#cert-passphrase').fill('fixture-passphrase');
   settingsFailure = 'html';
   await page.locator('#cert-form button[type="submit"]').click();
-  await page.locator('#cert-msg').getByText('Request failed (503).', {exact: true}).waitFor();
-  assert.equal(await page.locator('#cert-key').inputValue(), keyPEM, 'Failed upload preserves the draft for correction');
+  await page.locator('#cert-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
+  assert.equal(await page.locator('#cert-key').inputValue(), '', 'Submitted private material is cleared even on an uncertain result');
+  assert.equal(await page.locator('#cert-form button[type="submit"]').isDisabled(), true);
+  const reloadCertDraft = async () => {
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#settings-review-cert').click();
+    await page.locator('#cert-pem').fill(certPEM);
+    await page.locator('#cert-key').fill(keyPEM);
+    await page.locator('#cert-passphrase').fill('fixture-passphrase');
+  };
+  await reloadCertDraft();
   settingsFailure = 'invalid-success';
   await page.locator('#cert-form button[type="submit"]').click();
-  await page.locator('#cert-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
-  assert.equal(await page.locator('#cert-key').inputValue(), keyPEM, 'Invalid success response cannot claim a certificate replacement');
+  await page.locator('#cert-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
+  assert.equal(await page.locator('#cert-key').inputValue(), '', 'Invalid success clears private material without claiming replacement');
+  await reloadCertDraft();
   settingsFailure = '';
   await page.locator('#cert-form button[type="submit"]').click();
   await page.waitForFunction(() => document.getElementById('cert-key').value === '');
@@ -413,7 +426,12 @@ try {
   await page.locator('#td-enabled').check();
   settingsFailure = 'network';
   await page.locator('#td-form button[type="submit"]').click();
-  await page.locator('#td-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
+  await page.locator('#td-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#settings-review-td').click();
+  await page.waitForFunction(() => !window.irisSettings.state.loading);
+  await page.locator('#td-endpoint').fill('https://collector.example:4318/');
+  await page.locator('#td-enabled').check();
   settingsFailure = '';
   await page.locator('#td-form button[type="submit"]').click();
   await page.locator('#td-revert').waitFor({state: 'visible'});
@@ -431,7 +449,7 @@ try {
   await page.locator('#ae-recipient').fill('age1fixture');
   settingsFailure = 'html';
   await page.locator('#ae-form button[type="submit"]').click();
-  await page.locator('#ae-msg').getByText('Request failed (503).', {exact: true}).waitFor();
+  await page.locator('#ae-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
   assert.equal(settingsWrites.at(-1).body.port, 22);
   assert.equal(Object.hasOwn(settingsWrites.at(-1).body, 'password'), false, 'An empty password preserves the saved credential');
   await settingsTab('Image verification');

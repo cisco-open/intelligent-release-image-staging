@@ -588,105 +588,40 @@ def test_device_form_has_model_field():
 
 
 def test_settings_tls_trust_and_destination_sections_wired():
-    """Source guards for the 2026-08-19 TLS/trust/telemetry-destination spec:
-    the Settings view gains three sections — Certificate (replace/revert the
-    console cert), Trusted CAs (install/remove CA PEMs + public-bundle
-    download with job polling), Telemetry destination (editable OTLP
-    override). Conventions pinned: jpost + csrfHdr on every mutation, one
-    solid .btn per form (the ca-form has none — Add CA is that section's
-    primary), danger links confirm with consequence-naming text, no inline
-    handlers/styles, key material never echoed or left in the DOM."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    # section headings, in the Settings view
-    settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    assert "<h3>Console certificate</h3>" in settings
-    assert "<h3>Trusted certificate authorities</h3>" in settings
-    assert "<h3>Telemetry destination</h3>" in settings
-    # element inventory (the global orphan guard checks the JS side)
-    for el in ('id="cert-status"', 'id="cert-form"', 'id="cert-pem"',
-               'id="cert-key"', 'id="cert-msg"', 'id="cert-revert"',
-               'id="trust-tbl"', 'id="trust-rows"', 'id="trust-form"',
-               'id="trust-pem"', 'id="trust-msg"', 'id="ca-form"',
-               'id="ca-url"', 'id="ca-auto"', 'id="ca-msg"',
-               'id="ca-refresh"', 'id="td-status"', 'id="td-form"',
-               'id="td-endpoint"', 'id="td-enabled"', 'id="td-msg"',
-               'id="td-revert"'):
-        assert el in settings, el
-    # revert affordances start hidden — no flash before the first render
-    assert 'id="cert-revert" hidden' in settings
-    assert 'id="td-revert" hidden' in settings
-    # one solid button per form; auxiliaries are ghost or linkish.
-    # ('class="btn"' does NOT substring-match 'class="btn ghost"'.)
-    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
-    assert cert_form.count('class="btn"') == 1            # Replace certificate
-    assert 'class="linkish danger-link"' in cert_form     # Use built-in cert
-    trust_form = settings.split('id="trust-form"')[1].split('</form>')[0]
-    assert trust_form.count('class="btn"') == 1           # Add CA
-    ca_form = settings.split('id="ca-form"')[1].split('</form>')[0]
-    assert ca_form.count('class="btn"') == 0              # no second primary
-    assert ca_form.count('class="btn ghost"') == 2        # Save + Download now
-    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
-    assert td_form.count('class="btn"') == 1              # Save
-    assert 'class="linkish danger-link"' in td_form       # Revert to default
-    # trust table columns: subject/expiry/fingerprint/source/count
-    assert ("<th>Subject</th><th>Expires</th><th>SHA-256</th>"
-            "<th>Source</th><th>Certs</th>") in settings
-    # the operator is told the key is write-only and that the bundle URL
-    # gates both download paths
-    assert "never returned by the server" in settings
-    assert "over HTTPS" in settings
-    # CSP: still no inline styles or handlers anywhere in the page
+    """React owns these forms, their state and guarded writes; the router
+    only selects a pane and supplies authenticated services. Runtime tests
+    exercise labels, confirmations, bounded requests and uncertain replies."""
+    html, js = _webroot("index.html"), _webroot("app.js")
+    component = _react_shell("settings.jsx")
+    model = _react_shell("settings-model.mjs")
+    controller = _react_shell("settings-controller.mjs")
+    for name in ("general", "tls", "audit"):
+        assert 'id="iris-settings-%s"' % name in html
+    assert "mountSettings();" in _react_shell()
+    assert "settings.connect({" in js and "fetch: fetch, headers: csrfHdr" in js
+    for endpoint in ("gui-cert", "trust", "ca-trust", "ca-trust/refresh",
+                     "telemetry-destination", "audit-export", "password",
+                     "sessions/revoke-others", "peer-tls"):
+        assert "'" + endpoint + "'" in model
+    assert "this.services.headers(" in controller
+    assert "checkedSettingsResult(request, response, body)" in controller
+    assert "this.clearSecrets(group)" in controller
+    assert "this.state.unknown[group]" in controller
+    for old in ("mountSettingsForm(", "wireTelemetryForm(", "pollCaRefresh(",
+                "getElementById('cert-form')", "getElementById('pw-form')"):
+        assert old not in js
+    assert "never returned by the server" in component
+    assert "no longer trust it" in model
+    assert "certificate and key will be removed" in model
+    assert "uses deployment settings from the next sample" in model
+    assert "createPortal(telemetry," in component
     assert " style=" not in html and "onclick=" not in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    # endpoint literals — POST via jpost (csrfHdr inside), DELETE via fetch
-    assert js.count("'/api/v1/settings/gui-cert'") == 2       # POST + DELETE
-    assert "'/api/v1/settings/trust'" in js                   # POST add
-    assert "'/api/v1/settings/trust/' + encodeURIComponent(" in js   # DELETE row
-    assert "'/api/v1/settings/ca-trust'" in js                # POST config
-    assert "'/api/v1/settings/ca-trust/refresh'" in js        # POST job start
-    assert "'/api/v1/settings/ca-trust/refresh/' + encodeURIComponent(" in js
-    assert js.count("'/api/v1/settings/telemetry-destination'") == 2
-    # Settings mutations share error handling and keep CSRF on both methods.
-    helper = js.split("async function settingsWrite(", 1)[1].split("// Drag-and-drop", 1)[0]
-    assert "fetch(url, { method: 'DELETE', headers: csrfHdr() })" in helper
-    assert "await jpost(url, body)" in helper
-    for endpoint in ("gui-cert", "telemetry-destination"):
-        assert "settingsWrite('/api/v1/settings/" + endpoint + "', null, msg, 'DELETE')" in js
-    assert "settingsWrite('/api/v1/settings/trust/' + encodeURIComponent(name), null, msg, 'DELETE')" in js
-    # per-row remove is a danger link rendered into the trust table
-    assert "#trust-rows .trust-del" in js
-    assert "danger-link trust-del" in js
-    # destructive paths confirm with consequence-naming messages
-    assert "Deletes the uploaded certificate and key" in js   # cert revert
-    assert "no longer trust certificates from this CA" in js  # trust remove
-    assert "uses the deployment settings from the next sample" in js # dest revert
-    # download-now polls the job like the image publish poller
-    assert "function pollCaRefresh(" in js
-    assert "j.state === 'failed'" in js
-    # settings render consumes the new GET blocks; the old read-only
-    # Observability row is gone (superseded by the editable block)
-    assert "s.gui_cert" in js and "s.trust" in js and "s.ca_trust" in js
-    assert "s.telemetry_destination" in js
-    assert "effective_endpoint" in js and "fingerprint_sha256" in js
-    assert "['Observability'" not in js
-    # key hygiene: submit posts the PEMs, success wipes the textareas
-    assert "cert_pem" in js and "key_pem" in js
-    assert "getElementById('cert-form').reset()" in js
-    # all 8 new audit events have human verbs (keys quoted — hyphens)
     verbs = _react_shell("monitoring-model.mjs").split("const verbs = {")[1].split("};")[0]
-    for ev in ("gui-cert-replace", "gui-cert-revert", "trust-add",
-               "trust-remove", "ca-trust-config", "ca-trust-refresh",
-               "telemetry-destination-set", "telemetry-destination-clear"):
-        assert "'%s'" % ev in verbs, ev
-    # no inline on*= crept into the new JS-built markup
-    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
-
-    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
-        css = f.read()
-    assert ".inline-form textarea" in css
+    for event in ("gui-cert-replace", "gui-cert-revert", "trust-add", "trust-remove",
+                  "ca-trust-config", "ca-trust-refresh", "telemetry-destination-set",
+                  "telemetry-destination-clear"):
+        assert "'%s'" % event in verbs
+    assert ".inline-form textarea" in _webroot("styles.css")
 
 
 def _react_shell(name="main.jsx"):
@@ -6968,7 +6903,7 @@ def test_ca_trust_default_url_is_prefilled(tmp_path, monkeypatch):
     settings view both surface the built-in Cisco CA-bundle URL, not None,
     so the UI shows it prefilled and 'Download now' works out of the box."""
     assert gui_server._CA_TRUST_DEFAULT_URL == _CA_DEFAULT_URL
-    assert "var CA_CISCO_URL = '" + _CA_DEFAULT_URL + "';" in _webroot("app.js")
+    assert "export const CISCO_CA = '" + _CA_DEFAULT_URL + "';" in _react_shell("settings-model.mjs")
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     p = str(tmp_path / "state" / "ca-trust-settings.json")
     assert gui_server.read_ca_trust_settings(p) == {
@@ -8721,7 +8656,7 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
     # the telemetry form step mounts the SHARED template rather than copying it
     assert 'id="wz-td-mount"' in wiz
-    assert "mountSettingsForm('td', 'wz-td-mount')" in js
+    assert "settings.select('telemetry', 'wz-td-mount')" in js
     # packages is detect-and-instruct, never a form
     assert 'id="wz-pkg-recheck"' in wiz
     assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
@@ -9710,8 +9645,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("wz-pkg-table",
-                 "setup-pkg-table", "settings-info", "trust-tbl")
+    table_ids = ("wz-pkg-table", "setup-pkg-table")
     for tid in table_ids:
         marker = 'id="%s"' % tid
         assert marker in html, tid
@@ -9726,6 +9660,10 @@ def test_every_operational_table_gets_a_scroll_wrapper():
             "%s's table-scroll wrapper closed before the table opened" % tid
     # The unnamed credential table gets a wrapper too.
     assert html.count('<div class="table-scroll"') == html.count("<table")
+    settings = _react_shell("settings.jsx")
+    for tid in ("settings-info", "trust-tbl"):
+        before = settings.split('id="%s"' % tid, 1)[0]
+        assert "</div>" not in before[before.rfind('<div className="table-scroll"'):]
     component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
     assert '<div className="table-scroll" tabIndex={0} role="region" aria-label="Image rollout">' in component
     assert '<table className="tbl" id="ov-rollout">' in component
@@ -9819,11 +9757,6 @@ def test_forms_get_persistent_field_labels():
     assert "font-size: 12px" in css.split(".field-label {", 1)[1].split("}", 1)[0]
     # a representative sample across different forms, not every field
     samples = {
-        "pw-form": ("pw-cur", "pw-new", "pw-confirm"),
-        "cert-form": ("cert-pem", "cert-key"),
-        "trust-form": ("trust-pem",),
-        "ca-form": ("ca-source", "ca-url"),
-        "ae-form": ("ae-host", "ae-port", "ae-recipient"),
         "iv-schedule-form": ("iv-mode",),
     }
     for form_id, field_ids in samples.items():
@@ -9837,11 +9770,13 @@ def test_forms_get_persistent_field_labels():
     for fid in ('cf-id', 'cf-pass'):
         assert "'%s'," % fid in form
     assert '<Field id={id} label={label}>' in form
-    # the shared template (mounted into both Setup and Settings)
-    for tpl_id, field_ids in (("tpl-td-form", ("td-endpoint",)),):
-        tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
-        for fid in field_ids:
-            assert 'for="%s"' % fid in tpl, "%s: no label for=%r" % (tpl_id, fid)
+    settings = _react_shell("settings.jsx")
+    assert '<label className="field" htmlFor={id}' in settings
+    assert '<label className="field field-wide" htmlFor={id}' in settings
+    for fid in ("pw-cur", "pw-new", "pw-confirm", "cert-pem", "cert-key",
+                "trust-pem", "ca-url", "td-endpoint", "ae-host", "ae-port", "ae-recipient"):
+        assert "'%s', '" % fid in settings
+    assert 'htmlFor="ca-source"' in settings
 
 
 def test_error_and_status_regions_carry_live_roles():
@@ -9851,20 +9786,21 @@ def test_error_and_status_regions_carry_live_roles():
     styles.css) get role=alert, so either outcome is announced without the
     operator having to go find the message by sight."""
     html = _webroot("index.html")
-    alert_ids = ("pw-msg", "cert-msg",
-                 "trust-msg", "ca-msg", "td-msg", "ae-msg",
-                 "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg")
+    alert_ids = ("iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg")
     for eid in alert_ids:
         tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
         assert 'role="alert"' in tag, eid
     form = _react_shell('device-forms.jsx')
     for eid in ('df-err', 'cf-err'):
         assert 'role="alert"' in form.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
-    status_ids = ("dev-status", "wz-progress", "wz-msg",
-                  "cert-status", "td-status", "ae-status",
-                  "sessions-info", "swarm-summary")
+    status_ids = ("dev-status", "wz-progress", "wz-msg", "swarm-summary")
     for sid in status_ids:
         tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+        assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    settings = _react_shell("settings.jsx")
+    assert 'id={id} role="status" aria-live="polite" tabIndex={-1}' in settings
+    for sid in ("cert-status", "td-status", "ae-status", "sessions-info", "peer-tls-status"):
+        tag = settings.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
         assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
     details = _react_shell("device-details.jsx")
     for sid in ("di-note", "di-forget-host-key-status"):
@@ -10202,34 +10138,23 @@ def test_settings_forms_are_wrapped_in_bounded_card_sections():
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
     parsed = CardHeadings()
     parsed.feed(settings)
-    for heading in ("Peer transfer TLS", "Console certificate",
-                    "Trusted certificate authorities", "Public CA bundle",
-                    "Telemetry destination", "Audit export", "Server & build",
-                    "Schedule"):
+    for heading in ("Telemetry destination", "Schedule"):
         assert parsed.headings.get(heading) is True, \
             "%s must have an open card ancestor" % heading
-    # Certificate replacement and telemetry each retain their primary action.
-    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
-    assert cert_form.count('class="btn"') == 1
-    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
-    assert td_form.count('class="btn"') == 1
+    component = _react_shell("settings.jsx")
+    for group, heading in (("peer", "Peer transfer TLS"), ("cert", "Console certificate"),
+                           ("trust", "Trusted certificate authorities"), ("ca", "Public CA bundle"),
+                           ("ae", "Audit export")):
+        assert ('data-setting="%s"><h3>%s</h3>' % (group, heading)) in component
+    # Runtime card ancestry and action hierarchy are checked in settings-smoke.mjs.
 
 
 def test_settings_card_never_wraps_a_template_root():
-    """The card goes AROUND the mount point (#td-mount), never
-    around the <template> whose content is cloned into it -- a wrapped
-    template root would be inert markup styled as a card that never
-    actually renders."""
+    """The telemetry card wraps a React portal target, never inert markup."""
     html = _webroot("index.html")
-    for tpl_id, mount_id in (("tpl-td-form", "td-mount"),):
-        before_tpl = html.split('id="%s"' % tpl_id, 1)[0]
-        last_card_open = before_tpl.rfind('<div class="card">')
-        last_card_close = before_tpl.rfind("</div>")
-        assert last_card_close > last_card_open, \
-            "%s: the preceding card must already be closed" % tpl_id
-        mount_pos = html.index('id="%s"' % mount_id)
-        assert mount_pos < html.index('id="%s"' % tpl_id), \
-            "%s: mount point must precede its template" % mount_id
+    assert 'id="tpl-td-form"' not in html
+    assert '<div class="card"><h3>Telemetry destination</h3><div id="td-mount">' in html
+    assert 'id="wz-td-mount"' in html
 
 
 def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():

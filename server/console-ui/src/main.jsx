@@ -7,6 +7,7 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { mountSettingsNavigation } from './settings-navigation.jsx';
 import { mountPolicies } from './policies.jsx';
+import { mountSettings } from './settings.jsx';
 import { mountOverview } from './overview.jsx';
 import { mountImages } from './images.jsx';
 import { mountMonitoring } from './monitoring.jsx';
@@ -204,6 +205,7 @@ export function mountConsoleShell() {
     createRoot(navigation).render(<Navigation />);
     mountSettingsNavigation();
     mountPolicies();
+    mountSettings();
     mountOverview();
     mountImages();
     mountMonitoring();

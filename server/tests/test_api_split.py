@@ -438,6 +438,20 @@ def test_management_does_not_fall_back_to_device_certificate(tmp_path, monkeypat
 @pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
 def test_remote_console_reports_and_reloads_its_own_certificate(
         tmp_path, monkeypatch, projection_order):
+    def accepted_by_settings(action, result):
+        """Validate the actual proxy reply with the shipped browser model."""
+        model = Path(__file__).parents[1] / "console-ui/src/settings-model.mjs"
+        program = ("import assert from 'node:assert/strict';\n"
+                   "import {checkedSettingsResult, successMessage} from "
+                   + json.dumps(model.as_uri()) + ";\n"
+                   "const action = " + json.dumps(action) + ", body = "
+                   + json.dumps(result) + ";\n"
+                   "assert.equal(checkedSettingsResult({action}, {ok:true, status:200}, body), 'saved');\n"
+                   "if (!body.applied) assert.match(successMessage(action, body), /saved; restart/);")
+        checked = subprocess.run(["node", "--input-type=module"], input=program,
+                                 capture_output=True, text=True, timeout=10)
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+
     management_cert, management_key = _certificate(tmp_path, "management")
     default_cert, default_key = _certificate(tmp_path, "browser-default")
     custom_cert, custom_key = _certificate(tmp_path, "browser-custom")
@@ -522,6 +536,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         assert result["gui_cert"]["source"] == "custom"
         assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(custom_cert)
         assert served_fingerprint() == fingerprint(custom_cert)
+        accepted_by_settings("cert", result)
         status, _, body = request("/api/v1/settings/gui-cert", "DELETE", headers=auth)
         assert status == 200
         result = json.loads(body)
@@ -529,6 +544,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         assert result["gui_cert"]["source"] == "built-in"
         assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
         assert served_fingerprint() == fingerprint(default_cert)
+        accepted_by_settings("certDefault", result)
 
         # A durable save can succeed while the remote Console fails to fetch it.
         upstream_request = http.client.HTTPSConnection.request
@@ -545,6 +561,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         assert status == 200
         result = json.loads(body)
         assert result["applied"] is False and "restart" in result["note"]
+        accepted_by_settings("cert", result)
         assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
         assert served_fingerprint() == fingerprint(default_cert)
         assert b"PRIVATE KEY" not in body

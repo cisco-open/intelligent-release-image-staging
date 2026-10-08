@@ -16,7 +16,8 @@ Console](../zensical/user-guide/console.md) for that.
 ## The shell and the legacy app
 
 `server/console-ui/` renders the header, primary navigation, Settings section
-navigation, Policies, full Overview dashboard, Images, Monitoring
+navigation, General, TLS/trust, Telemetry, Audit export, Policies,
+the full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
 device-details and Activity drawers
@@ -35,6 +36,17 @@ Settings pages keep their existing
 `#settings/<section>` routes, so a link into a specific Settings section
 still lands there. Settings itself keeps one navigation-rail link and its own
 in-page section bar.
+
+General, TLS/trust, Telemetry and Audit export use `settings-controller.mjs`
+and `settings.jsx`. The `irisSettings` adapter supplies authenticated transport
+and pane visibility. Telemetry uses one React portal for Settings and setup.
+Dirty public fields survive refreshes; submitted or hidden forms clear private
+material. Writes validate endpoint-specific replies and retain an uncertain
+result until explicit review, without automatic replay. Peer TLS retains the
+original expected mode. Confirmed CA-download and audit-export job handles pause
+their reads on hide and resume on return. Certificate application is distinct
+from durable storage. Other Settings lifecycle, image-verification and package
+workflows remain in the older application.
 
 Images owns its catalog, upload and import jobs, and quarantine drawer in
 `images-controller.mjs` and `images.jsx`. The `iris:images-command` adapter
@@ -217,6 +229,13 @@ against temporary authenticated stores for aggregate partial results, cleared
 membership, stale preview refusal and serial quarantine conflict recovery.
 Browser tests also check focus, named confirmation, mobile layout and plain-text
 failure messages. These fixtures do not qualify live enforcement or TLS.
+`server/tests/test_settings_react.py` runs the shipped Settings controller
+against temporary authenticated stores. It covers password/session changes,
+telemetry, audit destination secrets, CA configuration and trust, and certificate
+storage. `test_api_split.py` also validates actual TLS-proxy certificate replies
+with the shipped model and verifies the certificate presented on a new connection.
+Browser checks cover empty success replies, secret clearing, shared setup fields,
+job pause/resume, persistent labels, keyboard focus and narrow layouts.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console

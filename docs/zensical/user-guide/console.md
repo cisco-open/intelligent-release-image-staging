@@ -91,6 +91,13 @@ you can bookmark it or send it to a colleague.
 | Audit export | `#settings/audit` | The encrypted off-box copy of the audit trail |
 | Setup checklist | `#settings/setup` | The four states a new server has to reach |
 
+General, TLS & trust, Telemetry and Audit export keep ordinary drafts during
+status refreshes. Passwords, private keys and passphrases clear after submission
+or when you leave the section or hide the tab.
+If a save has an uncertain result, use **Reload current settings** and review
+what is stored before retrying. For an uncertain password change, sign in again.
+Leaving a page does not cancel an already submitted request.
+
 ### Setup checklist
 
 The checklist holds four cards: admin account, telemetry destination, device
@@ -142,12 +149,16 @@ passphrase field. The Console decrypts it at import with `openssl pkey`,
 piping the passphrase over stdin and never placing it on the command line, and
 stores the key age-encrypted at rest either way. **Use deployment default
 certificate** returns to the deployment's identity.
+A saved certificate is only active when the Console confirms it was applied.
+If it asks for a restart, restart the Console and verify a new browser connection.
 
 **Trusted CAs** is the server's outbound trust store. Drop CA certificate files
 to install them one by one, or pick a bundle source: the Cisco Trusted Root
 Store (the default), the Mozilla CA bundle at `https://curl.se/ca/cacert.pem`,
 or a URL of your own. A bundle appears as one row, and **Remove bundle**
 returns you to the system store alone.
+Upload public CA certificates without private keys. If one upload has an
+uncertain result, the remaining files are left unattempted for you to review.
 
 ### Peer transfer encryption
 
@@ -178,6 +189,9 @@ what the encrypted transport proves.
 audit trail, the recipient it is encrypted to, the SCP password, and a daily
 schedule. It carries **Export now** and the outcome of the last run. To run
 one, see [Routine maintenance tasks](../admin-guide/maintenance.md).
+Leave the password blank to keep the saved password. Download and export jobs
+continue when you leave their page; returning resumes status checks for the
+same job. An unavailable status does not mean the job stopped.
 
 ## Deployment information
 

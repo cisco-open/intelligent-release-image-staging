@@ -15,6 +15,7 @@ HTML = (SERVER / "webroot/index.html").read_text()
 APP = (SERVER / "webroot/app.js").read_text()
 NAV = (UI / "src/settings-navigation.jsx").read_text()
 SHELL = (UI / "src/main.jsx").read_text()
+SETTINGS = (UI / "src/settings.jsx").read_text()
 CSS = (UI / "src/shell.css").read_text()
 SECTIONS = {"general", "tls", "certificates", "backups", "telemetry", "bulkhash", "packages", "audit", "setup"}
 
@@ -65,16 +66,20 @@ def test_checkbox_sizing_is_native_and_excludes_text_controls():
 
 
 def test_settings_form_ids_and_submit_handlers_remain_intact():
-    for form_id in ("pw-form", "cert-form", "trust-form", "ca-form", "td-form", "ae-form", "iv-schedule-form"):
-        assert len(re.findall(r'<form\b[^>]*\bid="' + form_id + r'"', HTML)) == 1
-        assert f"document.getElementById('{form_id}').addEventListener('submit'" in APP
+    for form_id in ("pw-form", "cert-form", "trust-form", "ca-form", "td-form", "ae-form"):
+        assert SETTINGS.count("form('" + form_id + "'") == 1
+        assert 'id="' + form_id + '"' not in HTML
+        assert f"document.getElementById('{form_id}')" not in APP
+    assert "onSubmit={event => {event.preventDefault(); c.perform(action);}}" in SETTINGS
+    assert HTML.count('id="iv-schedule-form"') == 1
+    assert "document.getElementById('iv-schedule-form').addEventListener('submit'" in APP
     for control_id in (
         "pw-cur", "pw-new", "pw-confirm", "revoke-others", "cert-pem", "cert-key",
         "cert-passphrase", "cert-passphrase-row", "trust-pem", "ca-url", "ca-auto",
-        "td-enabled", "td-endpoint", "ae-recipient", "ae-pass", "ae-auto", "iv-mode", "iv-hour",
+        "td-enabled", "td-endpoint", "ae-recipient", "ae-pass", "ae-auto",
     ):
-        assert HTML.count(f'id="{control_id}"') == 1
-        assert f"'{control_id}'" in APP
+        assert SETTINGS.count("'" + control_id + "'") + SETTINGS.count('id="' + control_id + '"') == 1
+        assert f"'{control_id}'" not in APP
     assert '.inline-form:not([hidden])' in CSS
     assert '.inline-form .field[hidden]' in CSS
     assert '.inline-form .field:has(> [hidden])' in CSS

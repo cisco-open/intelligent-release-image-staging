@@ -180,6 +180,9 @@
 .iris-react-shell #view-settings .field-label { color: var(--iris-text); font-size: 14px; }
 .iris-react-shell #view-settings .inline-form :is(input:not([type="checkbox"]),select,textarea) { width: 100%; font-size: 14px; }
 .iris-react-shell #view-settings .form-actions { padding-top: 8px; }
+.iris-react-shell [data-settings-react] button:disabled { opacity: .55; cursor: not-allowed; }
+.iris-react-shell [data-settings-react] .settings-message { display: block; max-width: 100%; overflow-wrap: anywhere; }
+.iris-react-shell [data-settings-react] .settings-message:empty { display: none; }
 .iris-react-shell #settings-pane-general .setup-cards { display: grid; grid-template-columns: minmax(0,1.25fr) minmax(0,1fr); gap: 24px; align-items: start; }
 .iris-react-shell #settings-pane-general .card:nth-child(2) { grid-column: 2; grid-row: 1 / span 2; }
 .iris-react-shell #settings-pane-general .card:nth-child(3) { grid-column: 1; }

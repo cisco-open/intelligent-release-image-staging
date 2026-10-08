@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move General, TLS/trust, Telemetry and Audit export into React. Check save
+  replies before reporting success, preserve ordinary drafts, clear submitted
+  or hidden private material, and require review after uncertain saves. Resume
+  download and export status checks for the same job after returning to its page.
+
 - Move the complete Policies workflow into React. Preserve drafts and preview
   revisions, check save/import/delete replies, and require review after an
   uncertain save. Keep keyboard focus and distinguish unavailable diagnostics

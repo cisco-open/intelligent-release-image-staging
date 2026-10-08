@@ -199,6 +199,23 @@ def test_console_boots_local_react_before_legacy_workflows():
         assert 'id="view-%s"' % view in html
 
 
+def test_settings_foundation_has_one_render_owner_and_bounded_job_polling():
+    js = APP.read_text()
+    source = APP.parents[1] / "console-ui/src"
+    component = (source / "settings.jsx").read_text()
+    controller = (source / "settings-controller.mjs").read_text()
+    for identifier in ("pw-form", "revoke-others", "cert-status", "cert-form", "trust-form",
+                       "trust-rows", "ca-form", "td-form", "ae-form", "peer-tls-form"):
+        assert "getElementById('%s')" % identifier not in js
+    assert "settings.select('telemetry', 'wz-td-mount')" in js
+    assert "settings.select(sub, 'td-mount')" in js
+    assert "if (document.hidden) settings.hide();" in js
+    assert "dangerouslySetInnerHTML" not in component
+    assert "setInterval(" not in controller
+    assert "this.jobGeneration++" in controller and "this.resumeJobs()" in controller
+    assert "this.state.jobs[group]?.id === job.id" in controller
+
+
 def test_images_owns_rendering_and_jobs_without_another_inventory_poller():
     js = APP.read_text()
     component = (APP.parents[1] / "console-ui/src/images.jsx").read_text()
