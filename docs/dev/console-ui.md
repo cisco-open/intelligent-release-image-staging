@@ -18,8 +18,8 @@ Console](../zensical/user-guide/console.md) for that.
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
-image and bulk credential dialogs, CSV and basic device actions, device-details
-and Activity drawers
+image and bulk credential dialogs, CSV and basic device actions, schedules,
+device-details and Activity drawers
 with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
@@ -75,7 +75,7 @@ view pauses reads and closes streams; closing the drawer leaves jobs running.
 Log callbacks are tied to their stream instance. Each of the six cached logs
 keeps up to 500 lines with a separate character limit. Cancellation names the displayed
 queued IDs, and per-job write locks survive closing and reopening. An unknown
-write result is reported without retrying. Role and schedule dialogs still use
+write result is reported without retrying. Role dialogs still use
 the older controller.
 
 The Add Device and credential forms use `device-forms-controller.mjs`, a shared
@@ -106,6 +106,15 @@ lines survive Inventory polling. Downloads check the content type and reject
 late bodies after navigation. Adopt/Delete run at most four requests together,
 check response bodies and report partial cleanup or unknown results. Only
 confirmed complete retirements are removed from the selection.
+
+Schedules use `schedules-controller.mjs`, its model and `schedules.jsx` for the
+list, bounded latest-history reads, creation and ownership reaffirmation. The
+dialog captures IDs and filters at opening. Shared read tickets order panel
+and Inventory results, including reads started during a write. Schedule slots
+come from the server; the browser does not recalculate recurring dates.
+Writes use the shared device mutation lock and checked results. Reaffirmation
+keeps the displayed ETag. Unknown creation requires an explicit list refresh
+before another submission. Hidden views stop reads, not submitted writes.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -176,6 +185,11 @@ partial retirement, retained selections and unknown writes.
 `server/tests/test_inventory_actions_api.py` uses the shipped controller with
 real temporary stores to check CSV import/export and HTTP 207 retirement.
 It deliberately fails record cleanup to verify the remaining work is reported.
+Schedule tests cover target snapshots, form defaults, read races, bounded
+history, unavailable evidence, revision conflicts and uncertain writes.
+`server/tests/test_schedules_client_api.py` exercises the shipped controller
+against real temporary stores for creation, history, stale ETags and ownership
+transfer. No runner or live device is started by that test.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console

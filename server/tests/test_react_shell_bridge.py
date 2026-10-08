@@ -42,7 +42,7 @@ def test_assignment_dialogs_have_only_react_dom_owners():
     assert "mountAssignments();" in entry
     assert "assignments.acceptImages(result, ticket)" in legacy
     assert "assignments.hide();" in legacy
-    assert "[data-inventory-react], [data-assignments-react], [data-inventory-actions-react]" in legacy
+    assert "[data-inventory-react], [data-assignments-react], [data-inventory-actions-react], [data-schedules-react]" in legacy
     assert "dangerouslySetInnerHTML" not in component
     assert "setInterval(" not in component and "setInterval(" not in controller
 
@@ -63,6 +63,23 @@ def test_inventory_action_roots_have_only_react_dom_owners():
     assert "inventoryActions.hide();" in legacy
     assert "dangerouslySetInnerHTML" not in component
     assert "setInterval(" not in component
+
+
+def test_schedule_roots_have_one_owner_and_share_inventory_read_ordering():
+    legacy = APP.read_text()
+    html = APP.with_name("index.html").read_text()
+    source = APP.parent.parent / "console-ui/src"
+    for identifier in ("sched-panel", "sched-modal", "sched-rows", "sched-refresh", "sched-modal-id"):
+        assert "getElementById('%s')" % identifier not in legacy
+        assert 'id="%s"' % identifier not in html
+    for identifier in ("iris-schedules-root", "iris-schedule-dialog-root"):
+        assert 'id="%s" data-schedules-react' % identifier in html
+    assert "mountSchedules();" in (source / "main.jsx").read_text()
+    assert "schedules.acceptSchedules(result, ticket)" in legacy
+    assert "acceptSchedules(schedules, scheduleTicket)" in (source / "inventory-controller.mjs").read_text()
+    assert "schedules.hide();" in legacy
+    assert "dangerouslySetInnerHTML" not in (source / "schedules.jsx").read_text()
+    assert "setInterval(" not in (source / "schedules-controller.mjs").read_text()
 
 
 def test_session_status_and_logout_bridge_preserves_csrf_and_idle_semantics():

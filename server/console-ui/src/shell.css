@@ -91,6 +91,14 @@
 .iris-react-shell [data-inventory-actions-react] .modal-backdrop { z-index: 210; }
 .iris-react-shell [data-inventory-actions-react] .modal-body { overflow-wrap: anywhere; }
 .iris-react-shell [data-inventory-actions-react] .modal-foot { flex-wrap: wrap; }
+.iris-react-shell [data-schedules-react] .modal-backdrop { z-index: 210; }
+.iris-react-shell [data-schedules-react] .modal-body { overflow-wrap: anywhere; }
+.iris-react-shell [data-schedules-react] .modal-foot { flex-wrap: wrap; }
+.iris-react-shell [data-schedules-react] .table-scroll { max-width: 100%; }
+.iris-react-shell [data-schedules-react] .modal-body .field { display: flex; width: 100%; margin-bottom: 12px; }
+.iris-react-shell [data-schedules-react] .modal-body input,
+.iris-react-shell [data-schedules-react] .modal-body select { width: 100%; min-width: 0; max-width: 100%; }
+.iris-react-shell [data-schedules-react] select[multiple] { height: auto; min-height: 96px; }
 .iris-react-shell .assignment-targets { margin-bottom: 12px; }
 .iris-react-shell .drawer, .iris-react-shell #dl-drawer { top: 56px; z-index: 105; }
 .iris-react-shell #activity-panel { width: min(880px, 96vw); }

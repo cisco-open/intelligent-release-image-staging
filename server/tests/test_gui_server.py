@@ -768,7 +768,7 @@ def test_all_selected_actions_share_one_busy_lock():
     # release are the two exceptions, guarded inside bulkQuarantine instead.
     claimers = [a for a in actions
                 if a not in ("quarantine-selected", "release-selected", "assign-images-selected", "apply-cred-selected",
-                             "onboard-confirm", "undeploy-confirm", "adopt-selected", "delete-selected")]
+                             "onboard-confirm", "undeploy-confirm", "adopt-selected", "delete-selected", "create-schedule")]
     assert js.count("claimSelection()") == len(claimers) + 1, (
         "%d legacy actions but %d calls claim the lock (excluding its definition)"
         % (len(claimers), js.count("claimSelection()") - 1))
@@ -13594,10 +13594,10 @@ def _schedule_projections():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required for console schedule projection tests")
-    source = _webroot("app.js")
-    start = source.index("  // ---- schedule projections")
-    end = source.index("  // ---- end schedule projections")
-    return node, source[start:end]
+    from pathlib import Path
+    module = (Path(gui_server.WEBROOT).parent / "console-ui/src/schedules-model.mjs").as_uri()
+    names = "scheduleTargetSummary, scheduleNextFireText, scheduleDeltaText, scheduleWaveText, scheduleCreatorText, scheduleTargetFromFilters, scheduleDefinitionFromForm, pendingScheduleText"
+    return node, "import {" + names + "} from " + json.dumps(module) + ";"
 
 
 def _run_schedule_projections(script):
@@ -13605,7 +13605,7 @@ def _run_schedule_projections(script):
     import subprocess
     node, block = _schedule_projections()
     program = (block + "\nconst esc = value => String(value);\n" + script)
-    result = subprocess.run([node], input=program, text=True,
+    result = subprocess.run([node, "--input-type=module"], input=program, text=True,
                             capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return _json.loads(result.stdout)
@@ -13641,21 +13641,20 @@ _SCHEDULE_OCCURRENCE = {
 
 
 def test_schedules_panel_lists_the_schedule_facts_an_operator_plans_from():
-    html = _webroot("index.html")
+    html = _react_shell("schedules.jsx")
     assert "['manage-schedules', 'Schedules']" in _react_shell('inventory.jsx')
-    panel = html.split('id="sched-panel"', 1)[1].split("</div>", 1)[0] + \
-        html.split('id="sched-panel"', 1)[1]
+    panel = html.split('id="sched-panel"', 1)[1]
     for column in ("Action", "Target", "Next run", "State",
                    "Latest run", "Created by"):
-        assert ">" + column + "<" in panel, column
+        assert "'" + column + "'" in panel, column
     assert 'id="sched-rows"' in html and 'id="sched-close"' in html
 
-    js = _webroot("app.js")
-    assert "function renderSchedules(" in js
+    js = _react_shell("schedules-controller.mjs")
+    assert "async refresh(" in js
     assert "'/api/v1/schedules'" in js
     # The list reads the schedule's own next-fire slot rather than
     # recomputing DST-aware weekly arithmetic in the browser.
-    assert "row.next_fire" in js
+    assert "row.next_fire" in _react_shell("schedules-model.mjs")
 
 
 def test_schedule_row_projections_report_target_delta_and_wave_counts():
@@ -13696,22 +13695,21 @@ def test_orphaned_schedule_names_the_missing_actor_and_can_be_reaffirmed():
     assert out["present"] == "console:alice"
     assert out["gone"] == "console:departed (actor no longer exists)"
 
-    js = _webroot("app.js")
+    js = _react_shell("schedules-controller.mjs")
     assert "'/reaffirm'" in js
     # Re-affirming rewrites created_by and bumps rev, so it carries the
     # revision the operator was looking at.
-    reaffirm = js.split("async function reaffirmSchedule(", 1)[1] \
-        .split("\n  }", 1)[0]
-    assert "'If-Match': row.etag" in reaffirm and "csrfHdr(" in reaffirm
+    reaffirm = js.split("async reaffirm(", 1)[1]
+    assert "'If-Match': row.etag" in reaffirm and "this.services.headers(" in reaffirm
     assert "method: 'POST'" in reaffirm
-    assert "sched-reaffirm" in js and "#sched-rows .sched-reaffirm" in js
+    assert "sched-reaffirm" in _react_shell("schedules.jsx") and "controller.reaffirm(row.id)" in _react_shell("schedules.jsx")
 
 
 def test_schedule_bulk_action_targets_the_current_device_filter():
-    html = _webroot("index.html")
+    html = _react_shell("schedules.jsx")
     assert "bulkButton('schedule-selected'" in _react_shell('inventory.jsx')
-    for element in ('id="sched-modal"', 'id="sched-modal-scope"',
-                    'id="sched-modal-kind"', 'id="sched-modal-when"',
+    for element in ('id="sched-modal"', "select('scope', 'scope'",
+                    "select('kind', 'kind'", "select('when', 'when'",
                     'id="sched-modal-preview"', 'id="create-schedule"'):
         assert element in html, element
 
@@ -13781,7 +13779,8 @@ def test_device_row_shows_a_pending_schedule_before_a_manual_conflict():
     assert out["miss"] == "" and out["none"] == ""
 
     js = _webroot("app.js")
-    assert "pendingScheduleText(id, SCHEDULES)" in js
+    assert "schedules.scheduled(id)" in js
+    assert "pendingScheduleText(id, this.state.rows)" in _react_shell("schedules-controller.mjs")
     assert "sched-chip" in _react_shell('inventory.jsx')
 
 

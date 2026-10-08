@@ -109,6 +109,7 @@
   var deviceForms = window.irisDeviceForms;
   var assignments = window.irisAssignments;
   var inventoryActions = window.irisInventoryActions;
+  var schedules = window.irisSchedules;
   var LAST_DEVICES = [], LAST_DEV_NOW = 0, devTotal = 0;
   var LAST_JOBS_BY_DEVICE = Object.create(null);
   function deviceFilterState() {
@@ -117,112 +118,6 @@
   }
   function onInventoryAction(id, handler) { inventory.onAction(id, handler); }
 
-  // ---- schedule projections (Phase 2) ----
-  // Pure string/document builders over the schedule and occurrence documents
-  // the API returns. They are deliberately free of DOM and fetch so the
-  // console's account of a window -- what it targets, when it next runs, how
-  // much of the preceding wave landed -- can be executed and pinned by tests
-  // rather than eyeballed.
-  function scheduleTargetSummary(row) {
-    var target = (row && row.target) || {};
-    var filters = target.filters || {};
-    var parts = Object.keys(filters).sort().filter(function (key) {
-      return filters[key] !== '' && filters[key] != null;
-    }).map(function (key) { return key + '=' + filters[key]; });
-    var named = (target.device_ids || []).length;
-    if (named) parts.push(named + ' named device(s)');
-    return (parts.length ? parts.join(', ') : 'whole fleet') + ' · ' +
-      (target.bind === 'early'
-        ? 'bound at creation' : 'resolved at each run');
-  }
-
-  // The slot the SERVER computed (see _schedule_views): local weekly time
-  // across a DST boundary is the runner's arithmetic, never the browser's.
-  function scheduleNextFireText(row) {
-    var slot = row && row.next_fire;
-    // A paused or completed schedule reports its own state; anything else
-    // with no slot has simply run out of them. An unreadable row says the
-    // latter rather than rendering "undefined" at an operator.
-    if (!slot) {
-      var state = row && row.state;
-      return state && state !== 'pending' ? state : 'no further run';
-    }
-    return slot.local_time + ' ' + slot.tz + ' (' + slot.status + ')';
-  }
-
-  // What the target actually resolved to at fire time, against the preview
-  // the operator approved. A late-bound target is meant to move; this is how
-  // much it moved.
-  function scheduleDeltaText(occurrence) {
-    var delta = occurrence && occurrence.delta;
-    if (!delta) return '';
-    return '+' + delta.added + ' / \u2212' + delta.removed + ' since preview';
-  }
-
-  // Missing is reported apart from errored on purpose: a dark device is not
-  // a failed one, and an operator deciding whether to wait needs to see which
-  // of the two is holding the wave.
-  function scheduleWaveText(occurrence) {
-    var wave = occurrence && occurrence.annotations &&
-      occurrence.annotations.wave;
-    if (!wave) return '';
-    return 'wave ' + wave.gate + ' · ' + wave.staged + ' staged / ' +
-      wave.errored + ' errored / ' + wave.missing + ' missing of ' +
-      wave.total;
-  }
-
-  function scheduleCreatorText(row) {
-    return row.created_by + (row.creator_exists ? ''
-      : ' (actor no longer exists)');
-  }
-
-  // The Devices filter IS the schedule's target: it is re-resolved at each
-  // run, which is the reason to schedule against it rather than against the
-  // rows that happen to be checked now. Naming devices instead is the
-  // explicit second choice, and it says so in the modal.
-  function scheduleTargetFromFilters(state, ids, scope) {
-    if (scope === 'selection') {
-      return { filters: {}, device_ids: (ids || []).slice(), bind: 'late' };
-    }
-    var names = { q: 'q', managementType: 'management_type',
-                  platform: 'platform', cred: 'cred', telemetry: 'telemetry',
-                  peer: 'peer', role: 'role', modelFamily: 'model_family',
-                  osFamily: 'os_family', status: 'status' };
-    var filters = {};
-    Object.keys(names).forEach(function (key) {
-      if (state[key]) filters[names[key]] = state[key];
-    });
-    return { filters: filters, device_ids: [], bind: 'late' };
-  }
-
-  function scheduleDefinitionFromForm(values) {
-    var when = values.recurring
-      ? { kind: 'recurring', weekday: values.weekday, hour: values.hour,
-          minute: values.minute, tz: values.tz,
-          window_seconds: values.windowSeconds }
-      : { kind: 'once', at: values.at, tz: values.tz,
-          window_seconds: values.windowSeconds };
-    var payload = values.kind === 'assign'
-      ? { image_ids: (values.imageIds || []).slice(), mode: values.mode }
-      : { telemetry: !!values.telemetry,
-          telemetry_stream: !!values.telemetryStream,
-          mode: 'new-only', max_devices: values.maxDevices };
-    return { id: values.id, kind: values.kind, target: values.target,
-             payload: payload, when: when };
-  }
-
-  // A schedule already aimed at this device, shown on the row itself so a
-  // manual assignment is not made in ignorance of one. It reads the stored
-  // preview: a late-bound target is re-resolved at fire time, so this is the
-  // last approved answer, not a promise about the next one.
-  function pendingScheduleText(deviceId, rows) {
-    var names = (rows || []).filter(function (row) {
-      return row.state === 'pending' &&
-        ((row.preview && row.preview.device_ids) || []).indexOf(deviceId) > -1;
-    }).map(function (row) { return row.id; });
-    return names.length ? 'Scheduled: ' + names.join(', ') : '';
-  }
-  // ---- end schedule projections ----
 
   // ONE derivation of the Status cell, read by the row renderer AND by the
   // filter. It used to be written twice, and the filter's copy knew only three
@@ -725,6 +620,8 @@
     acceptCredentials: function (result, ticket) { return deviceForms.acceptCredentials(result, ticket); },
     beginImageRead: function () { return assignments.beginImageRead(); },
     acceptImages: function (result, ticket) { return assignments.acceptImages(result, ticket); },
+    beginScheduleRead: function () { return schedules.beginScheduleRead(); },
+    acceptSchedules: function (result, ticket) { return schedules.acceptSchedules(result, ticket); },
     publish: function (state, policyTicket) {
       LAST_DEVICES = state.rows; LAST_DEV_NOW = state.now; devTotal = state.total;
       imageListOk = state.imagesOk;
@@ -738,7 +635,6 @@
       LAST_JOBS_BY_DEVICE = bestJobForDevice(state.jobs);
       var liveJobIds = new Set(state.jobs.map(function (job) { return job.id; }));
       Object.keys(lastJobStep).forEach(function (id) { if (!liveJobIds.has(id)) delete lastJobStep[id]; });
-      SCHEDULES = state.schedules;
       if (policyTicket === peerPolicyReadGeneration) {
         peerPolicyReadOk = state.policyOk;
         if (state.policyOk) peerPolicy = state.policy;
@@ -758,11 +654,11 @@
     status: deviceStatusPresentation, assignedIds: rowAssignedIds,
     seriesLabel: deviceSeriesLabel, installLabel: agentInstallLabel, installRefusal: installRefusal,
     details: openDeployInfo, assign: openRowAssign,
-    scheduled: function (id) { return pendingScheduleText(id, SCHEDULES); }
+    scheduled: function (id) { return schedules.scheduled(id); }
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); }
-    else if (!document.getElementById('view-devices').hidden) deviceForms.resume();
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); }
+    else if (!document.getElementById('view-devices').hidden) { deviceForms.resume(); schedules.resume(); }
   });
 
   // React owns the details DOM and async lifetimes. Shared Inventory status
@@ -822,7 +718,7 @@
     activityCommand('visibility', {visible: !document.hidden && !document.getElementById('view-devices').hidden});
   });
   function closeMenus() { inventory.update({menu: ''}); }
-  // Remaining policy and schedule dialogs retain their existing controller.
+  // Remaining policy dialogs retain their existing controller.
   var modalOpener = null;
   function openModal(id) {
     var overlay = document.getElementById(id);
@@ -885,7 +781,6 @@
   wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
   wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
   wireModal('policy-advanced-modal', ['policy-advanced-close', 'policy-advanced-x']);
-  wireModal('sched-modal', ['sched-modal-cancel', 'sched-modal-x']);
   onInventoryAction('onboard-selected', function () { inventoryActions.open('onboard', selectedIds()); });
   onInventoryAction('undeploy-selected', function () { inventoryActions.open('undeploy', selectedIds()); });
   onInventoryAction('set-cred-selected', function () { assignments.openCredentials(selectedIds()); });
@@ -922,7 +817,7 @@
     inventory.update({bulkBusy: busy});
     BULK_BTNS.concat(BULK_OPENERS).forEach(function (id) {
       var el = document.getElementById(id);
-      if (el && !el.closest('[data-inventory-react], [data-assignments-react], [data-inventory-actions-react]')) el.disabled = busy;
+      if (el && !el.closest('[data-inventory-react], [data-assignments-react], [data-inventory-actions-react], [data-schedules-react]')) el.disabled = busy;
     });
     syncRoleActionAvailability();
   }
@@ -1891,232 +1786,23 @@
   function downloadCsv(url, filename) { return inventoryActions.download(url, filename); }
   onInventoryAction('export-csv', function () { return downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
   onInventoryAction('example-csv', function () { return downloadCsv('/api/v1/devices/example-csv', 'devices-example.csv'); });
-  // ---- schedules panel and the "Schedule…" action ----
-  // The schedules a pending window could touch, read alongside the device
-  // table so a row can say so before an operator assigns over it. A failed
-  // read leaves the previous answer alone and says nothing new: the marker is
-  // advisory, and inventing "no schedule" from a failed fetch would be worse
-  // than saying nothing at all.
-  var SCHEDULES = [];
-  var schedPanel = document.getElementById('sched-panel');
-  var schedStatus = document.getElementById('sched-status');
-  var schedRefreshGeneration = 0;
-
-  // The occurrence the row reports on: the newest one, which is the last page
-  // of an ascending history. Two small reads per schedule beat inventing a
-  // "latest" from the first page and quietly reporting last week's run.
-  async function latestOccurrence(id) {
-    var base = '/api/v1/schedules/' + encodeURIComponent(id) + '/occurrences';
-    var probe = await fetch(base + '?limit=1');
-    if (!probe.ok) return;
-    var head = await probe.json();
-    if (head.total === 0) return null;
-    if (!Number.isSafeInteger(head.total) || head.total < 0) return;
-    var page = await fetch(base + '?limit=1&offset=' + (head.total - 1));
-    if (!page.ok) return;
-    var body = await page.json();
-    return (body.occurrences || [])[0];
-  }
-
-  async function reaffirmSchedule(row) {
-    var response;
-    try {
-      response = await fetch(
-        '/api/v1/schedules/' + encodeURIComponent(row.id) + '/reaffirm', {
-          method: 'POST',
-          headers: csrfHdr({ 'Content-Type': 'application/json',
-                             'If-Match': row.etag }),
-          body: '{}'
-        });
-    } catch (e) {
-      // The request may or may not have been applied. Say that, rather than
-      // reporting a failure the operator would re-attempt blindly.
-      schedStatus.textContent = 'Re-affirming ' + row.id +
-        ' did not complete; refresh to see whether it was applied.';
-      return renderSchedules();
-    }
-    if (response.status === 412) {
-      schedStatus.textContent = 'Schedule ' + row.id +
-        ' changed elsewhere; nothing was re-affirmed. Refresh and retry.';
-    } else if (!response.ok) {
-      schedStatus.textContent = 'Re-affirming ' + row.id + ' failed (' +
-        response.status + ').';
-    } else {
-      schedStatus.textContent = 'Re-affirmed ' + row.id +
-        '; it is now owned by this account.';
-    }
-    return renderSchedules();
-  }
-
-  // At most this many schedules get their latest run read per refresh. The
-  // list itself is never truncated -- a schedule the operator cannot see is
-  // the one failure this panel exists to prevent -- only the extra per-row
-  // history read is bounded.
-  var SCHED_HISTORY_ROWS = 25;
-
-  async function renderSchedules() {
-    var mine = ++schedRefreshGeneration;
-    var rows = document.getElementById('sched-rows');
-    var response;
-    try {
-      response = await fetch('/api/v1/schedules');
-    } catch (e) {
-      schedStatus.textContent = 'Schedule list unavailable; retrying on the next refresh.';
-      return;
-    }
-    if (mine !== schedRefreshGeneration) return;
-    if (!response.ok) {
-      rows.innerHTML = '<tr><td colspan="8" class="muted">Schedule list unavailable (' +
-        response.status + ').</td></tr>';
-      return;
-    }
-    var body = await response.json();
-    if (mine !== schedRefreshGeneration) return;
-    SCHEDULES = body.schedules || [];
-    inventory.update({schedules: SCHEDULES});
-    var latest = Object.create(null);
-    for (var i = 0; i < SCHEDULES.length && i < SCHED_HISTORY_ROWS; i++) {
-      try {
-        latest[SCHEDULES[i].id] = await latestOccurrence(SCHEDULES[i].id);
-      } catch (e) { latest[SCHEDULES[i].id] = undefined; }
-      if (mine !== schedRefreshGeneration) return;
-    }
-    rows.innerHTML = SCHEDULES.length ? SCHEDULES.map(function (row) {
-      var occurrence = latest[row.id];
-      var run = occurrence
-        ? [occurrence.state, scheduleDeltaText(occurrence),
-           scheduleWaveText(occurrence)].filter(function (part) { return part; }).join(' · ')
-        : occurrence === null ? 'no run yet' : 'run history unavailable';
-      return '<tr data-id="' + esc(row.id) + '"><td class="machine"><b>' +
-        esc(row.id) + '</b></td><td>' + esc(row.kind) + '</td><td>' +
-        esc(scheduleTargetSummary(row)) + '</td><td>' +
-        esc(scheduleNextFireText(row)) + '</td><td>' + esc(row.state) +
-        '</td><td>' + esc(run) + '</td><td>' + esc(scheduleCreatorText(row)) +
-        '</td><td>' + (row.creator_exists ? '' :
-          '<button type="button" class="linkish sched-reaffirm">Re-affirm</button>') +
-        '</td></tr>';
-    }).join('') : '<tr><td colspan="8" class="muted">No schedules yet. Filter the device table, select devices, and use Schedule… in the bulk bar.</td></tr>';
-    document.querySelectorAll('#sched-rows .sched-reaffirm').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        var row = SCHEDULES.filter(function (item) { return item.id === id; })[0];
-        if (row) reaffirmSchedule(row);
-      });
-    });
-  }
-
-  function schedModalFields() {
-    var recurring = document.getElementById('sched-modal-when').value === 'recurring';
-    var assign = document.getElementById('sched-modal-kind').value === 'assign';
-    document.getElementById('sched-modal-at').closest('.field').hidden = recurring;
-    document.getElementById('sched-modal-weekday').closest('.field').hidden = !recurring;
-    document.getElementById('sched-modal-time').closest('.field').hidden = !recurring;
-    document.getElementById('sched-modal-images').closest('.field').hidden = !assign;
-    document.getElementById('sched-modal-mode').closest('.field').hidden = !assign;
-    document.getElementById('sched-modal-max').closest('.field').hidden = assign;
-  }
-
-  // What this window will actually be aimed at, in the operator's own terms,
-  // before it is created. A filter target is re-resolved at each run, so its
-  // count is the CURRENT match and is labelled as such rather than as a
-  // promise about the next run.
-  function schedModalPreview() {
-    var scope = document.getElementById('sched-modal-scope').value;
-    var selected = selectedIds().length;
-    document.getElementById('sched-modal-preview').textContent = scope === 'selection'
-      ? selected + ' selected device(s), named explicitly. Devices matching the ' +
-        'filter later are not added.'
-      : 'The current filter matches ' + devTotal + ' device(s) now. The schedule ' +
-        're-resolves it at each run, so that set can differ when it fires.';
-  }
-
-  onInventoryAction('schedule-selected', function () {
-    if (bulkBusy || !selectedIds().length) return;
-    var images = document.getElementById('sched-modal-images');
-    images.innerHTML = imageIds.map(function (id) {
-      return '<option value="' + esc(id) + '">' + esc(imageLabel(id)) + '</option>';
-    }).join('');
-    var tz = document.getElementById('sched-modal-tz');
-    if (!tz.value) {
-      try { tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
-      catch (e) { tz.value = 'UTC'; }
-    }
-    document.getElementById('sched-modal-msg').textContent = '';
-    document.getElementById('sched-modal-count').textContent =
-      selectedIds().length + ' selected';
-    schedModalFields();
-    schedModalPreview();
-    openModal('sched-modal');
+  // Schedules share read ordering with Inventory and use the same write lock.
+  schedules.connect({
+    fetch: fetch, post: jpost, headers: csrfHdr,
+    isVisible: function () { return !document.hidden && !document.getElementById('view-devices').hidden; },
+    publishSchedules: function (patch) { inventory.update(patch); },
+    refreshInventory: refreshDevices,
+    report: function (message, failed) { inventory.report(message, failed); },
+    claimBulk: function () {
+      if (bulkBusy || inventory.snapshot().rowBusy.size) return false;
+      cancelSelectAllMatching(); setBulkBusy(true); return true;
+    },
+    releaseBulk: function () { setBulkBusy(false); }
   });
-  ['sched-modal-when', 'sched-modal-kind'].forEach(function (id) {
-    document.getElementById(id).addEventListener('change', schedModalFields);
-  });
-  document.getElementById('sched-modal-scope').addEventListener('change', schedModalPreview);
-
-  document.getElementById('create-schedule').addEventListener('click', async function () {
-    var msg = document.getElementById('sched-modal-msg');
-    msg.textContent = '';
-    var scope = document.getElementById('sched-modal-scope').value;
-    var ids = scope === 'selection' ? claimSelection() : selectedIds();
-    if (scope === 'selection' && !ids) return;
-    if (scope !== 'selection') setBulkBusy(true);
-    var recurring = document.getElementById('sched-modal-when').value === 'recurring';
-    var time = (document.getElementById('sched-modal-time').value || '02:30').split(':');
-    var at = document.getElementById('sched-modal-at').value;
-    var values = {
-      id: document.getElementById('sched-modal-id').value.trim(),
-      kind: document.getElementById('sched-modal-kind').value,
-      target: scheduleTargetFromFilters(deviceFilterState(), ids, scope),
-      imageIds: Array.prototype.slice.call(
-        document.getElementById('sched-modal-images').selectedOptions || []
-      ).map(function (option) { return option.value; }),
-      mode: document.getElementById('sched-modal-mode').value,
-      maxDevices: parseInt(document.getElementById('sched-modal-max').value, 10),
-      telemetry: true, telemetryStream: false,
-      recurring: recurring,
-      at: recurring ? 0 : Math.floor(new Date(at).getTime() / 1000),
-      weekday: parseInt(document.getElementById('sched-modal-weekday').value, 10),
-      hour: parseInt(time[0], 10), minute: parseInt(time[1], 10),
-      tz: document.getElementById('sched-modal-tz').value.trim(),
-      windowSeconds: Math.round(
-        parseFloat(document.getElementById('sched-modal-window').value) * 60)
-    };
-    if (!values.id) { msg.textContent = 'Give the schedule an id.'; setBulkBusy(false); return; }
-    if (!recurring && !(values.at > 0)) {
-      msg.textContent = 'Choose when this window starts.'; setBulkBusy(false); return;
-    }
-    if (values.kind === 'assign' && !values.imageIds.length) {
-      msg.textContent = 'Choose at least one image to assign.'; setBulkBusy(false); return;
-    }
-    msg.textContent = 'Creating… Closing this dialog does not cancel the request.';
-    try {
-      var response = await jpost('/api/v1/schedules',
-                                 scheduleDefinitionFromForm(values));
-      var body = await response.json().catch(function () { return {}; });
-      if (response.ok) {
-        devStatus.textContent = 'Schedule ' + values.id + ' created; next run ' +
-          scheduleNextFireText(body.schedule || {}) + '.';
-        closeModal('sched-modal');
-        schedPanel.hidden = false;
-        await renderSchedules();
-        refreshDevices().catch(function () {});
-      } else {
-        msg.textContent = 'Schedule not created: ' +
-          (body.title || body.error || response.status) + '.';
-      }
-    } catch (e) {
-      msg.textContent = 'Response unavailable. The schedule may have been created; refresh schedules before trying again.';
-    } finally {
-      setBulkBusy(false);
-    }
-  });
-
-  onInventoryAction('manage-schedules', function () {
-    schedPanel.hidden = !schedPanel.hidden;
-    if (!schedPanel.hidden) renderSchedules();
-  });
-  document.getElementById('sched-close').addEventListener('click', function () { schedPanel.hidden = true; });
-  document.getElementById('sched-refresh').addEventListener('click', function () { renderSchedules(); });
+  inventory.subscribe(function () { schedules.prerequisites(inventory.snapshot()); });
+  schedules.prerequisites(inventory.snapshot());
+  onInventoryAction('schedule-selected', function () { schedules.open(inventory.snapshot()); });
+  onInventoryAction('manage-schedules', function () { return schedules.togglePanel(); });
 
 
   // ---- Overview: "Needs attention" band (worst-of-group rollups) --------
@@ -4454,7 +4140,7 @@
       closeModal('role-def-modal');
       closeModal('policy-advanced-modal');
     }
-    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); }
+    if (view !== 'devices') { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); }
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });
@@ -4477,7 +4163,7 @@
     else if (view === 'images') {
       refreshImages(); refreshImportable();
       poll = function () { refreshImages(); refreshImportable(); };
-    } else if (view === 'devices') { refreshDevices(); deviceForms.resume(); poll = pollDevices; }
+    } else if (view === 'devices') { refreshDevices(); deviceForms.resume(); schedules.resume(); poll = pollDevices; }
     else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'settings') { refreshSetup(); } // showSettingsSub already refreshes the form data.

@@ -126,6 +126,11 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       retirement. Partial or unknown targets stay selected, even if their
       rows have left Inventory. Read the named cleanup steps and audit trail
       before retrying.</li>
+      <li>Schedule dialogs keep the filter and selected devices reviewed at
+      opening. Check <strong>Reviewed target</strong> before creating a window.
+      An unknown creation result needs <strong>Refresh schedules before
+      retrying</strong>; check whether the named schedule already exists.
+      Closing the dialog does not cancel a submitted request.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>

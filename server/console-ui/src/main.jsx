@@ -16,6 +16,7 @@ import { mountInventory } from './inventory.jsx';
 import { mountDeviceForms } from './device-forms.jsx';
 import { mountAssignments } from './assignments.jsx';
 import { mountInventoryActions } from './inventory-actions.jsx';
+import { mountSchedules } from './schedules.jsx';
 import './shell.css';
 
 const primary = [
@@ -211,6 +212,7 @@ export function mountConsoleShell() {
     mountDeviceForms();
     mountAssignments();
     mountInventoryActions();
+    mountSchedules();
   });
 }
 

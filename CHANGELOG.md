@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move schedule creation, history and ownership actions into React. Keep the
+  reviewed target fixed, order panel and Inventory reads, preserve conditional
+  ownership writes, and require review after an unknown creation result.
+
 - Move inventory CSV, Onboard/Undeploy options, Adopt and Delete actions into
   React. Keep job targets and options fixed after review, serialize CSV imports
   with other device edits, and reject stale downloads. Report incomplete
