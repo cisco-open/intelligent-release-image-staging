@@ -1110,6 +1110,45 @@ def test_snapshot_copy_falls_back_for_nested_and_non_json_values():
     assert rows["c"]["set"] == {3}
 
 
+def test_snapshot_copy_plan_is_reused_only_for_unchanged_private_rows(tmp_path, monkeypatch):
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"), cache_snapshots=True)
+    store.put("edge-a", {"value": "flat"})
+    choose = keyed_state._snapshot_copier
+    selected = []
+    reads = []
+    signature = store._snapshot_signature
+
+    def plan(rows):
+        copier = choose(rows)
+        selected.append(copier)
+        return copier
+
+    def fresh(path):
+        reads.append(path)
+        return signature(path)
+
+    monkeypatch.setattr(keyed_state, "_snapshot_copier", plan)
+    monkeypatch.setattr(store, "_snapshot_signature", fresh)
+    first = store.snapshot()
+    first["edge-a"]["value"] = {"caller-owned": []}
+    cold_reads = len(reads)
+    for _ in range(5):
+        assert store.snapshot() == {"edge-a": {"value": "flat"}}
+    assert selected == [keyed_state._copy_flat_rows]
+    assert len(reads) == cold_reads + 5  # Fresh open/hash on every request.
+
+    # A writer can change the shape. The fresh-content guard selects a new
+    # copier, and neither cold nor warm returned nested values alias the cache.
+    store.put("edge-a", {"value": [1, {"nested": 2}]})
+    nested = store.snapshot()
+    nested["edge-a"]["value"][1]["nested"] = 99
+    warm = store.snapshot()
+    assert warm == {"edge-a": {"value": [1, {"nested": 2}]}}
+    warm["edge-a"]["value"].append("changed")
+    assert store.snapshot() == {"edge-a": {"value": [1, {"nested": 2}]}}
+    assert selected == [keyed_state._copy_flat_rows, keyed_state.copy.deepcopy]
+
+
 def test_opt_in_snapshot_cache_invalidates_on_chmod_and_fails_closed_on_corruption(
         tmp_path, monkeypatch):
     path = str(tmp_path / "fleet.json")

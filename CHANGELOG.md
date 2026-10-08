@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Reuse defensive-copy plans for unchanged inventory rows, while retaining
+  fresh content and permission checks on every read.
+
 - Add a retained-input aria2 rebuild helper with exact APK hashes for amd64 and
   ARM64. It bypasses withdrawn package-index entries while preserving the
   published source and accepting only binaries that match the committed clients.

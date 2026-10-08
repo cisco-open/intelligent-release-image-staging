@@ -157,6 +157,14 @@ uploads, and external exports still need their own controlled scenarios.
 These checks confirm the API path works; they do not establish production
 capacity or justify a rate-limit change.
 
+An isolated 2026-10-08 comparison used 500 synthetic devices, 64 authenticated
+HTTP requests per phase, concurrency 1/4/16, and two before/after trials in
+reversed order. Reusing cached row-copy plans reduced CPU work in the storage
+profile, but HTTP results overlapped: at concurrency 16, inventory p95 was
+376–406 ms before and 365–407 ms after; Overview was 428–466 ms before and
+429–486 ms after. All 2,304 requests passed. This is no evidence of higher
+sustained capacity. Keep the current limits pending mixed-workload qualification.
+
 ## Related
 
 - [Verify the installation](../zensical/install/verify.md)
