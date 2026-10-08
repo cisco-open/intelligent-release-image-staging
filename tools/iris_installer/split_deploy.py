@@ -17,12 +17,11 @@ import os
 from pathlib import Path
 import re
 import shlex
-import socket
 import stat
 import subprocess
 import tempfile
 
-from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, digest, run
+from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, check_tcp_endpoint, digest, run
 from .state import InstallError, atomic_write, regular_bytes
 
 
@@ -76,11 +75,7 @@ def preflight(config, runner=run):
     """Check local listeners and remote custody/port without claiming resources."""
     validate_split_config(config)
     for port in (6969, 8443, 8000, 6881, 9101, 9443):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind((config['host'], port))
-            except OSError:
-                raise InstallError('Server listener is unavailable; no deployment was created') from None
+        check_tcp_endpoint(config['host'], port)
     code = r'''
 import json,os,pathlib,platform,shutil,socket,subprocess,sys
 r=json.load(sys.stdin); root=pathlib.Path(r['console_state_dir'])
@@ -89,7 +84,10 @@ for path in [*reversed(root.parents),root]:
  if path.is_symlink(): raise RuntimeError('Unsafe Console custody path')
  if path.exists() and (path.stat().st_uid!=0 or path.stat().st_mode&0o022): raise RuntimeError('Unsafe Console parent')
 if root.exists() or not root.parent.is_dir(): raise RuntimeError('Console custody must be new with an existing parent')
-with socket.socket() as sock: sock.bind((r['console_bind'],r['console_port']))
+with socket.socket() as sock:
+ sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+ sock.bind((r['console_bind'],r['console_port']))
+ sock.listen(1)
 if shutil.which('docker'):
  for kind in ('container','volume','network'):
   args=['docker',kind,'ls','-q']+(['-a'] if kind=='container' else [])

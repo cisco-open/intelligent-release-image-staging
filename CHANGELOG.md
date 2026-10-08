@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Allow installer port checks to pass after closed TCP connections while still
+  rejecting active listeners. Cover single and split Docker hosts. Recovery
+  errors now give the supported terminal commands for the selected deployment.
+
 - Prepare both IOx architectures with verified SHA512 package manifests for
   native Polaris signing. Exclude signature files from manifests and refuse
   to rewrite signed wrappers. Keep image payloads and OCI digests unchanged.

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -131,15 +132,24 @@ def read_roots(directory):
     return roots
 
 
+def check_tcp_endpoint(host, port):
+    """Permit a service restart through TIME_WAIT, but never replace a listener."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+            # Bind alone can succeed beside another reusable bound socket.
+            # Probe the operation the new service actually needs as well.
+            sock.listen(1)
+        except OSError as exc:
+            raise InstallError(f"Address unavailable or port occupied: {host}:{port}; nothing will be replaced") from exc
+
+
 def port_preflight(config):
     endpoints = [(config["host"], port) for port in (6969, 8443, 8000, 6881, 9101)]
     endpoints.append((config["console_bind"], config["console_port"]))
     for host, port in endpoints:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind((host, port))
-            except OSError as exc:
-                raise InstallError(f"Address unavailable or port occupied: {host}:{port}; nothing will be replaced") from exc
+        check_tcp_endpoint(host, port)
 
 
 class DockerInstall:
@@ -392,16 +402,20 @@ class DockerInstall:
         assert_no_pending_restore(self.journal)
         operation = self.base / 'credential-operation.json'
         if operation.exists() or operation.is_symlink():
+            command = 'sudo irisctl maintenance --state-dir ' + shlex.quote(str(self.base))
+            recovery_hint = (
+                f' Run `{command} status`, then select the recorded operation with '
+                f'`{command} recover --job-id <operation-id> --allow-downtime`.')
             try:
                 authority = json.loads(regular_bytes(operation))
             except (OSError, ValueError, InstallError):
-                raise InstallError('Credential maintenance authority is unreadable; preserve it and use the host maintenance UI') from None
+                raise InstallError('Credential maintenance authority is unreadable; preserve the journal.' + recovery_hint) from None
             terminal = isinstance(authority, dict) and (
                 authority.get('phase') == 'rotated' or (
                     authority.get('phase') == 'refused' and authority.get('mutations_admitted') is False))
             if (not terminal
                     or authority.get('instance_id') != self.journal.document['id']):
-                raise InstallError('Recover the approved credential operation in the host maintenance UI before resuming installation')
+                raise InstallError('Recover the approved credential operation before resuming installation.' + recovery_hint)
         self.verify_inputs()
         ubuntu.provision(self.command)
         self.verify_resource_ownership()

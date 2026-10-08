@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import shlex
 import sys
 from types import SimpleNamespace
 
@@ -337,8 +338,12 @@ def test_resume_cannot_bypass_interrupted_credential_maintenance(installation, m
     monkeypatch.setattr(installation, 'verify_inputs', lambda: called.append('must-not-run'))
     (installation.base / 'credential-operation.json').write_text(json.dumps({
         'phase': phase, 'instance_id': installation.journal.document['id']}))
-    with pytest.raises(InstallError, match='host maintenance UI'):
+    with pytest.raises(InstallError, match='irisctl maintenance') as error:
         installation.resume()
+    message = str(error.value)
+    assert '--state-dir ' + shlex.quote(str(installation.base)) + ' status' in message
+    assert 'recover --job-id <operation-id> --allow-downtime' in message
+    assert 'maintenance UI' not in message
     assert called == []
 
 
@@ -353,7 +358,7 @@ def test_resume_rejects_untrusted_credential_authority(installation, monkeypatch
         target.symlink_to(installation.base / 'missing-authority')
     else:
         target.write_text(json.dumps({'phase': 'rotated', 'instance_id': 'another-deployment'}))
-    with pytest.raises(InstallError, match='maintenance UI'):
+    with pytest.raises(InstallError, match='irisctl maintenance'):
         installation.resume()
     assert called == []
 
@@ -373,7 +378,7 @@ def test_resume_terminal_maintenance_requires_no_mutation_refusal(installation, 
             installation.resume()
         assert called == ['allowed']
     else:
-        with pytest.raises(InstallError, match='maintenance UI'):
+        with pytest.raises(InstallError, match='irisctl maintenance'):
             installation.resume()
         assert called == []
 
