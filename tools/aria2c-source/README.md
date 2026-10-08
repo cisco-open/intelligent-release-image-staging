@@ -10,7 +10,12 @@ provides both compiled clients and `aria2c-2.5.6-p10-source.tar.gz`. Download
 that source asset into a new working directory, then verify it against the
 tracked [source.sha256](source.sha256) before extraction. The adjacent release
 checksum file carries the same digest. Inside the extracted directory, run
-`sha256sum -c SHA256SUMS` and follow its `README.md` to rebuild.
+`sha256sum -c SHA256SUMS` to check its members.
+
+For rebuilding, use the current [checksum-locked APK helper](../aria2c-build/README.md#rebuilding)
+with the unchanged archive. The archive's original driver depends on a rolling
+Alpine index that no longer includes every pinned package. The new helper
+retains exact APKs and accepts output only if it matches the distributed binary.
 
 The binary identities remain pinned in [`../aria2c.sha256`](../aria2c.sha256).
 The source archive supplements those clients; normal installations do not need

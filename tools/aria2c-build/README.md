@@ -99,43 +99,44 @@ update the source asset record and default `ARIA2C_RELEASE_TAG` in
 
 ## Rebuilding
 
+Use the published matching source archive and the checksum-locked dependency
+helper from this checkout. See [source download and verification](../aria2c-source/README.md).
+
 ```bash
-git clone https://github.com/AnInsomniacy/aria2-next vendor/aria2-next
-git -C vendor/aria2-next checkout v2.5.6
-./build.sh x86_64      # or: ./build.sh aarch64
+python3 tools/aria2c-build/rebuild-pinned.py x86_64 \
+  --source-archive /path/to/aria2c-2.5.6-p10-source.tar.gz \
+  --cache /path/to/retained-apks --output /path/to/new-output --jobs 2
 ```
 
-`build.sh` refuses to proceed unless the checkout is at the pinned commit, and
-refuses any patch that does not apply cleanly to it, so a build either
-corresponds to the published patches or it fails.
+Run from the repository root. Use `aarch64` for ARM64, with a native builder or
+already configured emulation. Python 3.11+, git, Docker and buildx are required.
+The script verifies the published archive, reconstructs its exact patched
+source, and checks the rebuilt binary against the distributed checksum before
+adopting the output. It leaves the original source archive and clients unchanged.
 
-Builds default to two compiler and LTO jobs, including under ARM emulation.
-Set `ARIA2C_BUILD_JOBS=4 ./build.sh x86_64` to choose another positive bound.
-LTO and static linking remain enabled.
+The cache contains all 53 exact packages used by each architecture, including
+transitive dependencies. Downloads use HTTPS and pinned byte sizes and SHA256
+hashes. The build also verifies Alpine signatures using the pinned base image's
+architecture-specific trust keys. Compiler commands, static linking and LTO
+are unchanged; two compiler/LTO jobs are used by default.
+
+Retain the cache and base image for repeat builds. Add `--offline` to refuse
+package downloads and `--no-cache` to disable Docker build-layer reuse.
+Build steps run without network access in both modes. A changed cached file,
+missing offline input or binary mismatch stops the build without replacing
+existing output. These are contributor tools; installations use committed clients.
 
 ### When a pin has been withdrawn
 
-`Dockerfile` pins the base image by digest and every Alpine package by exact
-version, so a rebuild either resolves the same inputs or fails. It can fail:
-an Alpine release branch indexes only the newest `-rN` of each package, so a
-security bump withdraws the version we pinned and `apk add` refuses the set:
+The original archive's `rebuild.py` and producer `build.sh` use Alpine's rolling
+package index, which no longer lists every pinned version. Use the helper above:
+it acquires exact APK files from the recorded mirrors instead of resolving that
+index. Mirrors can also remove files, so retain the checked cache. No mirror is
+trusted to substitute bytes or signing keys.
 
-```
-ERROR: unable to select packages:
-  openssl-dev-3.5.8-r0: breaks: world[openssl-dev=3.5.7-r0]
-```
-
-That is the pinning working, not a bug to route around. Bump the withdrawn pin
-to the version the branch now carries — deliberately, in the file, keeping the
-`=version` — and note that the rebuilt binary then links the newer library and
-will not reproduce the shipped bytes. Never replace a pin with a floating
-package name to make the error go away.
-
-A rebuild with the recorded inputs can match `tools/aria2c.sha256`; a fresh
-x86_64 rebuild has done so. Changing a toolchain, library version or flag can
-produce different bytes. The checksum pins the exact artifact IRIS ships.
-Update it only when deliberately adopting and validating a new binary, never
-to silence an unexplained mismatch.
+Do not bump a dependency merely to make an old binary reproduce. A deliberately
+updated client needs matched binaries, corresponding source, notices and tests
+for both architectures. Existing published assets remain unchanged.
 
 ## Peer-cap regression checks
 
