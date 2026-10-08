@@ -1357,6 +1357,23 @@ def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
                 assert "schedule_not_found" in operation["responses"]["404"]["x-iris-problem-codes"]
 
 
+def test_projection_wait_refusal_is_documented_only_on_affected_gets():
+    spec = json.loads(SPEC.read_text())
+    expected = {prefix + suffix for prefix in ("/api/v1", "/internal/v1")
+                for suffix in ("/devices", "/overview", "/peer-policy")}
+    actual = set()
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            if not isinstance(operation, dict):
+                continue
+            response = operation.get("responses", {}).get("503", {})
+            if "projection-busy" in response.get("x-iris-problem-codes", []):
+                assert method == "get"
+                assert "Retry-After" in response["headers"]
+                actual.add(path)
+    assert actual == expected
+
+
 def test_schedule_container_installs_timezone_data_and_executable_cli():
     dockerfile = (SPEC.parents[2] / "server" / "Dockerfile").read_text()
     logical = dockerfile.replace("\\\n", " ")

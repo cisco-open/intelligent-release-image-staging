@@ -1314,6 +1314,15 @@ def _problem_variants(route, status):
     if _instruction_resource(route):
         return _instruction_problem_variants(route, status)
     suffix = _resource_suffix(route)
+    if status == 503 and route.service in ("console", "management") \
+            and route.method == "GET" \
+            and suffix in ("/devices", "/overview", "/peer-policy"):
+        values = [("projection-busy", "Device status temporarily busy"),
+                  api_problem.STATUS_DEFAULTS[status]]
+        if route.service == "console":
+            values.append(("management-api-unavailable",
+                           "Management API unavailable"))
+        return tuple(values)
     if route.service == "artifact":
         if status == 403 and route.security == "legacyGuestShell":
             return (("artifact-forbidden", "Artifact forbidden"),)

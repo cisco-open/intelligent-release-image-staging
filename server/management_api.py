@@ -69,6 +69,7 @@ import otlp
 import peer_endpoints
 import peer_policy
 import peer_enforcement
+import projection_reads
 import role_csv
 import role_management
 import schedule_runner
@@ -3103,6 +3104,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     api_rate_limiter = (api_rate_limiter or
                         api_rate_limit.AggregateRateLimiter.from_env())
     login_limiter = gui_auth.LoginRateLimiter()
+    projection_gate = projection_reads.ReadProjectionGate()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
     # jobs remain authoritative after restart; the ledger prevents the common
@@ -3342,6 +3344,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "instruction_status": instruction["instruction_status"],
                 "enforcement": enforcement, "origin_qos": origin_view,
                 "instruction_keys": custody}
+
+    @projection_gate.ordered
+    def policy_read_view():
+        # Mutation preflight and refusal paths keep calling policy_view directly:
+        # they never wait on the read-only projection queue or hold it for a write.
+        return policy_view()
 
     def role_policy_snapshot():
         """The authoritative policy result used by preview drift checks."""
@@ -4579,7 +4587,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/peer-policy":
                 if app.session_info(self._sid()) is None:
                     self._session_refusal(); return
-                view = policy_view()
+                try:
+                    view = policy_read_view()
+                except projection_reads.ProjectionBusy:
+                    self._projection_busy(); return
                 self._json(200, view, extra_headers=[
                     ("ETag", _revision_etag("peer-policy", view["revision"]))])
                 return
@@ -4704,6 +4715,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     rows, total, revision, target_facts = self._device_page(
                         limit, offset, q, filters)
+                except projection_reads.ProjectionBusy:
+                    self._projection_busy(); return
                 except deployment_records.RecordStoreUnreadable:
                     self._json(503, {
                         "error": "deployment targeting facts unavailable"})
@@ -4945,7 +4958,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/overview":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                self._json(200, self._overview()); return
+                try:
+                    view = self._overview()
+                except projection_reads.ProjectionBusy:
+                    self._projection_busy(); return
+                self._json(200, view); return
             if path == "/api/swarm":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -5133,6 +5150,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._serve_static("/login.html"); return
             self._serve_static(path)
 
+        def _projection_busy(self):
+            api_problem.send(
+                self, 503, "projection-busy", "Device status temporarily busy",
+                headers=(("Retry-After", "1"),))
+
         def _device_view(self):
             """The complete Inventory projection, in fleet store order."""
             return self._device_page()[0]
@@ -5151,6 +5173,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 hb.get(device.get("device_id"), {}),
                 jobs.get(device.get("device_id"))) for device in devices]
 
+        @projection_gate.ordered
         def _device_page(self, limit=None, offset=0, q=None, filters=None):
             """(rows, total, revision, target_facts) for the device projection.
 
@@ -5496,6 +5519,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             staged, errored = set(sids), set(eids)
             return any(iid not in staged and iid not in errored for iid in ids)
 
+        @projection_gate.ordered
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
             # One staging-only pass feeds rollout, totals and awaiting count;

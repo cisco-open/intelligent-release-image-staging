@@ -790,10 +790,11 @@
             }
           },
           "503": {
-            "description": "Management api unavailable or Service unavailable",
+            "description": "Device status temporarily busy or Service unavailable or Management API unavailable",
             "x-iris-problem-codes": [
-              "management-api-unavailable",
-              "service-unavailable"
+              "projection-busy",
+              "service-unavailable",
+              "management-api-unavailable"
             ],
             "content": {
               "application/problem+json": {
@@ -801,12 +802,12 @@
                   "$ref": "#/components/schemas/Problem"
                 },
                 "examples": {
-                  "management-api-unavailable": {
+                  "projection-busy": {
                     "value": {
-                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
-                      "title": "Management api unavailable",
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#projection-busy",
+                      "title": "Device status temporarily busy",
                       "status": 503,
-                      "code": "management-api-unavailable"
+                      "code": "projection-busy"
                     }
                   },
                   "service-unavailable": {
@@ -815,6 +816,14 @@
                       "title": "Service unavailable",
                       "status": 503,
                       "code": "service-unavailable"
+                    }
+                  },
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
                     }
                   }
                 }
@@ -15636,10 +15645,11 @@
             }
           },
           "503": {
-            "description": "Management API unavailable or Service unavailable",
+            "description": "Device status temporarily busy or Service unavailable or Management API unavailable",
             "x-iris-problem-codes": [
-              "management-api-unavailable",
-              "service-unavailable"
+              "projection-busy",
+              "service-unavailable",
+              "management-api-unavailable"
             ],
             "content": {
               "application/problem+json": {
@@ -15647,12 +15657,12 @@
                   "$ref": "#/components/schemas/Problem"
                 },
                 "examples": {
-                  "management-api-unavailable": {
+                  "projection-busy": {
                     "value": {
-                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
-                      "title": "Management API unavailable",
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#projection-busy",
+                      "title": "Device status temporarily busy",
                       "status": 503,
-                      "code": "management-api-unavailable"
+                      "code": "projection-busy"
                     }
                   },
                   "service-unavailable": {
@@ -15661,6 +15671,14 @@
                       "title": "Service unavailable",
                       "status": 503,
                       "code": "service-unavailable"
+                    }
+                  },
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
                     }
                   }
                 }
@@ -26237,10 +26255,11 @@
             }
           },
           "503": {
-            "description": "Management API unavailable or Service unavailable",
+            "description": "Device status temporarily busy or Service unavailable or Management API unavailable",
             "x-iris-problem-codes": [
-              "management-api-unavailable",
-              "service-unavailable"
+              "projection-busy",
+              "service-unavailable",
+              "management-api-unavailable"
             ],
             "content": {
               "application/problem+json": {
@@ -26248,12 +26267,12 @@
                   "$ref": "#/components/schemas/Problem"
                 },
                 "examples": {
-                  "management-api-unavailable": {
+                  "projection-busy": {
                     "value": {
-                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
-                      "title": "Management API unavailable",
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#projection-busy",
+                      "title": "Device status temporarily busy",
                       "status": 503,
-                      "code": "management-api-unavailable"
+                      "code": "projection-busy"
                     }
                   },
                   "service-unavailable": {
@@ -26262,6 +26281,14 @@
                       "title": "Service unavailable",
                       "status": 503,
                       "code": "service-unavailable"
+                    }
+                  },
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
                     }
                   }
                 }
@@ -43462,8 +43489,9 @@
             }
           },
           "503": {
-            "description": "Service unavailable",
+            "description": "Device status temporarily busy or Service unavailable",
             "x-iris-problem-codes": [
+              "projection-busy",
               "service-unavailable"
             ],
             "content": {
@@ -43471,11 +43499,23 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 },
-                "example": {
-                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
-                  "title": "Service unavailable",
-                  "status": 503,
-                  "code": "service-unavailable"
+                "examples": {
+                  "projection-busy": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#projection-busy",
+                      "title": "Device status temporarily busy",
+                      "status": 503,
+                      "code": "projection-busy"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
                 }
               }
             },
@@ -56998,8 +57038,9 @@
             }
           },
           "503": {
-            "description": "Service unavailable",
+            "description": "Device status temporarily busy or Service unavailable",
             "x-iris-problem-codes": [
+              "projection-busy",
               "service-unavailable"
             ],
             "content": {
@@ -57007,11 +57048,23 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 },
-                "example": {
-                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
-                  "title": "Service unavailable",
-                  "status": 503,
-                  "code": "service-unavailable"
+                "examples": {
+                  "projection-busy": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#projection-busy",
+                      "title": "Device status temporarily busy",
+                      "status": 503,
+                      "code": "projection-busy"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
                 }
               }
             },
@@ -66144,8 +66197,9 @@
             }
           },
           "503": {
-            "description": "Service unavailable",
+            "description": "Device status temporarily busy or Service unavailable",
             "x-iris-problem-codes": [
+              "projection-busy",
               "service-unavailable"
             ],
             "content": {
@@ -66153,11 +66207,23 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 },
-                "example": {
-                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
-                  "title": "Service unavailable",
-                  "status": 503,
-                  "code": "service-unavailable"
+                "examples": {
+                  "projection-busy": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#projection-busy",
+                      "title": "Device status temporarily busy",
+                      "status": 503,
+                      "code": "projection-busy"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
                 }
               }
             },

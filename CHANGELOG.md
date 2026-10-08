@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Order Inventory, Overview and sharing-policy status reads to reduce file-read
+  contention. Read current state for every request, leave writes independent,
+  and return a retryable 503 if a read waits too long to start.
+
 - Check selected device IDs before claiming all filter matches are selected.
   Show selections outside the current page or filter. Apply Select all only
   after every page succeeds; cancel stale reads when the target changes and

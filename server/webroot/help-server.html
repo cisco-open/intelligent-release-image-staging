@@ -90,6 +90,10 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       read-only tier-token and management-CA mounts. Confirm the management
       certificate covers the hostname or IP in the URL. A browser
       certificate and the management CA serve different connections.</li>
+      <li>If the response code is <code>projection-busy</code>, a device-status
+      read waited too long behind another read. Retry after
+      <code>Retry-After</code>; repeated failures call for checking server load
+      and storage health.</li>
       <li>Use <code>/readyz</code> for readiness: on server port 9101 it
       checks the tracker, catalog, artifact, and management listeners.
       <code>/healthz</code> only proves the telemetry process answers.

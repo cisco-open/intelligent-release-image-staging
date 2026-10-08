@@ -94,6 +94,45 @@ apply this figure to a different host or fleet. See
 method without the figures, and
 [tools/api-exercise.py](api-exercise.md) for the harness that produced them.
 
+## Fleet API projection comparisons - 2026-10-08
+
+An isolated comparison used 500 synthetic devices, 64 authenticated HTTP
+requests per phase, concurrency 1/4/16, and two before/after trials in reversed
+order. Reusing cached row-copy plans reduced CPU work in the storage profile,
+but HTTP results overlapped: at concurrency 16, Inventory p95 was 376–406 ms
+before and 365–407 ms after; Overview was 428–466 ms before and 429–486 ms
+after. All 2,304 requests passed.
+
+A second comparison added assignments and heartbeats for half of the 500
+devices. All 2,304 authenticated responses matched the previous implementation.
+Skipping unconsumed Inventory detail reduced Overview p95 at concurrency 16
+from 1,285–1,301 ms to 1,074–1,231 ms. Throughput rose from 13.0–13.3 to
+14.9–15.6 requests per second. Inventory and sharing-policy contention remained.
+This richer fixture is not directly comparable with the first run.
+
+A third paired comparison used that richer fixture to test ordered read
+admission against commit `b7fb9e4`. All 2,304 responses again returned 200 and
+matched the baseline JSON. At concurrency 16:
+
+| Read | Before p95 | After p95 | Before requests/second | After requests/second |
+| --- | --- | --- | --- | --- |
+| Inventory | 1,136–1,226 ms | 690–751 ms | 13.54–14.77 | 22.17–24.34 |
+| Sharing policy | 1,168–1,215 ms | 722–730 ms | 13.95–14.89 | 22.88–22.89 |
+| Overview | 1,075–1,149 ms | 681–724 ms | 14.56–15.42 | 23.25–24.57 |
+
+The queue restores throughput near the serial result; it does not provide
+linear scaling. A separate short correctness check ran 12 mixed-read workers
+alongside one writer: 192 reads, 32 inventory writes and 32 direct heartbeat
+writes. Every HTTP response was 200, and the final inventory read showed the
+new revision and last write. Deterministic tests cover FIFO entry, failures,
+expired waits, independent writes and response sends, and fresh state after
+waiting. The measurement and mixed checks used disposable local state.
+
+These short local HTTP checks did not qualify TLS, live deployments, sustained
+mixed workload, capacity or higher admission limits. See
+[the API test harness](api-exercise.md) for the current read behavior and test
+method.
+
 ## Telemetry WAN cost and peer-sampling coverage
 
 [Limitations](../zensical/architecture/limitations.md) and

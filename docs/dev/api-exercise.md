@@ -157,14 +157,6 @@ uploads, and external exports still need their own controlled scenarios.
 These checks confirm the API path works; they do not establish production
 capacity or justify a rate-limit change.
 
-An isolated 2026-10-08 comparison used 500 synthetic devices, 64 authenticated
-HTTP requests per phase, concurrency 1/4/16, and two before/after trials in
-reversed order. Reusing cached row-copy plans reduced CPU work in the storage
-profile, but HTTP results overlapped: at concurrency 16, inventory p95 was
-376–406 ms before and 365–407 ms after; Overview was 428–466 ms before and
-429–486 ms after. All 2,304 requests passed. This is no evidence of higher
-sustained capacity. Keep the current limits pending mixed-workload qualification.
-
 Overview reads current inventory, assignment, heartbeat and onboarding-job state
 without building the targeting and instruction details used by Inventory.
 Inventory keeps those checks. Unfiltered page counts use the same server-owned
@@ -172,12 +164,17 @@ OS and role data as the full projection, without classifying off-page models.
 Regression tests compare complete Overview responses with the detailed path and
 check that changed state is visible and failed source reads remain errors.
 
-A second comparison on the same date added assignments and heartbeats for half
-of the 500 devices. All 2,304 authenticated responses matched the previous
-implementation. At concurrency 16, Overview p95 fell from 1,285–1,301 ms to
-1,074–1,231 ms, with throughput rising from 13.0–13.3 to 14.9–15.6 requests per
-second. Inventory and peer-policy still showed contention. This richer fixture
-is not directly comparable with the earlier run and does not establish capacity.
+Inventory, Overview and sharing-policy GETs share a FIFO read queue within one
+server instance. They read fresh authorities after entry; there is no response
+cache. Mutations, heartbeats, sessions and response transmission do not join
+this queue. A waiting read times out after ten seconds with 503
+`projection-busy` and `Retry-After`. This bounds waiting, not filesystem I/O or
+execution time. The existing HTTP worker pool bounds the number of waiters.
+The queue neither makes multi-file reads atomic nor changes API rate budgets.
+
+Keep comparison results in [Dated lab evidence](validation-records.md#fleet-api-projection-comparisons-2026-10-08).
+Short paired runs help find regressions; they do not establish sustained
+capacity or justify raising the request budget.
 
 ## Related
 

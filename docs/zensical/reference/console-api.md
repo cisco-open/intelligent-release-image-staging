@@ -190,6 +190,11 @@ Set a shared request budget with `IRIS_API_RATE_TOTAL`, and optionally narrower 
 
 A rejected request returns 429 with `Retry-After`; wait at least that long, with jitter, before retrying. A 207 means part of a bulk request succeeded, which is not the same as a 429. See [Automate with the API](../user-guide/automation.md) for both cases worked through. The budget is per server process; see [Limitations](../architecture/limitations.md).
 
+Inventory, Overview and sharing-policy status reads take turns within the
+server process. Each reads current state when its turn begins. If a read waits
+longer than ten seconds, it returns 503 with
+[`projection-busy`](../problems.md#projection-busy) and `Retry-After`.
+
 ## Browse the API reference
 
 Open **Help → Local API reference (Swagger)** in the Console to browse the same routes, generated from the running server's contract. The documentation site publishes the same read-only view. There is no **Try it out** button or authorization field; send real requests through the Console or your own client. A header switch shows Console routes alone or every service, including the device-facing catalog and tracker APIs.

@@ -95,7 +95,10 @@ def test_overview_light_projection_matches_detailed_rows_and_expected_totals(pro
         "swarm_map_url": "/swarmmap",
     }
     # Compare the entire result against the former full-detail input path.
-    monkeypatch.setattr(handler, "_staging_view", handler._device_view)
+    # Compare the former detailed computation, not a second admission inside
+    # the Overview's already-admitted read (production never nests them).
+    monkeypatch.setattr(handler, "_staging_view",
+                        lambda: handler._device_page.__wrapped__(handler)[0])
     assert handler._overview() == actual
 
 
