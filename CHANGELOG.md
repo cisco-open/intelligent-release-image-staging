@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move Inventory's device-details drawer into React. Keep record and log reads
+  independent, reject stale responses after switching or reopening devices,
+  and prevent duplicate host-key requests. Preserve image-error precedence,
+  XR host-network details and keyboard access. Keep undated logs visible in
+  device history and show missing results as unknown, not done.
+
 - Move Monitoring's audit trail and deployment logs into React. Preserve older
   audit pages during refresh, keep time filters consistent and reject late log
   responses. Add keyboard time selection and keep the log drawer below the header.

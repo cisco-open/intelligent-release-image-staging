@@ -540,6 +540,9 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .drawer-body { flex:1; overflow:auto; padding:12px 14px; }
 .drawer-body h3:first-child { margin-top:0; }
 .drawer-body .log { max-height:45vh; overflow:auto; }
+#deploy-info-panel .drawer-head > span { min-width:0; overflow-wrap:anywhere; }
+#deploy-info-panel .drawer-head .btn { flex-shrink:0; }
+#di-log-tbl { min-width:540px; }
 
 @media (prefers-reduced-motion: reduce) {
   .drawer { transition:none; }

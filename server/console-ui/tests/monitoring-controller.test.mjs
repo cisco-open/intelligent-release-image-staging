@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {MonitoringController} from '../src/monitoring-controller.mjs';
-import {auditMessage, bounds, bucketCount, clampSelection, deploymentRows, panSelection,
+import {auditMessage, bounds, bucketCount, clampSelection, deploymentResult, deploymentRows, panSelection,
   queries, validRows} from '../src/monitoring-model.mjs';
 
 const response = (data, status = 200) => ({ok: status === 200, status, json: async () => data, text: async () => data});
@@ -67,6 +67,18 @@ test('deployment filters cover action, result, device and zero return code, pagi
   assert.equal(deploymentRows({...state, query: 'ROUTER-60'}).page, 0);
   assert.equal(deploymentRows({...state, action: 'undeploy'}).total, 0);
   assert.equal(deploymentRows({...state, result: 'error'}).pages, 1);
+});
+
+test('unknown log metadata never becomes a successful result or disappears from unfiltered device history', () => {
+  const row = {file: 'saved.log', finished_at: null, state: null, rc: null};
+  assert.equal(validRows([row], 'deploylogs'), false, 'time-filtered monitoring requires a dated result');
+  assert.equal(validRows([row], 'deploylogs', {allowUndated: true}), true);
+  assert.equal(validRows([{...row, finished_at: {}}], 'deploylogs', {allowUndated: true}), false);
+  assert.deepEqual(deploymentResult(row), {label: 'unknown', badge: 'badge-off'});
+  assert.equal(deploymentResult({state: 'constructor'}).badge, 'badge-off');
+  const state = {rows: [row], query: '', action: '', page: 0};
+  assert.equal(deploymentRows({...state, result: 'done'}).total, 0);
+  assert.equal(deploymentRows({...state, result: 'unknown'}).total, 1);
 });
 
 test('newer query owns both rows and histogram even when an old transport ignores abort', async t => {

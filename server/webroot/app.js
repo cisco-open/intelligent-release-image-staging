@@ -527,63 +527,6 @@
     return levelPillHTML(d.level, d.label, opts);
   }
 
-  // ---- Staging Boundary (spec §4 "Signature: Staging Boundary") ----------
-  // The one intentional IRIS signature: Catalogued -> Source checked ->
-  // Assigned -> Transferring -> Verified -> Staged, then a hatched
-  // "Operator control" terminus -- installation, activation and reload
-  // stay outside IRIS. stagingBoundaryHTML(steps) is the ONE renderer,
-  // shared verbatim by every device/image detail context that shows it
-  // (Task 8; Overview's own fleet-wide instance was removed per operator
-  // decision, Wave C) -- callers derive `steps` from whatever data THEIR
-  // view actually has and must never guess: an unknown or not-applicable
-  // step stays the explicit 'na' state, not an inferred 'done'.
-  //
-  // `steps` is an array of six entries, one per BOUNDARY_STEPS below, each
-  // either a bare state string -- 'done' | 'current' | 'upcoming' | 'na' --
-  // or, only for a failed step, `{ state: 'failed', pillHtml: '<pre-
-  // rendered pill>' }` (built with levelPillHTML, so it matches every other
-  // pill in the console). A missing/unrecognized entry renders as
-  // 'upcoming' (a plain outline), never as progress that was not reported.
-  var BOUNDARY_STEPS = [
-    { label: "Catalogued" }, { label: "Source checked" }, { label: "Assigned" },
-    { label: "Transferring" }, { label: "Verified" }, { label: "Staged" }
-  ];
-  function boundaryMarkerHTML(state, pillHtml) {
-    if (state === 'failed' && pillHtml) {
-      return '<span class="boundary-marker">' + pillHtml + '</span>';
-    }
-    if (state === 'done') {
-      return '<span class="boundary-circle is-done">' +
-        '<svg aria-hidden="true"><use href="#i-check"></use></svg></span>';
-    }
-    if (state === 'current') {
-      return '<span class="boundary-circle is-current"><span class="boundary-dot"></span></span>';
-    }
-    if (state === 'na') {
-      return '<span class="boundary-circle is-na"></span>';
-    }
-    // upcoming, and the safe default for anything unrecognized -- a plain
-    // outline claims no progress at all, so an unknown value never reads
-    // as more complete than it is.
-    return '<span class="boundary-circle is-upcoming"></span>';
-  }
-  function stagingBoundaryHTML(steps) {
-    steps = steps || [];
-    var stepsHtml = BOUNDARY_STEPS.map(function (step, i) {
-      var entry = steps[i];
-      var state = typeof entry === 'string' ? entry : (entry && entry.state) || 'upcoming';
-      var pillHtml = (entry && typeof entry === 'object') ? entry.pillHtml : null;
-      var connector = i > 0 ? '<span class="boundary-connector" aria-hidden="true"></span>' : '';
-      return connector + '<span class="boundary-step is-' + esc(state) + '">' +
-        boundaryMarkerHTML(state, pillHtml) +
-        '<span class="boundary-label">' + esc(step.label) + '</span></span>';
-    }).join('');
-    return '<div class="staging-boundary">' + stepsHtml +
-      '<span class="boundary-connector" aria-hidden="true"></span>' +
-      '<span class="boundary-terminus"><span class="boundary-terminus-label">' +
-      'Operator control</span></span></div>';
-  }
-
   // Shared by deviceStatusHtml and Overview's "Needs attention" tally
   // (overviewDeviceAttention): image-failed's severity (warning vs severe)
   // depends on THIS device's own errored/assigned ratio -- one derivation,
@@ -751,7 +694,7 @@
       // negative/severe/warning, spanning BOTH IRIS lifecycles (agent
       // deployment AND target-software staging). A general "what needs me"
       // filter, unlike the Staging Boundary's own failed-step derivation
-      // (deviceBoundarySteps, the device drawer's per-device instance),
+      // (boundarySteps in device-details-model.mjs, the device drawer),
       // which stays scoped to the staging lifecycle only -- see that
       // function's comment.
       else if (f.status === '__attention') {
@@ -1422,298 +1365,26 @@
     var next = document.getElementById('dev-page-next');
     if (next) next.disabled = devOffset + DEV_PAGE_SIZE >= total;
   }
-  // ---- Device deployment details (per-row ⓘ) ----
-  // The panel lives OUTSIDE #dev-rows so the 10s table re-render never
-  // touches it. deployInfoDev guards against a slow fetch for one device
-  // painting over the panel after another row was opened.
-  var deployInfoDev = null;
-  var deployInfoOpener = null;
-  var DEPLOY_STATE_BADGE = { active: 'badge-ok', removed: 'badge-queued',
-                             superseded: 'badge-cancelled', 'needs-reconcile': 'badge-fail' };
-  function deviceHardwareRows(device, record) {
-    var d = device || {}, rec = record || {};
-    var pf = rec.preflight || {}, res = rec.resolved || {};
-    var aliases = ['IE3x00', 'IR1x00', 'C8xxx', 'C9xxx', 'NCS', 'XR8000', 'ISR/ASR/CSR'];
-    var candidates = [[pf.detected_model, 'last preflight'],
-      [res.model, 'deployment record'], [d.model, 'inventory'],
-      [d.heartbeat_model, 'agent-reported']];
-    var chassis = candidates.find(function (item) {
-      return typeof item[0] === 'string' && item[0].trim() &&
-        !aliases.some(function (alias) { return alias.toLowerCase() === item[0].trim().toLowerCase(); });
+  // React owns the details DOM and async lifetimes. Shared Inventory status
+  // derivation stays here so table, Overview and drawer cannot disagree.
+  function deviceDetailsCommand(action, options) {
+    return new Promise(function (resolve, reject) {
+      window.dispatchEvent(new CustomEvent('iris:device-details-command', {
+        detail: Object.assign({action: action, resolve: resolve, reject: reject}, options || {})
+      }));
     });
-    var series = deviceSeriesLabel(d.model_family, '');
-    return '<tr><td class="muted">Series</td><td>' + esc(series) + '</td></tr>' +
-      '<tr><td class="muted">Chassis model</td><td>' +
-      (chassis ? esc(chassis[0]) + ' <span class="muted">(' + esc(chassis[1]) + ')</span>'
-        : 'Not detected') + '</td></tr>';
   }
-  function deployRecordRows(rec, total) {
-    var res = rec.resolved || {};
-    var ts = rec.timestamps || {};
-    var pf = rec.preflight || {};
-    var managementType = res.management_type || '';
-    // xr-host carries none of the four addressing rows below -- the
-    // appmgr container runs on the router's own network stack -- so they
-    // are dropped from the table entirely rather than shown as dashes,
-    // which would read as "unknown" instead of "not applicable".
-    var xrHost = managementType === 'xr-host';
-    var managementTypeLabel = xrHost ? 'XR host' : managementType;
-    var mgmt = managementType.indexOf('router-') === 0
-      ? (res.vpg_number ? 'VPG' + res.vpg_number : '')
-      : ((res.inband_vlan || res.iris_vlan) ? 'VLAN ' + (res.inband_vlan || res.iris_vlan) : '');
-    var svi = res.svi_ip ? res.svi_ip + (res.svi_mask ? ' / ' + res.svi_mask : '') : '';
-    var app = res.app_ip
-      ? res.app_ip + (res.app_mask ? ' / ' + res.app_mask : '') +
-        (res.app_gateway ? ' → gw ' + res.app_gateway : '')
-      : '';
-    var stateCls = DEPLOY_STATE_BADGE[rec.state] || 'badge-queued';
-    var pairs = [
-      ['State', '<span class="badge ' + stateCls + '">' + esc(rec.state || 'unknown') + '</span>' +
-        (rec.adopted ? ' <span class="muted">(adopted)</span>' : '')],
-      ['Record', '<span class="machine">' + esc(rec.record_id || '') + '</span>' +
-        ' <span class="muted">(' + esc(total) + ' stored for this device)</span>'],
-      ['Planned', '<span class="machine">' + esc(fmtDate(ts.planned_at) || '—') + '</span>'],
-      ['Finished', '<span class="machine">' + esc(fmtDate(ts.finished_at) || '—') + '</span>'],
-      ['Preflight', esc(pf.status || '—')],
-      ['Management type', esc(managementTypeLabel || '—')]
-    ];
-    if (!xrHost) {
-      pairs.push(
-        ['Management VLAN / VPG', esc(mgmt || '—')],
-        ['SVI', '<span class="machine">' + esc(svi || '—') + '</span>'],
-        ['App IP', '<span class="machine">' + esc(app || '—') + '</span>'],
-        ['NAT interface', '<span class="machine">' + esc(res.nat_interface || '—') + '</span>']
-      );
-    }
-    pairs.push(
-      ['Swarm port', '<span class="machine">' + esc(res.swarm_port || '—') + '</span>'],
-      ['Agent install', esc(agentInstallLabel(res.platform))],
-      ['Device identity', '<span class="machine">' + esc(res.device_identity || '—') + '</span>']
-    );
-    return pairs.map(function (kv) {
-      return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
-    }).join('');
-  }
-  // One row per assigned image: id + state, resolved from the per-image
-  // MEMBERSHIP the agent reports. A current error overrides retained staged
-  // membership, which is exactly how the Swarm Map's own image list
-  // resolves it, so two views of one heartbeat cannot disagree about an image.
-  //
-  // For a set, current_image_id is deliberately NOT an activity pointer. It is the wire-compat
-  // identity pointer: the FIRST image of the set that produced heartbeat data
-  // this tick, which is typically one already staged -- not the one in flight.
-  // Reading it as "the image currently transferring" is what left a failed
-  // image that happened not to be it reading "queued" in this drawer while the
-  // map showed it as "error", and pinned the tick's stage_error to a row that
-  // had nothing to do with it.
-  //
-  // stage_state and stage_error describe the whole TICK, not one image, so
-  // they are shown against an image only where they unambiguously are that
-  // image's own: an agent reporting no per-image lists at all, which is a
-  // one-image heartbeat and always has been. For a set, the tick's error rides
-  // its own row below the images, attributed no further than the agent
-  // attributes it. Parked is deliberately not a state here: a parked image is
-  // no longer in the assigned set, so it never produces a row at all.
-  function deployImageRows(d) {
-    var ids = rowAssignedIds(d);
-    if (!ids.length) {
-      return '<tr><td colspan="2" class="muted">No images assigned.</td></tr>';
-    }
-    var errored = rowErroredIds(d);
-    var perImage = d.staged_image_ids != null || d.errored_image_ids != null;
-    var rows = ids.map(function (iid) {
-      var state;
-      if (rowHasStaged(d, iid)) {
-        state = 'ready';
-      } else if (errored.indexOf(iid) !== -1) {
-        state = 'error';
-      } else if (!d.last_seen || !d.stage_state ||
-                 d.stage_state === 'ready' || d.stage_state === 'unassigned') {
-        state = 'pending';
-      } else if (!perImage) {
-        // A legacy heartbeat describes its named image only. A new policy
-        // can already name another image while that heartbeat is retained.
-        state = d.current_image_id && d.current_image_id !== iid ? 'pending' :
-          d.stage_state + (d.stage_error ? ' — ' + d.stage_error : '');
-      } else {
-        // neither staged nor errored this tick: genuinely still in flight
-        state = 'staging';
-      }
-      return '<tr><td class="machine">' + imageLabel(iid) + '</td><td>' + esc(state) + '</td></tr>';
-    }).join('');
-    if (perImage && d.stage_error) {
-      rows += '<tr><td class="muted">Last reported error</td><td>' +
-        esc(d.stage_error) + '</td></tr>';
-    }
-    return rows;
-  }
-  // Per-device instance of the Staging Boundary (Task 7's
-  // stagingBoundaryHTML, spec: "device and image detail contexts in Task
-  // 8" -- reused verbatim, never re-implemented). Uses the same six-step,
-  // same-deviceStatus()-keys reasoning Overview's own fleet-wide instance
-  // used before it was removed (Wave C, operator decision) -- "unknown
-  // stays na, never a guessed done" -- but scoped to this one device's
-  // assigned set, and derives ONLY from data
-  // the drawer already has in hand when it opens: the device row `d`
-  // (already fetched by refreshDevices) and the imageQuarantined map that
-  // same fetch already populated. No per-image hash_verification state
-  // reaches this view (only the quarantined flag does), so "Source
-  // checked" can say FAILED for a quarantined assigned image but never
-  // claims a "done" it cannot back up; "Verified" admits it has no
-  // on-device signal here either, same as it never did.
-  function deviceBoundarySteps(d, devNow) {
-    var ids = rowAssignedIds(d);
-    if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];
-    var catalogued = 'done';
-    var assigned = 'done';
-
-    var quarantined = ids.filter(function (iid) { return imageQuarantined[iid]; });
-    var sourceChecked = quarantined.length
-      ? { state: 'failed', pillHtml: levelPillHTML('negative',
-          quarantined.length + (quarantined.length === 1 ? ' image quarantined' : ' images quarantined')) }
-      : 'na';
-
-    var st = deviceStatus(d, devNow);
-    var transferring, staged;
-    if (st.key === 'placement-failed') {
-      transferring = { state: 'failed', pillHtml: levelPillHTML('negative', 'staging failed') };
-      staged = 'na';
-    } else if (st.key === 'image-failed') {
-      var ratio = imageFailedRatio(d);
-      transferring = { state: 'failed', pillHtml: levelPillHTML(ratio >= 0.5 ? 'severe' : 'warning', st.label) };
-      staged = 'na';
-    } else if (st.key === 'deployed') {
-      transferring = 'done'; staged = 'done';
-    } else if (st.key === 'copying' || st.key === 'staging') {
-      transferring = 'current'; staged = 'upcoming';
-    } else {
-      transferring = 'na'; staged = 'na';
-    }
-    var verified = 'na';
-    return [catalogued, sourceChecked, assigned, transferring, verified, staged];
-  }
-  async function openDeployInfo(id) {
+  function openDeployInfo(id) {
     closeActivity(false);
-    deployInfoDev = id;
-    deployInfoOpener = document.activeElement;
-    var note = document.getElementById('di-note');
-    document.getElementById('di-dev').textContent = id;
-    document.getElementById('di-rows').innerHTML = '';
-    document.getElementById('di-log-rows').innerHTML = '';
-    var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
-    document.getElementById('di-rows').innerHTML = deviceHardwareRows(d, null);
-    document.getElementById('di-img-rows').innerHTML = deployImageRows(d);
-    document.getElementById('di-boundary').innerHTML =
-      stagingBoundaryHTML(deviceBoundarySteps(d, LAST_DEV_NOW));
-    var lt = document.getElementById('di-log-text');
-    lt.hidden = true; lt.textContent = '';
-    note.textContent = 'Loading…';
-    document.getElementById('deploy-info-panel').hidden = false;
-    document.getElementById('di-close').focus();
-    var r = null;
-    try { r = await fetch('/api/v1/devices/' + encodeURIComponent(id) + '/deployment'); } catch (e) { }
-    if (deployInfoDev !== id) return;      // another row was opened meanwhile
-    if (!r) {
-      note.textContent = 'Deployment details unavailable.';
-    } else if (r.status === 404) {
-      note.textContent = 'Deployment records are unavailable on this server.';
-    } else if (!r.ok) {
-      note.textContent = 'Deployment details unavailable (' + r.status + ').';
-    } else {
-      var body = await r.json();
-      if (deployInfoDev !== id) return;
-      if (!body.record) {
-        note.textContent = 'No deployment record — onboarded before records ' +
-          'existed, or added manually; adopt or re-onboard to create one.';
-      } else {
-        note.textContent = '';
-        document.getElementById('di-rows').innerHTML =
-          deviceHardwareRows(d, body.record) + deployRecordRows(body.record, body.total || 0);
-      }
-    }
-    renderDeviceDeployLogs(id);
+    var d = LAST_DEVICES.find(function (x) { return x.device_id === id; }) || {};
+    return deviceDetailsCommand('open', {id: id, data: {device: d,
+      status: deviceStatus(d, LAST_DEV_NOW), failedRatio: imageFailedRatio(d),
+      filenames: imageFilenames, quarantined: imageQuarantined}});
   }
-  async function renderDeviceDeployLogs(id) {
-    var tbody = document.getElementById('di-log-rows');
-    var r = null;
-    try { r = await fetch('/api/v1/deploy-logs?device_id=' + encodeURIComponent(id)); } catch (e) { }
-    if (deployInfoDev !== id) return;
-    if (!r || !r.ok) {
-      tbody.innerHTML = '<tr><td colspan="5" class="muted">Deployment logs unavailable.</td></tr>';
-      return;
-    }
-    var logs = (await r.json()).logs || [];
-    if (deployInfoDev !== id) return;
-    if (!logs.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="muted">No deployment logs for this device yet.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = logs.map(function (l) {
-      // Deployment logs deliberately outlive a delete — they are the record of
-      // what actually ran. So a device deleted and added back under the same
-      // name inherits its predecessor's runs, and without this they read as its
-      // own history. The run is kept and shown; it is just never presented as
-      // belonging to the device currently holding the name.
-      var prev = l.previous_registration
-        ? ' <span class="badge badge-off" title="This run finished before the' +
-          ' current device was registered under this name, so it belongs to a' +
-          ' previous device.">previous device</span>'
-        : '';
-      return '<tr data-file="' + esc(l.file) + '"><td class="machine">' + esc(fmtDate(l.finished_at)) +
-        prev + '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
-        '</td><td class="machine">' + esc(fmtSize(l.size)) + '</td>' +
-        '<td><button class="linkish dlog-view">view</button></td></tr>';
-    }).join('');
-    document.querySelectorAll('#di-log-rows .dlog-view').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        showDeployLog(btn.closest('tr').getAttribute('data-file'),
-                      document.getElementById('di-log-text'));
-      });
-    });
-  }
-  function closeDeployInfo() {
-    deployInfoDev = null;
-    document.getElementById('deploy-info-panel').hidden = true;
-    if (deployInfoOpener) { deployInfoOpener.focus(); deployInfoOpener = null; }
-  }
-  document.getElementById('di-close').addEventListener('click', closeDeployInfo);
-  // Escape closes it, the same as the deployment-log drawer: a drawer that
-  // covers part of the table needs a way out that is not aiming for the ✕.
-  document.addEventListener('keydown', function (e) {
-    var panel = document.getElementById('deploy-info-panel');
-    if (e.key === 'Escape' && panel && !panel.hidden) closeDeployInfo();
-  });
-  // No trapDialogFocus here (Task 6, fix wave): this drawer is non-modal --
-  // no backdrop, deployInfoDev's own guard above expects a second row's
-  // drawer to open while the first is still loading -- so Tab must be free
-  // to leave it for the rest of the page. Focus still moves in on open and
-  // is restored to the opener above.
-  // "Forget host key" (issue #84): a re-imaged/replaced device presents a
-  // new SSH host key and accept-new mode then refuses every session with a
-  // changed-key error. This clears the stale entry from the persistent
-  // known_hosts so the NEXT session re-verifies and re-pins the new key --
-  // it does not disable verification. State-changing, so it goes through
-  // jpost (session + CSRF) and is audited server-side.
-  document.getElementById('di-forget-host-key').addEventListener('click', async function () {
-    var id = deployInfoDev;
-    if (!id) return;
-    if (!confirm('Forget the SSH host key for ' + id + '?\n\n' +
-                 'First verify the device was re-imaged or replaced. ' +
-                 'The next connection will trust and save any key it presents.')) return;
-    var status = document.getElementById('di-forget-host-key-status');
-    status.textContent = 'Forgetting…';
-    var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/forget-host-key', {});
-    if (deployInfoDev !== id) return;   // the drawer moved to another device meanwhile
-    if (r.ok) {
-      var body = await r.json();
-      status.textContent = 'Host key forgotten for ' + (body.peer || id) +
-        '. The next session will re-pin its new key.';
-    } else {
-      var err = null;
-      try { err = (await r.json()).error; } catch (e) { }
-      status.textContent = 'Forget host key failed: ' + (err || r.status);
-    }
-  });
+  function closeDeployInfo(restoreFocus) { return deviceDetailsCommand('close', {restoreFocus: restoreFocus}); }
+  await deviceDetailsCommand('connect', {services: {fetch: fetch, post: jpost,
+    confirm: function (message) { return confirm(message); }}});
+
   // Job logs live in one activity drawer; each job retains its own bounded
   // buffer/stream, but only the selected job is visible. Closing the drawer
   // disconnects viewers, never cancels or aborts jobs.
@@ -1812,7 +1483,7 @@
     root.focus();
   }
   function showActivity() {
-    if (!document.getElementById('deploy-info-panel').hidden) closeDeployInfo();
+    if (!document.getElementById('deploy-info-panel').hidden) closeDeployInfo(false);
     document.getElementById('activity-panel').hidden = false;
     document.getElementById('batch-close').focus();
   }
@@ -6560,32 +6231,6 @@
   function pollMonitoring() { return monitoringCommand('poll'); }
   await monitoringCommand('connect', {fetch: fetch});
 
-  // Inventory retains its separate per-device deployment-log viewer.
-  function deployLogResult(l) {
-    return jobBadge(l.state || 'done') +
-      (l.rc == null ? '' : ' <span class="muted">rc=' + esc(l.rc) + '</span>');
-  }
-  // Generation counter (same idiom as caPollGen): two quick
-  // "view" clicks race their fetches, and without this the SLOWER response
-  // would paint the shared <pre> after the newer one — only the latest
-  // requested file may render.
-  var deployLogGen = 0;
-  async function showDeployLog(file, pre) {
-    var gen = ++deployLogGen;
-    pre.hidden = false;
-    pre.textContent = 'Loading ' + file + '…';
-    var r = null;
-    try { r = await fetch('/api/v1/deploy-logs/' + encodeURIComponent(file)); } catch (e) { }
-    if (gen !== deployLogGen) return;   // a newer view request superseded this one
-    if (!r || !r.ok) {
-      pre.textContent = 'Log unavailable' + (r ? ' (' + r.status + ')' : '') + '.';
-      return;
-    }
-    var text = await r.text();
-    if (gen !== deployLogGen) return;
-    pre.textContent = text;
-  }
-
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
   var telemetryRefreshGeneration = 0;
@@ -6716,6 +6361,7 @@
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
     });
+    if (view !== 'devices') closeDeployInfo(false);
     var swarmFrame = document.getElementById('swarm-frame');
     if (swarmFrame && swarmFrame.contentWindow) {
       swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);

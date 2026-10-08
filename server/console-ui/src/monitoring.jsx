@@ -5,7 +5,7 @@
 import {useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore} from 'react';
 import {createRoot} from 'react-dom/client';
 import {MonitoringController} from './monitoring-controller.mjs';
-import {auditMessage, bounds, clampSelection, deploymentRows, formatAgo, handleWidth, height,
+import {auditMessage, bounds, clampSelection, deploymentResult, deploymentRows, formatAgo, handleWidth, height,
   panSelection, ranges, width} from './monitoring-model.mjs';
 import {formatDate, formatSize} from './image-model.mjs';
 
@@ -184,7 +184,7 @@ function Monitoring({controller}) {
         <select id="dl-action" aria-label="Filter by action" value={logs.action} onChange={event => controller.filter({action: event.target.value})}>
           <option value="">Action: any</option><option value="onboard">deployment</option><option value="undeploy">undeploy</option></select>
         <select id="dl-result" aria-label="Filter by result" value={logs.result} onChange={event => controller.filter({result: event.target.value})}>
-          <option value="">Result: any</option>{['done', 'error', 'cancelled'].map(result => <option key={result}>{result}</option>)}</select>
+          <option value="">Result: any</option>{['done', 'error', 'cancelled', 'unknown'].map(result => <option key={result}>{result}</option>)}</select>
         <button className="btn ghost" id="dl-refresh" onClick={() => controller.refresh('deploylogs')}>Refresh</button>
       </span><span className="muted push" id="dl-count">{logs.loaded
         ? `${page.total} log${page.total === 1 ? '' : 's'}${page.total === logs.rows.length ? '' : ` of ${logs.rows.length}`}` : logs.error ? 'Unavailable' : 'Loading…'}</span></div>
@@ -193,7 +193,7 @@ function Monitoring({controller}) {
         <thead><tr>{['Finished', 'Device', 'Action', 'Result', 'Size', ''].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
         <tbody id="dl-rows">{page.rows.length ? page.rows.map(log => <tr key={log.file} data-file={log.file}>
           <td className="machine">{formatDate(log.finished_at)}</td><td className="machine">{log.device_id || ''}</td><td>{log.action || ''}</td>
-          <td><span className={`badge ${{done: 'badge-ok', error: 'badge-fail', cancelled: 'badge-cancelled', running: 'badge-running'}[log.state || 'done'] || 'badge-queued'}`}>{log.state || 'done'}</span>
+          <td><span className={`badge ${deploymentResult(log).badge}`}>{deploymentResult(log).label}</span>
             {log.rc != null && <> <span className="muted">rc={log.rc}</span></>}</td><td className="machine">{formatSize(log.size)}</td>
           <td><button className="linkish dlog-view" aria-label={`View log for ${log.device_id || log.file}`}
             onClick={event => { opener.current = event.currentTarget; controller.openDetail(log.file); }}>view</button></td></tr>)

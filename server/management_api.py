@@ -1384,8 +1384,9 @@ def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None,
         if device_id is not None and entry["device_id"] != device_id:
             continue
         if registered_at is not None:
+            finished = entry.get("finished_at")
             entry["previous_registration"] = (
-                entry.get("finished_at") or 0) < registered_at
+                finished is not None and finished < registered_at)
         # Inclusive at both ends: a brush selection must contain the entries
         # sitting exactly on the edges the operator dragged to.
         ts = entry.get("finished_at")

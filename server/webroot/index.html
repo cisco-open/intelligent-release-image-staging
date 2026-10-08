@@ -529,64 +529,7 @@
         </div>
         <div class="menu" id="status-legend-pop" hidden></div>
         </div>
-        <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
-             to be appended below the devices table, so opening it on a fleet of
-             any size pushed the details off-screen and made the operator scroll
-             away from the row they had just clicked. role=dialog (Task 6, fix
-             wave): a NON-modal dialog -- no backdrop, the page behind stays
-             fully interactive (openDeployInfo's own deployInfoDev guard
-             expects a second row's drawer to open while the first is still
-             loading), so aria-modal and a Tab-trap would be dishonest and
-             would wrongly lock out the rest of the page. -->
-        <div id="deploy-info-panel" class="drawer" hidden role="dialog" aria-label="Deployment details">
-          <div class="drawer-head">
-            <span>Deployment details <span id="di-dev" class="machine"></span></span>
-            <button class="btn ghost" id="di-close" aria-label="Close deployment details">✕</button>
-          </div>
-          <div class="drawer-body">
-            <p class="muted" id="di-note" role="status" aria-live="polite"></p>
-            <!-- Per-device instance of the Staging Boundary (Task 7's
-                 stagingBoundaryHTML, reused verbatim per its own contract):
-                 derived ONLY from data this drawer already has (the device
-                 row + the quarantined map refreshDevices() already fetched),
-                 never a new request. See deviceBoundarySteps() in app.js. -->
-            <div class="card"><div id="di-boundary"></div></div>
-            <!-- SSH host key (issue #84): accept-new mode pins a device's
-                 SSH host key on first contact into a persistent known_hosts
-                 the operator cannot always reach directly. A re-imaged or
-                 replaced device then fails every session with a
-                 changed-key error; this forgets the stale entry so the
-                 NEXT session re-verifies and re-pins the new key. Audited
-                 server-side (device id + actor) -- never a silent removal. -->
-            <div class="card">
-              <h3>SSH host key</h3>
-              <p class="muted">If this device was re-imaged or replaced and
-                sessions now fail with a changed host key error, forget the
-                stale entry. The next session re-verifies and pins the
-                device's new key — this does not disable verification.</p>
-              <button type="button" class="btn ghost" id="di-forget-host-key">Forget host key</button>
-              <p class="muted" id="di-forget-host-key-status" role="status" aria-live="polite"></p>
-            </div>
-            <h3>Images</h3>
-            <div class="table-scroll">
-            <table class="tbl" id="di-img-tbl">
-              <thead><tr><th>Image</th><th>State</th></tr></thead>
-              <tbody id="di-img-rows"></tbody>
-            </table>
-            </div>
-            <div class="table-scroll">
-            <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
-            </div>
-            <h3>Deployment logs</h3>
-            <div class="table-scroll">
-            <table class="tbl" id="di-log-tbl">
-              <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
-              <tbody id="di-log-rows"></tbody>
-            </table>
-            </div>
-            <pre class="log" id="di-log-text" hidden></pre>
-          </div>
-        </div>
+        <div id="iris-device-details-root"></div>
         <!-- Image picker: one control shared by the per-row "assign" button
              and the bulk "Assign images to N devices…" toolbar action
              (openImagePicker in app.js). A centred modal, not a drawer -- it

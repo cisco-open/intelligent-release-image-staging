@@ -594,13 +594,16 @@ def test_login_page_does_not_disclose_first_run_credentials():
 
 def test_no_orphaned_control_ids():
     """Owner constraint for the toolbar rework: every element id referenced
-    from app.js must exist in index.html. A relocated-but-unwired control
+    from app.js must exist in HTML or a mounted component. An unwired control
     would silently do nothing; a deleted element with a live binding would
     throw at load and kill every later binding."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
+    assert 'id="iris-device-details-root"' in html
+    assert 'mountDeviceDetails();' in _react_shell("main.jsx")
+    html += _react_shell("device-details.jsx")
     ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
     assert len(ids) > 30, "id extraction matched too little — patterns drifted"
@@ -8947,7 +8950,7 @@ def test_agent_install_rename_and_inventory_only_label():
     assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
     assert "'Agent install updated for '" in js
     assert "'Agent install update failed: '" in js
-    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
+    assert "row('Agent install', lookup(platforms, res.platform" in _react_shell("device-details-model.mjs")
 
 
 def test_agent_install_labels_name_the_runtime_not_router_networking():
@@ -8963,7 +8966,9 @@ def test_agent_install_labels_name_the_runtime_not_router_networking():
     assert "Router (VPG)" not in html + js
     assert "Router (Guest Shell via VirtualPortGroup)" not in html + js
     assert '<option value="router">Guest Shell</option>' in html
-    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
+    details = _react_shell("device-details-model.mjs")
+    assert "router: 'Guest Shell'" in details
+    assert "row('Agent install', lookup(platforms, res.platform" in details
 
 
 def test_add_device_form_model_field_precedes_agent_install_select():
@@ -9059,20 +9064,19 @@ def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
     the honest 'XR host' label, and the four addressing rows are dropped
     from the table entirely for it rather than shown as em-dashes (which
     read as "unknown", not "not applicable")."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    fn = js.split("function deployRecordRows(rec, total) {", 1)[1].split(
-        "\n  }", 1)[0]
+    js = _react_shell("device-details-model.mjs")
+    fn = js.split("function recordRows(rec, total = 0) {", 1)[1].split(
+        "export function imageRows", 1)[0]
     # Pins the DATA KEY, not just the rendered label: a reader still keyed
     # off the retired res.attachment would read undefined for every device
     # (deployment_records never wrote res.attachment) and this whole test
     # would stay green testing a dead code path -- Task 2's fix-wave gap.
     assert "res.management_type" in fn
     assert "res.attachment" not in fn
-    assert "var xrHost = managementType === 'xr-host';" in fn
+    assert "xrHost = managementType === 'xr-host'" in fn
     assert "'XR host'" in fn
     assert "if (!xrHost) {" in fn
-    guarded = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[0]
+    guarded = fn.split("if (!xrHost) {", 1)[1].split("\n  }", 1)[0]
     for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
         assert row in guarded, "%r must be inside the !xrHost guard" % row
     # State/Record/Planned/Finished/Preflight/Management type stay
@@ -9082,11 +9086,11 @@ def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
     for row in ("State", "Record", "Planned", "Finished", "Preflight",
                 "Management type"):
         assert row in unguarded
-    after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
+    after_guard = fn.split("if (!xrHost) {", 1)[1].split("\n  }", 1)[1]
     for row in ("Swarm port", "Agent install", "Device identity"):
         assert row in after_guard
-    hardware = js.split("function deviceHardwareRows", 1)[1].split(
-        "function deployRecordRows", 1)[0]
+    hardware = js.split("function hardwareRows", 1)[1].split(
+        "function validRecordResponse", 1)[0]
     assert "Chassis model" in hardware and "Series" in hardware
     assert "xrHost" not in hardware
 
@@ -9912,8 +9916,9 @@ def test_image_picker_and_drawer_show_filename_not_just_id():
     picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
     picker = picker.split("\n  function closeImagePicker", 1)[0]
     assert "imageLabel(id)" in picker
-    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
-    assert "imageLabel(iid)" in drawer
+    drawer = _react_shell("device-details-model.mjs").split("function imageRows", 1)[1]
+    assert "`${id} — ${filename}`" in drawer
+    assert "imageRows(state?.device" in _react_shell("device-details.jsx")
 
 
 def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
@@ -10073,16 +10078,16 @@ def test_deployment_drawer_lists_one_row_per_assigned_image():
     tick's own stage_error carried alongside. Parked is deliberately NOT a
     console state: a parked image is simply absent from the assigned set, so
     it never gets a row here at all."""
-    html = _webroot("index.html")
+    html = _react_shell("device-details.jsx")
     app_js = _webroot("app.js")
     assert 'id="di-img-rows"' in html
-    assert "function deployImageRows(d)" in app_js
-    body = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
-    assert "rowAssignedIds(d)" in body
-    assert "rowHasStaged(d, iid)" in body
+    body = _react_shell("device-details-model.mjs").split("function imageRows", 1)[1].split("export function boundarySteps", 1)[0]
+    assert "assignedIds(device)" in body
+    assert "staged.includes(id)" in body
     assert "stage_error" in body
     assert "parked" not in body.lower()
-    assert "document.getElementById('di-img-rows').innerHTML = deployImageRows(d)" in app_js
+    assert "'di-img-rows').innerHTML" not in app_js
+    assert "imageRows(state?.device" in html
 
 
 def test_devices_side_reads_the_per_image_errors_the_agent_reports():
@@ -10102,20 +10107,21 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     errored_fn = app_js.split("function rowErroredIds(d) {", 1)[1][:300]
     assert "errored_image_ids" in errored_fn
 
-    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
-    assert "rowErroredIds(d)" in drawer
+    drawer = _react_shell("device-details-model.mjs").split("function imageRows", 1)[1].split("export function boundarySteps", 1)[0]
+    assert "device.errored_image_ids" in drawer
     assert "'error'" in drawer
     # rowHasStaged rejects a current per-image error before consulting the
     # retained staged set, so drawer and device verdict cannot disagree.
     staged = app_js.split("function rowHasStaged(d, iid) {", 1)[1].split("\n  }", 1)[0]
     assert staged.index("errored_image_ids") < staged.index("staged_image_ids")
-    assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
+    assert drawer.index("errored.includes(id)") < drawer.index("staged.includes(id)")
     # Multi-image state is never derived from the identity pointer.
     # current_image_id is the first image of the set that produced heartbeat
     # data this tick (typically one already STAGED), not the one in flight, so
     # reading it as "currently transferring" mislabels whichever image it
     # lands on and leaves the real failure reading "queued".
-    assert drawer.index("!perImage") < drawer.index("d.current_image_id")
+    legacy_branch = drawer.split("else if (!perImage)", 1)[1]
+    assert "device.current_image_id !== id" in legacy_branch
 
     body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
     body = body.split("\n  function ", 1)[0]
@@ -10131,11 +10137,11 @@ def test_deployment_details_open_in_a_right_hand_drawer():
     """It used to render below the devices table, so opening it on a fleet of
     any size put the details off-screen and made the operator scroll away from
     the row they had just clicked."""
-    html = _webroot("index.html")
+    html = _react_shell("device-details.jsx")
     css = _webroot("styles.css")
     app_js = _webroot("app.js")
     panel = html.split('id="deploy-info-panel"', 1)[1].split(">", 1)[0]
-    assert 'class="drawer"' in panel, panel
+    assert 'className="drawer"' in panel, panel
     drawer = css.split(".drawer {", 1)[1].split("}", 1)[0]
     assert "position:fixed" in drawer and "right:0" in drawer
     assert "top:0" in drawer and "bottom:0" in drawer
@@ -10143,8 +10149,8 @@ def test_deployment_details_open_in_a_right_hand_drawer():
     assert ".drawer { transition:none; }" in css
     # and Escape gets the operator out without aiming for the close control
     assert "closeDeployInfo" in app_js
-    escape = app_js.split("function closeDeployInfo", 1)[1][:700]
-    assert "'Escape'" in escape
+    assert "event.key === 'Escape'" in html
+    assert "controller.close()" in html
 
 
 # ---------------------------------------------------------------------------
@@ -10283,10 +10289,27 @@ def test_deploy_logs_flag_nothing_without_a_registration_stamp(tmp_path):
 
 
 def test_previous_registration_logs_are_labelled_in_the_console():
-    app_js = _webroot("app.js")
+    app_js = _react_shell("device-details.jsx")
     assert "previous_registration" in app_js
     block = app_js.split("previous_registration", 1)[1][:400]
     assert "previous device" in block
+
+
+def test_deploy_log_unknown_timestamp_is_not_a_previous_registration(tmp_path):
+    name = _plant_deploy_log(str(tmp_path), "d1", 1000)
+    log = tmp_path / name
+    log.write_text(log.read_text().replace("finished_at=1000", "finished_at=unknown"))
+    rows = gui_server._list_deploy_logs(str(tmp_path), device_id="d1", registered_at=1500)
+    assert len(rows) == 1
+    assert rows[0]["finished_at"] is None
+    assert rows[0]["previous_registration"] is False
+    # A missing header still has a known timestamp in its filename, but an
+    # unknown result. Neither field should be invented by the Console.
+    log.write_text("saved output without a header\n")
+    rows = gui_server._list_deploy_logs(str(tmp_path), device_id="d1", registered_at=1500)
+    assert rows[0]["finished_at"] == 1000
+    assert rows[0]["state"] is None
+    assert rows[0]["previous_registration"] is True
 
 
 def test_console_fonts_are_served_with_woff2_type(tmp_path):
@@ -10414,8 +10437,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("devices",
-                 "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
+    table_ids = ("devices", "wz-pkg-table",
                  "setup-pkg-table", "settings-info", "trust-tbl")
     for tid in table_ids:
         marker = 'id="%s"' % tid
@@ -10444,6 +10466,12 @@ def test_every_operational_table_gets_a_scroll_wrapper():
         region = monitoring.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
         assert '<table className="tbl" id="%s">' % tid in region
     assert monitoring.count('className="table-scroll" tabIndex={0} role="region"') == 2
+    details = _react_shell("device-details.jsx")
+    for label, tid in (("Device images", "di-img-tbl"), ("Deployment record", "di-tbl"),
+                       ("Device deployment logs", "di-log-tbl")):
+        region = details.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
+        assert '<table className="tbl" id="%s">' % tid in region
+    assert details.count('className="table-scroll" tabIndex={0} role="region"') == 3
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10464,22 +10492,14 @@ def test_dialogs_get_dialog_role_honestly():
     close -- that part of a dialog's contract holds regardless of modality."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    non_modal_drawers = ("deploy-info-panel",)
-    for panel_id in non_modal_drawers + ("img-picker",):
-        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
-        assert 'role="dialog"' in tag, panel_id
-    for panel_id in non_modal_drawers:
-        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
-        assert 'aria-modal' not in tag, panel_id
     img_picker_tag = html.split('id="img-picker"', 1)[1].split(">", 1)[0]
+    assert 'role="dialog"' in img_picker_tag
     assert 'aria-modal="true"' in img_picker_tag
     assert "function trapDialogFocus(container) {" in js
     assert "trapDialogFocus(document.getElementById('img-picker'))" in js
-    for panel_id in non_modal_drawers:
-        assert "trapDialogFocus(document.getElementById('%s'))" % panel_id not in js, panel_id
     # focus moves in on open and is restored to the opener on close, for
     # all four -- modal or not
-    for opener_var in ("deployInfoOpener", "imgPickerOpener"):
+    for opener_var in ("imgPickerOpener",):
         assert ("var %s = null;" % opener_var) in js, opener_var
         assert (opener_var + " = document.activeElement;") in js, opener_var
         assert (opener_var + ".focus();") in js, opener_var
@@ -10495,6 +10515,12 @@ def test_dialogs_get_dialog_role_honestly():
     assert "trapDialogFocus" not in monitoring
     assert "opener.current = event.currentTarget" in monitoring
     assert "close.current?.focus()" in monitoring and "opener.current.focus()" in monitoring
+    details = _react_shell("device-details.jsx")
+    tag = details.split('id="deploy-info-panel"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in details
+    assert "controller.opener = document.activeElement" in details
+    assert "close.current?.focus()" in details and "controller.opener.focus()" in details
 
 
 def test_forms_get_persistent_field_labels():
@@ -10543,11 +10569,15 @@ def test_error_and_status_regions_carry_live_roles():
     for eid in alert_ids:
         tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
         assert 'role="alert"' in tag, eid
-    status_ids = ("dev-status", "di-note", "wz-progress", "wz-msg",
+    status_ids = ("dev-status", "wz-progress", "wz-msg",
                   "cert-status", "td-status", "ae-status",
                   "sessions-info", "swarm-summary")
     for sid in status_ids:
         tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+        assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    details = _react_shell("device-details.jsx")
+    for sid in ("di-note", "di-forget-host-key-status"):
+        tag = details.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
         assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
     # progress bars are exposed as progressbar, not silent divs. #prog
     # (the legacy publish progress bar this pin used to also cover) was
@@ -10595,28 +10625,22 @@ def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokeniz
 # ---------------------------------------------------------------------------
 
 def test_staging_boundary_component_exists_and_ends_at_operator_control():
-    """Brief Step 1: the Staging Boundary is one shared component
-    (stagingBoundaryHTML(steps)), reused verbatim by device/image detail
-    contexts (Task 8; Overview's own fleet-wide instance was removed per
-    operator decision, Wave C). This is a pure source guard --
-    every named step of the lifecycle and the hatched terminus label must
-    exist as literal strings in app.js, regardless of how any one view
-    derives the states it feeds the component."""
-    js = _webroot("app.js")
-    assert "function stagingBoundaryHTML(" in js
-    for label in ('"Catalogued"', '"Source checked"', '"Assigned"',
-                  '"Transferring"', '"Verified"', '"Staged"', "Operator control"):
+    """Keep the lifecycle labels and operator-control terminus in the React
+    component, independent of the model supplying its states."""
+    js = _react_shell("device-details.jsx")
+    assert "function StagingBoundary(" in js
+    for label in ("'Catalogued'", "'Source checked'", "'Assigned'",
+                  "'Transferring'", "'Verified'", "'Staged'", "Operator control"):
         assert label in js, label
 
 
 def test_staging_boundary_step_states_are_css_backed():
     """Brief Step 3: circles = done/current/upcoming/na CSS states, plus the
-    status-pill substitution for a failed step. Every state stagingBoundaryHTML
+    status-pill substitution for a failed step. Every state StagingBoundary
     can render must have a real selector -- a typo'd class here would render
     invisibly rather than fail loudly."""
-    js = _webroot("app.js")
-    fn = js.split("function boundaryMarkerHTML(state, pillHtml) {", 1)[1].split(
-        "\n  }", 1)[0]
+    js = _react_shell("device-details.jsx")
+    fn = js.split("function BoundaryMarker", 1)[1].split("function StagingBoundary", 1)[0]
     for cls in ("boundary-circle is-done", "boundary-circle is-current",
                 "boundary-dot", "boundary-circle is-na", "boundary-circle is-upcoming",
                 "boundary-marker"):
@@ -10632,8 +10656,7 @@ def test_staging_boundary_step_states_are_css_backed():
     # themselves emit no style= attribute anywhere.
     assert "repeating-linear-gradient" in css
     assert "style=" not in fn
-    assert "style=" not in js.split("function stagingBoundaryHTML(steps) {", 1)[1].split(
-        "\n  }", 1)[0]
+    assert "style=" not in js.split("function StagingBoundary", 1)[1].split("function DeviceDetails", 1)[0]
 
 
 def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
@@ -10646,12 +10669,11 @@ def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
     (overviewBoundarySteps); that band (#ov-boundary, "Active staging") was
     removed per operator decision (Wave C post-walk fix) along with the
     function that derived its steps. The device drawer's per-device
-    instance (deviceBoundarySteps) is the sole survivor of the Staging
+    instance (boundarySteps) is the sole survivor of the Staging
     Boundary's per-view step derivation and carries the exact same
     invariant, so the pin moves here rather than disappearing."""
-    js = _webroot("app.js")
-    fn = js.split("function deviceBoundarySteps(d, devNow) {", 1)[1].split(
-        "\n  }", 1)[0]
+    js = _react_shell("device-details-model.mjs")
+    fn = js.split("function boundarySteps", 1)[1]
     assert "'placement-failed'" in fn
     assert "'image-failed'" in fn
     assert "'onboard-failed'" not in fn
@@ -10661,7 +10683,7 @@ def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
     assert "if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];" in fn
     # no distinct on-device post-transfer verification signal exists in this
     # build -- admitted honestly as 'na', not inferred from a proxy
-    assert "var verified = 'na';" in fn
+    assert "return ['done', source, 'done', transfer, 'na', staged];" in fn
 
 
 def test_overview_needs_attention_is_worst_of_group_and_excludes_offline():

@@ -43,15 +43,12 @@ def javascript_status(rows):
     source = APP.read_text()
     start = source.index("  function rowAssignedIds(d)")
     end = source.index("  // ---- Status pill grammar", start)
-    drawer_start = source.index("  function deployImageRows(d)")
-    drawer_end = source.index("\n  function ", drawer_start + 1)
-    script = (source[start:end] + source[drawer_start:drawer_end]
-              + "\nconst esc = value => String(value);"
-              + "\nconst imageLabel = value => String(value);"
+    model = (APP.parents[1] / "console-ui/src/device-details-model.mjs").as_uri()
+    script = ("import {imageRows} from " + json.dumps(model) + ";\n" + source[start:end]
               + "\nconst rows = " + json.dumps(rows) + ";"
               + "\nprocess.stdout.write(JSON.stringify(rows.map(d => ({"
-              + "key: deviceStatus(d, 1000).key, drawer: deployImageRows(d)}))));")
-    result = subprocess.run([node], input=script, text=True, capture_output=True,
+              + "key: deviceStatus(d, 1000).key, drawer: imageRows(d).map(row => row.state)}))));")
+    result = subprocess.run([node, "--input-type=module"], input=script, text=True, capture_output=True,
                             timeout=10)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -94,7 +91,7 @@ def test_console_and_api_status_agree_for_every_runtime(handler_factory):
         assert handler._device_status_key(row) == expected, row
         assert actual["key"] == expected, row
         if image_state:
-            assert "<td>" + image_state + "</td>" in actual["drawer"], row
+            assert image_state in actual["drawer"], row
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

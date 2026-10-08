@@ -10,6 +10,7 @@ import { mountPolicies } from './policies.jsx';
 import { mountOverview } from './overview.jsx';
 import { mountImages } from './images.jsx';
 import { mountMonitoring } from './monitoring.jsx';
+import { mountDeviceDetails } from './device-details.jsx';
 import './shell.css';
 
 const primary = [
@@ -199,6 +200,7 @@ export function mountConsoleShell() {
     mountOverview();
     mountImages();
     mountMonitoring();
+    mountDeviceDetails();
   });
 }
 

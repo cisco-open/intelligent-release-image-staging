@@ -16,8 +16,8 @@ Console](../zensical/user-guide/console.md) for that.
 ## The shell and the legacy app
 
 `server/console-ui/` renders the header, primary navigation, Settings section
-navigation, simple Policies overview, full Overview dashboard, Images and Monitoring
-with React.
+navigation, simple Policies overview, full Overview dashboard, Images, Monitoring
+and Inventory's device-details drawer with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
 
@@ -26,8 +26,8 @@ publishes `iris:shell-state` and listens for React's `iris:logout` action.
 Overview uses `iris:overview-state` for rendering and `iris:overview-action`
 for attention-card navigation. The controller keeps authenticated requests,
 shared device-status calculations and the single visible-view refresh timer;
-it never writes into the React-owned Overview, Images or Monitoring subtrees. Request
-generation checks prevent older responses from replacing newer state.
+it never writes into React-owned subtrees. Request generation checks prevent
+older responses from replacing newer state.
 Settings pages keep their existing
 `#settings/<section>` routes, so a link into a specific Settings section
 still lands there. Settings itself keeps one navigation-rail link and its own
@@ -45,8 +45,15 @@ Monitoring owns both audit and deployment-log queries through
 in React, freezes coordinates during a drag and cancels stale reads when filters
 change. Polling leaves expanded audit pages intact; local deployment-log filters
 work over the newest 200 results. The `iris:monitoring-command` adapter supplies
-authenticated reads and the existing visible-view timer. Inventory's per-device
-log viewer remains on its separate controller.
+authenticated reads and the existing visible-view timer.
+
+Inventory's device-details workflow uses `device-details-controller.mjs` and
+`device-details.jsx`. The `iris:device-details-command` adapter supplies shared
+status calculations and authenticated transport. Record and log reads run
+independently; closing or reopening the drawer invalidates old responses, even
+for the same device. Confirmed host-key writes keep a per-device lock until the
+request ends and are never automatically retried. The Inventory table, forms
+and activity streams still use the older controller.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -74,8 +81,8 @@ section. React and React DOM are the only direct runtime dependencies the
 frontend is allowed to declare, and a test fails if an internal Console UI
 import appears where a public one should be.
 
-CI also runs a set of browser checks against a mocked Chromium build, using a
-pinned Playwright dependency. To run the same checks locally, install
+CI also runs browser checks in Chromium against mocked APIs, using a pinned
+Playwright dependency. To run the same checks locally, install
 Chromium once and then run the browser test script from
 `server/console-ui/`:
 
@@ -89,6 +96,8 @@ Images checks exercise CSRF-protected writes, typed overrides, refused deletes,
 simultaneous uploads and imports, session expiry, keyboard focus and strict CSP.
 Monitoring checks cover time bounds, pointer cancellation, keyboard selection,
 older pages, local filters, file-response races and plain-text event/log content.
+Device-details checks cover XR/XE records, per-image status, confirmed host-key
+writes, same-device reopen races, plain-text logs, keyboard focus and mobile use.
 
 ## Building the browser assets
 

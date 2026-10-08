@@ -220,6 +220,17 @@ try {
   failures.clear();
   await command('refresh');
 
+  logs[0].state = null;
+  await command('refresh');
+  await page.locator('#dl-result').selectOption('unknown');
+  assert.equal(await page.locator('#dl-rows tr').count(), 1);
+  assert.equal(await page.locator('#dl-rows .badge-off').textContent(), 'unknown');
+  await page.locator('#dl-result').selectOption('done');
+  assert.equal(await page.locator('#dl-rows tr[data-file="log-0.txt"]').count(), 0);
+  await page.locator('#dl-result').selectOption('');
+  logs[0].state = 'error';
+  await command('refresh');
+
   await page.setViewportSize({width: 390, height: 844});
   await screenshot('deployment-mobile');
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'mobile page must not overflow');

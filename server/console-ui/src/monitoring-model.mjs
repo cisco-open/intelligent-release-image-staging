@@ -56,7 +56,7 @@ export function queries(kind, state, now, before) {
 export function deploymentRows(state) {
   const q = state.query.trim().toLowerCase();
   const rows = state.rows.filter(row => (!state.action || row.action === state.action)
-    && (!state.result || (row.state || 'done') === state.result)
+    && (!state.result || (row.state || 'unknown') === state.result)
     && (!q || [row.device_id, row.action, row.state, row.rc == null ? '' : `rc=${row.rc}`]
       .filter(Boolean).join(' ').toLowerCase().includes(q)));
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
@@ -119,13 +119,20 @@ export function formatAgo(ts, now) {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-export function validRows(rows, kind) {
+export function validRows(rows, kind, {allowUndated = false} = {}) {
   const text = kind === 'audit'
     ? ['event', 'category', 'actor', 'target', 'device_id', 'detail', 'secret_name', 'old_id', 'new_id', 'src_ip', 'result', 'action']
     : ['file', 'device_id', 'action', 'state'];
   return Array.isArray(rows) && rows.every(row => row && typeof row === 'object'
     && !Array.isArray(row) && text.every(key => row[key] == null || typeof row[key] === 'string')
-    && Number.isFinite(row[kind === 'audit' ? 'ts' : 'finished_at'])
+    && ((kind === 'deploylogs' && allowUndated && row.finished_at == null)
+      || Number.isFinite(row[kind === 'audit' ? 'ts' : 'finished_at']))
     && (kind === 'audit' || (typeof row.file === 'string'
       && (row.rc == null || Number.isFinite(row.rc)) && (row.size == null || Number.isFinite(row.size)))));
+}
+
+export function deploymentResult(log) {
+  const label = log.state || 'unknown';
+  const badges = {queued: 'badge-queued', running: 'badge-running', done: 'badge-ok', error: 'badge-fail', cancelled: 'badge-cancelled'};
+  return {label, badge: Object.hasOwn(badges, label) ? badges[label] : 'badge-off'};
 }

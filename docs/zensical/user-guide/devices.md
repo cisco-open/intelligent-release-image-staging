@@ -75,8 +75,16 @@ The device routes and their schemas are in [Console API](../reference/console-ap
 
 ### The deployment details drawer
 
-Each row has a **ⓘ Deployment details** control. It opens a read-only drawer
+Each row has a **ⓘ Deployment details** control. It opens a drawer
 that lists every image assigned to that device. **Esc** or **✕** closes it.
+
+If a re-imaged or replaced device reports a changed SSH host key, verify its
+identity before choosing **Forget host key** and confirming. The next connection
+trusts and saves the key it presents. If the request outcome is unknown, check
+the saved key before trying again.
+
+Saved deployment logs appear below the record. Missing dates and results show
+as unknown. **Previous device** marks a log dated before this device was added.
 
 | State | What it means |
 | --- | --- |
