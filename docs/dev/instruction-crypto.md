@@ -89,7 +89,7 @@ independent audit of the rest of the instruction pipeline.
 
 ## The OpenSSL pin
 
-Both build architectures pin OpenSSL 3.5.8 and use its maintained
+Both build architectures pin OpenSSL 3.5.9 and use its maintained
 [EVP AES-SIV interface](https://docs.openssl.org/3.5/man3/EVP_EncryptInit/#siv-mode),
 implementing [RFC 5297](https://www.rfc-editor.org/rfc/rfc5297). Pinning the
 version means a local build matches what shipped, and a security fix to

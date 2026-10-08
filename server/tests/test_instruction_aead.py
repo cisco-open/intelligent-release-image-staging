@@ -92,6 +92,14 @@ def test_crypto_build_keeps_exact_matching_openssl_pins():
     assert pins['openssl-dev'] == pins['openssl-libs-static']
 
 
+def test_contributor_guide_matches_the_linked_openssl():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / 'tools/build-instruction-crypto-inner.sh').read_text()
+    version = re.search(r'openssl-dev=([0-9.]+)-r\d+', script).group(1)
+    guide = (root / 'docs/dev/instruction-crypto.md').read_text()
+    assert re.findall(r'\bOpenSSL ([0-9]+\.[0-9]+\.[0-9]+)\b', guide) == [version]
+
+
 @pytest.mark.parametrize('dockerfile', [
     'tools/build-instruction-crypto.Dockerfile',
     'server/Dockerfile',
