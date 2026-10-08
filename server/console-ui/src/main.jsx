@@ -9,6 +9,7 @@ import { mountSettingsNavigation } from './settings-navigation.jsx';
 import { mountPolicies } from './policies.jsx';
 import { mountOverview } from './overview.jsx';
 import { mountImages } from './images.jsx';
+import { mountMonitoring } from './monitoring.jsx';
 import './shell.css';
 
 const primary = [
@@ -197,6 +198,7 @@ export function mountConsoleShell() {
     mountPolicies();
     mountOverview();
     mountImages();
+    mountMonitoring();
   });
 }
 

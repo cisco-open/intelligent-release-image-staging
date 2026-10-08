@@ -140,6 +140,9 @@ log. Widen the range if a job you expect is missing. The same list, filtered to
 one device, sits on that device's panel; see
 [Work with many devices at once](devices.md).
 
+You can also focus the graph and use arrow keys to move the time selection,
+or Shift + arrow to change its width. **Clear** removes the selection.
+
 Each line starts with its elapsed offset from the start of the job:
 
 ```text

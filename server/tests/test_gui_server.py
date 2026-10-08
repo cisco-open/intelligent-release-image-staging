@@ -897,71 +897,43 @@ def test_status_display_map_covers_every_status():
 
 
 def test_monitoring_timeline_wired():
-    """Source guards for the Monitoring time-travel timeline:
-    (1) index.html has the timeline container + range-preset chips.
-    (2) app.js talks to /api/audit/histogram, builds bars from it, and the
-        audit code has no inline on*= handlers (nonce-only CSP in console
-        mode forbids them -- everything must go through addEventListener)."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="audit-timeline"' in html
-    assert 'id="audit-range-chips"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "/api/v1/audit/histogram" in js
-    assert "addEventListener" in js
-    # No inline event handler attributes anywhere in the audit/timeline code
-    import re
-    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
+    """React owns Monitoring; its narrow bridge shares authenticated polling."""
+    assert 'id="iris-monitoring-root"' in _webroot("index.html")
+    assert "mountMonitoring();" in _react_shell()
+    component = _react_shell("monitoring.jsx")
+    assert '<Timeline kind="audit"' in component
+    assert '<Timeline kind="deploylogs"' in component
+    assert 'id={`${id}-range-chips`}' in component
+    assert "dangerouslySetInnerHTML" not in component
+    js = _webroot("app.js")
+    assert "await monitoringCommand('connect', {fetch: fetch});" in js
+    assert "poll = pollMonitoring;" in js
+    assert "document.getElementById('audit-" not in js
+    assert "document.getElementById('dl-" not in js
 
 
 def test_monitoring_brush_wired():
-    """Source guards for the draggable time brush (#19):
-    (1) index.html carries the two-layer SVG (bars layer re-rendered per fetch,
-        persistent brush overlay layer) plus the clear affordance.
-    (2) app.js drives the brush with Pointer Events registered via
-        addEventListener (nonce CSP forbids inline on*=), refetches the
-        histogram with since_ts/until_ts on selection change, auto-rezooms
-        via pickBucketCount, and clears the selection on Escape."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="audit-bars"' in html
-    assert 'id="audit-brush"' in html
-    assert 'id="audit-clear-selection"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    for ev in ("'pointerdown'", "'pointermove'", "'pointerup'",
-               "'pointercancel'", "'lostpointercapture'"):
-        assert "addEventListener(" + ev in js, ev
-    assert "setPointerCapture" in js and "releasePointerCapture" in js
-    # selection refetch uses the explicit-window contract + auto-rezoom
-    assert "since_ts=" in js and "until_ts=" in js
-    assert "function pickBucketCount(" in js
-    assert "bucket_seconds" in js
-    # selection lifecycle: commit/clear plumbing + Escape
-    assert "function commitSelection(" in js and "function clearSelection(" in js
-    assert "'Escape'" in js
-    # bars render into their own layer so the brush overlay survives refetches
-    assert "barsG.innerHTML" in js
-    import re
-    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
+    """Shared React brush retains independent bar/selection layers and cancel."""
+    component = _react_shell("monitoring.jsx")
+    for suffix in ("bars", "brush", "clear-selection"):
+        assert 'id={`${id}-%s`}' % suffix in component
+    for handler in ("onPointerDown", "onPointerMove", "onPointerUp",
+                    "onPointerCancel", "onLostPointerCapture", "onKeyDown"):
+        assert handler in component
+    assert "setPointerCapture" in component and "releasePointerCapture" in component
+    assert "'Escape'" in component
+    model = _react_shell("monitoring-model.mjs")
+    assert "histogram.set('since_ts'" in model and "histogram.set('until_ts'" in model
+    assert "bucketCount(state.selection.end - state.selection.start)" in model
+    assert "bucket_seconds" in _react_shell("monitoring-controller.mjs")
 
 
 def test_audit_message_composer_wired():
-    """Source guards for the operator-readable audit table (#19): 4-column
-    layout (Time | Actor | Message | Result), a verb map covering console
-    events plus the legacy broker shapes (mint/refresh/auth_fail carry
-    device_id instead of actor/target/detail), colored category tags and
-    result badges — everything composed through esc()."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert "<th>Time</th><th>Actor</th><th>Message</th><th>Result</th>" in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "function auditVerb(" in js
+    """Audit text is rendered as React text, with all existing event verbs."""
+    component = _react_shell("monitoring.jsx")
+    assert "['Time', 'Actor', 'Message', 'Result']" in component
+    js = _react_shell("monitoring-model.mjs")
+    assert "function auditMessage(" in js
     # verb coverage: console + legacy broker events
     for ev in ("login_fail", "password_change_fail", "revoke_other_sessions",
                "device_csv_import", "device_credential_change",
@@ -970,14 +942,13 @@ def test_audit_message_composer_wired():
                "mint", "refresh_fail", "auth_fail", "revoke"):
         assert ev in js, ev
     # legacy fallbacks: device_id fills actor/target; token rotation detail
-    assert "'device:' + e.device_id" in js
-    assert "e.secret_name" in js and "e.old_id" in js and "e.new_id" in js
-    # badges + category tags come from esc()'d helpers, relative time on hover
-    assert "badge-ok" in js and "badge-fail" in js
-    assert "cat-tag" in js
-    assert "function fmtAgo(" in js
+    assert "`device:${event.device_id}`" in js
+    assert "event.secret_name" in js and "event.old_id" in js and "event.new_id" in js
+    assert "badge-ok" in component and "badge-fail" in component
+    assert "cat-tag" in component
+    assert "function formatAgo(" in js
     # empty non-append result shows the empty state AND resets the pager cursor
-    assert "No events in this range." in js
+    assert "No events in this range." in component
 
     with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
         css = f.read()
@@ -1098,7 +1069,7 @@ def test_settings_tls_trust_and_destination_sections_wired():
     assert "cert_pem" in js and "key_pem" in js
     assert "getElementById('cert-form').reset()" in js
     # all 8 new audit events have human verbs (keys quoted — hyphens)
-    verbs = js.split("var AUDIT_VERBS = {")[1].split("};")[0]
+    verbs = _react_shell("monitoring-model.mjs").split("const verbs = {")[1].split("};")[0]
     for ev in ("gui-cert-replace", "gui-cert-revert", "trust-add",
                "trust-remove", "ca-trust-config", "ca-trust-refresh",
                "telemetry-destination-set", "telemetry-destination-clear"):
@@ -6655,16 +6626,16 @@ def test_source_guard_monitoring_nav_and_view():
     assert "['monitoring', 'Monitoring', 'pulse'" in _react_shell()
     assert 'id="view-monitoring"' in html
     assert "System" in _react_shell()
-    assert 'id="audit-load-older"' in html
-    assert "Load older" in html
-    assert 'id="audit-category"' in html
+    component = _react_shell("monitoring.jsx")
+    assert 'id="audit-load-older"' in component
+    assert "Load older" in component
+    assert 'id="audit-category"' in component
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "'monitoring'" in js
     assert "refreshMonitoring" in js
-    assert "audit-load-older" in js
-    assert "audit-category" in js
+    assert "iris:monitoring-command" in js
 
 
 # ---- stream tuning API + export-health proxy (device transfer telemetry) ----
@@ -8885,7 +8856,7 @@ def test_telemetry_health_badge_lives_on_overview_not_monitoring():
     monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
     assert 'id="telemetry-health"' not in monitoring
     # it refreshes with the Overview, not as part of refreshMonitoring()
-    monitoring_fn = js.split("async function refreshMonitoring(fromPoll)", 1)[1].split("}", 1)[0]
+    monitoring_fn = js.split("function refreshMonitoring()", 1)[1].split("}", 1)[0]
     assert "refreshTelemetryHealth" not in monitoring_fn
     overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
     assert "refreshTelemetryHealth" in overview_fn
@@ -9165,14 +9136,13 @@ def test_deploy_logs_paging_graph_search_and_side_drawer():
         js = f.read()
     with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
         css = f.read()
-    pane = html.split('id="monitoring-pane-deploylogs"', 1)[1].split("</div>\n      </section>", 1)[0]
+    pane = _react_shell("monitoring.jsx").split('id="monitoring-pane-deploylogs"', 1)[1]
     # the timeline is the audit timeline's FEATURE -- chips pick a window, a
     # brush selects a range, and the selection filters the table. A static
     # sparkline is not the same thing.
-    for control in ("dl-range-chips", "dl-histogram", "dl-bars", "dl-brush",
-                    "dl-window-label", "dl-clear-selection"):
-        assert 'id="%s"' % control in pane, "missing timeline control: %s" % control
-    assert "dlCommitSelection" in js and "after_ts=" in js
+    assert '<Timeline kind="deploylogs"' in pane
+    model = _react_shell("monitoring-model.mjs")
+    assert "list.set('after_ts', state.selection?.start" in model
     for control in ("dl-search", "dl-action", "dl-result",
                     "dl-prev", "dl-next", "dl-page", "dl-drawer", "dl-drawer-close"):
         assert 'id="%s"' % control in pane, "missing deploy-log control: %s" % control
@@ -9180,7 +9150,7 @@ def test_deploy_logs_paging_graph_search_and_side_drawer():
     drawer = pane.split('id="dl-drawer"', 1)[1]
     assert 'id="dl-text"' in drawer
     # paging + client-side matching exist
-    assert "dlPage" in js and "deployLogMatches" in js
+    assert "function deploymentRows(state)" in model and "rows.slice(page * PAGE_SIZE" in model
     # the drawer slides in from the right, and respects reduce-motion
     assert "#dl-drawer" in css
     assert "prefers-reduced-motion" in css
@@ -9316,17 +9286,14 @@ def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
 
-    # a display-label map exists and the chip renders through it
-    assert "AUDIT_CAT_LABELS" in js
-    chip = js.split("function auditRowHtml", 1)[1].split("return", 1)[0]
-    assert "AUDIT_CAT_LABELS" in chip, "the chip still prints the raw category"
-    # ...while the class stays keyed on the real category, for the styling
-    assert "cat-' + esc(category)" in chip, \
-        "the chip class must stay keyed on the REAL category, for styling"
+    model = _react_shell("monitoring-model.mjs")
+    component = _react_shell("monitoring.jsx")
+    assert "categoryLabel: category === 'onboard' ? 'deployment' : category" in model
+    assert "cat-${text.category}`}>{text.categoryLabel}" in component
     # the filter still SENDS onboard, whatever it displays
-    assert 'value="onboard"' in html
+    assert "value={category}>{category === 'onboard' ? 'deployment' : category}" in component
     # and the label an operator reads is no longer the bare subsystem name
-    assert ">onboard</option>" not in html
+    assert ">onboard</option>" not in component
 
 
 def _write_deploy_log(log_dir, finished_at, device, action="onboard",
@@ -10449,8 +10416,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     html = _webroot("index.html")
     table_ids = ("devices",
                  "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
-                 "setup-pkg-table", "settings-info", "trust-tbl",
-                 "audit-tbl", "dl-tbl")
+                 "setup-pkg-table", "settings-info", "trust-tbl")
     for tid in table_ids:
         marker = 'id="%s"' % tid
         assert marker in html, tid
@@ -10473,6 +10439,11 @@ def test_every_operational_table_gets_a_scroll_wrapper():
         region = images.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
         assert '<table className="tbl" id="%s">' % tid in region
     assert images.count('className="table-scroll" tabIndex={0} role="region"') == 2
+    monitoring = _react_shell("monitoring.jsx")
+    for label, tid in (("Audit events", "audit-tbl"), ("Deployment logs", "dl-tbl")):
+        region = monitoring.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
+        assert '<table className="tbl" id="%s">' % tid in region
+    assert monitoring.count('className="table-scroll" tabIndex={0} role="region"') == 2
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10493,7 +10464,7 @@ def test_dialogs_get_dialog_role_honestly():
     close -- that part of a dialog's contract holds regardless of modality."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    non_modal_drawers = ("deploy-info-panel", "dl-drawer")
+    non_modal_drawers = ("deploy-info-panel",)
     for panel_id in non_modal_drawers + ("img-picker",):
         tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
         assert 'role="dialog"' in tag, panel_id
@@ -10508,7 +10479,7 @@ def test_dialogs_get_dialog_role_honestly():
         assert "trapDialogFocus(document.getElementById('%s'))" % panel_id not in js, panel_id
     # focus moves in on open and is restored to the opener on close, for
     # all four -- modal or not
-    for opener_var in ("deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
+    for opener_var in ("deployInfoOpener", "imgPickerOpener"):
         assert ("var %s = null;" % opener_var) in js, opener_var
         assert (opener_var + " = document.activeElement;") in js, opener_var
         assert (opener_var + ".focus();") in js, opener_var
@@ -10518,6 +10489,12 @@ def test_dialogs_get_dialog_role_honestly():
     assert "trapDialogFocus" not in images
     assert "opener.current = event.currentTarget" in images
     assert "close.current?.focus()" in images and "opener.current.focus()" in images
+    monitoring = _react_shell("monitoring.jsx")
+    tag = monitoring.split('id="dl-drawer"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in monitoring
+    assert "opener.current = event.currentTarget" in monitoring
+    assert "close.current?.focus()" in monitoring and "opener.current.focus()" in monitoring
 
 
 def test_forms_get_persistent_field_labels():
@@ -10966,8 +10943,7 @@ def test_settings_card_never_wraps_a_template_root():
 
 
 def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
+    html = _react_shell("monitoring.jsx")
     css = _webroot("styles.css")
     audit_pane = html.split('id="monitoring-pane-audit"', 1)[1]
     assert 'id="audit-scope-tag"' in audit_pane.split("<h3>", 1)[1].split(
@@ -10976,14 +10952,10 @@ def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
     assert 'id="dl-scope-tag"' in dl_pane.split("<h3>", 1)[1].split("</h3>", 1)[0]
     # each pane keeps its own description, distinct from the other's
     assert "Every settings change" in audit_pane.split("<h3>", 1)[1][:600]
-    assert "Per-job onboard and undeploy logs" in dl_pane.split("<h3>", 1)[1][:600]
+    assert "Onboarding and undeployment logs" in dl_pane.split("<h3>", 1)[1][:600]
     assert ".scope-tag {" in css
-    fn = js.split("function updateMonitoringScopeTags() {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "auditRange" in fn and "dlRange" in fn
-    show_fn = js.split("function showMonitoringSub(sub) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "updateMonitoringScopeTags();" in show_fn
+    assert "ranges[audit.range].label" in html and "ranges[logs.range].label" in html
+    assert "return monitoringCommand('select', null, sub);" in _webroot("app.js")
 
 
 def test_table_scroll_fade_color_is_parameterized_for_cards():
@@ -11644,8 +11616,9 @@ def test_console_fetch_wrapper_handles_session_loss_polls_and_stale_state():
     assert "new CustomEvent('iris:shell-state', { detail: { connection: connection } })" in js
     assert "if (!r.ok) throw new Error('health proxy '" in js
     assert "poll = pollMonitoring;" in js
-    assert "if (fromPoll && auditExtraPages > 0) return;" in js
-    assert "if (!brushDrag) renderBrush(auditSel);" in js
+    monitoring = _react_shell("monitoring-controller.mjs")
+    assert "fromPoll && (state.olderPages > 0 || state.olderBusy)" in monitoring
+    assert "state.interacting" in monitoring
 
 
 def test_bulk_credential_modal_untouched_is_noop_and_clear_confirms():

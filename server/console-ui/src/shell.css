@@ -85,7 +85,7 @@
 .iris-react-shell #dev-rows .dev-id { min-width: 128px; white-space: nowrap; }
 .iris-react-shell #dev-rows .machine { white-space: nowrap; }
 .iris-react-shell #dev-rows .dev-series { min-width: 144px; white-space: nowrap; }
-.iris-react-shell .drawer { top: 56px; z-index: 105; }
+.iris-react-shell .drawer, .iris-react-shell #dl-drawer { top: 56px; z-index: 105; }
 .iris-react-shell #activity-panel { width: min(880px, 96vw); }
 .iris-react-shell #activity-panel .drawer-head { padding: 16px 20px; }
 .iris-react-shell #activity-title { margin: 0; font-size: 20px; }

@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move Monitoring's audit trail and deployment logs into React. Preserve older
+  audit pages during refresh, keep time filters consistent and reject late log
+  responses. Add keyboard time selection and keep the log drawer below the header.
+
 - Avoid unused device-detail work when refreshing Overview. Read current
   assignments, heartbeats and onboarding status on every request, and keep
   Inventory's full targeting and instruction-status checks.

@@ -16,7 +16,7 @@ Console](../zensical/user-guide/console.md) for that.
 ## The shell and the legacy app
 
 `server/console-ui/` renders the header, primary navigation, Settings section
-navigation, simple Policies overview, full Overview dashboard and Images
+navigation, simple Policies overview, full Overview dashboard, Images and Monitoring
 with React.
 Other operational views and working forms still render from
 `server/webroot/app.js`. This is a partial migration, not a full rewrite.
@@ -26,7 +26,7 @@ publishes `iris:shell-state` and listens for React's `iris:logout` action.
 Overview uses `iris:overview-state` for rendering and `iris:overview-action`
 for attention-card navigation. The controller keeps authenticated requests,
 shared device-status calculations and the single visible-view refresh timer;
-it never writes into the React-owned Overview or Images subtrees. Request
+it never writes into the React-owned Overview, Images or Monitoring subtrees. Request
 generation checks prevent older responses from replacing newer state.
 Settings pages keep their existing
 `#settings/<section>` routes, so a link into a specific Settings section
@@ -39,6 +39,14 @@ supplies the shared authenticated transport and routes refreshes from the
 existing timer. Each publish job runs independently. Responses from an older
 catalog request or a closed drawer cannot replace newer state. The adapter
 keeps CSRF tokens inside transport functions, including the upload XHR.
+
+Monitoring owns both audit and deployment-log queries through
+`monitoring-controller.mjs`. Its shared timeline renders bars and selections
+in React, freezes coordinates during a drag and cancels stale reads when filters
+change. Polling leaves expanded audit pages intact; local deployment-log filters
+work over the newest 200 results. The `iris:monitoring-command` adapter supplies
+authenticated reads and the existing visible-view timer. Inventory's per-device
+log viewer remains on its separate controller.
 
 The first-run setup wizard reuses these same components instead of
 duplicating them; see [Sign in for the first
@@ -79,6 +87,8 @@ npm run test:browser
 None of these checks contact a live server or a live device.
 Images checks exercise CSRF-protected writes, typed overrides, refused deletes,
 simultaneous uploads and imports, session expiry, keyboard focus and strict CSP.
+Monitoring checks cover time bounds, pointer cancellation, keyboard selection,
+older pages, local filters, file-response races and plain-text event/log content.
 
 ## Building the browser assets
 

@@ -217,14 +217,27 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 /* chart fill has no single-token equivalent (decorative, not a status
    color); Monitoring's chart treatment is Task 9 territory. */
 #audit-histogram .bar, #dl-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
-#audit-histogram .bar:hover { fill:var(--action); }
+#audit-histogram .bar:hover, #dl-histogram .bar:hover { fill:var(--action); }
 /* time brush: selection overlay lives in its own pointer-events-free layer;
    all hit-testing is numeric on the svg itself */
-#audit-histogram { cursor:crosshair; touch-action:none; user-select:none; -webkit-user-select:none; }
-#audit-brush { pointer-events:none; }
-#audit-brush .brush-sel { fill:rgba(39,116,217,.14); stroke:var(--action); stroke-width:1; }
-#audit-brush .brush-handle { fill:var(--action); }
-#audit-clear-selection { margin-left:6px; }
+#audit-histogram, #dl-histogram { cursor:crosshair; touch-action:none; user-select:none; -webkit-user-select:none; }
+#audit-brush, #dl-brush { pointer-events:none; }
+#audit-brush .brush-sel, #dl-brush .brush-sel { fill:rgba(39,116,217,.14); stroke:var(--action); stroke-width:1; }
+#audit-brush .brush-handle, #dl-brush .brush-handle { fill:var(--action); }
+#audit-clear-selection, #dl-clear-selection { margin-left:6px; }
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="left"],
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="right"] { cursor:ew-resize; }
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="pan"] { cursor:grab; }
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="dragging"] { cursor:grabbing; }
+.monitoring-timeline-help { font-size:12px; }
+#audit-tbl { min-width:640px; }
+#dl-tbl { min-width:700px; }
+@media (max-width: 800px) {
+  #monitoring-pane-deploylogs .joined { display:flex; flex-wrap:wrap; gap:8px; width:100%; }
+  #monitoring-pane-deploylogs .joined :is(input, select, button) { border:1px solid var(--border); border-radius:var(--radius-control); }
+  #monitoring-pane-deploylogs .joined input { flex-basis:100%; width:100%; min-width:0; }
+  #monitoring-pane-deploylogs .joined select { flex:1; min-width:0; }
+}
 /* audit table: composed messages, category tags, result badges */
 #audit-tbl td.nowrap { white-space:nowrap; }
 #audit-tbl .detail { color:var(--text-secondary); }
@@ -563,7 +576,9 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 #dl-drawer[hidden] { display:none; }
 .dl-drawer-head { display:flex; align-items:center; justify-content:space-between;
   gap:10px; padding:10px 12px; border-bottom:1px solid var(--rule); }
-#dl-drawer .log { flex:1; margin:0; overflow:auto; border:0; border-radius:0; }
+.dl-drawer-head > span { min-width:0; overflow-wrap:anywhere; }
+.dl-drawer-head .btn { flex-shrink:0; }
+#dl-drawer .log { flex:1; max-height:none; margin:0; overflow:auto; border:0; border-radius:0; }
 
 @media (prefers-reduced-motion: reduce) {
   #dl-drawer { transition:none; }

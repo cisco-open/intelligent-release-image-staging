@@ -12,7 +12,7 @@ and audit records.
 
 ## In the Console
 
-The navigation rail lists nine areas.
+The navigation rail groups the main views.
 
 | Area | What it does |
 | --- | --- |
@@ -20,11 +20,12 @@ The navigation rail lists nine areas.
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on the server's disk. |
 | Inventory | Lists known devices with their management type, **Agent install** choice, assigned images, and recent reports. Assign or clear device roles here. |
 | Policies | Creates, edits, imports, and exports role definitions. Shows sharing-policy health and instruction delivery diagnostics. |
-| Onboarding | Starts and tracks install and undeploy jobs, once the device has a credential profile. |
 | Swarm | Shows peer progress and which devices and seeders take part. |
 | Monitoring | Holds the audit trail and the deployment log for each job. |
 | Settings | Shows server configuration, version, and operational settings. |
-| Audit | Records administrative and workflow actions. |
+
+Start onboarding from **Inventory**. **Audit trail** and **Deployment logs**
+sit under **Monitoring**.
 
 Three words in that table have a fixed meaning in IRIS:
 
@@ -34,7 +35,7 @@ Three words in that table have a fixed meaning in IRIS:
 | Role | A named group of devices that share with each other. A sharing policy is the rules that say which devices may share pieces with which. See [Control which devices share with each other](roles.md). |
 | Instruction | The signed message the server sends a device saying which images to stage and how. |
 
-The **?** button shows the running version and the stable id of this
+The **Help** button shows the running version and the stable id of this
 deployment, with a copy button. Quote that id when you report a problem. It
 also links to this site and to three pages the Console serves on an isolated
 network: the local API reference at `/swagger/`, device troubleshooting, and
@@ -66,6 +67,13 @@ apply the setting, then check **Reported interval**. Paused telemetry and
 resource limits take precedence. While active, this adds up to six small
 telemetry reports a minute. Image transfer settings stay unchanged.
 
+### Audit trail
+
+In **Monitoring → Audit trail**, choose a time range and category to find an
+action. **Load older** keeps those pages in place during automatic refreshes;
+**Refresh** returns to the newest events in the selected range. Drag on the
+graph to narrow the time range, or focus it and use the arrow keys.
+
 ## Settings
 
 Open **Settings** and pick a section. Each section keeps its own address, so
@@ -75,6 +83,8 @@ you can bookmark it or send it to a colleague.
 | --- | --- | --- |
 | General | `#settings/general` | The device-facing server address and the Console's browser URL, which can belong to different hosts. See [Server configuration](../reference/server-configuration.md) |
 | TLS & trust | `#settings/tls` | This Console's certificate, the trusted CA store, and peer transfer encryption |
+| Certificates & keys | `#settings/certificates` | Certificate deadlines, renewals and key rotation |
+| Backup & restore | `#settings/backups` | Encrypted backups and recovery checks |
 | Telemetry | `#settings/telemetry` | Where swarm progress, device reports and export health are published |
 | Image verification | `#settings/bulkhash` | Checks of published images against the Bulk Hash, the checksum Cisco publishes for an image |
 | Device packages | `#settings/packages` | Whether the packages devices install are ready to serve |
