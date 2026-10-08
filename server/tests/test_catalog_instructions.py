@@ -272,6 +272,40 @@ def _keylist_path(device="device-a"):
     return "/v1/devices/%s/instruction-keylist" % device
 
 
+def test_live_telemetry_signed_cadence_and_http_rate_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog.time, "time", lambda: NOW)
+    table = live_samples.LiveTable()
+    fixture = _Fixture(tmp_path, monkeypatch, live_table=table)
+    try:
+        row = fixture.store.read_policy_row_snapshot("device-a")
+        row["approved_image_id"] = "image-a"
+        row["approved_image_ids"] = ["image-a"]
+        row["instr"]["part"]["control_override"] = {
+            "peer_telemetry_interval_s": 10, "telemetry_every_ticks": 1}
+        fixture.store._policies.put("device-a", row)
+        fixture.store.record_heartbeat("device-a", {"telemetry_enabled": True,
+            "telemetry_stream_enabled": True})
+        assert fixture.catalog._peer_telemetry_control(row, NOW)["peer_telemetry_interval_s"] == 10
+        for instant in (NOW - 1, NOW + 3600):
+            assert fixture.catalog._peer_telemetry_control(row, instant) is None
+        broken = dict(row, instr={})
+        assert fixture.catalog._peer_telemetry_control(broken, NOW) is None
+        path = "/v1/devices/device-a/live-telemetry"
+        body = {"telemetry_observation": {"v": 2, "obs_state": "rpc_unavailable",
+                                         "observed_at": NOW, "image_id": "image-a"}}
+        for _ in range(2):
+            assert _request(fixture, path, method="POST", body=body)[0] == 200
+        status, headers, _ = _request(fixture, path, method="POST", body=body)
+        assert status == 429 and int(_header(headers, "Retry-After")) > 0
+        # Fast ingress cannot exhaust the heartbeat endpoint's budget.
+        assert _request(fixture, "/v1/devices/device-a/heartbeat", method="POST", body={})[0] == 200
+        Path(fixture.state / "instructions" / "roles.d" /
+             ("default@" + row["instr"]["role_gen"])).unlink()
+        assert fixture.catalog._peer_telemetry_control(row, NOW) is None
+    finally:
+        fixture.close()
+
+
 def test_instruction_pointer_uses_one_row_read_and_only_stored_stamp(
         tmp_path, monkeypatch):
     fixture = _Fixture(tmp_path, monkeypatch)

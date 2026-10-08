@@ -19,6 +19,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -561,6 +562,7 @@ def _send_heartbeat(deps, sid, payload, instruction_attestation=None):
     realistic on enterprise networks and would discard progress. Mirrors
     _emit_impl's unconditional best-effort try/except."""
     try:
+        payload = dict(payload, peer_telemetry_v=1)
         transport = getattr(deps, "peer_tls", None)
         if callable(transport):
             payload = dict(payload)
@@ -648,7 +650,8 @@ def _not_active_observation(tele_on, now):
 
 
 def _build_observation(cfg, deps, state, img_id, stage, phase, now,
-                       tick_seconds=60):
+                       tick_seconds=60, record_context=True, suppress_idle=False,
+                       cadence_key="stream_last_ts"):
     """Build the state-first v2 `telemetry_observation` envelope for an assigned
     heartbeat, and — when the state is `observed` — checkpoint the incremented
     sample_seq BEFORE returning it, so the heartbeat POST that carries the seq
@@ -672,6 +675,14 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now,
         transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
         st = state.setdefault(img_id, {})
         tele = st.setdefault("tele", {})
+        # Cache only the observation target, never a new staging instruction.
+        # The accelerated worker additionally requires a current signed policy,
+        # same-boot context and an unexpired successful-heartbeat lease.
+        import instr
+        if record_context:
+            tele["live_context"] = {"stage": stage, "phase": phase,
+                                    "monotonic": time.monotonic(),
+                                    "boot_id": instr.boot_id()}
 
         def envelope(obs_state, sample_seq=None, aria_session_id=None,
                      sampling_class=None, stats=None, peers=None):
@@ -703,10 +714,16 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now,
         if paused:
             return state_envelope("paused"), None
         if not telemetry_report.should_sample(
-                state, tele, tier, now, tick_seconds=tick_seconds):
+                state, dict(tele, stream_last_ts=tele.get(cadence_key, 0)),
+                tier, now, tick_seconds=tick_seconds):
             return state_envelope("not_due"), None
         stats = deps.aria_stats(stage)
-        peers = [] if phase == "steady" else deps.aria_peers(stage)
+        sending = bool(stats and int(stats.get("uploadSpeed", "0") or 0) > 0)
+        if suppress_idle and phase == "steady" and tele.get("peer_idle_sent") \
+                and stats and not sending \
+                and int(stats.get("downloadSpeed", "0") or 0) == 0:
+            return None, None
+        peers = deps.aria_peers(stage) if phase != "steady" or sending else []
         if not stats:
             # RPC unreachable / no matching download: never retain an old rate.
             return state_envelope("rpc_unavailable"), None
@@ -726,7 +743,7 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now,
                 "%s sample_seq checkpoint failed" % img_id):
             tele["sample_seq"] = seq - 1
             return None, None
-        tele["stream_last_ts"] = now
+        tele[cadence_key] = now
         obs = envelope("observed", sample_seq=seq, aria_session_id=session,
                        sampling_class=sampling_class, stats=stats, peers=peers)
         return obs, peers
@@ -3099,6 +3116,9 @@ def _instruction_values(result):
     if isinstance(device_control, dict):
         control.update({name: device_control[name] for name in _FIXED_CONTROL
                         if name in device_control})
+        if "peer_telemetry_interval_s" in device_control:
+            control["peer_telemetry_interval_s"] = device_control[
+                "peer_telemetry_interval_s"]
     return qos, control
 
 
@@ -3375,6 +3395,10 @@ def _apply_instruction(result, cfg, state, rpc, torrent_defaults):
               for option, _public in _ARIA_LIVE_OPTIONS}
     torrent_defaults.clear()
     torrent_defaults.update(future)
+    if _control.get("peer_telemetry_interval_s") == 10:
+        bag["peer_telemetry_requested"] = 10
+    else:
+        bag.pop("peer_telemetry_requested", None)
     return fact
 
 
@@ -3526,6 +3550,12 @@ def _cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
     # A cadence-only tick deliberately takes no sample, but its heartbeat is
     # still authoritative for renewing or clearing stream directives.
     telemetry_report.store_directives(state, response, now)
+    if isinstance(response, dict):
+        import instr
+        for img_id in ids:
+            context = (state.get(img_id) or {}).get("tele", {}).get("live_context")
+            if isinstance(context, dict):
+                context.update(monotonic=time.monotonic(), boot_id=instr.boot_id())
     response_date = getattr(deps.catalog, "response_authenticated_date", None)
     _record_heartbeat_hint(state, response, response_date)
     return response
@@ -5981,6 +6011,139 @@ def _tick_exit_code(result):
     return 1 if result in _BACKOFF_RESULTS else 0
 
 
+def peer_telemetry_once(cfg, deps, state, now, monotonic_now, boot):
+    """Read-only aria telemetry; never call run_once or apply instructions.
+
+    Caller owns the same state lock as the main agent. Cache-only verification
+    and a short successful-heartbeat lease bound acceleration after outages.
+    False means stop the helper; True means it may try again in ten seconds.
+    """
+    if not telemetry_report.stream_enabled(cfg):
+        return False
+    directives = state.get("stream_directives") or {}
+    received = directives.get("received_ts", 0)
+    if type(received) not in (int, float) or not 0 <= now - received <= 180:
+        return False
+    preview = deps.instruction_step(
+        cfg=cfg, state=state, hints={}, catalog_date=None, cache_only=True)
+    if preview.get("attestation", {}).get("instr_state") not in ("applied", "lkg"):
+        return False
+    _qos, control = _instruction_values(preview)
+    if control.get("peer_telemetry_interval_s", 60) != 10:
+        return False
+    every, paused = telemetry_report.active_directives(state, now)
+    if paused or control.get("telemetry_pause") or every > 1 \
+            or control.get("telemetry_every_ticks", 1) > 1:
+        return True  # an explicit slower/paused policy always takes precedence
+    if now < directives.get("peer_retry_at", 0):
+        return True
+    images = []
+    for img_id, entry in state.items():
+        if not _is_image_entry(entry) or entry.get("parked"):
+            continue
+        tele = entry.get("tele") or {}
+        context = tele.get("live_context") or {}
+        when = context.get("monotonic")
+        if context.get("boot_id") != boot or type(when) not in (float, int) \
+                or not 0 <= monotonic_now - when <= 180:
+            continue
+        if context.get("phase") not in ("downloading", "seeding-only", "steady"):
+            continue
+        if telemetry_report.classify(state, tele.get("avg_bps")) != "good":
+            continue  # preserve the normal constrained/bad-tier cadence
+        stage = context.get("stage")
+        if not isinstance(stage, str) or os.path.dirname(stage) != cfg["stage_dir"]:
+            continue
+        images.append((float(tele.get("stream_last_ts", 0)), img_id, context))
+    if not images:
+        return True
+    # The live API has one current image per device. Fairly rotate eligible
+    # images; do not multiply the POST rate by the number of assignments.
+    _, img_id, context = sorted(images, key=lambda item: item[1])[
+        int(monotonic_now // 10) % len(images)]
+    observation, _peers = _build_observation(
+        cfg, deps, state, img_id, context["stage"], context["phase"], now,
+        tick_seconds=10, record_context=False, suppress_idle=True,
+        cadence_key="peer_stream_last_ts")
+    if observation is None or observation.get("obs_state") == "not_due":
+        return True
+    tele = state[img_id]["tele"]
+    idle = (context["phase"] == "steady" and
+            observation.get("obs_state") == "observed" and
+            not observation.get("aria", {}).get("send_bps") and
+            not observation.get("aria", {}).get("receive_bps"))
+    if idle and tele.get("peer_idle_sent"):
+        return True
+    try:
+        deps.catalog.post_live_observation(cfg["device_id"], observation)
+        tele["peer_idle_sent"] = idle
+        directives.pop("peer_retry_at", None)
+        directives.pop("peer_failures", None)
+    except Exception:
+        tele.pop("peer_idle_sent", None)
+        failures = min(6, int(directives.get("peer_failures", 0)) + 1)
+        directives.update(peer_failures=failures,
+                          peer_retry_at=now + min(600, 10 * 2 ** failures))
+    return True
+
+
+def peer_telemetry_loop():  # pragma: no cover - process wiring, pure tick tested
+    import fcntl
+    import instr
+    conf_path = os.environ.get("IRIS_AGENT_CONF", "/flash/guest-share/iris/iris-agent.conf")
+    state_path = os.environ.get("IRIS_AGENT_STATE", "/flash/guest-share/iris/iris-agent.state")
+    directory = os.path.dirname(state_path)
+    with open(os.path.join(directory, "iris-peer-telemetry.lock"), "w") as worker:
+        try:
+            fcntl.flock(worker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        source_mtime = os.stat(__file__).st_mtime_ns
+        while True:
+            started = time.monotonic()
+            try:
+                # Package refreshes take effect through a new helper; never
+                # keep a replaced Python module running indefinitely.
+                if os.stat(__file__).st_mtime_ns != source_mtime:
+                    return
+                with open(os.path.join(directory, "iris-agent.lock"), "w") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        time.sleep(10)
+                        continue
+                    cfg = agent_config.load(conf_path)
+                    with open(state_path) as source:
+                        state = json.load(source)
+                    before = json.dumps(state, sort_keys=True)
+                    deps = build_deps(cfg, conf_path, state_path)
+                    keep = peer_telemetry_once(
+                        cfg, deps, state, time.time(), started, instr.boot_id())
+                    if json.dumps(state, sort_keys=True) != before:
+                        _atomic_write_state(state_path, state)
+                    if not keep:
+                        return
+            except Exception:
+                # A lost config, broken state or verifier failure stops the
+                # helper. The ordinary agent may start a fresh one next tick.
+                return
+            time.sleep(max(1, 10 - (time.monotonic() - started)))
+
+
+def _start_peer_telemetry(cfg, conf_path, state_path, state):  # pragma: no cover
+    if not telemetry_report.stream_enabled(cfg) or \
+            state.get("instructions", {}).get("peer_telemetry_requested") != 10:
+        return
+    env = dict(os.environ, IRIS_AGENT_CONF=conf_path, IRIS_AGENT_STATE=state_path)
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--peer-telemetry"],
+                         env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True,
+                         close_fds=True)
+    except OSError:
+        pass  # acceleration can never make the ordinary staging tick fail
+
+
 def main():  # pragma: no cover
     conf_path = os.environ.get(
         "IRIS_AGENT_CONF", "/flash/guest-share/iris/iris-agent.conf")
@@ -6028,10 +6191,16 @@ def main():  # pragma: no cover
         deps.emit("STATE-WRITE-FAIL", "%s persistence failed: %s"
                   % (state_path, e))
     print(result)
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    lock.close()
+    if _tick_exit_code(result) == 0:
+        _start_peer_telemetry(cfg, conf_path, state_path, state)
     return _tick_exit_code(result)
 
 
 if __name__ == "__main__":
-    if "--once" in sys.argv or len(sys.argv) == 1:
+    if sys.argv[1:] == ["--peer-telemetry"]:
+        sys.exit(peer_telemetry_loop())
+    elif "--once" in sys.argv or len(sys.argv) == 1:
         # None (the "busy" early return) exits 0 like the ordinary tick.
         sys.exit(main())

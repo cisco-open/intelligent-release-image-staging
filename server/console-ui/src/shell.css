@@ -24,7 +24,6 @@
 .iris-react-shell .iris-shell-icon { width: 20px; height: 20px; flex-shrink: 0; fill: currentColor; }
 .iris-react-shell .iris-brand { color: var(--iris-header-text); text-decoration: none; font-size: 20px; font-weight: 700; letter-spacing: 1px; }
 .iris-react-shell .iris-product-title { font-size: 14px; padding-left: 16px; border-left: 1px solid #64788a; }
-.iris-react-shell .iris-stage-label { font-size: 12px; padding: 4px 8px; border: 1px solid #718397; border-radius: var(--radius-control); white-space: nowrap; }
 .iris-react-shell .iris-header-spacer { flex: 1; }
 .iris-react-shell .iris-account { font-size: 14px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iris-react-shell .iris-connection { display: block; padding: 8px 24px; color: var(--text-heading); background: var(--warning-tint); border-bottom: 1px solid var(--warning); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
@@ -216,7 +215,6 @@
 }
 @media (max-width: 800px) {
   .iris-react-shell .iris-header { gap: 8px; padding: 0 12px; }
-  .iris-react-shell .iris-stage-label { display: none; }
   .iris-react-shell .iris-account { max-width: 90px; }
   .iris-react-shell .iris-connection { padding: 8px 16px; }
   .iris-react-shell #iris-navigation-root { position: fixed; top: 56px; left: 0; bottom: 0; width: 280px; z-index: 110; visibility: hidden; transform: translateX(-100%); }

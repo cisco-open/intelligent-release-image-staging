@@ -14,6 +14,7 @@ services:
       file: docker-compose.yml
       service: iris
     environment:
+      IRIS_RUNTIME_LAYOUT: "docker-split"
       IRIS_CONSOLE_URL: "${IRIS_CONSOLE_URL:?Set IRIS_CONSOLE_URL to the browser-facing HTTPS URL}"
       IRIS_MANAGEMENT_API_GENERATE_TOKEN: "0"
       IRIS_MANAGEMENT_API_GENERATE_CERT: "0"

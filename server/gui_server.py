@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 import api_problem
 import api_routes
 import bounded_pool
+import deployment_info
 import service_shutdown
 import tier_auth
 
@@ -76,6 +77,7 @@ _HOP_HEADERS = {
     "forwarded", "x-forwarded-for", "x-forwarded-host",
     "x-forwarded-proto", "x-real-ip", "x-iris-client-ip",
     "x-iris-client-scheme",
+    "x-iris-console-runtime",
 }
 _RESPONSE_DROP = _HOP_HEADERS | {"server", "date"}
 _HANDSHAKE_TIMEOUT = 30
@@ -493,6 +495,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             outgoing["X-IRIS-Client-IP"] = self.client_address[0]
             outgoing["X-IRIS-Client-Scheme"] = (
                 "https" if srv.tls_active else "http")
+            if urlsplit(self.path).path in ("/api/v1/deployment", "/api/deployment"):
+                outgoing[deployment_info.HEADER] = deployment_info.console_header()
             return outgoing
 
         def _authorize_mutation(self, target):

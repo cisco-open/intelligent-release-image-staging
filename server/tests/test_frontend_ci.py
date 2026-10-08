@@ -30,7 +30,8 @@ def test_ci_runs_locked_frontend_build_and_mocked_chromium():
                     'npx --no-install playwright install --with-deps chromium',
                     'npm run test:browser', 'npm run test:swagger']
     package = json.loads((ROOT / 'server/console-ui/package.json').read_text())
-    assert package['scripts']['test:browser'] == 'node tests/browser-smoke.mjs'
+    assert package['scripts']['test:browser'] == (
+        'node tests/browser-smoke.mjs && node tests/swarm-peer-smoke.mjs')
     assert package['scripts']['test:swagger'] == 'node tests/swagger-smoke.mjs'
     lock = json.loads((ROOT / 'server/console-ui/package-lock.json').read_text())
     assert lock['packages']['node_modules/playwright']['version'] == package['devDependencies']['playwright']

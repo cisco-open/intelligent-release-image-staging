@@ -24,6 +24,14 @@ instead.
 | `IRIS_AGE_RECIPIENTS` | Comma-separated age public keys the secret store is encrypted to: the primary key plus an offline recipient. |
 | `IRIS_AGE_KEY_FILE_HOST` | Host path of the age identity (private key), mounted as the Docker secret `iris_age_key`. |
 
+The shipped layouts also set dashboard metadata automatically:
+`IRIS_RUNTIME_LAYOUT`, `IRIS_RUNTIME_NAME` and `IRIS_RUNTIME_HOST` for Docker;
+`IRIS_POD_NAME`, `IRIS_POD_NAMESPACE`, `IRIS_NODE_NAME` and `IRIS_POD_IP` through
+the Kubernetes Downward API. These describe placement, not connection targets.
+For a custom combined container, declare `IRIS_RUNTIME_LAYOUT=single-container`.
+Without layout metadata or managed inventory, the dashboard reports the layout
+as unknown. See [Deployment information](../user-guide/console.md#deployment-information).
+
 !!! note "How a variable reaches the container"
     Compose injects only the keys named in the `environment:` block of the
     Compose files you run. Setting a variable in your shell, or adding it to

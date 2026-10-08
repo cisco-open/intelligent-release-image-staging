@@ -57,6 +57,12 @@ Existing instances are refused, not adopted. Private offline roots stay with
 their custodians. The installer generates deployment identities, including age,
 online signing and TLS keys, but never generates an offline signing root.
 
+Docker installs accept `--image-root` for a dedicated host import folder.
+`irisctl image-root` can connect one to an existing one-host deployment while
+its previous import folder is empty. The recorded folder is mounted read-only
+and included in backup and restore alongside the separate uploads volume.
+Folder changes retain a recovery record until restart and backup checks pass.
+
 The engine pauses with exit 20 and exports `requests/online.pub` below its state
 directory. Take that public file to the offline custodian machine and run:
 

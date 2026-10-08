@@ -122,6 +122,21 @@
         <div class="page-header">
           <h2 class="page-title">Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         </div>
+        <section class="deployment-panel" aria-labelledby="deployment-heading">
+          <div class="deployment-heading">
+            <h3 id="deployment-heading">Deployment</h3>
+            <span id="deployment-layout" class="deployment-layout">Loading…</span>
+            <span id="deployment-observed" class="muted"></span>
+          </div>
+          <p id="deployment-context" class="muted" hidden></p>
+          <div class="table-scroll" id="deployment-table" hidden>
+            <table class="tbl deployment-table" aria-label="IRIS containers and pods">
+              <thead><tr><th scope="col">Component</th><th scope="col">Host / node</th><th scope="col">Environment</th><th scope="col">State</th></tr></thead>
+              <tbody id="deployment-rows"></tbody>
+            </table>
+          </div>
+          <p id="deployment-note" class="muted" role="status">Reading deployment information…</p>
+        </section>
         <!-- Band 1: worst-of-group rollups, clickable into a filtered
              Devices/Images view (spec: "Overview rollups = combined
              worst-of-group"). -->

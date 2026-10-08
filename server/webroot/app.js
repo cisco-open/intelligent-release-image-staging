@@ -4751,6 +4751,64 @@
   // call -- a visibilitychange-triggered immediate refresh racing the
   // interval tick, or a rapid nav-away-and-back -- is a real possibility, so
   // a superseded call must not clobber a newer one's render.
+  var deploymentRefreshController = null;
+  async function refreshDeployment() {
+    if (deploymentRefreshController) deploymentRefreshController.abort();
+    var controller = new AbortController();
+    deploymentRefreshController = controller;
+    // Finish before the 10-second view poll, otherwise each new poll could
+    // abort its predecessor forever while old inventory still looked current.
+    var timer = setTimeout(function () { controller.abort(); }, 8000);
+    var layout = document.getElementById('deployment-layout');
+    var table = document.getElementById('deployment-table');
+    var note = document.getElementById('deployment-note');
+    try {
+      var response = await fetch('/api/v1/deployment', {signal: controller.signal});
+      if (!response.ok) throw new Error('unavailable');
+      var data = await response.json();
+      if (!Array.isArray(data.components) || data.components.length > 64) throw new Error('invalid');
+      if (deploymentRefreshController !== controller) return;
+      var labels = {docker: 'Docker · one host', 'docker-split': 'Docker · separate hosts',
+        kubernetes: 'Kubernetes', 'single-container': 'Single container', unknown: 'Layout not reported'};
+      layout.textContent = labels[data.layout] || labels.unknown;
+      var context = document.getElementById('deployment-context');
+      context.textContent = [data.instance && ('Instance: ' + data.instance), data.namespace && ('Namespace: ' + data.namespace)].filter(Boolean).join(' · ');
+      context.hidden = !context.textContent;
+      document.getElementById('deployment-observed').textContent = Number.isFinite(data.observed_at)
+        ? 'Observed ' + new Date(data.observed_at * 1000).toLocaleTimeString() : 'Observation time unavailable';
+      var rows = document.getElementById('deployment-rows');
+      rows.replaceChildren();
+      data.components.forEach(function (item) {
+        var row = document.createElement('tr');
+        function cell(main, details) {
+          var td = document.createElement('td');
+          td.textContent = main || 'Not reported';
+          (details || []).filter(Boolean).forEach(function (value) {
+            var small = document.createElement('small'); small.textContent = value; td.appendChild(small);
+          });
+          row.appendChild(td);
+        }
+        cell(item.role === 'server' ? 'Tracker / distribution' : item.role === 'console' ? 'Console' : 'Component',
+          [(item.kind === 'pod' ? 'Pod: ' : item.kind === 'container' ? 'Container: ' : 'Runtime: ') + (item.name || 'Not reported')]);
+        cell(item.host, [item.address && ((item.kind === 'pod' ? 'Pod IP: ' : 'Host address: ') + item.address)]);
+        cell([item.os, item.architecture].filter(Boolean).join(' · ') || (item.kind === 'pod' ? 'Pod container' : 'Container'),
+          [[item.image && ('Image: ' + item.image), item.kernel && ('Kernel: ' + item.kernel)].filter(Boolean).join(' · ')]);
+        cell(item.state);
+        rows.appendChild(row);
+      });
+      table.hidden = !data.components.length;
+      note.textContent = data.note || '';
+      note.hidden = !note.textContent;
+    } catch (error) {
+      if (deploymentRefreshController !== controller) return;
+      layout.textContent = 'Unavailable';
+      table.hidden = true;
+      document.getElementById('deployment-context').hidden = true;
+      document.getElementById('deployment-observed').textContent = '';
+      note.hidden = false;
+      note.textContent = 'Deployment information could not be refreshed. Retrying automatically.';
+    } finally { clearTimeout(timer); }
+  }
   var overviewRefreshGeneration = 0, overviewRefreshController = null;
   async function refreshOverview() {
     var mine = ++overviewRefreshGeneration;
@@ -4761,6 +4819,7 @@
     // refresh. Deliberately not awaited with the overview fetch: a slow or
     // unreachable collector must not delay the cards.
     refreshTelemetryHealth();
+    refreshDeployment();
     // /api/v1/overview is the PRIMARY fetch -- Fleet Totals and Rollout need
     // nothing else, so its own failure is still a hard bail (matches the
     // pre-existing behavior: no data, nothing to render).

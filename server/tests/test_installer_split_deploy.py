@@ -62,6 +62,14 @@ def test_accepts_explicit_root_custody(monkeypatch):
     split.validate_split_config(config())
 
 
+def test_split_docker_accepts_recorded_external_image_root(monkeypatch):
+    fake_files(monkeypatch)
+    from iris_installer.deploy import validate_config
+    value = dict(config(), image_root='/opt/images')
+    validate_config(value)
+    split.validate_split_config(value)
+
+
 def test_backup_restart_refreshes_remote_trust_before_console_start(monkeypatch):
     adapter = object.__new__(split.SplitDockerInstall)
     calls = []

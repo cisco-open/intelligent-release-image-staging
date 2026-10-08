@@ -10476,7 +10476,7 @@ def test_every_operational_table_gets_a_scroll_wrapper():
         assert between.count("</div>") == 0, \
             "%s's table-scroll wrapper closed before the table opened" % tid
     # the two unnamed tables (credential list, onboarding batch) get one too
-    assert html.count('<div class="table-scroll">') == html.count("<table")
+    assert html.count('<div class="table-scroll"') == html.count("<table")
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -12812,6 +12812,7 @@ def role_api(tmp_path):
 
 
 @pytest.mark.parametrize("method,path,body", [
+    ("POST", "/api/devices/d1/peer-telemetry", {"interval_s": 10}),
     ("PUT", "/api/peer-policy/roles/fiber", {"restricted": False}),
     ("DELETE", "/api/peer-policy/roles/boat", None),
     ("POST", "/api/peer-policy/roles/import-csv", {"csv": "role\nboat\n"}),
@@ -12835,6 +12836,36 @@ def test_role_qos_routes_require_exact_strong_cas(role_api, method, path, body):
         assert problem["type"].endswith("#precondition_failed")
         assert headers["ETag"] == current
     assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+
+
+def test_peer_telemetry_setting_requires_capability_and_preserves_other_qos(role_api):
+    request, fleet, cat = role_api
+    import peer_policy
+    peer_policy.set_qos(os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"),
+        {"max_peers": 17}, actor="test", now=1, device_id="d1")
+    path = "/api/devices/d1/peer-telemetry"
+    assert request("POST", path, {"interval_s": 10})[0] == 422
+    cat.record_heartbeat("d1", {"peer_telemetry_v": 1})
+    status, _, preview = request("POST", path + "?dry_run=1", {"interval_s": 10})
+    assert status == 200
+    before = _loaded_peer_policy(cat).document
+    assert not before.get("roles", {}).get("qos_device", {}).get("d1", {}).get("peer_telemetry_interval_s")
+    status, _, result = request("POST", path, {"interval_s": 10,
+        "confirm_token": preview["confirm_token"]})
+    assert status == 200 and result["requested_interval_s"] == 10
+    assert _loaded_peer_policy(cat).document["roles"]["qos_device"]["d1"]["peer_telemetry_interval_s"] == 10
+    for invalid in (True, "10", 11, 0, None):
+        assert request("POST", path, {"interval_s": invalid})[0] == 422
+    # Clearing acceleration remains possible even if the device goes offline.
+    cat.record_heartbeat("d1", {}, now=1)
+    status, _, preview = request("POST", path + "?dry_run=1", {"interval_s": 60})
+    assert status == 200
+    status, _, result = request("POST", path, {"interval_s": 60,
+        "confirm_token": preview["confirm_token"]})
+    assert status == 200
+    assert "peer_telemetry_interval_s" not in _loaded_peer_policy(cat).document["roles"]["qos_device"]["d1"]
+    assert _loaded_peer_policy(cat).document["roles"]["qos_device"]["d1"]["max_peers"] == 17
 
 
 def test_role_qos_preview_confirmation_and_delete(role_api):

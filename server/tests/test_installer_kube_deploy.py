@@ -141,6 +141,13 @@ def test_pods_keep_server_identity_storage_and_lifecycle_off_console(tmp_path):
     console_secrets = {volume["secret"]["secretName"] for volume in console["volumes"] if "secret" in volume}
     assert console_secrets == {"iris-tier-auth", "iris-console-tls"}
     assert not any("persistentVolumeClaim" in volume for volume in console["volumes"])
+    for pod in (server, console):
+        env = {item["name"]: item for item in pod["containers"][0]["env"]}
+        for name, field in (("IRIS_POD_NAME", "metadata.name"),
+                            ("IRIS_POD_NAMESPACE", "metadata.namespace"),
+                            ("IRIS_NODE_NAME", "spec.nodeName"),
+                            ("IRIS_POD_IP", "status.podIP")):
+            assert env[name]["valueFrom"]["fieldRef"] == {"apiVersion": "v1", "fieldPath": field}
 
 
 @pytest.mark.parametrize("field,value", [("command", ["evil"]), ("args", ["evil"]),

@@ -91,6 +91,27 @@ The default is `--target docker`. The Console listens on `127.0.0.1:8080` over
 HTTPS. Set `--console-bind <management-ipv4> --console-port <port>` when exposing
 it on an approved management network. Existing Docker engines are preserved.
 
+### Use an existing image folder
+
+For Docker, add `--image-root /opt/images` when installing to use that host
+folder. Otherwise, the installer uses `images` inside its state directory.
+Uploads from the Console stay in a separate Docker volume.
+
+To connect a folder to an existing one-host Docker install:
+
+```bash
+sudo irisctl image-root --state-dir /var/lib/iris-installer/my-iris \
+  --path /opt/images --allow-downtime
+```
+
+The command checks access, records the folder and briefly restarts IRIS. The
+current import folder must be empty. It leaves permissions and files unchanged.
+If interrupted, rerun the same command.
+
+Use a dedicated folder: backups include it, and a restore can replace its
+contents. The server reads it through a read-only mount. For a separate disk,
+choose a folder inside that disk, not the mount point itself.
+
 ### Docker on separate hosts
 
 Add:

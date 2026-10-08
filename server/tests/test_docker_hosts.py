@@ -150,6 +150,9 @@ def test_server_retains_base_services_and_state_with_only_private_management_por
     assert set(doc["services"]) == {"iris"}
     assert set(doc["volumes"]) == {"iris-state", "iris-config", "iris-images"}
     base, server = base_doc["services"]["iris"], doc["services"]["iris"]
+    assert base['environment']['IRIS_RUNTIME_LAYOUT'] == 'docker'
+    assert server['environment']['IRIS_RUNTIME_LAYOUT'] == 'docker-split'
+    assert server['environment']['IRIS_RUNTIME_HOST'] == SERVER_ENV['IRIS_HOST_IP']
     assert not any(p["target"] == 9443 for p in base["ports"])
     assert server["ports"] == base["ports"] + [{
         "host_ip": "192.0.2.10", "mode": "ingress", "protocol": "tcp",
@@ -191,6 +194,9 @@ def test_console_renders_without_server_configuration_or_shared_state(compose):
             # explicit true -- what short-syntax binds get -- is a failure.
             assert not mount["bind"].get("create_host_path", False)
     env = console["environment"]
+    assert env['IRIS_RUNTIME_LAYOUT'] == 'docker-split'
+    assert env['IRIS_RUNTIME_HOST'] == '192.0.2.20'
+    assert env['IRIS_RUNTIME_NAME'] == console['container_name']
     assert env["IRIS_MANAGEMENT_API_URL"] == CONSOLE_ENV["IRIS_MANAGEMENT_API_URL"]
     assert env["IRIS_GUI_DEFAULT_CERT"] == "/run/iris-console-tls/tls.crt"
     assert env["IRIS_GUI_DEFAULT_KEY"] == "/run/iris-console-tls/tls.key"

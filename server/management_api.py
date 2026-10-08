@@ -57,6 +57,7 @@ import certificate_lifecycle
 import instruction_rotation
 import key_maintenance
 import lifecycle_client
+import deployment_info
 import instruction_keys
 import instruction_stamper
 import instructions
@@ -3434,6 +3435,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     ("DELETE", "/internal/v1/peer-policy/roles/{name}"),
                     ("PUT", "/internal/v1/peer-policy/qos"),
                     ("POST", "/internal/v1/devices/{device_id}/role"),
+                    ("POST", "/internal/v1/devices/{device_id}/peer-telemetry"),
                     ("POST", "/internal/v1/devices/bulk-role"),
                 }
                 # Admission follows tier auth, browser session/CSRF, and
@@ -4889,6 +4891,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if data is None:
                     self._json(404, {"error": "not found"}); return
                 self._send(200, "text/plain; charset=utf-8", data); return
+            if path == "/api/deployment":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                console = deployment_info.read_console(self.headers.get(deployment_info.HEADER))
+                self._json(200, deployment_info.summary(console)); return
             if path == "/api/overview":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -5858,6 +5865,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         definition = {key: value for key, value in body.items()
                                       if key != "confirm_token"}
                         committed = coordinator.define_role(name, definition, actor, **options)
+                elif path.startswith("/api/devices/") and path.endswith("/peer-telemetry"):
+                    did = unquote(path[len("/api/devices/"):-len("/peer-telemetry")])
+                    if set(body) - {"interval_s", "confirm_token"} \
+                            or type(body.get("interval_s")) is not int \
+                            or body["interval_s"] not in (10, 60):
+                        raise ValueError("bad peer telemetry interval")
+                    if fleet is None or fleet.get_device(did) is None:
+                        raise peer_policy.PolicyError("device not found", code="device_not_found")
+                    record = catalog.get_device(did) if catalog is not None else None
+                    if body["interval_s"] == 10 and (not record or
+                            record.get("peer_telemetry_v") != 1 or
+                            not 0 <= time.time() - record.get("last_seen", 0) <= 600):
+                        raise peer_policy.PolicyError(
+                            "Update the device agent before selecting 10 seconds",
+                            code="peer_telemetry_unsupported")
+                    qos = dict(loaded.document.get("roles", {}).get("qos_device", {}).get(did, {}))
+                    if body["interval_s"] == 60:
+                        qos.pop("peer_telemetry_interval_s", None)
+                    else:
+                        qos["peer_telemetry_interval_s"] = 10
+                    committed = coordinator.set_qos(qos, actor, device_id=did, **options)
+                    extra.update(device_id=did, requested_interval_s=body["interval_s"])
                 elif path == "/api/peer-policy/qos":
                     if set(body) - {"qos", "qos_state", "role", "confirm_token"} or \
                             not ({"qos", "qos_state"} & set(body)):
@@ -7178,7 +7207,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            result="ok" if applied else "fail")
                 self._json(200, {"ok": True, "applied": applied,
                                  "failed": failed}); return
-            if path.startswith("/api/devices/") and path.endswith("/role"):
+            if path.startswith("/api/devices/") and path.endswith(("/role", "/peer-telemetry")):
                 self._policy_mutation(path, actor, raw)
                 return
             if path.startswith("/api/devices/") and path.endswith("/assign"):

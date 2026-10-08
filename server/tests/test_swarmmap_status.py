@@ -65,6 +65,36 @@ def run_map(scenario):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_peer_arrows_have_direction_provenance_and_image_scope():
+    run_map("""
+      DATA=snapshot([peer('xr-one'),peer('xr-two')]);
+      DATA.images[0].peer_edges=[{source_device_id:'xr-one',target_device_id:'xr-two',
+        reporter_device_id:'xr-two',rate_field:'receive_bps',bytes_per_second:123,
+        identity_basis:'unique_tracker_address',received_at:95,valid_for_s:120}];
+      render();
+      assert.equal(freshPeerEdges().length,1);
+      assert.match(peerConnectionDetails(allPeers()[0]),/xr-one → xr-two/);
+      assert.match(peerConnectionDetails(allPeers()[0]),/reported by xr-two/);
+      const scene=svg.children[1],paths=scene.children.filter(x=>x.attrs.class==='edge peer-transfer');
+      assert.equal(paths.length,1); assert.equal(paths[0].attrs['marker-end'],'url(#peer-arrow)');
+      assert.match(paths[0].attrs['aria-label'],/xr-one → xr-two/);
+      curHash='another'; assert.equal(freshPeerEdges().length,0);
+      curHash='all'; query='xr-one';render();
+      assert.equal(svg.children[1].children.filter(x=>x.attrs.class==='edge peer-transfer').length,0);
+      query='';DATA.now=216;render();assert.equal(freshPeerEdges().length,0);
+    """)
+
+
+def test_cached_peer_arrows_age_while_map_polling_is_paused():
+    run_map("""
+      DATA=snapshot([peer('xr-one'),peer('xr-two')]);
+      DATA.images[0].peer_edges=[{source_device_id:'xr-one',target_device_id:'xr-two',
+        bytes_per_second:1,received_at:100,valid_for_s:120}];
+      lastUpdated=Date.now()/1000-121;paused=true;
+      assert.equal(freshPeerEdges().length,0);
+    """)
+
+
 @pytest.mark.parametrize("stage", ["staging", "verifying", "transferring_to_ios", "flash_full"])
 def test_torrent_completion_does_not_claim_device_staging_complete(stage):
     run_map("""

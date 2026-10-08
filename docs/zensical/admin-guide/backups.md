@@ -14,6 +14,9 @@ worker. For installer-owned Docker, split Docker and Kubernetes deployments,
 stops the server and Console, captures encrypted data and a separate identity
 recovery set, then starts the services that were running. Confirm the downtime
 before proceeding. The host worker continues while the Console is unavailable.
+Backups include Console uploads and the host image folder recorded by the
+managed Docker installer. A restore puts both back as they were in the backup;
+keep the host folder dedicated to IRIS and avoid editing it during maintenance.
 For an interrupted credential rotation, use the
 [host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped)
 even while the Console is stopped.

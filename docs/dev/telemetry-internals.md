@@ -14,6 +14,51 @@ oversight. It assumes you have read
 [Monitor transfers and reports](../zensical/user-guide/monitoring.md)
 and [Telemetry signals](../zensical/reference/telemetry-signals.md) first.
 
+## Peer arrows and accelerated reporting
+
+`server/swarm_edges.py` projects current peer rates into directed device edges
+for one catalog image and tracker swarm. It uses authenticated reporter ids and
+unambiguous current tracker endpoints or addresses for the remote match. This
+is address attribution, not proof of the remote socket's credential. Fresh
+receiver observations take precedence over sender observations, including zero;
+the two ends are never added together. Distinct sockets may be summed. Stale,
+withdrawn, wrong-image and ambiguous observations produce no active arrow.
+
+The optional device-only `peer_telemetry_interval_s` control is carried in the
+sealed instruction's `control_override`. Its absence means the existing normal
+cadence. Shared role artifacts keep their existing schema and defaults. The
+Console admits ten seconds only after a fresh capability heartbeat and uses
+the normal peer-policy revision and preview transaction. Returning to sixty
+seconds removes the override, preserving other device QoS settings.
+
+The helper started by `iris_agent.py --peer-telemetry` verifies the local signed
+cache, shares the ordinary agent's state lock, and only reads aria observations.
+It posts to the device-bound `live-telemetry` endpoint without refreshing the
+heartbeat or running staging, instruction application, token refresh or catalog
+polls. The successful-heartbeat and same-boot context leases last 180 seconds;
+expired policy, disabled streaming and a lost context stop accelerated work.
+Pause, slower signed cadence and constrained links take precedence. Failed POSTs
+back off. Idle seeders send one zero-rate observation and suppress repeated idle
+POSTs. A device with several images still sends at most one accelerated envelope
+per cycle; the live table remains one current image per device.
+Its sampling clock is separate from normal heartbeat observations, so fast
+reports cannot postpone the normal sample. Both paths share sequence numbers.
+
+The server rechecks current stamped control, heartbeat flags and assignments.
+The route has its own per-device token bucket (burst two, refill ten seconds).
+Live snapshot writes are batched every five seconds while fast observations
+remain valid; ordinary snapshots retain their fifteen-second cadence. The map
+still polls every five seconds. These are separate clocks; labels show time
+since the server received a sample and the cadence of that source.
+
+Before rolling back to a build without this control, return accelerated devices
+to sixty seconds and verify their next signed instruction was applied. Keep the
+current agent packages until that transition is complete.
+
+Focused tests are `test_swarm_edges.py`, `test_swarmmap_status.py`,
+`test_peer_telemetry.py` and `test_agent_peer_telemetry.py`. Shared-agent changes require all
+Guest Shell, amd64/arm64 IOx and XR wrappers to be rebuilt before device rollout.
+
 ## Building and testing the download-duration metric
 
 `iris.download.duration_seconds` needs a report field that only an updated

@@ -22,6 +22,11 @@ Both roots are scanned recursively. A publish happens in place: the seeder
 reads the image where it sits, and the `.torrent` goes under the state
 directory. See [Data formats and states](../reference/state-and-data.md).
 
+With the managed Docker installer, the host import folder defaults to `images`
+inside the installation's state directory. To use `/opt/images` on the host,
+[connect that folder](../install/managed-package.md#use-an-existing-image-folder).
+Console uploads remain in the separate uploads volume.
+
 !!! warning "Reseeding on restart trusts the recorded directory"
 
     On restart, the server reseeds each image from its catalog entry's

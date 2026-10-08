@@ -50,6 +50,11 @@ def parser():
     install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
     install.add_argument("--console-port", type=int, default=8080)
     install.add_argument("--peer-tls", choices=("required", "disabled"), default="required")
+    install.add_argument('--image-root', type=Path, help='dedicated host image folder for Docker; included in backup and restore')
+    image_root = commands.add_parser('image-root', help='connect a host image folder to an existing one-host Docker install')
+    image_root.add_argument('--state-dir', type=Path, required=True)
+    image_root.add_argument('--path', type=Path, required=True)
+    image_root.add_argument('--allow-downtime', action='store_true')
     split = install.add_argument_group('Split Docker: explicit remote Console custody')
     split.add_argument('--console-ssh-host')
     split.add_argument('--console-ssh-user')
@@ -255,6 +260,9 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == 'image-root':
+                from .image_storage import change
+                return change(args)
             if args.command == "maintenance":
                 from .maintenance import main as maintenance_command
                 return maintenance_command(args)

@@ -21,6 +21,7 @@ import tls_rotation
 import trust_rotation
 import peer_policy
 import schedules
+import deployment_info
 
 
 ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
@@ -65,6 +66,7 @@ POLICY_MUTATIONS = {
     ("DELETE", "/peer-policy/roles/{name}"),
     ("PUT", "/peer-policy/qos"),
     ("POST", "/devices/{device_id}/role"),
+    ("POST", "/devices/{device_id}/peer-telemetry"),
     ("POST", "/devices/bulk-role"),
 }
 
@@ -925,6 +927,9 @@ def _policy_business_errors(route):
             409: ("role_reserved_name", "role_shadowed_by_assignment"),
             422: ("bad_role", "invalid_policy", "incomparable_role_change"),
             503: ("fleet_write_failed",)},
+        ("POST", "/devices/{device_id}/peer-telemetry"): {
+            404: ("device_not_found",),
+            422: ("peer_telemetry_unsupported", "invalid_policy")},
         ("POST", "/devices/bulk-role"): {
             404: ("role_not_found",),
             409: ("role_reserved_name", "role_shadowed_by_assignment"),
@@ -988,6 +993,8 @@ def _qos_schema(scope):
                 value["anyOf"] = [{"const": 0}, {"minimum": peer_policy._MIN_RATE_BPS}]
             if key == "catalog_tick_s":
                 value["multipleOf"] = 60
+            if key == "peer_telemetry_interval_s":
+                value["enum"] = [10, 60]
         properties[key] = value
     return {"type": "object", "properties": properties,
             "additionalProperties": False,
@@ -1078,6 +1085,11 @@ def _swarm_peer_schema():
                 required.append("device_id")
                 properties["device_id"] = {"type": "string"}
                 properties["peer_tls"] = _peer_tls_schema(projected=True)
+                properties["peer_telemetry"] = {"type": "object",
+                    "additionalProperties": False,
+                    "properties": {"supported": {"type": "boolean"},
+                        "requested_interval_s": {"enum": [10, 60, None]},
+                        "effective_interval_s": {"type": ["integer", "null"]}}}
                 for name in ("model", "current_image_id", "stage_state"):
                     properties[name] = {"type": "string"}
                 for name in ("staged_image_ids", "errored_image_ids"):
@@ -1085,6 +1097,27 @@ def _swarm_peer_schema():
         variants.append({"type": "object", "additionalProperties": False,
                          "required": required, "properties": properties})
     return {"oneOf": variants}
+
+
+def _swarm_edge_properties():
+    fields = {
+        "source_device_id": {"type": "string"},
+        "target_device_id": {"type": "string"},
+        "reporter_device_id": {"type": "string"},
+        "bytes_per_second": {"type": "integer", "minimum": 1},
+        "connection_count": {"type": "integer", "minimum": 1, "maximum": 32},
+        "rate_field": {"enum": ["send_bps", "receive_bps"]},
+        "identity_basis": {"enum": ["tracker_endpoint", "unique_tracker_address"]},
+        "received_at": {"type": "number"},
+        "observed_at": {"type": ["number", "null"]},
+        "age_s": {"type": "integer", "minimum": 0},
+        "valid_for_s": {"type": "integer", "minimum": 1, "maximum": 120},
+    }
+    return {"peer_edges": {"type": "array", "maxItems": 1024,
+                "items": {"type": "object", "properties": fields,
+                          "required": list(fields), "additionalProperties": False}},
+            "peer_edges_truncated": {"type": "boolean"},
+            "unattributed_peer_connections": {"type": "integer", "minimum": 0}}
 
 
 def _blast_example():
@@ -1787,6 +1820,8 @@ _JSON_REQUESTS = {
                                       ("platform",), True),
     "/devices/{device_id}/forget-host-key": ({}, (), False),
     "/devices/{device_id}/request-report": ({}, (), False),
+    "/devices/{device_id}/peer-telemetry": (
+        {"interval_s": 10, "confirm_token": "candidate-bound-sha256"}, ("interval_s",), True),
     "/devices/{device_id}/adopt": ({"acknowledge_adopt": True},
                                    ("acknowledge_adopt",), True),
     "/devices/{device_id}/onboard": (
@@ -1862,6 +1897,10 @@ _JSON_REQUESTS = {
     "/v1/devices/{device_id}/telemetry": (
         {"schema": "v2", "image_id": "image-01", "state": "complete",
          "timestamp": 1788470400}, ("schema", "image_id"), True),
+    "/v1/devices/{device_id}/live-telemetry": (
+        {"telemetry_observation": {"v": 2, "obs_state": "rpc_unavailable",
+            "observed_at": 1788470400, "image_id": "image-01",
+            "transfer_id": "a" * 32, "sample_seq": 1}}, ("telemetry_observation",), True),
     "/v1/devices/{device_id}/peer-tls": ({"csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."}, ("csr",), True),
     "/v1/devices/{device_id}/token-refresh": ({}, (), False),
 }
@@ -2021,6 +2060,7 @@ def _request_body(route):
             "are rejected with 422.")
     if route.service == "catalog" and path.endswith("/heartbeat"):
         schema["properties"]["peer_tls"] = _peer_tls_schema()
+        schema["properties"]["peer_telemetry_v"] = {"type": "integer", "const": 1}
         return {"required": required_body, "content": {
             "application/json": _instruction_attestation_request(schema, example)}}
     if suffix == "/settings/image-verification":
@@ -2058,9 +2098,38 @@ def _request_body(route):
     # silently accepted as alternate credentials.
     if suffix in ("/login", "/setup") or path.endswith("/authorizations"):
         schema["additionalProperties"] = False
+    if path == "/v1/devices/{device_id}/live-telemetry":
+        schema["additionalProperties"] = False
+        integer = {"type": "integer", "minimum": 0}
+        rate = dict(integer, maximum=10 ** 12)
+        schema["properties"]["telemetry_observation"] = {
+            "type": "object", "required": ["v", "obs_state", "observed_at"],
+            "description": "At most 8192 serialized bytes. Requires current device credentials, an active ten-second signed policy, streaming enabled and a recent heartbeat. Unknown fields are discarded. Peer rows beyond 32 are truncated.",
+            "properties": {
+                "v": {"const": 2}, "obs_state": {"enum": ["observed", "not_due", "paused", "disabled", "not_active", "rpc_unavailable"]},
+                "observed_at": {"type": "number", "minimum": 0},
+                "image_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+                "transfer_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+                "sample_seq": integer, "sampling_class": {"enum": ["good", "constrained"]},
+                "aria": {"type": "object", "required": ["completed_content_bytes", "total_content_bytes", "receive_bps", "send_bps", "connections"],
+                    "properties": {"status": {"enum": ["active", "waiting", "paused", "complete", "error", "removed"]},
+                        "completed_content_bytes": dict(integer, maximum=2 ** 53),
+                        "total_content_bytes": dict(integer, maximum=2 ** 53),
+                        "receive_bps": rate, "send_bps": rate,
+                        "connections": dict(integer, maximum=1024)}},
+                "peer_connections": {"type": "array", "items": {"type": "object", "required": ["ip"],
+                    "properties": {"ip": {"type": "string", "format": "ipv4"},
+                        "port": dict(integer, maximum=65535), "send_bps": rate, "receive_bps": rate,
+                        "peer_client_name": {"type": "string", "maxLength": 64},
+                        "progress": {"type": "number", "minimum": 0, "maximum": 100}}}}},
+            "if": {"properties": {"obs_state": {"const": "observed"}}},
+            "then": {"required": ["sample_seq", "sampling_class", "aria"]},
+            "else": {"not": {"anyOf": [{"required": [name]} for name in ("sampling_class", "aria", "peer_connections")]}}}
     if _policy_mutation(route):
         schema["additionalProperties"] = False
         schema["properties"]["confirm_token"]["type"] = ["string", "null"]
+        if suffix == "/devices/{device_id}/peer-telemetry":
+            schema["properties"]["interval_s"]["enum"] = [10, 60]
         if suffix == "/peer-policy/roles/{name}":
             schema["properties"].update(_role_definition_schema()["properties"])
         if suffix == "/peer-policy/qos":
@@ -2095,6 +2164,8 @@ def _json_success_example(route):
         "/peer-policy/roles/{name}": _policy_write_example(),
         "/peer-policy/roles/import-csv": {**_policy_write_example(), "roles": 2},
         "/peer-policy/qos": _policy_write_example(),
+        "/devices/{device_id}/peer-telemetry": {
+            **_policy_write_example(), "device_id": "edge-01", "requested_interval_s": 10},
         "/devices/{device_id}/role": {**_policy_write_example(), "partial": False,
             "applied": 1, "failed": {}, "direction": "tighten",
             "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
@@ -2235,6 +2306,13 @@ def _json_success_example(route):
             "rollout": [{"image_id": "image-01", "filename": "image.bin",
                          "assigned": 1, "staged": 1}],
             "swarm_map_url": "/swarmmap"},
+        "/deployment": {
+            "layout": "docker", "source": "managed-worker", "observed_at": 1788470400,
+            "instance": "iris", "namespace": None, "note": None,
+            "components": [{"role": "server", "kind": "container", "name": "iris-server",
+                            "host": "staging-host", "address": None, "image": "iris:latest",
+                            "state": "running / healthy", "os": "Debian GNU/Linux",
+                            "architecture": "x86_64", "kernel": "6.8.0"}]},
         "/swarm": {
             "now": 1788470400.0,
             "server": {
@@ -2380,6 +2458,7 @@ def _json_success_example(route):
         "/v1/devices/{device_id}/heartbeat": {
             "ok": True, "stream_every": 4, "stream_pause": False},
         "/v1/devices/{device_id}/telemetry": {"ok": True},
+        "/v1/devices/{device_id}/live-telemetry": {"ok": True},
         "/v1/devices/{device_id}/peer-tls": {
             "mode": "required", "certificate": "-----BEGIN CERTIFICATE-----\n...",
             "ca": "-----BEGIN CERTIFICATE-----\n...", "renew_before_seconds": 21600},
@@ -2441,6 +2520,20 @@ def _success(route):
         return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix == "/deployment":
+        nullable = {"type": ["string", "null"], "maxLength": 256}
+        component = _schedule_object({field: dict(nullable) for field in deployment_info.FIELDS})
+        component["properties"]["role"] = {"enum": ["server", "console"]}
+        component["properties"]["kind"] = {"enum": ["container", "pod", "process"]}
+        schema = _schedule_object({
+            "layout": {"enum": list(deployment_info.LAYOUTS)},
+            "source": {"enum": ["managed-worker", "runtime"]},
+            "observed_at": {"type": "integer", "minimum": 0},
+            "instance": dict(nullable), "namespace": dict(nullable), "note": dict(nullable),
+            "components": {"type": "array", "maxItems": 64, "items": component},
+        })
+        return "200", {"description": "Read-only deployment inventory or explicitly limited runtime observations",
+                       "content": {"application/json": _media(schema, _json_success_example(route))}}
     if suffix == "/settings/peer-tls":
         example = _json_success_example(route)
         schema = _schema_for_example(example, "PeerTlsSettings")
@@ -2713,6 +2806,7 @@ def _success(route):
         normal_schema["properties"]["images"]["items"]["properties"][
             "total_bytes"] = {"type": ["integer", "null"]}
         normal_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
+        normal_schema["properties"]["images"]["items"]["properties"].update(_swarm_edge_properties())
         empty_schema = {"type": "object", "maxProperties": 0}
         if route.service == "telemetry":
             variants = [normal_schema, empty_schema]
@@ -2736,6 +2830,7 @@ def _success(route):
             paged_schema["properties"]["images"]["items"]["properties"][
                 "total_bytes"] = {"type": ["integer", "null"]}
             paged_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
+            paged_schema["properties"]["images"]["items"]["properties"].update(_swarm_edge_properties())
             paged_schema["properties"]["peers_limit"] = {
                 "type": ["integer", "null"]}
             unavailable_schema = _schema_for_example(

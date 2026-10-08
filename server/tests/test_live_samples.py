@@ -107,6 +107,27 @@ class TestSettings:
 
 
 class TestWriterLoop:
+    @pytest.mark.parametrize("interval,valid,expected", [
+        (60, True, [1005, 1020, 1035]),
+        (10, True, [1005, 1010, 1015, 1020, 1025, 1030, 1035]),
+        (10, False, [1005, 1020, 1035])])
+    def test_fast_writes_only_while_observations_are_valid(self, monkeypatch, interval, valid, expected):
+        import time
+        from types import SimpleNamespace
+        now, writes = [1000], []
+
+        def wait(seconds):
+            assert seconds == 5
+            now[0] += seconds
+            return now[0] > 1035
+
+        monkeypatch.setattr(time, "time", lambda: now[0])
+        monkeypatch.setattr(live_samples, "_atomic_write_json", lambda *args: writes.append(now[0]))
+        table = SimpleNamespace(snapshot=lambda _: {"samples": {"device": {
+            "interval_s": interval, "valid": valid}}})
+        live_samples.writer_loop(table, "unused", 15, SimpleNamespace(wait=wait))
+        assert writes == expected
+
     def test_keeps_fresh_and_final_empty_write(self, tmp_path):
         import time as _time
         path = str(tmp_path / "live-samples.json")

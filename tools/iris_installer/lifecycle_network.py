@@ -214,6 +214,7 @@ def make_https_server(bind, port, worker, custody):
                     result = worker.transport_proof(request, peer)
                 else:
                     result = (worker.status() if request == {'action': 'status'} else
+                              worker.deployment_info() if request == {'action': 'deployment-info'} else
                               worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
                 status = 200

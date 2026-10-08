@@ -10,7 +10,7 @@
   "scripts": {
     "build": "vite build",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "test:browser": "node tests/browser-smoke.mjs",
+    "test:browser": "node tests/browser-smoke.mjs && node tests/swarm-peer-smoke.mjs",
     "test:swagger": "node tests/swagger-smoke.mjs"
   },
   "dependencies": {

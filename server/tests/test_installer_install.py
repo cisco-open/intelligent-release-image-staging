@@ -218,8 +218,13 @@ def test_package_gate_includes_fresh_guestshell_evidence(installation, monkeypat
 
 
 @pytest.mark.parametrize('mask', [0o022, 0o077])
-def test_prepare_uses_scoped_names_and_does_not_publish_management(installation, mask):
+@pytest.mark.parametrize('external', [False, True])
+def test_prepare_uses_scoped_names_and_does_not_publish_management(installation, mask, external):
     calls = []
+    if external:
+        library = installation.base.parent / 'library'
+        library.mkdir(mode=0o755)
+        installation.config['image_root'] = str(library)
 
     def runner(command, **kwargs):
         calls.append((command, kwargs))
@@ -229,6 +234,7 @@ def test_prepare_uses_scoped_names_and_does_not_publish_management(installation,
             return b"age1primary"
         if "config" in command:
             assert kwargs["env"]["IRIS_PEER_TLS_MODE"] == "required"
+            assert kwargs['env']['IRIS_IMAGE_ROOT'] == (str(library) if external else str(installation.base / 'images'))
             return json.dumps({"services": {
                 "iris": {"ports": [{"target": 8443, "published": "8443"}], "volumes": []},
                 "console": {"ports": [{"target": 8080, "published": "18080"}]},
@@ -244,6 +250,10 @@ def test_prepare_uses_scoped_names_and_does_not_publish_management(installation,
     result = json.loads(installation.compose_file.read_text())
     assert result["name"] == "iris-test"
     assert result["services"]["iris"]["container_name"] == "iris-test-server"
+    for service in result['services'].values():
+        assert service['environment']['IRIS_RUNTIME_NAME'] == service['container_name']
+        assert service['environment']['IRIS_RUNTIME_LAYOUT'] == 'docker'
+        assert service['environment']['IRIS_RUNTIME_HOST'] == installation.config['host']
     assert result["services"]["console"]["ports"][0]["host_ip"] == "127.0.0.1"
     assert all(p["target"] != 9443 for s in result["services"].values() for p in s["ports"])
     assert "private" not in installation.compose_file.read_text()

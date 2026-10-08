@@ -60,6 +60,8 @@ def service(custody):
             return {'available': True, 'target': 'kubernetes'}
         def rotation_status(self):
             return {'available': True, 'families': ['management-tls']}
+        def deployment_info(self):
+            return {'layout': 'kubernetes', 'components': []}
         def submit(self, request):
             raise InstallError('private-path-must-not-escape')
     server = network.make_https_server('127.0.0.1', 0, Worker(), custody)
@@ -86,6 +88,7 @@ def test_actual_authenticated_network_client(custody, service, monkeypatch):
         monkeypatch.setenv('IRIS_LIFECYCLE_' + variable, str(custody[name]))
     assert lifecycle_client.call({'action': 'status'}) == {'available': True, 'target': 'kubernetes'}
     assert lifecycle_client.call({'action': 'rotation-status'})['families'] == ['management-tls']
+    assert lifecycle_client.call({'action': 'deployment-info'})['layout'] == 'kubernetes'
     monkeypatch.delenv('IRIS_LIFECYCLE_KEY')
     with pytest.raises(lifecycle_client.LifecycleUnavailable):
         lifecycle_client.call({'action': 'status'})

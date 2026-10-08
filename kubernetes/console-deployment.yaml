@@ -52,6 +52,22 @@ spec:
             - configMapRef:
                 name: iris-console
           env:
+            - name: IRIS_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: IRIS_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: IRIS_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: IRIS_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: IRIS_MANAGEMENT_API_TOKEN_FILE
               value: /run/secrets/iris-tier-auth/current
             - name: IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE

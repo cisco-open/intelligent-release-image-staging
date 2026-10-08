@@ -33,6 +33,7 @@ import tier_auth
 import service_credentials
 import keyed_state
 import live_samples
+import swarm_edges
 import instruction_keys
 import metrics
 import otlp
@@ -1818,6 +1819,8 @@ class Telemetry:
             matching_ids = image_ids.get(str(info_hash), [])
             if len(matching_ids) == 1:
                 image["image_id"] = matching_ids[0]
+            image.update(swarm_edges.project(
+                peers, live_by_device, image.get("image_id"), now))
             images.append(image)
         return {
             "now": now,
@@ -2308,6 +2311,16 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
         dobs = _device_observation(live_by_device.get(device_id), now)
         if dobs is not None:
             row["device_observation"] = dobs
+        requested = None
+        if policy is not None and not getattr(policy, "fail_closed", True):
+            requested = _peer_policy.compile_qos(
+                policy.document, device_id).get("peer_telemetry_interval_s", 60)
+        row["peer_telemetry"] = {
+            "supported": rec.get("peer_telemetry_v") == 1 and
+                0 <= now - (rec.get("last_seen") or 0) <= 600,
+            "requested_interval_s": requested,
+            "effective_interval_s": dobs.get("interval_s") if dobs else None,
+        }
         report = report_by_device.get(device_id)
         if report is not None:
             row["latest_report"] = report
@@ -2386,6 +2399,9 @@ def _device_observation(entry, now):
     if not valid:
         # Stale / withdrawn: retained context only; omit all fresh counters.
         return out
+
+    out["interval_s"] = entry.get("interval_s", 60 * live_samples.TIER_TICKS.get(
+        entry.get("sampling_class", "good"), 1))
 
     if schema == "v1":
         # v1 rollout: map its legacy fields with explicit v1-source names; do

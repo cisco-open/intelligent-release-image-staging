@@ -11,6 +11,11 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
 const internalUiReference = /@(?:harbor|magnetic)(?:\/|\b)|\bhbr[-A-Z]|\bagentinfo\b|boilerplate-web-main/i;
 
+test('header keeps the product name without the repeated stage-only label', () => {
+  assert.match(bundle, /Intelligent Release/);
+  assert.doesNotMatch(bundle, /iris-stage-label|Stage only/);
+});
+
 function readSources(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const path = new URL(entry.name + (entry.isDirectory() ? '/' : ''), directory);

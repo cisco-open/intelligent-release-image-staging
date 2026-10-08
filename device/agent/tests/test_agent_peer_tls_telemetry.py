@@ -76,7 +76,8 @@ def test_heartbeat_callback_failure_cannot_suppress_heartbeat_or_leak_error():
                  emit=lambda *args: emitted.append(args))
     payload = {"stage_state": "ready"}
     assert iris_agent._send_heartbeat(deps, "d1", payload) == {"ok": True}
-    assert captured == [("d1", {"stage_state": "ready", "instr_protocol": 1})]
+    assert captured == [("d1", {"stage_state": "ready", "instr_protocol": 1,
+                               "peer_telemetry_v": 1})]
     assert payload == {"stage_state": "ready"}
     assert not emitted
 
@@ -89,7 +90,8 @@ def test_heartbeat_observation_does_not_mutate_caller_payload():
                  peer_tls=lambda: observation)
     payload = {"stage_state": "ready"}
     iris_agent._send_heartbeat(deps, "d1", payload)
-    assert captured == [dict(payload, peer_tls=observation, instr_protocol=1)]
+    assert captured == [dict(payload, peer_tls=observation, instr_protocol=1,
+                            peer_telemetry_v=1)]
     assert "peer_tls" not in payload
 
 

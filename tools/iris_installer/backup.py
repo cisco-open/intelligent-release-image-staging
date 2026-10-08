@@ -73,6 +73,14 @@ def docker_capture_plan(installation, *, services=('console', 'iris')):
     if set(compose['services']) != set(services):
         raise InstallError("Deployment services differ from the owned topology")
     sources = {name: installation.base / name for name in ('source', 'roots', 'artifacts', 'images')}
+    from .image_storage import image_root, overlaps
+    sources['images'] = image_root(installation)
+    external_images = installation.config.get('image_root') is not None
+    if external_images:
+        mounts = [m for m in compose['services']['iris'].get('volumes', []) if m.get('target') == '/opt/images']
+        if (len(mounts) != 1 or mounts[0].get('type') != 'bind' or
+                mounts[0].get('source') != str(sources['images']) or mounts[0].get('read_only') is not True):
+            raise InstallError('External image mount differs from the recorded read-only folder')
     sources.update({'deployment': installation.compose_file,
                     'environment': installation.base / 'compose.env',
                     'installation': journal.path})
@@ -87,6 +95,8 @@ def docker_capture_plan(installation, *, services=('console', 'iris')):
         if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', member):
             raise InstallError("Unsupported volume name")
         sources[member] = Path(record['Mountpoint'])
+        if external_images and overlaps(sources['images'], sources[member]):
+            raise InstallError('External images must not overlap Docker volume storage')
         volumes[name] = str(sources[member])
     containers = []
     for service in services:
@@ -95,7 +105,16 @@ def docker_capture_plan(installation, *, services=('console', 'iris')):
         if (record['Config'].get('Labels', {}).get('com.cisco.iris.installer') != journal.document['id']
                 or record['Image'] != completed['images'][compose['services'][service]['image']]):
             raise InstallError("Deployment container identity changed")
+        if external_images and service == 'iris':
+            roots = [m for m in record['Mounts'] if m.get('Destination') == '/opt/images']
+            if (len(roots) != 1 or roots[0].get('Type') != 'bind' or
+                    roots[0].get('Source') != str(sources['images']) or roots[0].get('RW') is not False):
+                raise InstallError('Running image mount differs from the recorded read-only folder')
         for mount in record['Mounts']:
+            if (external_images and service == 'iris' and mount.get('Destination') == '/opt/images'
+                    and mount['Type'] == 'bind' and mount['Source'] == str(sources['images'])
+                    and mount.get('RW') is False):
+                continue
             if mount['Type'] == 'volume' and mount.get('Name') not in volumes:
                 raise InstallError("Container uses an unaccounted volume")
             if mount['Type'] == 'bind' and mount['Source'] not in {
@@ -105,7 +124,7 @@ def docker_capture_plan(installation, *, services=('console', 'iris')):
         containers.append({'id': record['Id'], 'service': service, 'running': record['State']['Running']})
     ids = installation.command(['docker', 'container', 'ls', '-aq'], capture=True).decode().split()
     owned = {record['id'] for record in containers}
-    storage = [Path(path) for path in volumes.values()] + [installation.base / name for name in ('images', 'artifacts')]
+    storage = [Path(path) for path in volumes.values()] + [sources['images'], sources['artifacts']]
     for identifier in ids:
         record, = json.loads(installation.command(['docker', 'container', 'inspect', identifier], capture=True))
         if record['Id'] in owned:

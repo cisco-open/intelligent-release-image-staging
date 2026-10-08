@@ -18,6 +18,14 @@ try {
   const jobOptions = [];
   const deviceQueries = [];
   let settingsReads = 0;
+  const deploymentBase = {layout: 'docker', source: 'managed-worker', observed_at: 1790160000,
+    instance: 'iris', namespace: null, note: null, components: [
+      {role: 'server', kind: 'container', name: 'iris-server', host: 'staging-host',
+        image: 'iris-server:2026.09.29', state: 'running / healthy', os: 'Debian GNU/Linux 12', architecture: 'x86_64', kernel: '6.8.0'},
+      {role: 'console', kind: 'container', name: 'iris-console', host: 'staging-host',
+        image: 'iris-console:2026.09.29', state: 'running / healthy', os: 'Debian GNU/Linux 12', architecture: 'x86_64', kernel: '6.8.0'},
+    ]};
+  let deploymentSummary = deploymentBase, deploymentUnavailable = false, deploymentStall = false;
   let logoutResult = 'http-error';
   const settingsWrites = [];
   const defaultCA = 'https://www.cisco.com/security/pki/trs/ios.p7b';
@@ -53,6 +61,10 @@ try {
     const url = new URL(route.request().url());
     assert.equal(url.origin, 'http://iris.test', 'No external requests allowed');
     if (url.pathname.startsWith('/api/')) {
+      if (url.pathname === '/api/v1/deployment') {
+        if (deploymentStall) return; // Deliberately leave this request pending until the UI timeout.
+        return route.fulfill({status: deploymentUnavailable ? 503 : 200, json: deploymentSummary});
+      }
       if (url.pathname === '/api/v1/settings') settingsReads++;
       if (url.pathname === '/api/v1/settings/certificates/browser/rotation' && route.request().method() === 'GET') return route.fulfill({json: browserTlsFixture});
       if (url.pathname === '/api/v1/settings/service-credentials' && route.request().method() === 'GET') return route.fulfill({json: serviceCredentialFixture});
@@ -240,6 +252,56 @@ try {
   });
   await page.goto('http://iris.test/');
   await page.getByText('UI test', { exact: true }).waitFor();
+  const showDeployment = async () => {
+    await page.goto('http://iris.test/#overview');
+    await page.locator('#deployment-layout').getByText(
+      deploymentUnavailable ? 'Unavailable' : deploymentSummary.layout === 'kubernetes' ? 'Kubernetes' :
+        deploymentSummary.layout === 'docker-split' ? 'Docker · separate hosts' : 'Docker · one host', {exact: true}).waitFor();
+  };
+  await showDeployment();
+  assert.equal(await page.locator('#deployment-rows tr').count(), 2);
+  assert.match(await page.locator('#deployment-rows').innerText(), /Tracker \/ distribution/);
+  assert.match(await page.locator('#deployment-rows').innerText(), /Debian GNU\/Linux/);
+  deploymentSummary = {...deploymentBase, layout: 'docker-split', components: [deploymentBase.components[0],
+    {...deploymentBase.components[1], host: '192.0.2.20'}]};
+  await showDeployment();
+  assert.match(await page.locator('#deployment-rows').innerText(), /192\.0\.2\.20/);
+  deploymentSummary = {...deploymentBase, layout: 'kubernetes', namespace: 'iris-production', components: [
+    {...deploymentBase.components[0], kind: 'pod', name: 'iris-seed-server-a', host: 'node-a', address: '192.0.2.10'},
+    {...deploymentBase.components[1], kind: 'pod', name: 'iris-console-a', host: 'node-b'},
+    {...deploymentBase.components[1], kind: 'pod', name: '<img src=x onerror=alert(1)>', host: 'node-c', state: 'Running / not ready'},
+  ]};
+  await showDeployment();
+  assert.equal(await page.locator('#deployment-rows tr').count(), 3);
+  assert.equal(await page.locator('#deployment-rows img').count(), 0, 'Runtime labels must be text, never HTML');
+  assert.match(await page.locator('#deployment-context').innerText(), /iris-production/);
+  deploymentSummary.components[2].name = 'iris-console-b';
+  await showDeployment();
+  for (const [width, name] of [[1440, 'desktop'], [390, 'mobile']]) {
+    await page.setViewportSize({width, height: 1000});
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Deployment table must not overflow the page');
+    if (process.env.IRIS_UI_SCREENSHOTS) {
+      await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+      await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'deployment-kubernetes-' + name + '.png')});
+    }
+  }
+  deploymentSummary = {...deploymentBase, source: 'runtime', note: 'Full deployment inventory is unavailable.'};
+  await showDeployment();
+  assert.equal(await page.locator('#deployment-note').innerText(), deploymentSummary.note);
+  deploymentUnavailable = true;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await page.locator('#deployment-layout').getByText('Unavailable', {exact: true}).waitFor();
+  assert.equal(await page.locator('#deployment-table').isVisible(), false, 'Failed refresh must hide previous runtime state');
+  assert.match(await page.locator('#deployment-note').innerText(), /Retrying automatically/);
+  deploymentSummary = deploymentBase; deploymentUnavailable = false;
+  await page.setViewportSize({width: 1440, height: 1000});
+  await showDeployment();
+  if (process.env.IRIS_UI_SCREENSHOTS) await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'deployment-docker-desktop.png')});
+  deploymentStall = true;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await page.locator('#deployment-layout').getByText('Unavailable', {exact: true}).waitFor({timeout: 12000});
+  assert.equal(await page.locator('#deployment-table').isVisible(), false, 'A stalled endpoint must not leave old state visible');
+  deploymentStall = false;
   await page.getByRole('navigation', { name: 'Primary', exact: true }).getByRole('link', { name: 'Settings', exact: true }).click();
   assert.equal(new URL(page.url()).hash, '#settings/general');
   const settings = page.getByRole('navigation', { name: 'Settings sections' });
@@ -667,6 +729,8 @@ try {
   await page.locator('#dev-rows tr[data-id]').first().waitFor();
   assert.equal(await page.locator('#devices input[type="checkbox"]').count(), 0, 'No device selection checkboxes');
   assert.equal(await page.getByText('Distribute. Verify. Stage.', { exact: true }).count(), 0);
+  assert.equal(await page.locator('.iris-header').getByText('Stage only', { exact: true }).count(), 0);
+  await page.locator('.iris-header').getByText('Intelligent Release & Image Staging', { exact: true }).waitFor();
   const rows = page.locator('#dev-rows tr[data-id]');
   assert.equal(await rows.count(), 2);
   await rows.first().locator('td').nth(2).click();

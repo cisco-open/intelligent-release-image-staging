@@ -43,7 +43,20 @@ def _all_containers(pod):
 
 
 def _env(container):
-    return {item["name"]: item["value"] for item in container.get("env", [])}
+    return {item["name"]: item["value"] if "value" in item else item["valueFrom"]
+            for item in container.get("env", [])}
+
+
+def test_dashboard_placement_uses_downward_api_without_cluster_credentials():
+    for filename in ("deployment.yaml", "console-deployment.yaml"):
+        pod = _pod(_load(filename))
+        assert pod["automountServiceAccountToken"] is False
+        env = _env(pod["containers"][0])
+        for name, field in (("IRIS_POD_NAME", "metadata.name"),
+                            ("IRIS_POD_NAMESPACE", "metadata.namespace"),
+                            ("IRIS_NODE_NAME", "spec.nodeName"),
+                            ("IRIS_POD_IP", "status.podIP")):
+            assert env[name] == {"fieldRef": {"fieldPath": field}}
 
 
 def _volume(pod, name):

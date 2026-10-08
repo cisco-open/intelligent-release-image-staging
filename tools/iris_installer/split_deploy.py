@@ -37,7 +37,7 @@ def validate_split_config(config):
     if not SPLIT_FIELDS.issubset(config):
         raise InstallError('Split Docker requires explicit SSH transport and Console custody settings')
     base = {'target', 'instance', 'host', 'console_bind', 'console_port', 'recovery_recipient', 'peer_tls'}
-    if set(config) != base | SPLIT_FIELDS:
+    if set(config) - {'image_root'} != base | SPLIT_FIELDS:
         raise InstallError('Unexpected split deployment configuration fields')
     for field in ('console_ssh_host', 'management_bind'):
         try:
@@ -493,6 +493,7 @@ class SplitDockerInstall(DockerInstall):
         spec = json.loads(regular_bytes(self.console_build_file))['services']['console']
         spec.pop('build', None); spec['image'] = saved
         spec['environment'].update(IRIS_MANAGEMENT_API_URL='https://' + self.config['management_bind'] + ':9443',
+                                   IRIS_RUNTIME_HOST=self.config['console_ssh_host'],
                                    IRIS_GUI_DEFAULT_CERT='/run/iris-console-custody/tls.crt',
                                    IRIS_GUI_DEFAULT_KEY='/run/iris-console-custody/tls.key',
                                    IRIS_MANAGEMENT_API_TOKEN_FILE='/run/iris-console-custody/current.json',

@@ -47,6 +47,9 @@ def signer_path(state_dir):
 def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None):
     """Other maintenance entry points must respect an interrupted restore."""
     base = Path(state_dir)
+    image_change = base / 'image-root-change.json'
+    if image_change.exists() or image_change.is_symlink():
+        raise InstallError('Image-folder change is incomplete; rerun the original irisctl image-root command')
     path, directory = base / 'restore-operation.json', base / 'restore-operations'
     try:
         operations = list(directory.iterdir()) if directory.exists() else []

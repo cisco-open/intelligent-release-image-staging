@@ -72,6 +72,9 @@ class Worker:
         self.extract_dir = backup_archive.private_directory(extract_dir) if extract_dir else None
         self.record = self.state_dir / 'lifecycle-jobs.json'
         self.lock = threading.Lock()
+        self.inventory_lock = threading.Lock()
+        self.inventory_cache = None
+        self.inventory_checked = None
         self.thread = None
         self.jobs = json.loads(regular_bytes(self.record)) if self.record.exists() else []
         if not isinstance(self.jobs, list) or len(self.jobs) > 100:
@@ -82,6 +85,21 @@ class Worker:
                 job['state'] = 'recovery-required'
                 job['detail'] = 'Worker interrupted. Inspect backup-operation.json and service state before another capture.'
         self.save()
+
+    def deployment_info(self):
+        from .deployment_info import collect
+        # Cache failures too, to bound repeated Docker/SSH/cluster queries.
+        with self.inventory_lock:
+            if self.inventory_checked is None or time.monotonic() - self.inventory_checked >= 30:
+                self.inventory_cache = None
+                try:
+                    self.inventory_cache = collect(self.state_dir)
+                except (InstallError, OSError, ValueError, KeyError, TypeError):
+                    pass
+                self.inventory_checked = time.monotonic()
+            if self.inventory_cache is None:
+                raise InstallError('Deployment inventory unavailable')
+            return self.inventory_cache
 
     def save(self):
         atomic_write(self.record, json.dumps(self.jobs, sort_keys=True).encode())
@@ -522,6 +540,7 @@ def make_server(path, worker, *, allowed_uids=(0, 10001)):
                     result = (worker.transport_status() if request == {'action': 'transport-status'} else worker.submit_transport(request))
                 else:
                     result = (worker.status() if request == {'action': 'status'} else
+                              worker.deployment_info() if request == {'action': 'deployment-info'} else
                               worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
             except (InstallError, ValueError, TypeError) as exc:

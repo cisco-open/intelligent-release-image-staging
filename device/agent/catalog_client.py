@@ -248,6 +248,14 @@ class CatalogClient:
             raise CatalogError("heartbeat %s -> HTTP %d" % (device_id, status))
         return json.loads(body)
 
+    def post_live_observation(self, device_id, observation):
+        status, body = self._req(
+            "POST", "/v1/devices/%s/live-telemetry" % device_id,
+            body={"telemetry_observation": observation})
+        if status != 200:
+            raise CatalogError("live telemetry -> HTTP %d" % status)
+        return json.loads(body)
+
     def post_telemetry(self, device_id, report):
         # POST a device telemetry report (issue #13). ASCII JSON body; when
         # it exceeds GZIP_MIN bytes it is gzip-compressed and flagged with

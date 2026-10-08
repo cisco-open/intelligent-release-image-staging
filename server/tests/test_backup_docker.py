@@ -34,7 +34,7 @@ def docker(*args):
 
 
 @pytest.fixture
-def deployment(tmp_path):
+def deployment(tmp_path, request):
     image = os.environ.get('IRIS_BACKUP_DOCKER_IMAGE')
     if not image or os.geteuid() != 0:
         pytest.skip('explicit cached test image and root required for Docker volume capture')
@@ -60,6 +60,12 @@ def deployment(tmp_path):
     recipient = subprocess.check_output(['age-keygen', '-y', str(recovery_key)], text=True).strip()
     config = dict(target='docker', instance=name, host='192.0.2.10', console_bind='127.0.0.1',
                   console_port=18080, recovery_recipient=recipient, peer_tls='required')
+    external = getattr(request, 'param', False)
+    if external:
+        library = tmp_path / 'external-images'
+        library.mkdir()
+        (library / 'external.bin').write_bytes(b'external fixture image')
+        config['image_root'] = str(library)
     compose = {'services': {}, 'volumes': {}}
     containers, volumes = [], []
     labels = ['--label', 'com.cisco.iris.installer=' + owner,
@@ -81,9 +87,13 @@ def deployment(tmp_path):
             if service == 'iris':
                 for index, volume in enumerate(volumes):
                     command.extend(['-v', volume + ':/fixture/' + str(index)])
+                if external:
+                    command.extend(['--mount', 'type=bind,source=' + str(library) + ',target=/opt/images,readonly'])
             docker(*command, image, '/bin/sh', '-c', 'sleep 3600')
             containers.append(container)
             compose['services'][service] = {'container_name': container, 'image': image}
+            if external and service == 'iris':
+                compose['services'][service]['volumes'] = [dict(type='bind', source=str(library), target='/opt/images', read_only=True)]
         (state / 'compose.json').write_text(json.dumps(compose))
         (state / 'compose.env').write_text('# fixture\n')
         with Journal(state).locked() as journal:
@@ -126,6 +136,36 @@ def test_real_capture_decrypt_extract_preserves_all_volumes_and_identity(deploym
         assert record == {'component': logical, 'replay_floor': 12345}
     assert (fixture.extracted / 'data/container-images').stat().st_size > 0
     assert (fixture.extracted / 'data/images/example.bin').read_bytes() == (fixture.state / 'images/example.bin').read_bytes()
+
+
+@pytest.mark.parametrize('deployment', [True], indirect=True)
+def test_real_external_image_mount_is_readonly_and_included_with_upload_volume(deployment):
+    fixture = deployment
+    mounts = json.loads(docker('inspect', fixture.containers[0]))[0]['Mounts']
+    assert next(m for m in mounts if m['Destination'] == '/opt/images')['RW'] is False
+    assert backup.create(SimpleNamespace(state_dir=fixture.state, output=fixture.data,
+        recovery_output=fixture.recovery, allow_downtime=True)) == 0
+    backup_archive.read(fixture.data, fixture.key, fixture.public, destination=fixture.extracted / 'data')
+    assert (fixture.extracted / 'data/images/external.bin').read_bytes() == b'external fixture image'
+    assert (fixture.extracted / 'data/volume-iris-images/fixture.json').is_file()
+    for name in fixture.containers:
+        assert json.loads(docker('inspect', name))[0]['State']['Running']
+
+
+@pytest.mark.parametrize('deployment', [True], indirect=True)
+def test_external_image_mount_rejects_another_container_writer(deployment):
+    document = json.loads((deployment.state / 'installation.json').read_bytes())
+    writer = deployment.containers[0] + '-writer'
+    image = json.loads(docker('inspect', deployment.containers[0]))[0]['Image']
+    try:
+        docker('run', '-d', '--network', 'none', '--name', writer, '--mount',
+            'type=bind,source=' + document['config']['image_root'] + ',target=/images',
+            image, '/bin/sh', '-c', 'sleep 3600')
+        with Journal(deployment.state).locked() as journal:
+            with pytest.raises(backup.InstallError, match='can write deployment storage'):
+                backup.capture_plan(DockerInstall(journal))
+    finally:
+        docker('rm', '-f', writer)
 
 
 def test_capture_failure_restarts_original_services(deployment, monkeypatch):

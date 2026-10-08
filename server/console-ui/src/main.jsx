@@ -96,7 +96,6 @@ function Header() {
       aria-label="Toggle navigation" aria-controls="iris-navigation" aria-expanded={expanded}><Icon name="list" /></button>
     <a href="#overview" className="iris-brand" aria-label="IRIS overview">IRIS</a>
     <span className="iris-product-title">Intelligent Release &amp; Image Staging</span>
-    <span className="iris-stage-label">Stage only</span>
     <span className="iris-header-spacer" />
     <div className="iris-help-wrap" ref={menu} onBlur={event => {
       if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);

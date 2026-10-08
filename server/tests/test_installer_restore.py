@@ -402,7 +402,7 @@ def test_kubernetes_recovery_matches_stopped_replica_state_but_not_changed_autho
 
 
 @pytest.fixture
-def transaction(tmp_path, monkeypatch):
+def transaction(tmp_path, monkeypatch, request):
     from iris_installer import backup_archive
     for executable in ('age', 'age-keygen', 'ssh-keygen'):
         if not shutil.which(executable):
@@ -421,10 +421,15 @@ def transaction(tmp_path, monkeypatch):
     instance = str(uuid.uuid4())
     document = dict(schema=1, id=instance, config={'target': 'docker', 'recovery_recipient': recipient},
                     completed={'images': {'server': 'sha256:' + 'a' * 64}}, root_digests={})
+    external = getattr(request, 'param', False)
+    if external:
+        document['config']['image_root'] = str(tmp_path / 'external-images')
     put(base / 'installation.json', document)
     sources = {name: base / name for name in ('source', 'roots', 'images', 'artifacts',
                'volume-iris-config', 'volume-iris-state', 'volume-iris-images',
                'volume-iris-tier-auth', 'volume-iris-management-ca')}
+    if external:
+        sources['images'] = tmp_path / 'external-images'
     for directory in sources.values():
         directory.mkdir(mode=0o700)
     sources.update(deployment=base / 'compose.json', environment=base / 'compose.env', installation=base / 'installation.json')
@@ -482,6 +487,40 @@ def test_complete_transaction_restores_data_restarts_and_authenticates_console(t
     assert calls[0] == 'fenced'
     assert [call[-1] for call in calls if isinstance(call, tuple) and call[0] == 'up'] == ['iris', 'console']
     assert tx.run(recovery=True) == result
+
+
+@pytest.mark.parametrize('transaction', [True], indirect=True)
+def test_external_image_folder_is_restored_with_uploads_and_original_modes(transaction):
+    tx, sources, calls, install = transaction
+    from iris_installer.image_storage import image_root
+    assert image_root(install) == sources['images']
+    assert sources['images'].parent != tx.base
+    result = tx.run()
+    assert result['state'] == 'restored'
+    assert (sources['images'] / 'image.bin').read_bytes() == b'original-image'
+    assert sources['images'].stat().st_mode & 0o777 == 0o700
+    assert any(item['target'] == str(sources['volume-iris-images']) for item in tx.record['plan'])
+    assert any(item['target'] == str(sources['images']) for item in tx.record['plan'])
+
+
+@pytest.mark.parametrize('transaction', [True], indirect=True)
+def test_external_image_restore_recovers_after_original_directory_is_retained(transaction, monkeypatch):
+    tx, sources, calls, install = transaction
+    publish = storage.publish
+    def interrupted(target, staged, retained, before, after):
+        if Path(target) == sources['images']:
+            os.rename(target, retained)
+            raise OSError('fixture interrupted between directory renames')
+        return publish(target, staged, retained, before, after)
+    monkeypatch.setattr(storage, 'publish', interrupted)
+    with pytest.raises(OSError, match='interrupted'):
+        tx.run()
+    from iris_installer.image_storage import image_root
+    assert not sources['images'].exists()
+    assert image_root(install) == sources['images']
+    monkeypatch.setattr(storage, 'publish', publish)
+    assert tx.run(recovery=True)['state'] == 'restored'
+    assert (sources['images'] / 'image.bin').read_bytes() == b'original-image'
 
 
 def test_explicit_recovery_repairs_first_record_pointer_crash_window(transaction, monkeypatch):

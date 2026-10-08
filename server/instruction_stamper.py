@@ -960,7 +960,7 @@ _V2_OBSERVED_FIELDS = _V2_STATE_FIELDS | frozenset((
     "last_sample_seq", "observed_received_at", "last_observed_seq",
 ))
 _V2_OPTIONAL_FIELDS = frozenset((
-    "transfer_id", "image_id", "aria_session_id",
+    "transfer_id", "image_id", "aria_session_id", "interval_s",
 ))
 _V2_WITHDRAWN_OPTIONAL = _V2_OPTIONAL_FIELDS | frozenset((
     "sample_seq", "last_sample_seq", "observed_received_at",
@@ -1074,6 +1074,10 @@ def _validate_live_sample(device_id, sample, now):
         raise StamperError("live_unavailable")
     _live_number(sample["observed_at"])
     _validate_live_common(sample, now)
+    if "interval_s" in sample:
+        interval = _live_integer(sample["interval_s"], instructions.MAX_I63)
+        if interval != 10 and (interval < 60 or interval % 60):
+            raise StamperError("live_unavailable")
     if "transfer_id" in sample:
         _live_identifier(sample["transfer_id"], live_samples._HEX32)
     if "image_id" in sample:
@@ -1386,7 +1390,8 @@ def _effective_part(paths, policy, device_id, role, restricted, definition,
                           definition, now, expires)
     qos_override = {key: effective[key] for key in instructions.QOS_FIELDS
                     if effective[key] != base[key]}
-    control_override = {key: effective[key] for key in instructions.CONTROL_FIELDS
+    control_override = {key: effective[key] for key in
+                        instructions.CONTROL_FIELDS + instructions.OPTIONAL_CONTROL_FIELDS
                         if effective[key] != base[key]}
     return {"peers": peers, "qos_override": qos_override,
             "control_override": control_override, "server_time": expires}

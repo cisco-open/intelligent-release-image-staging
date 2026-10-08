@@ -69,6 +69,12 @@ def run(command, *, env=None, input=None, timeout=7200, capture=False):
 
 
 def validate_config(config):
+    if isinstance(config, dict) and 'image_root' in config:
+        from .image_storage import validate_name
+        validate_name(config['image_root'])
+        if config.get('target') not in ('docker', 'docker-split'):
+            raise InstallError('Host image folders are supported by Docker; Kubernetes uses its persistent volume')
+        config = {key: value for key, value in config.items() if key != 'image_root'}
     if isinstance(config, dict) and config.get('target') in ('docker-split', 'kubernetes'):
         if not BASE_CONFIG_KEYS.issubset(config):
             raise InstallError('Installation configuration is incomplete or invalid')
@@ -185,6 +191,8 @@ class DockerInstall:
             raise InstallError("Deployment root fingerprints changed; refusing to resume")
 
     def prepare(self):
+        from .image_storage import image_root
+        import_root = image_root(self)
         completed = self.journal.document["completed"]
         if "prepared" in completed:
             if digest(self.compose_file) != completed["prepared"]:
@@ -222,7 +230,7 @@ class DockerInstall:
             "IRIS_GUI_PUBLISH": str(self.config["console_port"]),
             "IRIS_CONSOLE_URL": f'https://{self.config["console_bind"]}:{self.config["console_port"]}/',
             "IRIS_PEER_TLS_MODE": self.config["peer_tls"],
-            "IRIS_IMAGE_ROOT": str(self.base / "images"),
+            "IRIS_IMAGE_ROOT": str(import_root),
             "IRIS_ARTIFACTS_HOST_DIR": str(self.base / "artifacts"),
         }
         # Empty explicit env file prevents automatic discovery of server/.env.
@@ -240,6 +248,9 @@ class DockerInstall:
         for service, suffix in (("iris", "server"), ("console", "console")):
             spec = compose["services"][service]
             spec["container_name"] = self.config["instance"] + "-" + suffix
+            spec.setdefault("environment", {}).update(
+                IRIS_RUNTIME_LAYOUT=self.config["target"],
+                IRIS_RUNTIME_NAME=spec["container_name"], IRIS_RUNTIME_HOST=self.config["host"])
             spec["image"] = "iris-installer/" + self.config["instance"] + "-" + suffix + ":" + self.journal.document["id"]
             spec.setdefault("labels", {})["com.cisco.iris.installer"] = self.journal.document["id"]
             for port in spec.get("ports", []):
@@ -455,6 +466,8 @@ def start(args):
     ubuntu.check_platform()
     config = {name: getattr(args, name) for name in (
         "target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls")}
+    if getattr(args, 'image_root', None) is not None:
+        config['image_root'] = str(args.image_root)
     if args.target == 'docker-split':
         from .split_deploy import SPLIT_FIELDS
         config.update({name: getattr(args, name) for name in SPLIT_FIELDS})

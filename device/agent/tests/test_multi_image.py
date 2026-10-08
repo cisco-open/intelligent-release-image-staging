@@ -210,7 +210,7 @@ def test_single_image_set_behaves_exactly_as_before():
     hb = cat.heartbeats[0]
     assert set(hb) == {"current_image_id", "free_flash_bytes", "version",
                        "model", "stage_state", "stage_error", "target_fs",
-                       "telemetry_enabled", "telemetry_stream_enabled",
+                       "telemetry_enabled", "telemetry_stream_enabled", "peer_telemetry_v",
                        "telemetry_observation", "instr_protocol"}
     assert type(hb["instr_protocol"]) is int
     assert hb["instr_protocol"] == 1

@@ -36,7 +36,7 @@ def _network_call(request, endpoint):
     context = ssl.create_default_context(cafile=ca)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
-    timeout = 400 if request.get('action') == 'sync-management' else 5
+    timeout = 400 if request.get('action') == 'sync-management' else 10 if request.get('action') == 'deployment-info' else 5
     connection = http.client.HTTPSConnection(parsed.hostname, parsed.port, context=context, timeout=timeout)
     try:
         connection.request('POST', '/v1/lifecycle', body=json.dumps(request).encode(),
@@ -54,6 +54,7 @@ def call(request):
         raise ValueError('Expected a maintenance request')
     action = request.get('action')
     fields = {'status': {'action'}, 'rotation-status': {'action'},
+              'deployment-info': {'action'},
               'sync-management': {'action', 'request_id'},
               'rotate': {'action', 'request_id', 'family', 'allow_downtime'},
               'recover-rotation': {'action', 'request_id', 'family', 'allow_downtime'},
@@ -63,7 +64,7 @@ def call(request):
               'verify': {'action', 'request_id', 'backup_id'}, 'extract': {'action', 'request_id', 'backup_id'}}
     if not isinstance(action, str) or action not in fields or set(request) != fields[action]:
         raise ValueError('Unsupported maintenance request')
-    if action not in ('status', 'rotation-status') and (not isinstance(request['request_id'], str)
+    if action not in ('status', 'rotation-status', 'deployment-info') and (not isinstance(request['request_id'], str)
             or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['request_id'])):
         raise ValueError('Provide a bounded maintenance request ID')
     if action in ('backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
@@ -83,7 +84,7 @@ def call(request):
             raw = _network_call(request, network_endpoint)
         else:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(400 if action == 'sync-management' else 5)
+                connection.settimeout(400 if action == 'sync-management' else 10 if action == 'deployment-info' else 5)
                 connection.connect(endpoint)
                 connection.sendall(json.dumps(request).encode() + b'\n')
                 with connection.makefile('rb') as stream:

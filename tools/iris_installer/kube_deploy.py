@@ -545,6 +545,11 @@ class KubeInstall(DockerInstall):
                      "envFrom": [{"configMapRef": {"name": SERVICES[service]}}], "volumeMounts": mounts,
                      "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
                      "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "2" if server else "1", "memory": "2Gi" if server else "512Mi"}}}
+        container["env"] = [{"name": name, "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": field}}}
+                            for name, field in (("IRIS_POD_NAME", "metadata.name"),
+                                                ("IRIS_POD_NAMESPACE", "metadata.namespace"),
+                                                ("IRIS_NODE_NAME", "spec.nodeName"),
+                                                ("IRIS_POD_IP", "status.podIP"))]
         port = 9101 if server else 8080
         for probe, path in (("startupProbe", "/readyz"), ("readinessProbe", "/readyz"), ("livenessProbe", "/healthz")):
             container[probe] = {"httpGet": {"path": path, "port": port, "scheme": "HTTPS"}, "periodSeconds": 5 if probe == "startupProbe" else 10, "timeoutSeconds": 10, "failureThreshold": 60 if probe == "startupProbe" else 6}
@@ -555,7 +560,7 @@ class KubeInstall(DockerInstall):
         if self.config["kube_registry_auth"]:
             spec["imagePullSecrets"] = [{"name": "iris-registry"}]
         if server:
-            container["env"] = [{"name": "IRIS_POD_UID", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.uid"}}}]
+            container["env"].append({"name": "IRIS_POD_UID", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.uid"}}})
             # A newly provisioned fsGroup volume may set SGID on new children.
             # Create private authority dirs ourselves and explicitly clear it.
             init = copy.deepcopy(container)

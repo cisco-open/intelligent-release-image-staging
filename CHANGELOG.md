@@ -17,12 +17,28 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.10.08]
+
+- Show directional device-to-device transfers on the Swarm Map using fresh,
+  identity-matched peer observations. Add a per-device 10-second telemetry
+  option in the Console, delivered through signed policy, while keeping the
+  60-second default and normal device control polling unchanged. Correct the
+  server's peer-row cap so reporting cadence does not truncate peer lists.
+
+- Remove the repeated "Stage only" label from the Console header.
+
+- Support a chosen host image folder for managed Docker installations, including
+  backup and restore. Check read access before changing an existing mount and
+  preserve separate Console upload storage.
+
+- Show deployment layout, hosts, container or pod names, images and observed
+  runtime state on the Console dashboard, with explicit limited-inventory and
+  unavailable states. Managed inventory remains read-only and deployment-scoped.
+
 - Replace installer desktop windows with terminal commands for setup and host
   recovery. Add `iris-key-setup` to guide key holders through creating protected
   signing keys, creating recovery keys, approving requests and copying public
   files. Private signing roots stay off the server.
-
-## [2026.09.29]
 
 - Remove the active IOS-XR peer identity during verified agent teardown, while
   preserving staged images and public certificate generations. Re-onboarding
@@ -50,7 +66,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   Verify every Console consumer, preserve management-token overlap on failed
   synchronization, and require pod/process-bound shutdown proof for PVC capture.
   Keep the Kubernetes lifecycle worker outside the cluster behind mutual TLS.
-  Add host-UI same-key renewal of that worker's CA and connection certificates,
+  Add host controls for same-key renewal of that worker's CA and connection certificates,
   including recovery after expiry. Drain HTTP requests, publishers, exports and
   background writers before admitting clean-stop backup evidence. Handle Console
   pod termination gracefully and distinguish an idle seeder from an unreachable
@@ -67,7 +83,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   credentials. Require independently verified cold backups, stopped writers,
   bounded recovery and consumer evidence. Rebuild native packages when signing
   roots change; require device removal and re-onboarding for changed trust.
-  Package desktop tools for offline key generation/approval, independent recovery
+  Package terminal tools for offline key generation/approval, independent recovery
   recipient replacement and host recovery. Preserve access to older backup sets.
 
 - Add owner-only Console browser TLS request, public CA approval, explicit
