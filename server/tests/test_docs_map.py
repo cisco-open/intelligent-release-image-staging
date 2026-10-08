@@ -58,6 +58,21 @@ def test_every_nav_page_exists():
             "zensical.toml nav references missing page: %s" % page
 
 
+def test_catalyst_iox_storage_requirement_matches_the_onboarding_profile():
+    source = Path(REPO, 'server/gui_onboard.py').read_text()
+    module = ast.parse(source)
+    assignment = next(node for node in module.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == '_C9K_IOX_ENV'
+                              for target in node.targets))
+    profile = ast.literal_eval(assignment.value)
+    requirements = Path(DOCS, 'install/device-requirements.md').read_text()
+    supported = Path(DOCS, 'install/supported-devices.md').read_text()
+    assert profile['SHARE_IOS_PATH'] in requirements
+    assert 'requires an app-hosting SSD' in requirements
+    assert 'The share must be writable' in requirements
+    assert 'app-hosting SSD and the required IRIS share' in supported
+
+
 def test_nav_page_existence_check_catches_missing_file_and_directory_target(tmp_path):
     """Prove the os.path.isfile guard test_every_nav_page_exists relies on
     actually flags both failure shapes Zensical itself stays silent about: a

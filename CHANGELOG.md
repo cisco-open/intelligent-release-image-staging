@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify that the Catalyst IOx profile requires the app-hosting SSD share for
+  image placement; Guest Shell is the choice when that storage is unavailable.
+
 - Resume interrupted initial installer snapshots using recorded public inputs.
   Verify each file before publishing it and preserve unknown or changed files.
 

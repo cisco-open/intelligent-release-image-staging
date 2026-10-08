@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Use this page for a device that runs the device agent as an IOx application:
 Industrial Ethernet switches with app hosting, Catalyst 8000 series routers, and
-Catalyst 9000 series switches with app-hosting storage. On Catalyst 9000 series
-switches the agent normally runs in [Guest Shell](guest-shell.md), and
+Catalyst 9000 series switches with an app-hosting SSD and shared folder. On
+Catalyst 9000 series switches the agent normally runs in [Guest Shell](guest-shell.md), and
 [Supported devices and platforms](supported-devices.md) says which path each
 series takes.
 
