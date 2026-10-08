@@ -133,7 +133,7 @@ def test_rollout_rejects_retained_staged_membership_with_current_error(
     cat = catalog.CatalogStore(str(tmp_path))
     cat.save_image({"id": "a", "filename": "a.bin"})
     handler = handler_factory(catalog=cat)
-    handler._device_view = lambda: [{
+    handler._staging_view = lambda: [{
         "assigned_image_ids": ["a"], "staged_image_ids": ["a"],
         "errored_image_ids": ["a"], "stage_state": "error", "last_seen": 990,
     }]
@@ -151,7 +151,7 @@ def test_overview_waits_for_activity_and_excludes_current_image_errors(handler_f
          "assigned_image_ids": ["a"], "staged_image_ids": ["a"],
          "errored_image_ids": ["a"]},
     ]
-    handler._device_view = lambda: rows
+    handler._staging_view = lambda: rows
     overview = handler._overview()
     assert overview["assigned"] == 2
     assert overview["staged"] == 0
@@ -161,7 +161,7 @@ def test_overview_waits_for_activity_and_excludes_current_image_errors(handler_f
 
 def test_offline_and_terminal_devices_are_not_currently_staging(handler_factory):
     handler = handler_factory()
-    handler._device_view = lambda: [
+    handler._staging_view = lambda: [
         {"last_seen": 390, "stage_state": "staging", "assigned_image_id": "a"},
         {"last_seen": 990, "stage_state": "copy_failed", "assigned_image_id": "a"},
         {"last_seen": 990, "stage_state": "error", "assigned_image_id": "a"},

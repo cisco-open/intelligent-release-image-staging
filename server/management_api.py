@@ -784,6 +784,12 @@ def _device_filter_params(qs):
     return out
 
 
+def _target_os_family(fleet_row, deployment_type=None):
+    """The OS authority shared by full projections and count-only facts."""
+    return (fleet_row.get("os_family") or
+            (deployment_type or {}).get("os_family") or "")
+
+
 def trusted_target_projection(fleet_row, deployment_type=None):
     """Derive scheduling facts from server-owned inventory/record inputs.
 
@@ -794,11 +800,38 @@ def trusted_target_projection(fleet_row, deployment_type=None):
     deployment_type = deployment_type or {}
     return {
         "model_family": gui_onboard.family(fleet_row.get("model")),
-        "os_family": (fleet_row.get("os_family") or
-                      deployment_type.get("os_family") or ""),
+        "os_family": _target_os_family(fleet_row, deployment_type),
         "platform_resolved": (deployment_type.get("platform") or
                               fleet_row.get("platform") or ""),
     }
+
+
+def _device_staging_projection(device, policy, heartbeat, job):
+    """Shared staging fields for Inventory and Overview, without device detail.
+
+    Assignment authority is the catalog policy, never a heartbeat. Missing
+    per-image reports stay None: aggregate staging rules distinguish them from
+    an explicit empty set. Preserve the full row's existing onboarding fallback
+    when no newer job exists.
+    """
+    row = {key: device[key] for key in (
+        "device_id", "onboard_action", "onboard_state", "onboard_finished_at")
+        if key in device}
+    row.update({
+        "assigned_image_id": policy.get("approved_image_id"),
+        "assigned_image_ids": policy.get("approved_image_ids"),
+        "last_seen": heartbeat.get("last_seen"),
+        "stage_state": heartbeat.get("stage_state"),
+        "stage_error": heartbeat.get("stage_error"),
+        "current_image_id": heartbeat.get("current_image_id"),
+        "staged_image_ids": heartbeat.get("staged_image_ids"),
+        "errored_image_ids": heartbeat.get("errored_image_ids"),
+    })
+    if job:
+        row["onboard_action"] = job["action"]
+        row["onboard_state"] = job["state"]
+        row["onboard_finished_at"] = job["finished_at"]
+    return row
 
 
 def deployment_target_snapshot(records):
@@ -3140,6 +3173,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 RecursionError, OverflowError):
             return None
 
+    def staging_snapshot():
+        """Read each staging authority once; never substitute stale/empty data."""
+        heartbeat_rows = instruction_heartbeat_snapshot(unavailable_ok=False)
+        heartbeat_available = isinstance(heartbeat_rows, list)
+        hb = {row.get("device_id"): row for row in (heartbeat_rows or [])
+              if isinstance(row, dict) and isinstance(row.get("device_id"), str)}
+        # The latest job accounts for the gap before the first agent heartbeat.
+        jobs = onboard.latest_jobs_by_device() if onboard else {}
+        # Use the strict assignment projection, not the raw stamp aggregate.
+        policies = catalog.list_policies() if catalog else {}
+        return policies, hb, jobs, heartbeat_available
+
     def instruction_heartbeat_for_device(device_id):
         """Read one heartbeat shard without turning evidence loss into 5xx."""
         if catalog is None:
@@ -5088,9 +5133,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             self._serve_static(path)
 
         def _device_view(self):
-            """The WHOLE merged fleet, in store order — what /api/overview's
-            aggregates and the unpaginated /api/devices are defined by."""
+            """The complete Inventory projection, in fleet store order."""
             return self._device_page()[0]
+
+        def _staging_view(self):
+            """Overview's staging inputs, without unconsumed inventory detail.
+
+            Every call reads current fleet, heartbeat, assignment and job state.
+            Targeting facts, installation choices and instruction diagnostics
+            remain on the detailed Inventory path that actually returns them.
+            """
+            devices = fleet.snapshot()[1] if fleet else []
+            policies, hb, jobs, _available = staging_snapshot()
+            return [_device_staging_projection(
+                device, policies.get(device.get("device_id"), {}),
+                hb.get(device.get("device_id"), {}),
+                jobs.get(device.get("device_id"))) for device in devices]
 
         def _device_page(self, limit=None, offset=0, q=None, filters=None):
             """(rows, total, revision, target_facts) for the device projection.
@@ -5119,19 +5177,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             paging = limit is not None or offset or active_filter
             if paging:
                 devs.sort(key=lambda d: str(d.get("device_id") or ""))
-            heartbeat_rows = instruction_heartbeat_snapshot(unavailable_ok=False)
-            heartbeat_available = isinstance(heartbeat_rows, list)
-            hb = {d.get("device_id"): d for d in (heartbeat_rows or [])
-                  if isinstance(d, dict) and isinstance(d.get("device_id"), str)}
-            # each device's latest onboard/undeploy job, so the UI can show
-            # "onboarding…" / "waiting for heartbeat" instead of a misleading
-            # "not enrolled" before the fresh agent's first heartbeat lands
-            jobs = onboard.latest_jobs_by_device() if onboard else {}
-            # one policy.json read for the whole table — get_policy() re-parses
-            # the file per call, which multiplies badly on the polled endpoints
-            # Keep the established strict policy projection for assignments.
-            # Raw policy rows exist only for policy_view's stamp aggregate.
-            policies = catalog.list_policies() if catalog else {}
+            policies, hb, jobs, heartbeat_available = staging_snapshot()
             revoked_principals = instruction_revocation_snapshot()
             observed_at = now_fn()
             deployment_types = deployment_type_snapshot()
@@ -5171,16 +5217,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # requested page. They need only trusted fleet/record fields,
                 # so the fast path still avoids merging heartbeat and catalog
                 # state for rows it will not render.
-                fact_rows = []
-                for device in devs:
-                    resolved = deployment_types.get(device.get("device_id"), {})
-                    fact_row = dict(device)
-                    fact_row.update(trusted_target_projection(device, resolved))
-                    fact_rows.append(fact_row)
                 facts = {
                     "missing_os_family": sum(
-                        not row.get("os_family") for row in fact_rows),
-                    "role_drift": sum(role_drift(row) for row in fact_rows),
+                        not _target_os_family(device, deployment_types.get(
+                            device.get("device_id"))) for device in devs),
+                    "role_drift": sum(role_drift(device) for device in devs),
                 }
                 return rows, total, revision, facts
 
@@ -5316,22 +5357,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # store enforces, so the Console offers only those instead of a
             # choice the server refuses and the table then snaps back from.
             row["install_options"] = gui_fleet.install_options_for_record(d)
-            row["assigned_image_id"] = pol.get("approved_image_id")
-            row["assigned_image_ids"] = pol.get("approved_image_ids")
-            row["last_seen"] = h.get("last_seen")
-            row["stage_state"] = h.get("stage_state")
+            row.update(_device_staging_projection(d, pol, h, jobs.get(did)))
             row["peer_tls"] = h.get("peer_tls")
-            row["stage_error"] = h.get("stage_error")
-            row["current_image_id"] = h.get("current_image_id")
-            # the ordered set of images the agent reports as staged
-            # (Task 3); absent from an agent that predates the field, in
-            # which case rollout falls back to current_image_id/stage_state
-            row["staged_image_ids"] = h.get("staged_image_ids")
-            # which assigned images hit a terminal per-image failure on
-            # the agent's last tick; absent from an agent that predates
-            # the field, in which case staging falls back to guessing
-            # from the single aggregate stage_state (_row_is_staging)
-            row["errored_image_ids"] = h.get("errored_image_ids")
             row["heartbeat_model"] = h.get("model")
             # the "copying to <fs>" badge needs the heartbeat's target FS
             row["target_fs"] = h.get("target_fs")
@@ -5349,11 +5376,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             row["instruction"] = _instruction_device_projection(
                 h, revoked, observed_at,
                 heartbeat_available=heartbeat_available)
-            j = jobs.get(did)
-            if j:
-                row["onboard_action"] = j["action"]
-                row["onboard_state"] = j["state"]
-                row["onboard_finished_at"] = j["finished_at"]
             return row
 
         @staticmethod
@@ -5475,10 +5497,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
-            # the merged device rows already carry policy + heartbeat, so one
-            # _device_view() pass feeds rollout, totals, and the awaiting count
-            # without re-reading the fleet/policy/heartbeat stores here
-            rows = self._device_view()
+            # One staging-only pass feeds rollout, totals and awaiting count;
+            # none of these aggregates consumes Inventory's detailed projection.
+            rows = self._staging_view()
             rollout = []
             for img in imgs:
                 iid = img.get("id")

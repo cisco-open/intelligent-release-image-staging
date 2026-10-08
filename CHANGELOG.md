@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Avoid unused device-detail work when refreshing Overview. Read current
+  assignments, heartbeats and onboarding status on every request, and keep
+  Inventory's full targeting and instruction-status checks.
+
 - Move the Images screen into React with independent upload and import jobs.
   Keep verification, typed quarantine overrides and delete checks intact;
   prevent late responses from closing another image's details. Keep upload

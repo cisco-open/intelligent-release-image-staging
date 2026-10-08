@@ -165,6 +165,20 @@ profile, but HTTP results overlapped: at concurrency 16, inventory p95 was
 429–486 ms after. All 2,304 requests passed. This is no evidence of higher
 sustained capacity. Keep the current limits pending mixed-workload qualification.
 
+Overview reads current inventory, assignment, heartbeat and onboarding-job state
+without building the targeting and instruction details used by Inventory.
+Inventory keeps those checks. Unfiltered page counts use the same server-owned
+OS and role data as the full projection, without classifying off-page models.
+Regression tests compare complete Overview responses with the detailed path and
+check that changed state is visible and failed source reads remain errors.
+
+A second comparison on the same date added assignments and heartbeats for half
+of the 500 devices. All 2,304 authenticated responses matched the previous
+implementation. At concurrency 16, Overview p95 fell from 1,285–1,301 ms to
+1,074–1,231 ms, with throughput rising from 13.0–13.3 to 14.9–15.6 requests per
+second. Inventory and peer-policy still showed contention. This richer fixture
+is not directly comparable with the earlier run and does not establish capacity.
+
 ## Related
 
 - [Verify the installation](../zensical/install/verify.md)
