@@ -144,9 +144,9 @@ export function definitionProblem(status, body, verb) {
   return verb + ' refused: ' + reason + '.';
 }
 export function definitionPreviewText(title, body) {
-  return title + `.\nMembership changes: ${body.member_delta}\nDevices losing origin access: ${body.origin_access_lost}`
-    + `\nEmpty permitted peer sets: ${body.empty_permitted_sets}\nRole pairings stopped: ${body.role_pairs_stopped}`
-    + `\nQoS policy changed: ${body.qos_changed ? 'yes' : 'no'}`
+  return title + `.\nMembership changes: ${body.member_delta}\nDevices losing distribution permission: ${body.origin_access_lost}`
+    + `\nDevices losing all permitted peers: ${body.empty_permitted_sets}\nRole-to-role links removed: ${body.role_pairs_stopped}`
+    + `\nSpeed or agent settings changed: ${body.qos_changed ? 'yes' : 'no'}`
     + '\nChanges affect new pairings; existing device-to-device sessions may continue.'
     + (body.requires_confirmation ? '\nThis exceeds the confirmation threshold; applying confirms these effects.' : '');
 }

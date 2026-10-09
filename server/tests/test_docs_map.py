@@ -690,9 +690,10 @@ def test_docs_state_phase_zero_role_and_qos_contract():
     _assert_unit(security, ("exact device identities", "IPv4 addresses",
                            "limits", "another preview"),
                  "origin activation must bind exact reviewed identities and addresses")
-    _require("user-guide/roles.md", ["Distribution access", "Review only",
+    _require("user-guide/roles.md", ["Distribution access", "Preview only",
         "New address limit", "New device limit", "Apply reviewed change",
-        "Requested mode", "Refresh status"])
+        "Saved mode", "Transfer-service status", "Approved for blocking",
+        "Confirmed blocked", "Refresh status"])
     _require("architecture/limitations.md",
              ["per-role origin shaping is not expressible"])
     _require("reference/peer-policy-api.md", [
@@ -1125,7 +1126,7 @@ def test_workstream_a_docs_separate_tracker_observability_and_state_controls():
     assert re.search(r"qos_state.{0,160}(?:api-only|management api|documented api)",
                      console_lower, re.DOTALL)
     assert "seeder_numwant" in console_lower and "leecher_numwant" in console_lower
-    assert "no role-policy json editor" in console_lower
+    assert "named fields for sharing permissions, speed limits and agent settings" in console_lower
 
     fleet_lower = fleet.lower()
     for term in ("iris-role", "roles.csv", "seeder/leecher", "qos_state",

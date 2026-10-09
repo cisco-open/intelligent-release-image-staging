@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 ## What this is for
 
 Use **Policies** to edit roles and **Inventory** to assign devices to them.
-The Console has no role-policy JSON editor.
+The Console uses named fields for sharing permissions, speed limits and agent settings.
 
 IRIS moves an image over a private swarm: a device takes pieces from other
 devices. A role is a named group of devices that share with each other. Use
@@ -40,14 +40,15 @@ own speed limits. Sharing needs permission from both roles.
 
 ### Edit role definitions
 
-Open **Policies → Advanced → Role definitions**. Each row is one role, with its
-restricted flag, peer roles, origin access, networks and speed limit overrides.
+Open **Policies → Device-to-device sharing**. Each row shows a role, the other
+roles it may share with, and its distribution-server permission.
 
 1. Select **New role**, or **Edit** on a row.
-2. Turn on **Limit sharing to these roles** to hold the role to a peer list and
-   the distribution-server restriction. Without it, the role permits every role
-   and the server.
-3. Open **Advanced** for the IPv4 networks, the instruction expiry fallback,
+2. Turn on **Limit sharing to selected roles**, then enter **Other roles to
+   allow**. Both roles must permit sharing. Use **Allow transfers with the distribution
+   server** to set this role's distribution permission. Without a sharing limit,
+   the role permits every role and the server.
+3. Open **Speed limits and agent settings** for the IPv4 networks, the instruction expiry fallback,
    the eight speed limits and the cadence values. A speed limit of 0 means
    unlimited, any other value is at least 8192 bytes per second, and a blank
    field takes the global default.
@@ -58,7 +59,7 @@ If a save cannot be confirmed, refresh and review the current definition before
 trying again. **Reload current definition** discards your draft. Closing the
 editor leaves an already-submitted save running.
 
-The Console sets per-role speed limits in **Edit role definitions → Advanced**
+The Console sets per-role speed limits in **Speed limits and agent settings**
 (above). Global defaults use `PUT /api/v1/peer-policy/qos`. Tracker timing
 overrides (`qos_state`) use the management API or the role CSV below; editing other role fields preserves
 them. Pair explanations are available only through
@@ -69,27 +70,34 @@ them. Pair explanations are available only through
 
 ### Review distribution access
 
-Open **Policies → Distribution access**. The default is **Review only**.
+Open **Policies → Distribution access**. The default is **Preview only**.
+The saved mode is separate from the transfer service's confirmed effect.
 
-1. Choose **Enforce reviewed restrictions** to apply the current device-to-server
+1. Under **Change distribution access**, choose **Enforce reviewed blocks** to apply the current device-to-server
    access rules at the distribution service.
 2. Check **New address limit** and **New device limit**. Both start at 10 and
    limit additions in this review, not the total already approved.
 3. Select **Preview change**. Review new and retained counts and resolve any
    checks shown. Applying can disconnect existing transfers from those addresses.
-4. Select **Apply reviewed change**. Wait for **Application status** to confirm
-   enforcement; **Requested mode** alone is not proof.
+4. Select **Apply reviewed change**. **Saved mode** records the request;
+   **Transfer-service status** first shows **Waiting for confirmation**.
+   Wait for **Blocks confirmed** before treating the reviewed blocks as applied.
+
+**Approved for blocking** counts the devices and addresses you approved.
+**Confirmed blocked** counts what the transfer service confirmed. **Not
+confirmed** means that proof is unavailable, not that the count is zero.
+The **Next step** text tells you whether to preview, wait or refresh.
 
 A changed policy or a newly observed address needs another review. Unknown
 origin information or shared allowed/denied addresses prevents full enforcement.
-Use distinct addresses for those devices. Returning to **Review only** uses the
+Use distinct addresses for those devices. Returning to **Preview only** uses the
 same preview and apply steps; ordinary quarantine and revocation remain active.
 If a save is uncertain, select **Refresh status** and check the current settings
 before previewing again.
 
 ### Import and export the definitions file
 
-**Import CSV…** replaces every definition with a comma-separated values (CSV)
+Under **Policies → Advanced → Role definitions**, **Import CSV…** replaces every definition with a comma-separated values (CSV)
 file in the `fleet/roles.csv.example` format, and asks you to confirm a count of
 the roles it holds. Roles missing from the file are removed, and a role a device
 still declares refuses the import. **Export CSV** downloads the definitions.
@@ -129,13 +137,14 @@ For routes, request fields and refusal codes, see
 | --- | --- |
 | Inventory, **Role** column | the role a device declares, or a dash |
 | **Filters → Role** | *Role: any*, `— no role —`, and every role in the policy, including roles not on the page you are looking at |
-| **Policies** | which roles may share images and which may use the distribution server |
+| **Policies → Device-to-device sharing** | saved role permissions, with sharing shown only when both roles permit it |
+| **Policies → Distribution access** | saved mode, approved blocks, confirmed effect and the next action |
 | **Advanced** | role and restricted-role counts, drift, how full the pending-operation queue is (`N/256`), and, under **Peer access and roles**, per-role member counts and the rule that an explicit ACL entry shadows a role |
 
-Policies shows configured intent. Quarantine and explicit ACLs can restrict
-access further. A badge that reads `<state> (stale)`
-means the tracker last reconciled more than five minutes ago, or never; its
-tooltip carries the last reconcile time and error, so check the tracker.
+The role table shows configured intent. Quarantine and explicit ACLs can
+restrict access further. Open **How sharing rules take effect** to check the
+existing server blocklist separately from reviewed distribution blocks.
+**Not current** means its tracker status is stale; check the tracker.
 
 The role controls stay disabled while the server's support for roles is
 uncertain or the policy is degraded. Degraded means the tracker fell back to the

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import {PoliciesController} from '../src/policies-controller.mjs';
 import {InventoryController} from '../src/inventory-controller.mjs';
 import {definitionForm, definitionPayload, checkedDefinitions, checkedDefinitionPreview, definitionWriteResult,
-  definitionProblem, policyEtagRevision, policyBody, rateHint, roleQosFields} from '../src/policy-definitions-model.mjs';
+  definitionProblem, definitionPreviewText, policyEtagRevision, policyBody, rateHint, roleQosFields} from '../src/policy-definitions-model.mjs';
 import {instructionDiagnostics, instructionMapRows, policyDiagnostics, roleCapabilityMessage} from '../src/policy-model.mjs';
 
 const reply = (body, status = 200, headers = {}) => ({ok: status >= 200 && status < 300, status, body,
@@ -19,6 +19,12 @@ const preview = (extra = {}) => ({ok: true, dry_run: true, revision: 8, candidat
   member_delta: 0, origin_access_lost: 2, empty_permitted_sets: 0, role_pairs_stopped: 1,
   qos_changed: true, requires_confirmation: true, confirm_token: 'preview-token', ...extra});
 const saved = (extra = {}) => ({ok: true, dry_run: false, revision: 8, ...extra});
+test('role preview describes exact impact counts without claiming live blocking', () => {
+  const text = definitionPreviewText('Edit branch', preview({member_delta: 2, origin_access_lost: 3, empty_permitted_sets: 1, role_pairs_stopped: 4}));
+  for (const line of ['Membership changes: 2', 'Devices losing distribution permission: 3', 'Devices losing all permitted peers: 1',
+    'Role-to-role links removed: 4', 'Speed or agent settings changed: yes', 'existing device-to-device sessions may continue']) assert.ok(text.includes(line), line);
+  assert.doesNotMatch(text, /Devices blocked|Blocks confirmed/);
+});
 async function fixture() {
   const c = new PoliciesController(), inventory = new InventoryController(), calls = [], replies = [], prompts = [], downloads = [];
   const data = {revision: 7, roles: {boat: {restricted: true, peers: ['boat', 'fiber'], origin: false, qos: {seed_up_bps: 12500000}, qos_state: {seeder: {numwant: 4}}},

@@ -56,20 +56,31 @@ try {
   const idle = () => page.waitForFunction(() => !window.irisPolicies.origin.state.busy && !window.irisPolicies.origin.state.loading);
   const apply = async () => {await page.locator('#origin-apply').click(); await idle();};
   const refresh = async () => {await page.locator('#origin-refresh').click(); await idle();};
+  const snapshot = async name => {if (process.env.IRIS_BROWSER_SCREENSHOT_DIR) {
+    await fs.mkdir(process.env.IRIS_BROWSER_SCREENSHOT_DIR, {recursive: true});
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({path: path.join(process.env.IRIS_BROWSER_SCREENSHOT_DIR, name + '.png'), fullPage: true});
+  }};
   await page.goto('http://iris.test/#policies'); await page.waitForFunction(() => window.irisPolicies?.origin.state.ready);
-  assert.equal(await page.locator('#origin-application-state').innerText(), 'Review only');
+  assert.equal(await page.locator('#origin-application-state').innerText(), 'Preview only');
+  assert.equal(await page.locator('#origin-saved-mode').innerText(), 'Preview only');
+  assert.equal(await page.locator('#origin-approved-counts').innerText(), '0 devices · 0 addresses');
+  assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
+  await snapshot('distribution-preview-only');
   await page.locator('#origin-mode').selectOption('enforce'); await page.locator('#origin-max_new_ips').fill('1001'); await apply();
   assert.equal(writes.length, 0); assert.match(await page.locator('#origin-message').innerText(), /0 to 1000/);
   await page.locator('#origin-max_new_ips').fill('10'); await apply();
   assert.equal(writes.length, 1); assert.equal(await page.locator('#origin-apply').innerText(), 'Apply reviewed change');
   assert.equal(await page.locator('#origin-apply').evaluate(node => document.activeElement === node), true);
-  assert.match(await page.locator('#origin-preview').innerText(), /New devices\s+3/);
+  assert.match(await page.locator('#origin-preview').innerText(), /New devices to block\s+3/);
+  assert.equal(await page.locator('#origin-saved-mode').innerText(), 'Preview only', 'A requested draft does not replace saved settings');
+  assert.equal(await page.locator('#origin-application-state').innerText(), 'Preview only');
+  assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
   for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
     await page.setViewportSize({width, height}); await page.locator('#origin-apply').scrollIntoViewIfNeeded();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     const box = await page.locator('#origin-apply').boundingBox(); assert.ok(box.x >= 0 && box.x + box.width <= width);
-    if (process.env.IRIS_BROWSER_SCREENSHOT_DIR) {await fs.mkdir(process.env.IRIS_BROWSER_SCREENSHOT_DIR, {recursive: true});
-      await page.screenshot({path: path.join(process.env.IRIS_BROWSER_SCREENSHOT_DIR, 'origin-preview-' + width + '.png'), fullPage: true});}
+    await snapshot('origin-preview-' + width);
   }
   await page.setViewportSize({width: 1440, height: 1000});
   await page.getByRole('button', {name: 'Cancel review', exact: true}).click(); assert.equal(writes.length, 1);
@@ -81,9 +92,18 @@ try {
   assert.equal(await page.locator('#origin-apply').isDisabled(), true);
   await page.evaluate(() => window.irisPolicies.origin.refresh()); assert.equal(await page.locator('#origin-apply').isDisabled(), true);
   await refresh(); mode = 'ok'; await page.locator('#origin-mode').selectOption('enforce'); await apply(); await apply();
-  assert.equal(await page.locator('#origin-application-state').innerText(), 'Waiting for the transfer service');
+  assert.equal(await page.locator('#origin-application-state').innerText(), 'Waiting for confirmation');
+  assert.equal(await page.locator('#origin-saved-mode').innerText(), 'Enforce reviewed blocks');
+  assert.equal(await page.locator('#origin-approved-counts').innerText(), '3 devices · 2 addresses');
+  assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
+  await snapshot('distribution-waiting');
   value = {...value, state: 'enforced', reason: null, applied_ip_count: 2, applied_device_count: 3, last_verified_at: 2000000000};
-  await refresh(); assert.equal(await page.locator('#origin-application-state').innerText(), 'Applied');
+  await refresh(); assert.equal(await page.locator('#origin-application-state').innerText(), 'Blocks confirmed');
+  assert.equal(await page.locator('#origin-confirmed-counts').innerText(), '3 devices · 2 addresses');
+  await snapshot('distribution-confirmed');
+  value = {...value, state: 'pending', reason: 'session_changed', applied_ip_count: null, applied_device_count: null, last_verified_at: null};
+  await refresh(); assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
+  assert.equal(await page.locator('#origin-application-state').innerText(), 'Waiting for confirmation', 'Restarted transfer service needs current-session proof');
   // Keyboard operation reaches the same review button; no mouse-only confirmation.
   await page.locator('#origin-max_new_devices').focus(); await page.keyboard.press('Tab');
   assert.equal(await page.locator('#origin-apply').evaluate(node => document.activeElement === node), true);

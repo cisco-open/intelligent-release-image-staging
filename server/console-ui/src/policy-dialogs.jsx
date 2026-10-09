@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {useLayoutEffect, useRef} from 'react';
-import {policyDiagnostics} from './policy-model.mjs';
+import {distributionAllowed, policyDiagnostics} from './policy-model.mjs';
 import {roleQosFields, rateHint} from './policy-definitions-model.mjs';
 
-const countLabels = [['policy-roles-defined', 'Roles defined'], ['policy-roles-restricted', 'Restricted roles'],
-  ['policy-role-drift', 'Role drift'], ['policy-outbox', 'Unacknowledged operations']];
+const countLabels = [['policy-roles-defined', 'Roles defined'], ['policy-roles-restricted', 'Roles with sharing limits'],
+  ['policy-role-drift', 'Devices with mismatched roles'], ['policy-outbox', 'Changes awaiting tracker confirmation']];
 const deliveryLabels = [['policy-issued-revision', 'Highest issued revision'], ['policy-instr-stamp-missing', 'Devices missing an instruction stamp'],
   ['policy-pointer-skew', 'Devices reporting pointer skew'], ['policy-instruction-observed', 'Server observation time']];
 const custodyLabels = [['instruction-key-state', 'Custody state'], ['instruction-cert-days', 'Signing certificate remaining'],
@@ -73,10 +73,10 @@ export function PolicyDialogs({controller, state, disabled}) {
             <summary>Peer access and roles <span className="muted" id="peer-policy-summary">{diag.summary}</span></summary>
             <div className="policy-panel-body">
               <Counts labels={countLabels} cells={diag.cells} />
-              <p className="muted">Role members in peer policy</p><CountList id="policy-role-members" rows={diag.members} />
+              <p className="muted">Device counts in the saved sharing policy</p><CountList id="policy-role-members" rows={diag.members} />
               <p id="policy-origin-qos">{diag.origin}</p><p id="policy-mutual-origin">{diag.mutual}</p>
               <h3>Role definitions</h3>
-              <p className="muted">Roles a device can be set to, with their peer access and speed limits. Rates are bytes per second (0 = unlimited); a blank field inherits the global default. Import replaces every definition with the file, using the roles API CSV format.</p>
+              <p className="muted">Edit sharing permissions, speed limits and agent settings here. Use Inventory to assign devices. Import CSV replaces all role definitions; export a copy before replacing them.</p>
               <div className="role-def-actions">
                 <button className="btn" type="button" id="role-def-new" disabled={disabled} onClick={() => controller.open()}>New role…</button>
                 <button className="btn ghost" type="button" id="role-def-import" disabled={disabled || state.reviewRequired} onClick={() => file.current?.click()}>Import CSV…</button>
@@ -85,12 +85,12 @@ export function PolicyDialogs({controller, state, disabled}) {
                 <button className="btn ghost" type="button" disabled={busy} onClick={() => start(() => controller.refresh(true))}>Refresh policies</button>
               </div>
               <div className="table-scroll" role="region" aria-label="Role definitions table" tabIndex={0}>
-                <table className="tbl dense role-def-table" aria-label="Role definitions"><thead><tr>{['Role', 'Restricted', 'Peer roles', 'Origin', 'Networks', 'QoS overrides', 'Actions'].map(label => <th key={label}>{label}</th>)}</tr></thead>
+                <table className="tbl dense role-def-table" aria-label="Role definitions"><thead><tr>{['Role', 'Sharing limit', 'Allowed roles', 'Distribution permission', 'Networks', 'Speed and agent overrides', 'Actions'].map(label => <th key={label}>{label}</th>)}</tr></thead>
                   <tbody id="role-def-rows">{!state.definitionsOk ? <tr><td colSpan={7} className="muted">{state.readError || 'Role definitions unavailable.'}</td></tr>
                     : !Object.keys(state.definitions).length ? <tr><td colSpan={7} className="muted">No roles defined. Choose New role, or import a roles CSV.</td></tr>
                       : Object.keys(state.definitions).sort().map(name => {const d = state.definitions[name], peers = (d.peers || []).filter(peer => peer !== name); return <tr key={name}>
-                        <td className="machine">{name}</td><td>{d.restricted ? 'yes' : 'no'}</td><td className="machine">{peers.join(', ') || <span className="muted">only itself</span>}</td>
-                        <td>{d.origin === false ? 'no' : 'yes'}</td><td className="machine">{d.nets?.join(', ') || '—'}</td>
+                        <td className="machine">{name}</td><td>{d.restricted ? 'Selected roles' : 'No role limit'}</td><td>{d.restricted ? <span className="machine">{[name, ...peers].join(', ')}</span> : 'All roles, if the other role permits sharing'}</td>
+                        <td>{distributionAllowed(d) ? 'Allowed by role' : 'Not allowed by role'}</td><td className="machine">{d.nets?.join(', ') || '—'}</td>
                         <td className="qos">{Object.keys(d.qos || {}).length ? Object.entries(d.qos).map(([key, value]) => <span key={key} className="machine qos-chip">{key}={String(value)}</span>) : <span className="muted">inherit</span>}</td>
                         <td><button className="linkish role-def-edit" type="button" data-role={name} disabled={disabled} onClick={() => controller.open(name)}>Edit</button> · <button className="linkish danger-link role-def-delete" type="button" data-role={name} disabled={disabled || state.reviewRequired} onClick={() => start(() => controller.delete(name))}>Delete</button></td>
                       </tr>;})}</tbody></table>
@@ -120,16 +120,25 @@ export function PolicyDialogs({controller, state, disabled}) {
         <div className="modal-head"><span id="role-def-modal-title">{editor?.name ? 'Edit role ' + editor.name : 'New role'}</span>
           <button className="btn ghost icon-only" type="button" id="role-def-modal-x" aria-label="Close" onClick={() => controller.close()}>✕</button></div>
         <div className="modal-body">
-          <p id="role-def-modal-help">Choose sharing permissions, then preview before saving. Both roles must allow sharing.</p>
+          <p id="role-def-modal-help">Set this group's permissions, then preview their effect before saving.</p>
           <div className="role-def-grid">
-            {field('name', 'rd-name', <>Role name <span className="muted">a–z, 0–9, . _ - (max 32)</span></>, {maxLength: 32, placeholder: 'e.g. boat', disabled: !!editor?.name || committing})}
-            {field('peers', 'rd-peers', <>Can share with these roles <span className="muted">comma separated; same role always allowed</span></>, {placeholder: 'e.g. fiber', disabled: !form.restricted || committing})}
-            <label className="check-row"><input type="checkbox" id="rd-restricted" checked={form.restricted} disabled={committing} onChange={event => controller.field('restricted', event.target.checked)} /> Limit sharing to these roles</label>
-            <label className="check-row"><input type="checkbox" id="rd-origin" checked={form.origin} disabled={!form.restricted || committing} onChange={event => controller.field('origin', event.target.checked)} /> Allow the distribution server</label>
+            <div>{field('name', 'rd-name', 'Role name', {maxLength: 32, placeholder: 'e.g. branch', disabled: !!editor?.name || committing, 'aria-describedby': 'role-name-help'})}
+              <p className="muted" id="role-name-help">Up to 32 characters: a–z, 0–9, dot, underscore or hyphen. Start with a letter or digit.</p>
+            </div>
           </div>
-          <p className="muted">Without a sharing limit, this role allows all roles and the distribution server. Other roles still need to allow it.</p>
+          <div className="role-sharing-fields">
+            <fieldset><legend>Device-to-device sharing</legend>
+              <label className="check-row"><input type="checkbox" id="rd-restricted" checked={form.restricted} disabled={committing} onChange={event => controller.field('restricted', event.target.checked)} /> Limit sharing to selected roles</label>
+              {field('peers', 'rd-peers', 'Other roles to allow', {placeholder: 'e.g. distribution, branch', disabled: !form.restricted || committing, 'aria-describedby': 'role-peer-help'})}
+              <p className="muted" id="role-peer-help">{form.restricted ? 'Separate names with commas. Devices in this same role are always permitted by the role.' : 'This role permits all roles. Turn on the limit to choose specific roles.'} Both roles must permit sharing.</p>
+            </fieldset>
+            <fieldset><legend>Distribution permission</legend>
+              <label className="check-row"><input type="checkbox" id="rd-origin" checked={!form.restricted || form.origin} disabled={!form.restricted || committing} onChange={event => controller.field('origin', event.target.checked)} /> Allow transfers with the distribution server</label>
+              <p className="muted">{form.restricted ? 'Clear this to deny distribution access in this role. After saving, review Distribution access to apply server-side blocks.' : 'Without a sharing limit, this role allows the distribution server. Turn on the sharing limit to change this permission.'}</p>
+            </fieldset>
+          </div>
           <details id="role-editor-advanced" key={editor?.key} className="policy-diagnostics">
-            <summary>Advanced — speed limits and agent settings</summary><div className="role-def-grid">
+            <summary>Speed limits and agent settings</summary><div className="role-def-grid">
               {field('nets', 'rd-nets', <>Networks <span className="muted">IPv4 prefixes, comma separated</span></>, {placeholder: 'e.g. 10.20.0.0/16'})}
               <label className="field" htmlFor="rd-on-stale"><span className="field-label">When instructions expire</span>
                 <select id="rd-on-stale" value={form.onStale} disabled={committing} onChange={event => controller.field('onStale', event.target.value)}>

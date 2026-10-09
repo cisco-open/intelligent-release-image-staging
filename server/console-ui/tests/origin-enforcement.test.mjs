@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {OriginEnforcementController} from '../src/origin-enforcement-controller.mjs';
-import {checkedOrigin, checkedOriginPreview, originEtag, originForm, originPayload, originWriteResult} from '../src/origin-enforcement-model.mjs';
+import {checkedOrigin, checkedOriginPreview, originApplicationConfirmed, originEtag, originForm, originModeLabel, originNextAction, originPayload, originStates, originWriteResult} from '../src/origin-enforcement-model.mjs';
 
 export const originFixture = (extra = {}) => ({revision: 0, policy_revision: 7, mode: 'preflight', max_new_ips: 10, max_new_devices: 10,
   approved_ip_count: 0, approved_device_count: 0, new_ip_count: 2, new_device_count: 3, retained_ip_count: 0,
@@ -14,6 +14,33 @@ export const originFixture = (extra = {}) => ({revision: 0, policy_revision: 7, 
 const token = 'a'.repeat(64);
 const preview = (extra = {}) => originFixture({mode: 'enforce', dry_run: true, requires_confirmation: true, confirm_token: token, ...extra});
 const saved = (extra = {}) => preview({revision: 1, dry_run: false, requires_confirmation: false, confirm_token: null, state: 'pending', ...extra});
+test('operator copy separates saved mode, confirmed effect and next action', () => {
+  assert.equal(originModeLabel('preflight'), 'Preview only');
+  assert.equal(originModeLabel('enforce'), 'Enforce reviewed blocks');
+  assert.equal(originModeLabel('unknown'), 'Unavailable');
+  assert.equal(originStates.pending, 'Waiting for confirmation');
+  assert.equal(originStates.enforced, 'Blocks confirmed');
+  assert.match(originNextAction(originFixture(), true, false), /Enforce reviewed blocks, then Preview change/);
+  assert.match(originNextAction(saved(), true, false), /Wait for the transfer service/);
+  assert.match(originNextAction(originFixture({state: 'review_required'}), true, false), /changed policy or addresses/);
+  assert.match(originNextAction(originFixture({state: 'degraded'}), true, false), /Resolve the reported problem/);
+  assert.match(originNextAction(originFixture({state: 'unavailable'}), true, false), /check the distribution service/);
+  assert.match(originNextAction(originFixture({state: 'enforced'}), false, false), /^Choose Refresh status/);
+  assert.match(originNextAction(originFixture({state: 'enforced'}), true, true), /review the saved settings before trying/);
+});
+test('blocking counts are confirmed only with coherent current application proof', () => {
+  const proof = originFixture({mode: 'enforce', state: 'enforced', applied_device_count: 3, applied_ip_count: 2, last_verified_at: 100});
+  assert.equal(originApplicationConfirmed(proof), true);
+  assert.equal(originApplicationConfirmed(originFixture()), false);
+  assert.equal(originApplicationConfirmed(null), false);
+  for (const patch of [{state: 'pending'}, {state: 'review_required'}, {state: 'degraded'}, {state: 'unavailable'},
+    {state: 'preflight'}, {mode: 'preflight'}, {last_verified_at: null}, {last_verified_at: 0},
+    {last_verified_at: Infinity}, {applied_device_count: null}, {applied_ip_count: null},
+    {applied_ip_count: '2'}, {reason: 'session_changed'}, {blockers: ['shared_address']}]) {
+    assert.equal(originApplicationConfirmed({...proof, ...patch}), false, JSON.stringify(patch));
+  }
+  assert.equal(originApplicationConfirmed({...proof, mode: 'preflight', state: 'preflight', applied_device_count: 0, applied_ip_count: 0}), true);
+});
 const reply = (body, status = 200, etag = originEtag(body?.revision)) => ({status, ok: status >= 200 && status < 300,
   headers: {get: key => key === 'ETag' ? etag : null}, json: async () => body});
 const gate = () => {let resolve, reject; const promise = new Promise((yes, no) => {resolve = yes; reject = no;}); return {promise, resolve, reject};};

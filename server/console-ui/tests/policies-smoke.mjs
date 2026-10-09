@@ -13,14 +13,14 @@ try {
   const page = await browser.newPage({viewport: {width: 1440, height: 1000}}); page.setDefaultTimeout(10000);
   const errors = [], writes = [], prompts = [];
   let mode = 'ok', held, reached, accept = true;
-  const policy = {revision: 7, quarantine_assignments: [], roles_supported: true, roles: {defined: 2, restricted: 2, members: {boat: 2, fiber: 1}},
+  const policy = {revision: 7, quarantine_assignments: [], roles_supported: true, roles: {defined: 2, restricted: 1, members: {boat: 2, fiber: 1}},
     enforcement: {state: 'enforced', stale: false, mutual_origin: {mode: 'preflight', newly_denied_device_count: 0}},
     fleet_rollup: {applied: {'9223372036854775807': 2}, states: {'<img src=x onerror=alert(1)>': 2}},
     instruction_status: {issued_revision_label: 'r9223372036854775807', pointer_skew: 0},
     instruction_keys: {enabled: true, state: 'ready', root_quorum_degraded: false, roots_attested_180d: 2, roots_configured: 2,
       certificate_renewal_due: false, signing_refused: false, keylist_resign_due: false}};
   let roles = {boat: {restricted: true, peers: ['boat', 'fiber'], origin: false, qos: {numwant: 10}, qos_state: {seeder: {numwant: 8}}},
-    fiber: {restricted: true, peers: ['fiber', 'boat'], origin: true}};
+    fiber: {restricted: false, peers: ['fiber', 'boat'], origin: false}};
   const preview = (extra = {}) => ({ok: true, dry_run: true, revision: policy.revision + 1, member_delta: 0, origin_access_lost: 1,
     empty_permitted_sets: 0, role_pairs_stopped: 1, qos_changed: true, requires_confirmation: true, confirm_token: 'reviewed-token', ...extra});
   page.on('pageerror', error => errors.push(error.message)); page.on('dialog', async dialog => {prompts.push(dialog.message()); await (accept ? dialog.accept() : dialog.dismiss());});
@@ -58,7 +58,21 @@ try {
   const edit = () => page.getByRole('button', {name: 'Edit role boat', exact: true}).click();
   const snapshot = async name => {if (process.env.IRIS_BROWSER_SCREENSHOT_DIR) {await fs.mkdir(process.env.IRIS_BROWSER_SCREENSHOT_DIR, {recursive: true}); await page.screenshot({path: path.join(process.env.IRIS_BROWSER_SCREENSHOT_DIR, name + '.png')});}};
   await page.goto('http://iris.test/#policies'); await page.waitForFunction(() => window.irisPolicies?.current());
+  assert.equal(await page.getByRole('heading', {name: 'Device-to-device sharing', exact: true}).count(), 1);
+  for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
+    await page.setViewportSize({width, height});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await snapshot('policies-overview-' + width);
+  }
+  await page.setViewportSize({width: 1440, height: 1000});
+  await page.getByRole('button', {name: 'Edit role fiber', exact: true}).click();
+  assert.equal(await page.locator('#rd-origin').isChecked(), true, 'Unrestricted role permits distribution even with a stored false field');
+  assert.equal(await page.locator('#rd-origin').isDisabled(), true);
+  await page.locator('#rd-restricted').check();
+  assert.equal(await page.locator('#rd-origin').isChecked(), false, 'Enabling a limit preserves the stored draft permission');
+  await page.locator('#role-def-cancel').click(); assert.equal(writes.length, 0);
   await edit(); assert.equal(await focus('#rd-restricted'), true); assert.equal(await page.locator('#rd-name').isDisabled(), true);
+  await snapshot('policy-sharing-editor');
   await page.locator('#role-def-save').focus(); await page.keyboard.press('Tab'); assert.equal(await focus('#role-def-modal-x'), true);
   await page.keyboard.press('Escape'); assert.equal(await page.getByRole('button', {name: 'Edit role boat', exact: true}).evaluate(node => node === document.activeElement), true);
   await edit(); await page.locator('#role-editor-advanced summary').click(); assert.equal(await page.locator('[data-qos]').count(), 17);
@@ -66,7 +80,7 @@ try {
   await page.locator('#rd-qos-overall_up_bps').fill('4096'); await save(); assert.equal(writes.length, 0); assert.match(await page.locator('#role-def-msg').innerText(), /8192/);
   await page.locator('#rd-qos-overall_up_bps').fill('16384'); await save(); assert.equal(await focus('#role-def-save'), true);
   assert.deepEqual(writes[0].body.qos_state, {seeder: {numwant: 8}});
-  assert.match(await page.locator('#role-def-preview').innerText(), /Membership changes: 0.*QoS policy changed: yes/s);
+  assert.match(await page.locator('#role-def-preview').innerText(), /Membership changes: 0.*Speed or agent settings changed: yes/s);
   for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
     await page.setViewportSize({width, height});
     await page.locator('#role-def-preview').scrollIntoViewIfNeeded();
@@ -84,6 +98,8 @@ try {
   assert.equal(await page.locator('#role-def-save').isDisabled(), false); assert.equal(await page.locator('#rd-qos-numwant').inputValue(), '10');
   mode = 'ok'; await save(); await save(); assert.equal(await page.locator('#role-def-modal').isHidden(), true);
   await page.locator('#policy-advanced-open').click(); assert.equal(await focus('#policy-advanced-close'), true);
+  const unrestricted = page.locator('#role-def-rows tr').filter({has: page.getByRole('cell', {name: 'fiber', exact: true})});
+  assert.match(await unrestricted.innerText(), /No role limit.*All roles, if the other role permits sharing.*Allowed by role/s);
   await page.locator('.policy-diagnostics summary').filter({hasText: 'Instruction delivery and key custody'}).click();
   assert.match(await page.locator('#policy-applied-revisions').innerText(), /r9223372036854775807: 2/);
   assert.equal(await page.locator('#policy-issued-revision').innerText(), 'r9223372036854775807');

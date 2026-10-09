@@ -6,9 +6,28 @@ const object = value => !!value && typeof value === 'object' && !Array.isArray(v
 const count = value => Number.isSafeInteger(value) && value >= 0;
 const nullableCount = value => value === null || count(value);
 export const originStates = {
-  preflight: 'Review only', pending: 'Waiting for the transfer service', enforced: 'Applied',
+  preflight: 'Preview only', pending: 'Waiting for confirmation', enforced: 'Blocks confirmed',
   review_required: 'Review needed', degraded: 'Needs attention', unavailable: 'Status unavailable',
 };
+export const originModeLabel = mode => ({preflight: 'Preview only', enforce: 'Enforce reviewed blocks'}[mode] || 'Unavailable');
+export function originApplicationConfirmed(value) {
+  return !!value && ((value.state === 'enforced' && value.mode === 'enforce') || (value.state === 'preflight' && value.mode === 'preflight'))
+    && value.reason === null && Array.isArray(value.blockers) && value.blockers.length === 0
+    && count(value.applied_device_count) && count(value.applied_ip_count)
+    && Number.isFinite(value.last_verified_at) && value.last_verified_at > 0;
+}
+export function originNextAction(value, ready, reviewRequired) {
+  if (reviewRequired) return 'Choose Refresh status and review the saved settings before trying another change.';
+  if (!ready) return 'Choose Refresh status to read the saved settings and current effect.';
+  return {
+    preflight: 'To block distribution transfers denied by the policy, choose Enforce reviewed blocks, then Preview change.',
+    pending: 'Wait for the transfer service to confirm the saved change. Status refreshes every five seconds while this page is open.',
+    enforced: 'The reviewed blocks are confirmed. Preview a new change if you need to update or release them.',
+    review_required: 'Review the changed policy or addresses, then choose Preview change to check the current set.',
+    degraded: 'Resolve the reported problem, then choose Refresh status before previewing again.',
+    unavailable: 'Choose Refresh status. If status stays unavailable, check the distribution service.',
+  }[value?.state] || 'Choose Refresh status to read the current effect.';
+}
 export const originReasons = {
   origin_unknown: 'Set a valid distribution address before enabling restrictions.',
   origin_unobserved: 'The tracker has not observed the distribution service yet.',

@@ -7,6 +7,7 @@ import {distributionAllowed, enforcementLabel, roleConnections} from './policy-m
 import {PoliciesController} from './policies-controller.mjs';
 import {PolicyDialogs} from './policy-dialogs.jsx';
 import {OriginEnforcement} from './origin-enforcement.jsx';
+import './policy-clarity.css';
 
 function Policies({controller}) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
@@ -20,12 +21,12 @@ function Policies({controller}) {
     if (!state.dialog && controller.visible() && node && (!node.isConnected || node.disabled)
       && (document.activeElement === node || document.activeElement === document.body)) document.getElementById('policy-advanced-open')?.focus();
   }, [state, controller]);
-  return <div onFocusCapture={event => {lastFocus.current = event.target;}}>
+  return <div className="policy-workspace" onFocusCapture={event => {lastFocus.current = event.target;}}>
     <div className="page-header"><h2 className="page-title">Policies</h2></div>
-    <p className="page-description">Choose who can share images and use the distribution server. Assign devices to roles in <a href="#devices">Inventory</a>.</p>
+    <p className="page-description">Choose which groups can exchange image pieces and use the distribution server. Assign devices to roles in <a href="#devices">Inventory</a>.</p>
     <p className="policy-warning" id="role-capability-banner" role="status" aria-live="polite" hidden={!warning}>{warning}</p>
     <div className="policy-simple-heading">
-      <div><h3>Who can share images</h3><p className="muted">Role-to-role sharing needs permission from both sides.</p></div>
+      <div><h3>Device-to-device sharing</h3><p className="muted">A role groups devices with the same rules. The table shows sharing allowed by both roles.</p></div>
       <div className="role-def-actions">
         <button className="btn" disabled={disabled} onClick={() => controller.open()}>New role</button>
         <button className="btn ghost" id="policy-refresh" disabled={state.busy || state.loading} onClick={() => controller.refresh(true)}>{state.loading ? 'Refreshing…' : 'Refresh policies'}</button>
@@ -34,7 +35,7 @@ function Policies({controller}) {
     </div>
     <div className="table-scroll policy-sharing-table" tabIndex={0} role="region" aria-label="Role sharing permissions">
       <table className="tbl" aria-label="Who can share images">
-        <thead><tr><th scope="col">Role</th><th scope="col">Can share with</th><th scope="col">Distribution server</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col">Role</th><th scope="col">Can share with these roles</th><th scope="col">Distribution permission</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{!current ? <tr><td colSpan={4}>Role permissions unavailable. Refresh or check Advanced.</td></tr>
           : !names.length ? <tr><td colSpan={4}>No roles yet. Create a role, then assign devices in Inventory.</td></tr>
           : names.map(name => <tr key={name}>
@@ -45,18 +46,19 @@ function Policies({controller}) {
           </tr>)}</tbody>
       </table>
     </div>
-    <p className="muted">Shows configured role permissions, not a live connectivity test. Quarantine and device or server ACLs can restrict access further.</p>
+    <p className="muted">These are saved permissions, not a connectivity test. Quarantine and explicit access lists can restrict them further.</p>
     <p className="err" role="status">{state.readError}</p>
     <p className={state.failed ? 'err' : 'muted'} id="policy-status" role="status" aria-live="polite" hidden={state.dialog === 'advanced'}>{state.message}</p>
-    <section className="policy-enforcement-summary" aria-labelledby="policy-enforcement-title">
-      <h3 id="policy-enforcement-title">Enforcement</h3>
-      <dl>
-        <div><dt>Role-to-role sharing</dt><dd>Controls which peers the tracker introduces. Existing transfers may continue.</dd></div>
-        <div><dt>Distribution server blocklist</dt><dd>{enforcementLabel(policy, state.policyOk)}<span className="policy-member-count">Status of the existing blocklist, not all role restrictions.</span></dd></div>
-      </dl>
-      <p className="muted">Device reports are not independent proof of enforcement. Advanced shows delivery, drift and troubleshooting details.</p>
-    </section>
     <OriginEnforcement controller={controller.origin} />
+    <details className="policy-scope">
+      <summary>How sharing rules take effect</summary>
+      <dl className="policy-scope-facts">
+        <div><dt>Device-to-device sharing</dt><dd>The tracker controls which peers it introduces. Existing device-to-device transfers may continue after a rule changes.</dd></div>
+        <div><dt>Distribution blocking</dt><dd>Distribution access can stop the server's transfers to reviewed addresses. Its confirmed status is separate from the role table.</dd></div>
+        <div><dt>Existing server blocklist</dt><dd>{enforcementLabel(policy, state.policyOk)}. This is the existing blocklist's status, not proof that every role restriction is applied.</dd></div>
+      </dl>
+      <p className="muted">Device reports describe what devices report, not independent proof. Advanced includes delivery status, mismatched roles and troubleshooting details.</p>
+    </details>
     <PolicyDialogs controller={controller} state={state} disabled={disabled} />
   </div>;
 }
