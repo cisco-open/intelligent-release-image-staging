@@ -201,7 +201,7 @@ differ. The adapters retain their existing remote-transfer and Kubernetes digest
 checks; prebuilt image acquisition disables source builds and image pulls.
 
 The neutral device finalizer validates both architectures, preserves runtime
-content and adds the selected public instruction roots. Its receipt records
+content and adds the selected public instruction roots. Its finalization record identifies
 those exact inputs and outputs. This is distinct from native IOx package signing.
 Native wrappers use the finalized image and pinned local packaging tools.
 Completed package bytes are recorded before publication and checked on resume.
@@ -243,6 +243,33 @@ image builds and writes `local-candidate.json` with `authenticated: false`.
 Add `--ubuntu-dependencies /path/to/iris-ubuntu-dependencies.tar.gz` for a prepared
 Ubuntu dependency archive. Use a new output directory within a protected parent.
 
+### Ubuntu source and notice companion
+
+Collect exact source files under a local `pool/...` mirror and prepare an
+`iris-ubuntu-source-inputs-v1` JSON descriptor. Its `indexes` list contains
+`repository`, `suite`, `component`, absolute `inrelease` and `sources` paths,
+and boolean `historical` for each index. Include all six current noble,
+noble-updates and noble-security main/universe indexes; explicitly mark retained
+historical source evidence. Current InRelease bytes must match the binary closure.
+
+```bash
+python3 tools/build-offline-sources.py --binary-closure /path/to/dependency-payload \
+  --manifest-sha256 '<dependency-manifest-sha256>' --indexes /path/to/indexes.json \
+  --source-pool /path/to/source-mirror --out /path/to/iris-ubuntu-sources.tar.gz
+```
+
+The producer verifies Ubuntu signatures, exact Source and Built-Using versions,
+source files, `.dsc` inventories and carried copyright/license bytes. Inputs are
+local; source recipes are not executed. Use `--verify-bundle` instead of `--out`,
+`--indexes` and `--source-pool` to independently recheck an existing companion.
+
+Add `--ubuntu-sources /path/to/iris-ubuntu-sources.tar.gz` together with
+`--ubuntu-dependencies` to candidate assembly. Both archives are privately
+snapshotted and complete source coverage is checked before any builder runs.
+The immutable companion is recorded in `local-candidate.json` with its exact
+dependency binding; it is not an installer asset role. The candidate remains
+unauthenticated. Ubuntu coverage does not establish Docker/Alpine image coverage.
+
 Before publication, review corresponding source and notices for every shipped
 component, including Ubuntu packages, and confirm redistribution permission.
 Cisco's licensed ioxclient remains separately supplied. Candidate checks do not
@@ -273,7 +300,7 @@ it, then installs the exact local `.deb`. Unrecorded installer packages and unkn
 destination files are refused. Dependencies never fall back to network downloads.
 
 Resume with the original inputs, `--accept-changes` and the same state path.
-Keep bootstrap and deployment journals separate. Missing receipts, partial package
+Keep bootstrap and deployment journals separate. Missing bootstrap records, partial package
 changes and altered files stop for inspection; preserve that evidence. Deployment
 authentication, approvals and public-kit qualification remain separate requirements.
 

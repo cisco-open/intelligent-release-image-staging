@@ -41,6 +41,7 @@ NAMES = {'server-image': 'iris-server-amd64.docker.tar',
          'device-runtime': 'iris-device-neutral.oci.tar',
          'guest-inputs': 'iris-guest-inputs.tar.gz',
          'packaging-tools': 'iris-packaging-tools.tar.gz', 'source': 'iris.tgz'}
+UBUNTU_SOURCES_NAME = 'iris-ubuntu-sources.tar.gz'
 
 
 def fail(message):
@@ -227,13 +228,43 @@ def _run(command, *, environment, cwd):
     subprocess.run([str(value) for value in command], env=environment, cwd=cwd, check=True)
 
 
+def _prepare_ubuntu_inputs(work, ubuntu_dependencies, ubuntu_sources):
+    """Snapshot and independently prove optional source coverage before builders."""
+    if ubuntu_sources is not None and ubuntu_dependencies is None:
+        fail('--ubuntu-sources requires --ubuntu-dependencies')
+    if ubuntu_dependencies is None:
+        return None, None, None
+    from iris_installer.offline_inputs import inspect_dependency_archive
+    from iris_installer.offline_sources import validate_source_archive
+    closure = work / 'ubuntu-dependencies.tar.gz'
+    dependency_digest = kit._snapshot(f._path(ubuntu_dependencies), closure, kit.MAX_ASSET)
+    companion = None
+    if ubuntu_sources is not None:
+        companion = work / 'ubuntu-sources.tar.gz'
+        companion_digest = kit._snapshot(f._path(ubuntu_sources), companion, kit.MAX_ASSET)
+    if companion is None:
+        inspect_dependency_archive(closure)
+        return closure, None, None
+    payload = work / 'ubuntu-dependency-payload'
+    inspected = inspect_dependency_archive(closure, destination=payload)
+    digest = inspected['manifest_sha256']
+    verified = validate_source_archive(companion, payload, digest)
+    proof = {'format': 'iris-local-ubuntu-source-coverage-v1',
+             'binary_manifest_sha256': digest, 'dependency_archive_sha256': dependency_digest,
+             'companion_archive_sha256': companion_digest, 'asset': UBUNTU_SOURCES_NAME,
+             'binaries': len(verified['binaries']), 'sources': len(verified['sources'])}
+    return closure, companion, proof
+
+
 def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
-             ubuntu_dependencies=None, builder=None, runner=None):
+             ubuntu_dependencies=None, ubuntu_sources=None, builder=None, runner=None):
     if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}', commit):
         fail('a full lowercase commit SHA is required')
     kit._auth().validate_tag(tag)
     if builder is not None and not re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', builder):
         fail('builder name is invalid')
+    if ubuntu_sources is not None and ubuntu_dependencies is None:
+        fail('--ubuntu-sources requires --ubuntu-dependencies')
     repository, appmgr_repository = f._path(repository), f._path(appmgr_repository)
     runner = runner or _run
     # All commands operate in this independently owned workspace, not the input
@@ -262,14 +293,10 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
 
         # Fail early on unavailable pinned tooling/closure and source parity,
         # before spending time on image builds. Neither producer runs ioxclient.
+        closure, companion, ubuntu_proof = _prepare_ubuntu_inputs(work, ubuntu_dependencies, ubuntu_sources)
+        _same_directory(work, descriptor)
         python('build-packaging-inputs.py', '--appmgr-repository', appmgr_repository,
                '--output-dir', work / 'packaging')
-        closure = None
-        if ubuntu_dependencies is not None:
-            closure = work / 'ubuntu-dependencies.tar.gz'
-            kit._snapshot(f._path(ubuntu_dependencies), closure, kit.MAX_ASSET)
-            from iris_installer.offline_inputs import inspect_dependency_archive
-            inspect_dependency_archive(closure)
         python('build-installer-package.py', '--repo', source, '--out', products)
         package = products / ('iris-installer_' + version + '+installer.0.g' + commit[:12] + '_amd64.deb')
         run(['dpkg-deb', '--extract', package, work / 'installed'])
@@ -313,6 +340,10 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
                           package.name + '.source.json', neutral.name + '.manifest'}
         if closure is not None:
             expected_names.add('iris-ubuntu-dependencies.tar.gz')
+        if companion is not None:
+            if kit._snapshot(companion, assets / UBUNTU_SOURCES_NAME, kit.MAX_ASSET) != ubuntu_proof['companion_archive_sha256']:
+                fail('source companion changed after independent coverage validation')
+            expected_names.add(UBUNTU_SOURCES_NAME)
         if {path.name for path in assets.iterdir()} != expected_names:
             fail('builder produced an unexpected candidate asset set')
         profile = 'ubuntu-dependencies' if closure is not None else 'prepared-host'
@@ -324,12 +355,19 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
         for name in sorted(expected_names):
             record = _file(assets / name, maximum=kit.MAX_ASSET)
             inventory[name] = {key: record[key] for key in ('sha256', 'size')}
+            expected = ({UBUNTU_SOURCES_NAME: ubuntu_proof['companion_archive_sha256'],
+                         'iris-ubuntu-dependencies.tar.gz': ubuntu_proof['dependency_archive_sha256']}
+                        if ubuntu_proof is not None else {})
+            if name in expected and record['sha256'] != expected[name]:
+                fail('Ubuntu candidate bytes changed after independent source validation')
             if kit._snapshot(assets / name, stage / name, kit.MAX_ASSET) != record['sha256']:
                 fail('candidate changed before publication')
         receipt = {'format': 'iris-local-release-candidate-v1', 'authenticated': False,
                    'scope': 'local candidate only; source/notices and redistribution gates remain separate',
                    'commit': commit, 'tag': tag, 'version': version, 'profile': profile,
                    'source_match': proof, 'files': inventory}
+        if ubuntu_proof is not None:
+            receipt['ubuntu_source_coverage'] = ubuntu_proof
         (stage / 'local-candidate.json').write_bytes(f._json(receipt))
     return output
 
@@ -342,13 +380,16 @@ def main(argv=None):
     parser.add_argument('--appmgr-repository', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True, help='New private candidate directory')
     parser.add_argument('--ubuntu-dependencies', type=Path, help='Optional already-produced Ubuntu closure')
+    parser.add_argument('--ubuntu-sources', type=Path,
+                        help='Optional source/notices companion; requires --ubuntu-dependencies')
     parser.add_argument('--builder', help='Existing buildx builder supporting amd64 and arm64')
     args = parser.parse_args(argv)
     previous_umask = os.umask(0o022)
     try:
         result = assemble(args.repo, args.output_dir, commit=args.commit, tag=args.tag,
                           appmgr_repository=args.appmgr_repository,
-                          ubuntu_dependencies=args.ubuntu_dependencies, builder=args.builder)
+                          ubuntu_dependencies=args.ubuntu_dependencies,
+                          ubuntu_sources=args.ubuntu_sources, builder=args.builder)
     except (InstallError, OSError, ValueError, UnicodeError, tarfile.TarError, EOFError, subprocess.SubprocessError) as exc:
         parser.exit(1, 'Local candidate preparation failed: ' + str(exc) + '\n')
     finally:

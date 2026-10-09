@@ -21,6 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from iris_installer.state import InstallError
+from test_installer_offline_sources import original as source_repository
 
 SPEC = importlib.util.spec_from_file_location('iris_release_candidate', ROOT / 'tools/build-release-candidate.py')
 c = importlib.util.module_from_spec(SPEC)
@@ -371,6 +372,123 @@ def test_optional_closure_is_snapshotted_before_use(tmp_path, repository, monkey
     assert len(checked) == 1
     assert (output / 'iris-ubuntu-dependencies.tar.gz').read_bytes() == b'closure candidate'
     assert json.loads((output / 'local-candidate.json').read_bytes())['profile'] == 'ubuntu-dependencies'
+
+
+@pytest.fixture
+def companions(source_repository, tmp_path, monkeypatch):
+    from iris_installer import offline_dependencies, offline_sources
+    monkeypatch.setattr(offline_dependencies, 'ROOT_PACKAGES', frozenset(('age',)))
+    binary = source_repository.base / 'binary'
+    dependency = tmp_path / 'dependencies.tar.gz'
+    with tarfile.open(dependency, 'w:gz') as archive:
+        for path in sorted(binary.rglob('*')):
+            if path.is_file():
+                archive.add(path, arcname=str(path.relative_to(binary)))
+    source = tmp_path / 'sources.tar.gz'
+    offline_sources.build_sources(binary, source_repository.digest, source_repository.indexes,
+        source_repository.base / 'pool', source, keyring=source_repository.keyring)
+    validate = offline_sources.validate_source_archive
+    def verify(archive, payload, digest):
+        return validate(archive, payload, digest, keyring=source_repository.keyring)
+    monkeypatch.setattr(offline_sources, 'validate_source_archive', verify)
+    return dependency, source, source_repository.digest
+
+
+def test_source_companion_requires_dependency_archive_before_workspace(tmp_path, repository, monkeypatch):
+    monkeypatch.setattr(c, '_publication', lambda *a: pytest.fail('Invalid pairing created a workspace'))
+    with pytest.raises(InstallError, match='requires --ubuntu-dependencies'):
+        assemble(tmp_path, repository, ubuntu_sources=tmp_path / 'source.tar.gz')
+
+
+def test_real_source_companion_is_verified_before_builders_and_is_not_a_kit_role(tmp_path, repository, companions):
+    dependency, source, digest = companions
+    builders = Builders(repository[1], repository[2])
+    def run(arguments, **kwargs):
+        private = kwargs['cwd'].parent
+        assert (private / 'ubuntu-dependency-payload/dependency-manifest.json').is_file()
+        assert (private / 'ubuntu-sources.tar.gz').read_bytes() == source.read_bytes()
+        assert '--ubuntu-sources' not in list(map(str, arguments))
+        builders(arguments, **kwargs)
+    output, _ = assemble(tmp_path, repository, builders=run, ubuntu_dependencies=dependency, ubuntu_sources=source)
+    receipt = json.loads((output / 'local-candidate.json').read_bytes())
+    assert receipt['authenticated'] is False
+    assert receipt['profile'] == 'ubuntu-dependencies'
+    assert receipt['ubuntu_source_coverage'] == {
+        'format': 'iris-local-ubuntu-source-coverage-v1', 'binary_manifest_sha256': digest,
+        'dependency_archive_sha256': sha(dependency.read_bytes()), 'companion_archive_sha256': sha(source.read_bytes()),
+        'asset': c.UBUNTU_SOURCES_NAME, 'binaries': 1, 'sources': 2}
+    assert (output / c.UBUNTU_SOURCES_NAME).read_bytes() == source.read_bytes()
+    assert (output / c.UBUNTU_SOURCES_NAME).stat().st_mode & 0o777 == 0o444
+    assert c.UBUNTU_SOURCES_NAME in receipt['files']
+    assert '--ubuntu-sources' not in builders.calls[-1]
+
+
+@pytest.mark.parametrize('change', ['wrong-closure', 'incomplete', 'tampered', 'malformed-dependency'])
+def test_companion_refusals_precede_all_builders(tmp_path, repository, companions, change):
+    from test_installer_offline_sources import archive_bytes, contents
+    dependency, source, _ = companions
+    if change == 'malformed-dependency':
+        dependency.write_bytes(b'not a dependency archive')
+    else:
+        files = contents(source)
+        manifest = json.loads(files['source-manifest.json'])
+        if change == 'wrong-closure':
+            manifest['binary_manifest_sha256'] = '0' * 64
+        elif change == 'incomplete':
+            manifest['sources'].pop()
+        else:
+            files['README.txt'] = b'changed notice instructions'
+        files['source-manifest.json'] = json.dumps(manifest).encode()
+        source.write_bytes(archive_bytes(files))
+    with pytest.raises((InstallError, OSError, tarfile.TarError)):
+        assemble(tmp_path, repository, ubuntu_dependencies=dependency, ubuntu_sources=source,
+                 builders=lambda *a, **kw: pytest.fail('Invalid companion reached a builder'))
+    assert not (tmp_path / 'candidate').exists()
+
+
+def test_both_ubuntu_inputs_are_snapshotted_before_validation(tmp_path, monkeypatch):
+    from iris_installer import offline_inputs, offline_sources
+    dependency, source, work = tmp_path / 'deps.tar.gz', tmp_path / 'sources.tar.gz', tmp_path / 'work'
+    dependency.write_bytes(b'original dependencies')
+    source.write_bytes(b'original sources')
+    work.mkdir(mode=0o700)
+    calls = []
+    def inspect(path, *, destination):
+        assert path == work / 'ubuntu-dependencies.tar.gz'
+        assert path.read_bytes() == b'original dependencies'
+        assert (work / 'ubuntu-sources.tar.gz').read_bytes() == b'original sources'
+        dependency.write_bytes(b'changed original dependencies')
+        source.write_bytes(b'changed original sources')
+        destination.mkdir()
+        calls.append('extract')
+        return {'manifest_sha256': 'a' * 64}
+    def validate(path, payload, digest):
+        assert calls == ['extract'] and digest == 'a' * 64
+        assert path.read_bytes() == b'original sources'
+        assert payload == work / 'ubuntu-dependency-payload'
+        calls.append('validate')
+        return {'binaries': [{}], 'sources': [{}, {}]}
+    monkeypatch.setattr(offline_inputs, 'inspect_dependency_archive', inspect)
+    monkeypatch.setattr(offline_sources, 'validate_source_archive', validate)
+    private_dependency, private_source, proof = c._prepare_ubuntu_inputs(work, dependency, source)
+    assert private_dependency.read_bytes() == b'original dependencies'
+    assert private_source.read_bytes() == b'original sources'
+    assert proof['dependency_archive_sha256'] == sha(b'original dependencies')
+    assert proof['companion_archive_sha256'] == sha(b'original sources')
+    assert calls == ['extract', 'validate']
+
+
+@pytest.mark.parametrize('filename', ['ubuntu-sources.tar.gz', 'ubuntu-dependencies.tar.gz'])
+def test_ubuntu_inputs_cannot_change_after_coverage_validation(tmp_path, repository, companions, filename):
+    dependency, source, _ = companions
+    builders = Builders(repository[1], repository[2])
+    def run(arguments, **kwargs):
+        builders(arguments, **kwargs)
+        if str(arguments[0]) == 'docker':
+            (kwargs['cwd'].parent / filename).write_bytes(b'changed after source validation')
+    with pytest.raises(InstallError, match='changed after independent'):
+        assemble(tmp_path, repository, ubuntu_dependencies=dependency, ubuntu_sources=source, builders=run)
+    assert not (tmp_path / 'candidate').exists()
 
 
 def test_publication_race_preserves_new_owner_directory(tmp_path, repository, monkeypatch):
