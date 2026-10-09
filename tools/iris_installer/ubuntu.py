@@ -33,6 +33,47 @@ KUBECTL_DESTINATION = Path('/usr/local/bin/kubectl')
 SYSTEM_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 
+def preflight_prebuilt(target):
+    """Check a prepared host without provisioning or contacting a registry.
+
+    This is not an offline dependency installer. The caller must authenticate
+    its kit separately and still perform deployment/network/cluster preflight.
+    Unlike source builds, neutral-runtime finalization needs no Buildx or QEMU.
+    """
+    if target not in ('docker', 'docker-split', 'kubernetes'):
+        raise InstallError('Unknown prebuilt deployment target')
+    check_platform()
+    names = ('python3', 'bash', 'age', 'age-keygen', 'openssl', 'ssh-keygen',
+             'tar', 'gzip', 'xz', 'file', 'skopeo', 'rpmbuild', 'docker', 'systemctl')
+    if target == 'docker-split':
+        names += ('ssh',)
+    if target == 'kubernetes':
+        names += ('ip',)
+    paths = {name: shutil.which(name, path=SYSTEM_PATH) for name in names}
+    missing = sorted(name for name, path in paths.items() if path is None)
+    client = None
+    if target == 'kubernetes':
+        for name, suffix in (('kubectl', ()), ('k3s', ('kubectl',))):
+            executable = shutil.which(name, path=SYSTEM_PATH)
+            if executable:
+                paths[name] = executable
+                client = (executable, *suffix)
+                break
+        if client is None:
+            missing.append('kubectl or k3s')
+    if missing:
+        raise InstallError('Prebuilt installation requires a prepared host; missing: '
+                           + ', '.join(missing) + '. No dependencies were installed')
+    # Paths came only from the fixed system path, not a kit or inherited PATH.
+    # These commands inspect the local daemon and plugin; they never pull images.
+    if not command_ok([paths['docker'], 'info']):
+        raise InstallError('Docker is unavailable; no dependencies were installed')
+    if not command_ok([paths['docker'], 'compose', 'version']):
+        raise InstallError('Docker Compose is unavailable; no dependencies were installed')
+    return {'profile': 'prepared-host', 'target': target, 'tools': paths,
+            'kubernetes_client': list(client) if client else None}
+
+
 def provision_kubernetes_client(run):
     """Preserve an installed client; add a verified client only when absent.
 
