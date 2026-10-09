@@ -21,6 +21,14 @@ import tempfile
 REPOSITORY = "cisco-open/intelligent-release-image-staging"
 WORKFLOW = REPOSITORY + "/.github/workflows/release.yml"
 SOURCE_ASSET = "aria2c-2.5.6-p10-source.tar.gz"
+# These new binary products are local candidates until their complete source
+# coverage and deployment qualification gates are connected to publication.
+# A release attestation establishes provenance, not those missing checks.
+PREBUILT_CANDIDATE_ASSETS = frozenset((
+    "release-kit.json", "local-candidate.json", "iris-server-amd64.docker.tar",
+    "iris-console-amd64.docker.tar", "iris-device-neutral.oci.tar",
+    "iris-ubuntu-dependencies.tar.gz",
+))
 
 
 def validate_tag(tag):
@@ -105,6 +113,9 @@ def prepare(repo, output, tag):
         raise ValueError("Release tag does not identify the checked-out commit")
     if git("status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Release inputs must have no tracked changes")
+    if PREBUILT_CANDIDATE_ASSETS.intersection(path.name for path in output.iterdir()):
+        raise ValueError("Prebuilt kit publication is not enabled: complete corresponding-source "
+                         "coverage checks and deployment qualification before authenticating these candidates")
     source = output / SOURCE_ASSET
     expected = [line.split()[0] for line in (repo / "tools/aria2c-source/source.sha256").read_text().splitlines()
                 if line and not line.startswith("#")]

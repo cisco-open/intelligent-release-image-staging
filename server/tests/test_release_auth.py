@@ -147,6 +147,23 @@ def test_prepares_complete_publishable_inventory(prepared_inputs):
     subprocess.run(["sha256sum", "--check", "aria2c.sha256"], cwd=output, check=True)
 
 
+@pytest.mark.parametrize('name', sorted(AUTH.PREBUILT_CANDIDATE_ASSETS))
+@pytest.mark.parametrize('kind', ['file', 'dangling-symlink'])
+def test_unqualified_prebuilt_candidates_refused_before_publication_writes(prepared_inputs, name, kind):
+    repo, output = prepared_inputs
+    candidate = output / name
+    if kind == 'file':
+        candidate.write_bytes(b'local unqualified candidate')
+    else:
+        candidate.symlink_to(output / 'missing')
+    before = {path.name: path.lstat() for path in output.iterdir()}
+    with pytest.raises(ValueError, match='corresponding-source coverage checks'):
+        AUTH.prepare(repo, output, TAG)
+    after = {path.name: path.lstat() for path in output.iterdir()}
+    assert before == after
+    assert not (output / 'release.json').exists()
+
+
 def test_prepare_preserves_exact_prebuilt_source_asset(prepared_inputs):
     repo, output = prepared_inputs
     target = output / "iris.tgz"

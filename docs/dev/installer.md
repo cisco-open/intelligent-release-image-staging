@@ -223,6 +223,7 @@ release kit, verifier and independent trust files at their recorded locations.
 The current publication workflow supplies source-build artifacts. Complete kit
 publication and offline topology qualification remain release gates. A local
 candidate does not prove publisher authentication or native Cisco signature acceptance.
+Release preparation refuses the new prebuilt assets until those gates are connected.
 
 ## Assemble a local candidate
 

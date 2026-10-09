@@ -29,6 +29,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   selection, offline verification and pinned local packaging tools. Preserve
   the selected input mode on resume and check saved package bytes before reuse.
   Keep the default source-build workflow available.
+  Block publication of the new prebuilt candidates until component source coverage
+  and deployment qualification checks are connected.
 
 - Check Guest Shell source references and both committed aria2 architectures
   before prebuilt installation. Support a pinned local Kubernetes client without
