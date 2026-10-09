@@ -256,8 +256,52 @@ def _prepare_ubuntu_inputs(work, ubuntu_dependencies, ubuntu_sources):
     return closure, companion, proof
 
 
+def _checksum_rows(path):
+    rows = []
+    for line in regular_bytes(path, 65536).decode('utf-8').splitlines():
+        if not line.strip() or line.startswith('#'):
+            continue
+        fields = line.split()
+        if len(fields) != 2 or not re.fullmatch('[a-f0-9]{64}', fields[0]):
+            fail('invalid committed corresponding-source or binary checksum manifest')
+        rows.append(fields)
+    return rows
+
+
+def _prepare_aria_sources(work, source, archive):
+    """Bind a reviewed source companion to the selected commit's two clients."""
+    if archive is None:
+        return None, None
+    rows = _checksum_rows(source / 'tools/aria2c-source/source.sha256')
+    if (len(rows) != 1
+            or not re.fullmatch(r'aria2c-[A-Za-z0-9._-]+-source\.tar\.gz', rows[0][1])):
+        fail('expected one named committed aria2 source companion')
+    expected, name = rows[0]
+    rows = _checksum_rows(source / 'tools/aria2c.sha256')
+    if len(rows) != 2 or {row[1] for row in rows} != {'x86_64', 'aarch64'}:
+        fail('expected exactly two committed aria2 client checksums')
+    binaries = {arch: checksum for checksum, arch in rows}
+    input_path = source / 'tools/aria2c-source/inputs.json'
+    inputs = kit._json(regular_bytes(input_path, kit.MAX_METADATA))
+    if not isinstance(inputs, dict) or inputs.get('binary_sha256') != binaries:
+        fail('aria2 source inputs differ from the committed client checksums')
+    for arch, checksum in binaries.items():
+        if _file(source / 'deliverables' / ('aria2c-' + arch))['sha256'] != checksum:
+            fail('aria2 client differs from the committed source binding')
+    if _file(source / 'bin/aria2c')['sha256'] != binaries['x86_64']:
+        fail('server aria2 client differs from the committed source binding')
+    private = work / name
+    if kit._snapshot(f._path(archive), private, kit.MAX_ASSET) != expected:
+        fail('aria2 source companion differs from the selected committed checksum')
+    return private, {'format': 'iris-local-aria2-source-binding-v1', 'asset': name,
+                     'archive_sha256': expected, 'binary_sha256': binaries,
+                     'inputs_sha256': _file(input_path)['sha256'],
+                     'scope': 'committed clients; image embedding and full image source coverage remain separate'}
+
+
 def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
-             ubuntu_dependencies=None, ubuntu_sources=None, builder=None, runner=None):
+             ubuntu_dependencies=None, ubuntu_sources=None, aria2_sources=None,
+             builder=None, runner=None):
     if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}', commit):
         fail('a full lowercase commit SHA is required')
     kit._auth().validate_tag(tag)
@@ -293,6 +337,7 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
 
         # Fail early on unavailable pinned tooling/closure and source parity,
         # before spending time on image builds. Neither producer runs ioxclient.
+        aria_source, aria_proof = _prepare_aria_sources(work, source, aria2_sources)
         closure, companion, ubuntu_proof = _prepare_ubuntu_inputs(work, ubuntu_dependencies, ubuntu_sources)
         _same_directory(work, descriptor)
         python('build-packaging-inputs.py', '--appmgr-repository', appmgr_repository,
@@ -344,6 +389,10 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
             if kit._snapshot(companion, assets / UBUNTU_SOURCES_NAME, kit.MAX_ASSET) != ubuntu_proof['companion_archive_sha256']:
                 fail('source companion changed after independent coverage validation')
             expected_names.add(UBUNTU_SOURCES_NAME)
+        if aria_source is not None:
+            if kit._snapshot(aria_source, assets / aria_proof['asset'], kit.MAX_ASSET) != aria_proof['archive_sha256']:
+                fail('aria2 source companion changed after committed-source validation')
+            expected_names.add(aria_proof['asset'])
         if {path.name for path in assets.iterdir()} != expected_names:
             fail('builder produced an unexpected candidate asset set')
         profile = 'ubuntu-dependencies' if closure is not None else 'prepared-host'
@@ -358,8 +407,10 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
             expected = ({UBUNTU_SOURCES_NAME: ubuntu_proof['companion_archive_sha256'],
                          'iris-ubuntu-dependencies.tar.gz': ubuntu_proof['dependency_archive_sha256']}
                         if ubuntu_proof is not None else {})
+            if aria_proof is not None:
+                expected[aria_proof['asset']] = aria_proof['archive_sha256']
             if name in expected and record['sha256'] != expected[name]:
-                fail('Ubuntu candidate bytes changed after independent source validation')
+                fail('candidate bytes changed after independent source validation')
             if kit._snapshot(assets / name, stage / name, kit.MAX_ASSET) != record['sha256']:
                 fail('candidate changed before publication')
         receipt = {'format': 'iris-local-release-candidate-v1', 'authenticated': False,
@@ -368,6 +419,8 @@ def assemble(repository, output_dir, *, commit, tag, appmgr_repository,
                    'source_match': proof, 'files': inventory}
         if ubuntu_proof is not None:
             receipt['ubuntu_source_coverage'] = ubuntu_proof
+        if aria_proof is not None:
+            receipt['aria2_source_binding'] = aria_proof
         (stage / 'local-candidate.json').write_bytes(f._json(receipt))
     return output
 
@@ -382,6 +435,8 @@ def main(argv=None):
     parser.add_argument('--ubuntu-dependencies', type=Path, help='Optional already-produced Ubuntu closure')
     parser.add_argument('--ubuntu-sources', type=Path,
                         help='Optional source/notices companion; requires --ubuntu-dependencies')
+    parser.add_argument('--aria2-sources', type=Path,
+                        help='Local aria2 companion matching the selected commit source and client pins')
     parser.add_argument('--builder', help='Existing buildx builder supporting amd64 and arm64')
     args = parser.parse_args(argv)
     previous_umask = os.umask(0o022)
@@ -389,7 +444,8 @@ def main(argv=None):
         result = assemble(args.repo, args.output_dir, commit=args.commit, tag=args.tag,
                           appmgr_repository=args.appmgr_repository,
                           ubuntu_dependencies=args.ubuntu_dependencies,
-                          ubuntu_sources=args.ubuntu_sources, builder=args.builder)
+                          ubuntu_sources=args.ubuntu_sources, aria2_sources=args.aria2_sources,
+                          builder=args.builder)
     except (InstallError, OSError, ValueError, UnicodeError, tarfile.TarError, EOFError, subprocess.SubprocessError) as exc:
         parser.exit(1, 'Local candidate preparation failed: ' + str(exc) + '\n')
     finally:

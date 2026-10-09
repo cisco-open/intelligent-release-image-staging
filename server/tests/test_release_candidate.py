@@ -506,6 +506,121 @@ def test_publication_race_preserves_new_owner_directory(tmp_path, repository, mo
     assert set((tmp_path / 'candidate').iterdir()) == {tmp_path / 'candidate/sentinel'}
 
 
+@pytest.fixture
+def aria_repository(tmp_path, repository):
+    repo, _, files = repository
+    archive = tmp_path / 'supplied-aria-source.tar.gz'
+    archive.write_bytes(b'reviewed exact aria source archive fixture')
+    name = 'aria2c-2.5.6-p10-source.tar.gz'
+    binaries = {'x86_64': b'amd64 client', 'aarch64': b'arm64 client'}
+    pins = {arch: sha(data) for arch, data in binaries.items()}
+    files.update({
+        'tools/aria2c-source/source.sha256': (sha(archive.read_bytes()) + '  ' + name + '\n').encode(),
+        'tools/aria2c.sha256': ('# Client pins — both architectures\n' + ''.join(
+            digest + '  ' + arch + '\n' for arch, digest in pins.items())).encode(),
+        'tools/aria2c-source/inputs.json': json.dumps({'binary_sha256': pins}).encode(),
+        'bin/aria2c': binaries['x86_64'],
+        **{'deliverables/aria2c-' + arch: data for arch, data in binaries.items()},
+    })
+    for path, data in files.items():
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'Pin fixture aria sources and both clients')
+    return (repo, git(repo, 'rev-parse', 'HEAD'), files), archive, name, pins
+
+
+def test_aria_companion_is_bound_to_both_clients_before_builds(tmp_path, aria_repository):
+    repository, archive, name, pins = aria_repository
+    original = archive.read_bytes()
+    builders = Builders(repository[1], repository[2])
+    def run(arguments, **kwargs):
+        assert (kwargs['cwd'].parent / name).read_bytes() == original
+        archive.write_bytes(b'changed original after snapshot')
+        builders(arguments, **kwargs)
+    output, _ = assemble(tmp_path, repository, builders=run, aria2_sources=archive)
+    record = json.loads((output / 'local-candidate.json').read_bytes())
+    assert record['authenticated'] is False
+    assert (output / name).read_bytes() == original
+    assert (output / name).stat().st_mode & 0o777 == 0o444
+    assert record['aria2_source_binding'] == {
+        'format': 'iris-local-aria2-source-binding-v1', 'asset': name,
+        'archive_sha256': sha(original), 'binary_sha256': pins,
+        'inputs_sha256': sha(repository[2]['tools/aria2c-source/inputs.json']),
+        'scope': 'committed clients; image embedding and full image source coverage remain separate'}
+    assert name in record['files']
+    assert all('--aria2-sources' not in args for args in builders.calls)
+
+
+@pytest.mark.parametrize('change', [
+    'wrong-archive', 'archive-symlink', 'archive-hardlink', 'missing-archive',
+    'wrong-amd64', 'wrong-arm64', 'wrong-server', 'inputs-mismatch',
+    'duplicate-source-pin', 'unsafe-source-name', 'malformed-source-pin',
+    'duplicate-binary-pin',
+])
+def test_aria_companion_refusals_precede_all_builders(tmp_path, aria_repository, change):
+    repository, archive, name, _ = aria_repository
+    repo, commit, files = repository
+    if change == 'wrong-archive':
+        archive.write_bytes(b'not the pinned source')
+    elif change in ('archive-symlink', 'archive-hardlink'):
+        other = tmp_path / 'alias'
+        if change == 'archive-symlink':
+            other.symlink_to(archive)
+        else:
+            os.link(archive, other)
+        archive = other
+    elif change == 'missing-archive':
+        archive = tmp_path / 'missing'
+    else:
+        if change.startswith('wrong-'):
+            filename = {'wrong-amd64': 'deliverables/aria2c-x86_64',
+                        'wrong-arm64': 'deliverables/aria2c-aarch64',
+                        'wrong-server': 'bin/aria2c'}[change]
+            (repo / filename).write_bytes(b'changed binary')
+        elif change == 'inputs-mismatch':
+            (repo / 'tools/aria2c-source/inputs.json').write_text('{"binary_sha256": {}}')
+        elif change == 'duplicate-binary-pin':
+            path = repo / 'tools/aria2c.sha256'
+            duplicate = next(line for line in path.read_text().splitlines() if not line.startswith('#'))
+            path.write_text(path.read_text() + duplicate + '\n')
+        else:
+            path = repo / 'tools/aria2c-source/source.sha256'
+            value = path.read_text()
+            path.write_text(value + value if change == 'duplicate-source-pin'
+                else value.replace(name, '../' + name) if change == 'unsafe-source-name'
+                else 'not-a-digest ' + name + '\n')
+        git(repo, 'add', '.')
+        git(repo, 'commit', '-m', 'Invalid committed source binding fixture')
+        commit = git(repo, 'rev-parse', 'HEAD')
+    with pytest.raises((InstallError, OSError, ValueError)):
+        c.assemble(repo, tmp_path / 'candidate', commit=commit, tag=TAG,
+                   appmgr_repository=repo, aria2_sources=archive,
+                   runner=lambda *a, **k: pytest.fail('Invalid aria source reached a builder'))
+    assert not (tmp_path / 'candidate').exists()
+
+
+@pytest.mark.parametrize('location', ['private', 'candidate-asset'])
+def test_aria_companion_cannot_drift_after_pin_validation(tmp_path, aria_repository, monkeypatch, location):
+    repository, archive, name, _ = aria_repository
+    builders = Builders(repository[1], repository[2])
+    def run(arguments, **kwargs):
+        builders(arguments, **kwargs)
+        if location == 'private' and str(arguments[0]) == 'docker':
+            (kwargs['cwd'].parent / name).write_bytes(b'changed private source')
+    original = c.kit._snapshot
+    def snapshot(source, destination, maximum):
+        result = original(source, destination, maximum)
+        if location == 'candidate-asset' and destination.parent.name == 'assets' and destination.name == name:
+            destination.write_bytes(b'changed candidate source')
+        return result
+    monkeypatch.setattr(c.kit, '_snapshot', snapshot)
+    with pytest.raises(InstallError, match='changed after'):
+        assemble(tmp_path, repository, builders=run, aria2_sources=archive)
+    assert not (tmp_path / 'candidate').exists()
+
+
 def test_publication_parent_replacement_never_cleans_replacement(tmp_path, repository, monkeypatch):
     parent = tmp_path / 'output-parent'
     parent.mkdir(mode=0o700)
