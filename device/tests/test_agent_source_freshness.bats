@@ -144,19 +144,21 @@ _check_under_set_e() {
 }
 
 @test "a merged feature tip with identical source is fresh despite the merge commit" {
+  # Identical timestamps must not choose which side survives Git's path-history
+  # simplification. Give main an independent commit with the same source tree:
+  # it remains absent from feature's ancestry regardless of merge walk order.
+  export GIT_AUTHOR_DATE=2020-01-01T00:00:00Z GIT_COMMITTER_DATE=2020-01-01T00:00:00Z
   _make_stale_repo
   git -C "$R" branch feature main
   git -C "$R" branch -f main "$C1"
   git -C "$R" checkout -q main
+  echo "two" > "$R/device/agent/a.py"
+  git -C "$R" add device/agent/a.py
+  git -C "$R" commit -q -m "Independent identical agent source"
   git -C "$R" merge -q --no-ff feature -m "Merge feature"
   git -C "$R" checkout -q feature
-  echo "three" > "$R/device/agent/a.py"
-  git -C "$R" add device/agent/a.py
-  git -C "$R" commit -q -m "Next feature change"
-  git -C "$R" checkout -q main
-  git -C "$R" merge -q --no-ff feature -m "Merge continued feature"
-  git -C "$R" checkout -q feature
-  [ "$(git -C "$R" rev-list --count HEAD..main -- device/agent)" -gt 0 ]
+  [ "$(git -C "$R" rev-list --count HEAD..main -- device/agent)" -eq 1 ]
+  git -C "$R" diff --exit-code HEAD main -- device/agent
   _check_under_set_e IRIS_REQUIRE_FRESH_AGENT=1
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" != *"WARNING"* ]]
