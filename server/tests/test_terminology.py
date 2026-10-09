@@ -406,6 +406,8 @@ TERM_FILE_ALLOWLIST.extend(
         "tools/iris_installer/debian_sources.py",
         "tools/iris_installer/core_python_sources.py",
         "tools/iris_installer/runtime_sources.py",
+        "tools/iris_installer/candidate_evidence.py",
+        "tools/iris_installer/image_source_notices.py",
         "tools/iris_installer/device_finalize.py",
         "tools/iris_installer/guest_inputs.py",
         "tools/iris_installer/image_components.py",

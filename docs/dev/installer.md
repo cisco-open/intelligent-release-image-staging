@@ -350,6 +350,28 @@ inputs. Keep its referenced Alpine archive alongside it. Source-file matches
 are reported separately from generated binaries; the tool does not establish
 binary reproducibility or publisher authentication.
 
+### Image notices and candidate completion
+
+`tools/build-image-source-notices.py` collects original notices, package ownership
+and exact source references from every image layer and the final filesystems.
+Supply the candidate and inventory with their reviewed hashes, the five image
+source companions with their hashes, and the pinned debuerreotype script and
+license. Use `--verify-bundle` to reconstruct an existing catalogue. Recipe-only
+license declarations remain distinct from original notice text; package ownership
+does not prove a reproducible binary build.
+
+Once the companions are ready, use `tools/complete-release-candidate.py` with the
+original candidate hash, tag, full commit, source companions, notice catalogue,
+independent Debian keyring and reviewed pip source hash. Include Ubuntu sources
+for the dependency profile. The helper rechecks the installer against its source,
+recomputes the image inventory and independently validates each companion.
+
+It writes a new private directory with `candidate-evidence.json`, preserving the
+original candidate bytes. It does not rebuild images or download source. This
+evidence still needs source and redistribution review, release authentication
+and live qualification. See the [release checklist](release-checklist.md) for
+the separate authentication and publication steps.
+
 ## Bootstrap the installer offline
 
 This developer route needs an authenticated `ubuntu-dependencies` kit and its

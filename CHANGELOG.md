@@ -31,6 +31,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   distributed image layer before completing publication checks.
   Allow explicit integrity checks of retained Debian source archives after
   repository metadata expires, while keeping fresh-build checks unchanged.
+  Collect image ownership and original notices, then complete candidate evidence
+  without rebuilding or replacing the original files.
+
+- Separate release authentication from publication. A tag exports authenticated
+  files for qualification; a later manual workflow checks the exact files and
+  reviewer approval before publishing them without a rebuild.
 
 - Bound local packaging-source reads by their original timeout, including silent
   Git processes, and isolate them from unrelated Git configuration.

@@ -15,15 +15,40 @@ check.
 
 ## Before you cut a release
 
-Complete the release qualification record before creating `v<VERSION>`. The
-tag starts `.github/workflows/release.yml` on a GitHub-hosted Ubuntu runner. The
-workflow checks the tag against `VERSION`, builds the Ubuntu installer and
-source archive, verifies the pinned aria2 corresponding source and binaries,
-and creates GitHub artifact attestations for every publication asset. It verifies
-the attestations against the exact repository, workflow, tag and source commit
-before creating the public release. Publication refuses an existing release;
-changed bytes require a new version. It needs repository `contents: write`,
-`attestations: write` and GitHub OIDC `id-token: write` workflow permissions.
+Review the source and run the local checks before creating `v<VERSION>`.
+The tag starts `.github/workflows/release.yml` on a GitHub-hosted Ubuntu runner.
+It checks the tag against `VERSION`, builds the Ubuntu installer and source
+archive, verifies the pinned aria2 source and both binaries, and authenticates
+every asset with GitHub artifact attestations. The signed `release-stage.json`
+also binds the files to that workflow run and attempt.
+
+The tag workflow exports `iris-authenticated-<run-id>-<attempt>` and stops.
+It does not publish a release. Its permissions are repository `contents: read`,
+`attestations: write` and GitHub OIDC `id-token: write`. Prebuilt-kit publication
+remains disabled until its separate source and qualification checks are connected.
+
+Download and verify the exact stage for qualification using the reviewed local
+`tools/release-stage.py acquire` helper. Supply the tag, full commit, run ID,
+attempt, artifact ID and independently recorded raw ZIP SHA-256; use `--help`
+for the options. The helper checks the successful run, immutable artifact,
+attestations and exact file inventory without executing downloaded code.
+
+Qualify those same files before publication. Record installer/source agreement,
+source and notice review, single and split Docker, single-node and multi-node
+Kubernetes, both device architectures, native admission and lifecycle checks.
+The `iris-release-qualification-v1` JSON record binds each passed check's evidence
+hash to the stage, every asset and the reviewer. It is a reviewer's statement,
+not a claim that the publication helper ran those tests.
+
+An authorized repository contributor can then manually run
+`.github/workflows/publish-release.yml` from `main`. Supply the same stage
+identities, the literal qualification JSON and its SHA-256, and the confirmation
+`publish <tag> <release.json SHA256>`. The record's `reviewed_by` must match the
+person triggering publication. The workflow re-verifies a private snapshot and
+publishes those exact files without rebuilding. It retains the qualification and
+publication binding separately. This workflow needs `actions: read` and
+`contents: write`, not signing permission. Existing releases are refused; changed
+bytes require a new version.
 
 After publication, download all assets into a fresh directory and follow
 [download and authentication](../zensical/install/managed-package.md#download-and-authenticate).
