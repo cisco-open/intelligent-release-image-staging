@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Small, offline terminal workflow; only public files leave this machine."""
+"""Terminal key-holder workflow; only public files leave this machine."""
 
 import argparse
 import base64
@@ -119,11 +119,17 @@ def run(command, *, capture=False):
     return result.stdout
 
 
-def holder_machine():
+def holder_machine(*, local=False):
     if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
         raise InstallError("Run this on your key-holder machine, not inside a container")
+    if local:
+        print("You chose to keep and use private keys on this host, which may also run IRIS.")
+        print("If this host is compromised, the private keys stored here are also at risk.")
+        if input("Type LOCAL KEY HOLDER to confirm this choice: ").strip() != "LOCAL KEY HOLDER":
+            raise InstallError("Stopped; no private keys were created or used")
+        return
     if Path("/etc/iris").exists() or list(Path("/var/lib/iris-installer").glob("*/installation.json")):
-        raise InstallError("This looks like an IRIS server. Use a separate key-holder machine")
+        raise InstallError("This looks like an IRIS server. Use a separate key-holder machine, or explicitly choose iris-key-setup --local")
     print("Use your separate key-holder machine, not the IRIS server.")
     print("Keep this machine offline while creating or using private keys.")
     if input("Type KEY HOLDER to confirm where you are running this: ").strip() != "KEY HOLDER":
@@ -136,7 +142,7 @@ def create_root(name, directory):
     directory = private_directory(directory)
     other = "root-b" if name == "root-a" else "root-a"
     if (directory / other).exists() or (directory / (other + ".pub")).exists():
-        raise InstallError("The other signing key is here. Each holder must use a separate machine")
+        raise InstallError("The other signing key is here. Use a separate private folder for each signing key")
     root = directory / name
     if root.is_symlink():
         raise InstallError("Private key must not be a symbolic link")
@@ -303,7 +309,9 @@ def fetch_request(host, source, output):
 
 
 def parser():
-    result = argparse.ArgumentParser(description="Create and use IRIS keys from a terminal on a separate key-holder machine.")
+    result = argparse.ArgumentParser(description="Create and use IRIS keys from a terminal. A separate key-holder machine is the default.")
+    result.add_argument("--local", action="store_true",
+                        help="explicitly use this host for private keys, including an IRIS server; put this option before the command")
     modes = result.add_subparsers(dest="command")
     root = modes.add_parser("create-root", help="create or check your protected signing key")
     root.add_argument("--name", choices=("root-a", "root-b"))
@@ -345,14 +353,14 @@ def main(argv=None):
             commands = {"1": "create-root", "2": "create-recovery", "3": "approve", "4": "export", "5": "send", "6": "fetch"}
             if choice not in commands:
                 raise InstallError("Choose a number from 1 to 6")
-            args = parser().parse_args([commands[choice]])
+            args = parser().parse_args((["--local"] if args.local else []) + [commands[choice]])
             if args.command == "approve":
                 kind = input("Request type: 1. Server signing key  2. Key retirement list: ").strip()
                 if kind not in ("1", "2"):
                     raise InstallError("Choose request type 1 or 2")
                 args.kind = "signing" if kind == "1" else "keylist"
         if args.command in ("create-root", "create-recovery", "approve"):
-            holder_machine()
+            holder_machine(local=args.local)
         for binary in (("age-keygen",) if args.command == "create-recovery" else ("ssh-keygen",)):
             if shutil.which(binary) is None:
                 raise InstallError("Install " + binary + " on this key-holder machine first")
