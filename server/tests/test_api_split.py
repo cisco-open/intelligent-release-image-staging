@@ -30,6 +30,7 @@ import management_api
 import secrets_store
 import telemetry
 import tracker
+from native_listener_fixture import start_fixture_server
 
 
 def _write_secret(path, value, scope="management"):
@@ -52,27 +53,12 @@ def _certificate(tmp_path, stem="tls"):
 
 
 def _thread(server):
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return thread
+    return start_fixture_server(server)
 
 
 def _fixture_server(server, request):
     """Register cleanup before startup, including partial fixture failures."""
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-
-    def stop():
-        try:
-            if thread.is_alive():
-                server.shutdown()
-        finally:
-            server.server_close()
-            if thread.ident is not None:
-                thread.join(timeout=3)
-
-    request.addfinalizer(stop)
-    thread.start()
-    return thread
+    return start_fixture_server(server, request)
 
 
 def _request(port, path, method="GET", headers=None, body=None, https=False):
@@ -1423,21 +1409,11 @@ def policy_tiers(tmp_path, monkeypatch, request, console_transport_failures):
     management = management_api.make_server(
         "127.0.0.1", 0, app, fleet=fleet, catalog=store, certfile=str(cert),
         keyfile=str(key), management_token_file=str(token))
-    management_thread = _thread(management)
-
-    def stop_server(server, thread):
-        try:
-            server.shutdown()
-        finally:
-            server.server_close()
-            thread.join(timeout=3)
-
-    request.addfinalizer(lambda: stop_server(management, management_thread))
+    _fixture_server(management, request)
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server("127.0.0.1", 0,
         "https://localhost:%d" % management.server_address[1], str(token), str(cert))
-    console_thread = _thread(console)
-    request.addfinalizer(lambda: stop_server(console, console_thread))
+    _fixture_server(console, request)
     headers = {}
     def request(tier, method, suffix, body=None, duplicates=False,
                 authorized=True, declared_length=None, match=True,
@@ -1519,14 +1495,14 @@ def test_policy_tiers_setup_failure_closes_started_servers(
     class FixtureRequest:
         addfinalizer = staticmethod(finalizers.append)
 
-    original_thread = _thread
+    original_fixture_server = _fixture_server
 
-    def record_thread(server):
-        thread = original_thread(server)
+    def record_thread(server, request):
+        thread = original_fixture_server(server, request)
         started.append((server, thread))
         return thread
 
-    monkeypatch.setitem(globals(), "_thread", record_thread)
+    monkeypatch.setitem(globals(), "_fixture_server", record_thread)
     if failure == "console-construction":
         def unavailable_console(*args, **kwargs):
             raise gui_server.ConsoleConfigurationError("fixture console unavailable")
