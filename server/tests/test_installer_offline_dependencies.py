@@ -221,9 +221,9 @@ def test_apply_rejects_any_plan_change(monkeypatch):
         dependencies.apply_dependencies(None, {'status_sha256': 'before'}, accept_changes=True)
 
 
-def test_apply_resimulates_exact_packages_before_mutation(monkeypatch):
+def test_apply_resimulates_exact_packages_before_mutation(monkeypatch, tmp_path):
     operation = {'name': 'example', 'version': '1.0', 'old_version': None, 'architecture': 'amd64'}
-    plan = {'packages': [operation]}
+    plan = {'packages': [operation], 'status_sha256': 'a' * 64}
     calls = []
     monkeypatch.setattr(dependencies.os, 'geteuid', lambda: 0)
     monkeypatch.setattr(dependencies, 'plan_dependencies', lambda _: plan)
@@ -232,9 +232,10 @@ def test_apply_resimulates_exact_packages_before_mutation(monkeypatch):
         calls.append(command)
         return 'Inst example (1.0 Ubuntu:24.04/noble [amd64])' if '--simulate' in command else ''
     monkeypatch.setattr(dependencies, '_run', run)
-    dependencies.apply_dependencies(SimpleNamespace(config=Path('/private/apt.conf')), plan, accept_changes=True)
+    dependencies.apply_dependencies(SimpleNamespace(config=Path('/private/apt.conf'), directory=tmp_path), plan, accept_changes=True)
     assert len(calls) == 2 and '--simulate' in calls[0] and '--yes' in calls[1]
     assert all('--no-download' in c and '--no-remove' in c and 'example=1.0' in c for c in calls)
+    assert any(option.startswith('DPkg::Pre-Invoke::=') for option in calls[1])
 
 
 def test_unfinished_dpkg_state_requires_recovery(tmp_path):
@@ -267,3 +268,39 @@ def test_simulation_handles_apt_predependency_marker():
 def test_simulation_retains_architecture_independent_package_identity():
     result = dependencies._simulation('Inst ubuntu-keyring (2023.11.28.1 Ubuntu:24.04/noble [all])')
     assert result[0]['architecture'] == 'all'
+
+
+def test_dpkg_reinstallation_error_requires_recovery(tmp_path):
+    status = tmp_path / 'status'
+    status.write_text('Package: example\nVersion: 1.0\nArchitecture: amd64\nStatus: install reinstreq installed\n')
+    with pytest.raises(InstallError, match='unfinished package operations'):
+        dependencies._installed(status)
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_real_apt_guard_blocks_changed_status_before_any_dpkg(signed_repository, tmp_path, changed):
+    directory, keyring, digest = signed_repository
+    with dependencies.validate_closure(directory, digest, keyring=keyring) as closure:
+        application = tmp_path / 'application'
+        application.mkdir(mode=0o700)
+        status = closure.config.parent / 'status'
+        guard = dependencies._application_guard(application, dependencies._digest(status), status=status)
+        if changed:
+            status.write_text('Package: concurrent-test\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0\nDescription: fixture\n\n')
+        # Real apt runs its hook and prints the dpkg commands. Its diagnostic
+        # switch suppresses all dpkg execution, while every apt state path is
+        # private. This test cannot install or remove a host package.
+        command = ['/usr/bin/apt-get', '--yes', 'install', '--no-download', '--no-remove',
+                   '-o', 'Debug::pkgDPkgPM=true', '-o', 'Debug::NoLocking=true',
+                   '-o', 'DPkg::Pre-Invoke::=' + guard, '-o', 'DPkg::Pre-Invoke::=' + guard, 'age=1.0']
+        result = subprocess.run(command, env={**dependencies.ENV, 'APT_CONFIG': str(closure.config)},
+                                capture_output=True, text=True, timeout=30)
+        if changed:
+            assert result.returncode != 0 and 'Host package state changed after review' in result.stderr
+            assert not (application / 'apt-operation.json').exists()
+        else:
+            assert result.returncode == 0, result.stderr
+            assert (application / 'apt-operation.json').is_file()
+            reused = subprocess.run(command, env={**dependencies.ENV, 'APT_CONFIG': str(closure.config)},
+                                    capture_output=True, text=True, timeout=30)
+            assert reused.returncode != 0 and 'different apt operation' in reused.stderr
