@@ -5,6 +5,7 @@
 """Authentication/export is separate from exact-byte manual publication."""
 
 import hashlib
+from contextlib import contextmanager
 import importlib.util
 import io
 import json
@@ -106,6 +107,360 @@ def replace_files(stage, files):
     stage["selected"]["artifact_sha256"] = sha(stage["archive"])
     stage["artifact"]["digest"] = "sha256:" + sha(stage["archive"])
     stage["artifact"]["size_in_bytes"] = len(stage["archive"])
+
+
+def seal_prebuilt(stage, files):
+    """Refresh only the signed outer seal; inner joins remain independently checked."""
+    files = {name: raw for name, raw in files.items() if name not in {"release.json", "SHA256SUMS", "attestations.jsonl"}}
+    files["release.json"] = STAGE._canonical({"schema": 1, "repository": STAGE.REPOSITORY,
+        "workflow": STAGE.WORKFLOW, "tag": TAG, "commit": COMMIT, "assets": inventory(files)})
+    files["SHA256SUMS"] = "".join(sha(files[name]) + "  " + name + "\n" for name in sorted(files)).encode()
+    files["attestations.jsonl"] = b"Fixture signatures mocked; not hosted authentication\n"
+    replace_files(stage, files)
+
+
+def rebind_prebuilt(stage, files):
+    """Rebind surrounding inventories to test malformed inner signed metadata."""
+    original = json.loads(files["local-candidate.json"])
+    original["files"] = {name: inventory(files)[name] for name in original["files"]}
+    files["local-candidate.json"] = STAGE._canonical(original)
+    evidence = json.loads(files["candidate-evidence.json"])
+    evidence["files"] = {name: inventory(files)[name] for name in evidence["files"]}
+    evidence["original_candidate_sha256"] = sha(files["local-candidate.json"])
+    evidence["image_inventory_sha256"] = sha(files["image-components.json"])
+    files["candidate-evidence.json"] = STAGE._canonical(evidence)
+    prep = json.loads(files["prebuilt-preparation.json"])
+    prep["payload_assets"] = {name: inventory(files)[name] for name in prep["payload_assets"]}
+    prep["payload_asset_map_sha256"] = sha(STAGE._canonical(prep["payload_assets"]))
+    prep["candidate_evidence_sha256"] = sha(files["candidate-evidence.json"])
+    prep["image_inventory_sha256"] = sha(files["image-components.json"])
+    prep["delivery_assets"] = {name: inventory(files)[name] for name in prep["delivery_assets"]}
+    review = json.loads(files["source-review.json"])
+    for key in ("candidate_evidence_sha256", "image_inventory_sha256", "payload_assets", "payload_asset_map_sha256"):
+        review[key] = prep[key]
+    files["source-review.json"] = STAGE._canonical(review)
+    prep["source_review_sha256"] = sha(files["source-review.json"])
+    files["prebuilt-preparation.json"] = STAGE._canonical(prep)
+    seal_prebuilt(stage, files)
+
+
+@pytest.fixture(params=["prepared-host", "ubuntu-dependencies"])
+def prebuilt(stage, request, tmp_path, monkeypatch):
+    """Use the real gate writer; expensive source reconstruction is a labelled stub."""
+    from iris_installer import prebuilt_release as gate
+    from iris_installer import candidate_evidence as completion
+    profile = request.param
+    package = "iris-installer_" + TAG[1:] + "+installer.0.g" + COMMIT[:12] + "_amd64.deb"
+    roles = {"server-image": "iris-server-amd64.docker.tar", "console-image": "iris-console-amd64.docker.tar",
+             "device-runtime": "iris-device-neutral.oci.tar", "guest-inputs": "iris-guest-inputs.tar.gz",
+             "packaging-tools": "iris-packaging-tools.tar.gz", "source": "iris.tgz"}
+    if profile == "ubuntu-dependencies":
+        roles["ubuntu-dependencies"] = "iris-ubuntu-dependencies.tar.gz"
+    files = {name: ("inert fixture " + name).encode() for name in roles.values()}
+    configs = {role: STAGE._canonical({"architecture": "amd64", "os": "linux",
+               "config": {"Labels": {"org.opencontainers.image.revision": COMMIT}}, "role": role})
+               for role in ("server-image", "console-image")}
+    digest = {role: "sha256:" + sha(raw) for role, raw in configs.items()}
+    digest["device-runtime"] = "sha256:" + "c" * 64
+    source_sha = "d" * 64
+    descriptor = {"schema": STAGE.kit.SCHEMA, "repository": STAGE.REPOSITORY, "workflow": STAGE.WORKFLOW,
+                  "tag": TAG, "commit": COMMIT, "host": STAGE.kit.HOST, "profile": profile, "assets": {}}
+    for role, name in roles.items():
+        row = {"name": name, **inventory(files)[name], "format": "tar.gz"}
+        if role in STAGE.kit.IMAGES:
+            row.update(format="oci-archive" if role == "device-runtime" else "docker-archive",
+                       platforms=["linux/amd64", "linux/arm64"] if role == "device-runtime" else ["linux/amd64"],
+                       image_digest=digest[role])
+        if role == "device-runtime":
+            row["neutral_source_sha256"] = source_sha
+        if role == "ubuntu-dependencies":
+            row["dependency_manifest_sha256"] = "e" * 64
+        descriptor["assets"][role] = row
+    files["release-kit.json"] = STAGE._canonical(descriptor)
+    neutral = {"format": "iris-device-neutral-oci-v1", "trust_mode": "neutral", "source_sha256": source_sha,
+               "index_digest": digest["device-runtime"], "archive_sha256": sha(files[roles["device-runtime"]]),
+               "platforms": "linux/amd64,linux/arm64"}
+    files["iris-device-neutral.oci.tar.manifest"] = "".join(key + "=" + value + "\n" for key, value in neutral.items()).encode()
+    delivery = {"release-auth.py": b"# Never execute received helper\n", "aria2c-x86_64": b"inert amd64 client",
+                "aria2c-aarch64": b"inert arm64 client", "MANIFEST.txt": b"fixture canonical source manifest\n"}
+    source_map = {"tools/release-auth.py": sha(delivery["release-auth.py"]),
+                  **{"deliverables/aria2c-" + arch: sha(delivery["aria2c-" + arch]) for arch in ("x86_64", "aarch64")}}
+    files[package] = b"inert installer fixture"
+    files[package + ".source.json"] = STAGE._canonical({"schema": 1, "commit": COMMIT, "files": source_map})
+    files[package + ".sha256"] = (sha(files[package]) + "  " + package + "\n").encode()
+    original = {"format": "iris-local-release-candidate-v1", "authenticated": False, "scope": "local candidate only",
+                "tag": TAG, "commit": COMMIT, "version": TAG[1:], "profile": profile,
+                "source_match": {"canonical_source_matches": True}, "files": inventory(files)}
+    files[completion.ORIGINAL] = STAGE._canonical(original)
+    images = {}
+    for role in sorted(STAGE.kit.IMAGES):
+        image = {"archive_sha256": sha(files[roles[role]]), "archive_size": len(files[roles[role]])}
+        if role == "device-runtime":
+            image.update(index_digest=digest[role], source_commit_binding="not-assessed",
+                         platforms=[{"platform": platform, "config_digest": "sha256:" + "e" * 64,
+                                     "manifest_digest": "sha256:" + "f" * 64}
+                                    for platform in ("linux/amd64", "linux/arm64")])
+        else:
+            image.update(config_digest=digest[role], platform="linux/amd64", revision_label=COMMIT)
+            files["iris-" + role + "-config.json"] = configs[role]
+        images[role] = image
+    files["image-components.json"] = STAGE._canonical({"format": "iris-image-component-inventory-v1",
+        "scope": "inventory-only", "authenticated": False, "source_coverage_complete": False, "commit": COMMIT,
+        "commit_scope": "core-revision-labels-only", "images": images, "attribution_policy": "Fixture evidence only"})
+    companions = {}
+    for role, name in {"aria2": "aria2c-2.5.6-p10-source.tar.gz", **completion.COMPANIONS}.items():
+        if role == "ubuntu" and profile != "ubuntu-dependencies":
+            continue
+        files[name] = ("inert source companion " + role).encode()
+        companions[role] = {"asset": name, "archive_sha256": sha(files[name]), "scope": "fixture source binding"}
+        if role == "aria2":
+            companions[role]["binary_sha256"] = {arch: sha(delivery["aria2c-" + arch]) for arch in ("x86_64", "aarch64")}
+        else:
+            companions[role]["validated_manifest_canonical_sha256"] = "f" * 64
+    agreement = {"scope": "fixture retained source parity", "git_provenance_verified": False, "commit_label": COMMIT,
+                 "source_inventory_sha256": "b" * 64, "canonical_file_count": len(source_map),
+                 "additional_tar_files": {"MANIFEST.txt": {**inventory(delivery)["MANIFEST.txt"], "mode": 0o644}}}
+    evidence = {"format": completion.SCHEMA, "authenticated": False, "source_coverage_complete": False,
+                "rebuild_verified": False, "original_candidate_sha256": sha(files[completion.ORIGINAL]),
+                "tag": TAG, "commit": COMMIT, "profile": profile, "image_inventory_sha256": sha(files["image-components.json"]),
+                "source_agreement": agreement, "neutral_source_sha256": source_sha,
+                "external_pins": {"debian_keyring_sha256": "b" * 64, "pip_sdist_sha256": "c" * 64},
+                "companions": companions, "files": inventory(files), "mechanical_evidence": "fixture only", "remaining_gates": []}
+    files[completion.MANIFEST] = STAGE._canonical(evidence)
+    delivery["aria2c.sha256"] = "".join(sha(delivery["aria2c-" + arch]) + "  aria2c-" + arch + "\n"
+                                        for arch in ("x86_64", "aarch64")).encode()
+    for name in ("iris.tgz", companions["aria2"]["asset"]):
+        delivery[name + ".sha256"] = (sha(files[name]) + "  " + name + "\n").encode()
+    files.update(delivery)
+    private = tmp_path / "gate-checked-fixture"
+    private.mkdir(mode=0o700)
+    for name, raw in files.items():
+        (private / name).write_bytes(raw)
+    parity = {"commit": COMMIT, "canonical_file_count": len(source_map),
+              "canonical_source_map_sha256": sha(STAGE._canonical(source_map)),
+              "scope": "all retained canonical source bytes and modes match the selected local Git shipping set",
+              "binary_rebuild_verified": False}
+    refs = gate._companions(evidence)
+    checked = gate.CheckedCandidate(private, evidence, sha(files[completion.MANIFEST]), inventory(files), refs, parity, inventory(delivery))
+    @contextmanager
+    def checked_fixture(*args, **kwargs):
+        yield checked
+    monkeypatch.setattr(gate, "check_completed_candidate", checked_fixture)
+    review = {"format": gate.REVIEW_SCHEMA, "scope": "source-sufficiency-and-redistribution",
+              "decision": "approve-exact-artifacts", "tag": TAG, "commit": COMMIT,
+              "candidate_evidence_sha256": checked.evidence_sha256, "payload_assets": checked.assets,
+              "payload_asset_map_sha256": sha(STAGE._canonical(checked.assets)),
+              "image_inventory_sha256": evidence["image_inventory_sha256"], "companions": refs,
+              "reviewer": "Fixture only", "reference": "No owner approval", "statement": "Test statement only"}
+    review_raw = json.dumps(review, indent=2).encode() + b"\n"
+    record_raw = json.dumps(STAGE._stage_record(TAG, COMMIT, 31, 2), indent=2).encode() + b"\n"
+    review_path, record_path = tmp_path / "review-input.json", tmp_path / "stage-input.json"
+    review_path.write_bytes(review_raw)
+    record_path.write_bytes(record_raw)
+    output = gate.prepare_prebuilt(private, checked.evidence_sha256, tmp_path / "gate-output",
+        repository=tmp_path / "unused-repository", tag=TAG, commit=COMMIT,
+        debian_keyring=tmp_path / "unused-keyring", pip_sdist_sha256="c" * 64,
+        source_review=review_path, expected_review_sha256=sha(review_raw),
+        stage_record=record_path, expected_stage_sha256=sha(record_raw))
+    files = {path.name: path.read_bytes() for path in output.parent.iterdir()}
+    files["attestations.jsonl"] = b"Fixture signatures mocked; not hosted authentication\n"
+    replace_files(stage, files)
+    stage["profile"] = profile
+    stage["package"] = package
+    # Acquisition must never invoke these expensive source-validation seams.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("stage verifier must not rerun source validators or execute candidate code")
+    monkeypatch.setattr(gate, "check_completed_candidate", forbidden)
+    monkeypatch.setattr(completion, "assemble", forbidden)
+    return stage
+
+
+def prebuilt_qualification(stage):
+    value = qualification(stage)
+    prep = json.loads(stage["files"]["prebuilt-preparation.json"])
+    descriptor = json.loads(stage["files"]["release-kit.json"])
+    images = {}
+    for role in STAGE.kit.IMAGES:
+        row = descriptor["assets"][role]
+        images[role] = ({"archive_sha256": row["sha256"], "index_digest": row["image_digest"],
+                         "neutral_source_sha256": row["neutral_source_sha256"], "platforms": row["platforms"]}
+                        if role == "device-runtime" else {"archive_sha256": row["sha256"],
+                            "config_digest": row["image_digest"], "platform": "linux/amd64"})
+    value.update(schema="iris-release-qualification-v2", profile=stage["profile"],
+        release_kit_sha256=sha(stage["files"]["release-kit.json"]),
+        candidate_evidence_sha256=sha(stage["files"]["candidate-evidence.json"]), image_identities=images,
+        prebuilt_inputs={"original_candidate_sha256": sha(stage["files"]["local-candidate.json"]),
+            "source_review_sha256": sha(stage["files"]["source-review.json"]),
+            "preparation_sha256": sha(stage["files"]["prebuilt-preparation.json"]),
+            "payload_asset_map_sha256": prep["payload_asset_map_sha256"],
+            "image_inventory_sha256": sha(stage["files"]["image-components.json"])})
+    value["checks"]["source-notices-review"]["evidence_sha256"] = sha(stage["files"]["source-review.json"])
+    return value
+
+
+def test_actual_prebuilt_gate_writer_acquires_both_profiles(prebuilt):
+    record = STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], profile=prebuilt["profile"])
+    assert record["schema"] == "iris-verified-release-stage-v2"
+    assert record["profile"] == prebuilt["profile"]
+    assert record["files"] == inventory(prebuilt["files"])
+    assert "source validators were not rerun" in record["verification_scope"]
+    signatures = [value for value in prebuilt["calls"] if isinstance(value, str)]
+    assert signatures[0] == "release.json"
+    assert set(signatures) == set(prebuilt["files"]) - {"attestations.jsonl"}
+
+
+def test_prebuilt_qualification_binds_exact_writer_output_without_publishing(prebuilt):
+    record = publish(prebuilt, prebuilt_qualification(prebuilt), profile=prebuilt["profile"])
+    assert record["schema"] == "iris-release-publication-v2"
+    assert record["qualification_is_reviewer_statement"] is True
+    assert record["profile"] == prebuilt["profile"]
+    assert json.loads((prebuilt["output"] / "assets/prebuilt-preparation.json").read_bytes())["review_statement_authenticated"] is False
+    assert prebuilt["calls"][-1][0] == "/git/ref/tags/" + TAG
+
+
+@pytest.mark.parametrize("profile", [None, "source-only", "other", False])
+def test_prebuilt_never_infers_profile_or_bypasses_default(prebuilt, profile):
+    options = {} if profile is None else {"profile": profile}
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], **options)
+    assert not prebuilt["output"].exists()
+
+
+def test_prebuilt_explicit_other_profile_refuses(prebuilt):
+    other = "prepared-host" if prebuilt["profile"] == "ubuntu-dependencies" else "ubuntu-dependencies"
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], profile=other)
+
+
+@pytest.mark.parametrize("field", ["profile", "schema", "release_kit_sha256", "candidate_evidence_sha256",
+                                    "image_identities", "prebuilt_inputs", "assets", "reviewed_by"])
+def test_prebuilt_qualification_selection_is_exact(prebuilt, field):
+    value = prebuilt_qualification(prebuilt)
+    value[field] = None
+    with pytest.raises(STAGE.InstallError):
+        publish(prebuilt, value, profile=prebuilt["profile"])
+    assert not prebuilt["output"].exists()
+
+
+def test_prebuilt_qualification_review_evidence_names_actual_statement(prebuilt):
+    value = prebuilt_qualification(prebuilt)
+    value["checks"]["source-notices-review"]["evidence_sha256"] = "0" * 64
+    with pytest.raises(STAGE.InstallError, match="exact staged statement"):
+        publish(prebuilt, value, profile=prebuilt["profile"])
+
+
+@pytest.mark.parametrize("field,value", [("authenticated", True), ("review_statement_authenticated", 0),
+    ("profile", "source-only"), ("staged_run", {"run_id": 31, "run_attempt": 2.0}),
+    ("stage_record_sha256", "0" * 64), ("source_review_sha256", "0" * 64),
+    ("payload_asset_map_sha256", "0" * 64), ("candidate_evidence_sha256", "0" * 64),
+    ("delivery_assets", {}), ("companions", {}), ("git_source_parity", {}),
+    ("review_attribution", {}), ("remaining_gates", []), ("unknown", True)])
+def test_authenticated_but_inconsistent_preparation_refuses(prebuilt, field, value):
+    files = dict(prebuilt["files"])
+    record = json.loads(files["prebuilt-preparation.json"])
+    record[field] = value
+    files["prebuilt-preparation.json"] = STAGE._canonical(record)
+    seal_prebuilt(prebuilt, files)
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], profile=prebuilt["profile"])
+    assert not prebuilt["output"].exists()
+
+
+@pytest.mark.parametrize("fault", ["extra", "missing-review", "missing-helper", "missing-source", "renamed-source",
+                                    "wrong-stage", "unsigned-metadata", "bad-size-type", "null-files"])
+def test_prebuilt_closed_set_and_authentication_boundary(prebuilt, fault, monkeypatch):
+    files = dict(prebuilt["files"])
+    if fault == "extra":
+        files["extra.bin"] = b"unsupported"
+    elif fault.startswith("missing-"):
+        del files[{"missing-review": "source-review.json", "missing-helper": "release-auth.py",
+                   "missing-source": "iris-runtime-sources.tar.gz"}[fault]]
+    elif fault == "renamed-source":
+        files["another-source.tar.gz"] = files.pop("iris-runtime-sources.tar.gz")
+    elif fault == "wrong-stage":
+        files["release-stage.json"] = STAGE._canonical(STAGE._stage_record(TAG, COMMIT, 31, 3))
+    elif fault in ("bad-size-type", "null-files"):
+        evidence = json.loads(files["candidate-evidence.json"])
+        if fault == "bad-size-type":
+            evidence["files"]["iris.tgz"]["size"] = True
+        else:
+            evidence["files"] = None
+        files["candidate-evidence.json"] = STAGE._canonical(evidence)
+    else:
+        def refuse(path, *args):
+            if path.name == "source-review.json":
+                raise STAGE.InstallError("unsigned fixture review")
+        monkeypatch.setattr(STAGE, "_verify_signature", refuse)
+        monkeypatch.setattr(STAGE, "_prebuilt_metadata", lambda *args: pytest.fail("claims read before signatures"))
+    seal_prebuilt(prebuilt, files)
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], profile=prebuilt["profile"])
+    assert not prebuilt["output"].exists()
+
+
+@pytest.mark.parametrize("filename,keys,value", [
+    ("release-kit.json", ("assets",), []),
+    ("release-kit.json", ("assets", "server-image", "size"), True),
+    ("release-kit.json", ("assets", "server-image", "image_digest"), "sha256:" + "0" * 64),
+    ("release-kit.json", ("profile",), "source-only"),
+    ("release-kit.json", ("host", "version"), 24.04),
+    ("image-components.json", ("authenticated",), 0),
+    ("image-components.json", ("commit_scope",), "all-images"),
+    ("image-components.json", ("images", "server-image"), []),
+    ("image-components.json", ("images", "console-image", "revision_label"), "0" * 40),
+    ("image-components.json", ("images", "device-runtime", "platforms"), None),
+    ("image-components.json", ("images", "device-runtime", "source_commit_binding"), "verified"),
+    ("candidate-evidence.json", ("authenticated",), 0),
+    ("candidate-evidence.json", ("external_pins", "pip_sdist_sha256"), "untrusted"),
+    ("candidate-evidence.json", ("neutral_source_sha256",), "0" * 64),
+    ("candidate-evidence.json", ("source_agreement", "canonical_file_count"), 3.0),
+    ("candidate-evidence.json", ("source_agreement", "git_provenance_verified"), 0),
+    ("candidate-evidence.json", ("source_agreement", "additional_tar_files", "MANIFEST.txt", "mode"), 0o600),
+    ("candidate-evidence.json", ("companions", "aria2", "binary_sha256", "aarch64"), "0" * 64),
+    ("local-candidate.json", ("authenticated",), 0),
+    ("local-candidate.json", ("version",), "2020.01.01"),
+    ("local-candidate.json", ("unknown",), True),
+])
+def test_resealed_inner_metadata_joins_are_strict(prebuilt, filename, keys, value):
+    files = dict(prebuilt["files"])
+    record = json.loads(files[filename])
+    target = record
+    for key in keys[:-1]:
+        target = target[key]
+    target[keys[-1]] = value
+    files[filename] = STAGE._canonical(record)
+    rebind_prebuilt(prebuilt, files)
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], profile=prebuilt["profile"])
+    assert not prebuilt["output"].exists()
+
+
+@pytest.mark.parametrize("name", ["release-auth.py", "aria2c-aarch64", "MANIFEST.txt", "iris.tgz.sha256",
+                                   "aria2c.sha256", "iris-device-neutral.oci.tar.manifest",
+                                   "iris-server-image-config.json"])
+def test_resealed_delivery_and_image_evidence_cannot_alias_other_bytes(prebuilt, name):
+    files = dict(prebuilt["files"])
+    files[name] += b"changed fixture\n"
+    rebind_prebuilt(prebuilt, files)
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt["selected"], prebuilt["output"], profile=prebuilt["profile"])
+    assert not prebuilt["output"].exists()
+
+
+def test_source_only_cannot_be_selected_as_prebuilt(stage):
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(stage["selected"], stage["output"], profile="prepared-host")
+    assert not stage["output"].exists()
+
+
+def test_cli_explicit_profile_defaults_do_not_change_workflows(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(STAGE, "acquire_stage", lambda *args, **kwargs: calls.append(kwargs["profile"]))
+    args = ["acquire", "--tag", TAG, "--commit", COMMIT, "--run-id", "31", "--run-attempt", "2",
+            "--artifact-id", "47", "--artifact-sha256", "a" * 64, "--output-dir", str(tmp_path / "unused")]
+    assert STAGE.main(args) == 0
+    assert STAGE.main(args + ["--profile", "ubuntu-dependencies"]) == 0
+    assert calls == ["source-only", "ubuntu-dependencies"]
 
 
 def test_acquisition_preserves_exact_flat_files_and_never_executes_them(stage):

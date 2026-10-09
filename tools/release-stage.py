@@ -41,6 +41,7 @@ MAX_QUALIFICATION = 65535
 MAX_FILE = 2 * 1024**3
 MAX_TOTAL = 8 * 1024**3
 MAX_FILES = 64
+PROFILES = ("source-only", "prepared-host", "ubuntu-dependencies")
 CHUNK = 1024 * 1024
 CHECKS = frozenset(("installer-source-parity", "source-notices-review", "single-docker",
                     "split-docker", "single-node-kubernetes", "multi-node-kubernetes",
@@ -342,10 +343,240 @@ def _source_assets(tag, commit):
             "aria2c-2.5.6-p10-source.tar.gz.sha256", package, package + ".sha256", package + ".source.json"}
 
 
-def _verify_assets(directory, files, selected, parent_fd, config):
+def _profile(value):
+    if not isinstance(value, str) or value not in PROFILES:
+        fail("select an explicitly supported stage profile")
+    return value
+
+
+def _same(actual, expected, message):
+    # JSON types matter: Python equality alone equates false/0 and 1/1.0.
+    if _canonical(actual) != _canonical(expected):
+        fail(message)
+
+
+def _prebuilt_metadata(directory, files, selected, profile):
+    """Join authenticated exporter records, without repeating source validation.
+
+    Every input has already passed the fixed tag-workflow signature boundary.
+    These checks bind its technical report and externally supplied statement;
+    neither a signature nor this join authenticates the original reviewer or
+    proves source sufficiency, lab results, or binary reproduction.
+    """
+    from iris_installer import prebuilt_release as gate
+    from iris_installer import candidate_evidence as completion
+    from iris_installer import image_components
+
+    def metadata(name, maximum=kit.MAX_METADATA):
+        if name not in files:
+            fail("prebuilt stage omits required metadata")
+        return _json(_read(directory / name, maximum))
+
+    def subset(records, names):
+        gate._asset_map(records)
+        _same(records, {name: files[name] for name in names if name in files},
+              "prebuilt byte inventory differs from the authenticated files")
+        if set(records) != set(names):
+            fail("prebuilt inventory is not the required closed set")
+
+    identity = {key: selected[key] for key in ("tag", "commit")}
+    evidence = metadata(completion.MANIFEST)
+    _keys(evidence, gate.EVIDENCE_FIELDS)
+    if (evidence["format"] != completion.SCHEMA or evidence["profile"] != profile
+            or any(evidence[key] is not False for key in ("authenticated", "source_coverage_complete", "rebuild_verified"))
+            or any(evidence[key] != value for key, value in identity.items())):
+        fail("prebuilt evidence identity or scope differs")
+    gate._asset_map(evidence["files"])
+    _keys(evidence["external_pins"], {"debian_keyring_sha256", "pip_sdist_sha256"})
+    for digest in evidence["external_pins"].values():
+        kit._sha(digest)
+    refs = gate._companions(evidence)
+    for role, record in refs.items():
+        expected_name = ("aria2c-2.5.6-p10-source.tar.gz" if role == "aria2" else completion.COMPANIONS[role])
+        if record["asset"] != expected_name:
+            fail("prebuilt companion role has an unsupported filename")
+        if role != "aria2":
+            _keys(evidence["companions"][role], {"asset", "archive_sha256", "validated_manifest_canonical_sha256", "scope"})
+            kit._sha(evidence["companions"][role]["validated_manifest_canonical_sha256"])
+    original = metadata(completion.ORIGINAL)
+    required = {"format", "authenticated", "scope", "commit", "tag", "version", "profile", "source_match", "files"}
+    if (not isinstance(original, dict) or not required <= original.keys()
+            or original.keys() - required - {"ubuntu_source_coverage", "aria2_source_binding"}
+            or original["format"] != "iris-local-release-candidate-v1" or original["authenticated"] is not False
+            or (original["tag"], original["commit"], original["version"], original["profile"])
+            != (selected["tag"], selected["commit"], selected["tag"][1:], profile)):
+        fail("original candidate identity or profile differs")
+    if evidence["original_candidate_sha256"] != files[completion.ORIGINAL]["sha256"]:
+        fail("original candidate seal differs from the authenticated evidence")
+    role_names = {"server-image": "iris-server-amd64.docker.tar", "console-image": "iris-console-amd64.docker.tar",
+                  "device-runtime": "iris-device-neutral.oci.tar", "guest-inputs": "iris-guest-inputs.tar.gz",
+                  "packaging-tools": "iris-packaging-tools.tar.gz", "source": "iris.tgz"}
+    if profile == "ubuntu-dependencies":
+        role_names["ubuntu-dependencies"] = "iris-ubuntu-dependencies.tar.gz"
+    package = "iris-installer_" + selected["tag"][1:] + "+installer.0.g" + selected["commit"][:12] + "_amd64.deb"
+    original_names = {*role_names.values(), "release-kit.json", "iris-device-neutral.oci.tar.manifest",
+                      package, package + ".sha256", package + ".source.json"}
+    # Newer candidates may already carry these exact companions; completion
+    # preserves them. No arbitrary original-candidate extra files are admitted.
+    optional = {refs["aria2"]["asset"]}
+    if profile == "ubuntu-dependencies":
+        optional.add(refs["ubuntu"]["asset"])
+    if not isinstance(original["files"], dict) or set(original["files"]) - original_names - optional:
+        fail("original candidate contains unsupported assets")
+    subset(original["files"], original_names | (set(original["files"]) & optional))
+    completed_names = {*original["files"], completion.ORIGINAL, "image-components.json",
+                       "iris-server-image-config.json", "iris-console-image-config.json",
+                       *(row["asset"] for row in refs.values())}
+    subset(evidence["files"], completed_names)
+    delivery_names = {"release-auth.py", "aria2c-x86_64", "aria2c-aarch64", "MANIFEST.txt", "aria2c.sha256",
+                      "iris.tgz.sha256", refs["aria2"]["asset"] + ".sha256"}
+    payload_names = completed_names | {completion.MANIFEST} | delivery_names
+    if set(files) != payload_names | {gate.REVIEW_NAME, gate.PREPARATION_NAME, gate.STAGE_NAME,
+                                     "release.json", "SHA256SUMS", "attestations.jsonl"}:
+        fail("prebuilt stage contains missing or unsupported assets")
+    payload = {name: files[name] for name in payload_names}
+    preparation = metadata(gate.PREPARATION_NAME)
+    _keys(preparation, {"format", "authenticated", "source_coverage_complete", "rebuild_verified",
+        "review_statement_authenticated", "tag", "commit", "profile", "candidate_evidence_sha256",
+        "payload_assets", "payload_asset_map_sha256", "image_inventory_sha256", "companions",
+        "git_source_parity", "delivery_assets", "source_review_sha256", "stage_record_sha256",
+        "staged_run", "review_attribution", "remaining_gates"})
+    fixed = {"format": gate.PREPARATION_SCHEMA, **identity, "profile": profile,
+             "authenticated": False, "source_coverage_complete": False, "rebuild_verified": False,
+             "review_statement_authenticated": False, "candidate_evidence_sha256": files[completion.MANIFEST]["sha256"],
+             "payload_assets": payload, "payload_asset_map_sha256": hashlib.sha256(_canonical(payload)).hexdigest(),
+             "image_inventory_sha256": files["image-components.json"]["sha256"], "companions": refs,
+             "delivery_assets": {name: files[name] for name in delivery_names},
+             "source_review_sha256": files[gate.REVIEW_NAME]["sha256"],
+             "stage_record_sha256": files[gate.STAGE_NAME]["sha256"],
+             "staged_run": {key: selected[key] for key in ("run_id", "run_attempt")},
+             "remaining_gates": ["external owner-review authority", "release authentication",
+                                 "topology qualification", "owner publication approval"]}
+    _same({key: preparation[key] for key in fixed}, fixed, "prebuilt preparation binding differs")
+    if evidence["image_inventory_sha256"] != fixed["image_inventory_sha256"]:
+        fail("prebuilt image inventory digest differs")
+    checked = gate.CheckedCandidate(directory, evidence, files[completion.MANIFEST]["sha256"], payload,
+                                    refs, preparation["git_source_parity"], preparation["delivery_assets"])
+    review = gate._review(_read(directory / gate.REVIEW_NAME, kit.MAX_METADATA), checked, **identity)
+    _same(preparation["review_attribution"], {"reviewer": review["reviewer"], "reference": review["reference"],
+          "authority": "Externally supplied statement; this helper checks binding, not reviewer identity or approval authority."},
+          "prebuilt review attribution differs")
+    sidecar = metadata(package + ".source.json")
+    _keys(sidecar, {"schema", "commit", "files"})
+    if type(sidecar["schema"]) is not int or sidecar["schema"] != 1 or sidecar["commit"] != selected["commit"]:
+        fail("installer source identity differs")
+    source_map = sidecar["files"]
+    if not isinstance(source_map, dict) or not 1 <= len(source_map) <= 100000:
+        fail("installer source inventory is unbounded")
+    for path, digest in source_map.items():
+        if not isinstance(path, str) or path.startswith("/") or any(part in ("", ".", "..") for part in path.split("/")):
+            fail("installer source inventory has an unsafe path")
+        kit._sha(digest)
+    _same(preparation["git_source_parity"], {"commit": selected["commit"], "canonical_file_count": len(source_map),
+          "canonical_source_map_sha256": hashlib.sha256(_canonical(source_map)).hexdigest(),
+          "scope": "all retained canonical source bytes and modes match the selected local Git shipping set",
+          "binary_rebuild_verified": False}, "authenticated Git source parity report differs")
+    agreement = evidence["source_agreement"]
+    _keys(agreement, {"scope", "git_provenance_verified", "commit_label", "source_inventory_sha256",
+                      "canonical_file_count", "additional_tar_files"})
+    if (agreement["git_provenance_verified"] is not False or agreement["commit_label"] != selected["commit"]
+            or type(agreement["canonical_file_count"]) is not int or agreement["canonical_file_count"] != len(source_map)):
+        fail("retained source agreement differs")
+    kit._sha(agreement["source_inventory_sha256"])
+    extras = agreement["additional_tar_files"]
+    if not isinstance(extras, dict) or "MANIFEST.txt" not in extras or set(extras) - {"MANIFEST.txt", "artifacts/.gitkeep"}:
+        fail("retained source manifest evidence is missing")
+    _same(extras["MANIFEST.txt"], {**files["MANIFEST.txt"], "mode": 0o644}, "delivered source manifest differs")
+    if "artifacts/.gitkeep" in extras:
+        _same(extras["artifacts/.gitkeep"], {"sha256": hashlib.sha256(b"").hexdigest(), "size": 0, "mode": 0o644},
+              "unsupported generated source file")
+    binaries = evidence["companions"]["aria2"].get("binary_sha256")
+    _keys(binaries, {"x86_64", "aarch64"})
+    for name, path in (("release-auth.py", "tools/release-auth.py"),
+                       ("aria2c-x86_64", "deliverables/aria2c-x86_64"), ("aria2c-aarch64", "deliverables/aria2c-aarch64")):
+        if source_map.get(path) != files[name]["sha256"]:
+            fail("delivery helper or client differs from canonical source inventory")
+    for arch, digest in binaries.items():
+        if kit._sha(digest) != files["aria2c-" + arch]["sha256"]:
+            fail("delivered client differs from the source companion binding")
+    for name in ("iris.tgz", refs["aria2"]["asset"], package):
+        if _read(directory / (name + ".sha256")) != (files[name]["sha256"] + "  " + name + "\n").encode():
+            fail("delivery checksum sidecar differs")
+    if _read(directory / "aria2c.sha256") != "".join(
+            binaries[arch] + "  aria2c-" + arch + "\n" for arch in ("x86_64", "aarch64")).encode():
+        fail("delivery client checksums differ")
+    descriptor = metadata("release-kit.json")
+    # The general kit reader predates strict JSON numeric type comparisons.
+    if not isinstance(descriptor, dict) or descriptor.get("profile") != profile:
+        fail("release kit profile differs from the explicit selection")
+    if not isinstance(descriptor.get("assets"), dict):
+        fail("release kit roles must be a mapping")
+    for row in descriptor["assets"].values():
+        if not isinstance(row, dict) or type(row.get("size")) is not int:
+            fail("release kit asset size must be an integer")
+    assets = {asset.role: asset for asset in kit._kit_manifest(descriptor, _auth(), **identity, inventory=files)}
+    _same({role: asset.name for role, asset in assets.items()}, role_names, "release kit role filenames differ")
+    image_inventory = metadata("image-components.json", image_components.MAX_RECEIPT)
+    _keys(image_inventory, {"format", "scope", "authenticated", "source_coverage_complete", "commit",
+                           "commit_scope", "images", "attribution_policy"})
+    if (image_inventory["format"] != "iris-image-component-inventory-v1" or image_inventory["scope"] != "inventory-only"
+            or image_inventory["authenticated"] is not False or image_inventory["source_coverage_complete"] is not False
+            or image_inventory["commit"] != selected["commit"] or image_inventory["commit_scope"] != "core-revision-labels-only"):
+        fail("image inventory scope or source identity differs")
+    _keys(image_inventory["images"], kit.IMAGES)
+    images = {}
+    for role in sorted(kit.IMAGES):
+        image, asset = image_inventory["images"][role], assets[role]
+        if not isinstance(image, dict):
+            fail("invalid image identity metadata")
+        fields = {"archive_sha256": asset.sha256, "archive_size": asset.size}
+        if role == "device-runtime":
+            fields.update(index_digest=asset.image_digest, source_commit_binding="not-assessed")
+            platforms = image.get("platforms")
+            if not isinstance(platforms, list) or len(platforms) != 2:
+                fail("neutral inventory requires both platforms")
+            if [row.get("platform") for row in platforms if isinstance(row, dict)] != list(asset.platforms):
+                fail("neutral inventory platform selection differs")
+            for row in platforms:
+                kit._sha(row.get("config_digest"), "sha256:")
+                kit._sha(row.get("manifest_digest"), "sha256:")
+            images[role] = {"archive_sha256": asset.sha256, "index_digest": asset.image_digest,
+                            "neutral_source_sha256": asset.neutral_source_sha256, "platforms": list(asset.platforms)}
+        else:
+            fields.update(config_digest=asset.image_digest, platform="linux/amd64", revision_label=selected["commit"])
+            if files["iris-" + role + "-config.json"]["sha256"] != asset.image_digest.removeprefix("sha256:"):
+                fail("retained core configuration bytes differ from kit image identity")
+            images[role] = {"archive_sha256": asset.sha256, "config_digest": asset.image_digest, "platform": "linux/amd64"}
+        _same({key: image.get(key) for key in fields}, fields, "image inventory differs from release kit")
+    neutral = assets["device-runtime"]
+    if evidence["neutral_source_sha256"] != neutral.neutral_source_sha256:
+        fail("neutral source context identity differs")
+    try:
+        lines = [line.split("=", 1) for line in _read(directory / "iris-device-neutral.oci.tar.manifest").decode("ascii").splitlines()]
+        neutral_record = dict(lines)
+    except (UnicodeError, ValueError):
+        fail("invalid neutral builder record")
+    _same(neutral_record, {"format": "iris-device-neutral-oci-v1", "trust_mode": "neutral",
+          "source_sha256": neutral.neutral_source_sha256, "index_digest": neutral.image_digest,
+          "archive_sha256": neutral.sha256, "platforms": "linux/amd64,linux/arm64"}, "neutral builder identity differs")
+    if len(lines) != len(neutral_record):
+        fail("duplicate neutral builder fields")
+    return {"release_kit_sha256": files["release-kit.json"]["sha256"],
+            "candidate_evidence_sha256": files[completion.MANIFEST]["sha256"], "image_identities": images,
+            "prebuilt_inputs": {"original_candidate_sha256": files[completion.ORIGINAL]["sha256"],
+                "source_review_sha256": files[gate.REVIEW_NAME]["sha256"],
+                "preparation_sha256": files[gate.PREPARATION_NAME]["sha256"],
+                "payload_asset_map_sha256": preparation["payload_asset_map_sha256"],
+                "image_inventory_sha256": files["image-components.json"]["sha256"]}}
+
+
+def _verify_assets(directory, files, selected, parent_fd, config, profile="source-only"):
+    _profile(profile)
     expected_names = _source_assets(selected["tag"], selected["commit"]) | {"release.json", "SHA256SUMS", "attestations.jsonl"}
-    if set(files) != expected_names:
+    if profile == "source-only" and set(files) != expected_names:
         fail("source-only stage has missing or unsupported assets; prebuilt publication remains disabled")
+    if not {"release.json", "release-stage.json", "SHA256SUMS", "attestations.jsonl"} <= files.keys():
+        fail("stage omits authentication metadata")
     for name, maximum in (("release.json", MAX_JSON), ("release-stage.json", MAX_JSON),
                           ("SHA256SUMS", MAX_JSON), ("attestations.jsonl", kit.MAX_BUNDLE)):
         if files[name]["size"] > maximum:
@@ -358,7 +589,7 @@ def _verify_assets(directory, files, selected, parent_fd, config):
             or manifest["repository"] != REPOSITORY or manifest["workflow"] != WORKFLOW
             or manifest["tag"] != selected["tag"] or manifest["commit"] != selected["commit"]):
         fail("authenticated release inventory does not match the selected identity")
-    expected = {name: files[name] for name in _source_assets(selected["tag"], selected["commit"])}
+    expected = {name: row for name, row in files.items() if name not in {"release.json", "SHA256SUMS", "attestations.jsonl"}}
     if _canonical(manifest["assets"]) != _canonical(expected):
         fail("authenticated inventory differs from the exact extracted files")
     for name in sorted(expected):
@@ -372,6 +603,9 @@ def _verify_assets(directory, files, selected, parent_fd, config):
     if _canonical(record) != _canonical(_stage_record(selected["tag"], selected["commit"],
                                                      selected["run_id"], selected["run_attempt"])):
         fail("signed stage record belongs to a different run attempt")
+    if profile != "source-only":
+        return _prebuilt_metadata(directory, files, selected, profile)
+    return None
 
 
 def _recheck_files(directory, files):
@@ -465,20 +699,21 @@ def _publication(destination):
             os.close(parent)
 
 
-def _acquire(selected, stage, parent_fd, token):
+def _acquire(selected, stage, parent_fd, token, profile="source-only"):
     expected_size = _hosted_identity(selected, token)
     archive, assets, config = stage / "stage.zip", stage / "assets", stage / "verifier-config"
     assets.mkdir(mode=0o700)
     config.mkdir(mode=0o700)
     _download(selected, archive, expected_size, token)
     files = _unpack(archive, assets)
-    _verify_assets(assets, files, selected, parent_fd, config)
+    binding = _verify_assets(assets, files, selected, parent_fd, config, profile)
     archive.unlink()
     shutil.rmtree(config)
-    return files
+    return files, binding
 
 
-def _qualification(data, expected_sha256, selected, files, actor, confirmation):
+def _qualification(data, expected_sha256, selected, files, actor, confirmation, profile="source-only", binding=None):
+    _profile(profile)
     kit._sha(expected_sha256)
     if not 0 < len(data) <= MAX_QUALIFICATION or hashlib.sha256(data).hexdigest() != expected_sha256:
         fail("qualification bytes differ from the explicit hash or size bound")
@@ -486,6 +721,10 @@ def _qualification(data, expected_sha256, selected, files, actor, confirmation):
     fields = ("schema", "repository", "tag", "commit", "profile", "stage", "release_json_sha256",
               "sha256sums_sha256", "attestations_sha256", "assets", "release_kit_sha256",
               "candidate_evidence_sha256", "image_identities", "reviewed_by", "checks")
+    if profile != "source-only":
+        fields += ("prebuilt_inputs",)
+        if not isinstance(binding, dict):
+            fail("prebuilt qualification requires verified metadata bindings")
     _keys(value, fields)
     expected = {"schema": "iris-release-qualification-v1", "repository": REPOSITORY,
                 "tag": selected["tag"], "commit": selected["commit"], "profile": "source-only",
@@ -495,25 +734,34 @@ def _qualification(data, expected_sha256, selected, files, actor, confirmation):
                 "attestations_sha256": files["attestations.jsonl"]["sha256"], "assets": files,
                 "release_kit_sha256": None, "candidate_evidence_sha256": None, "image_identities": None,
                 "reviewed_by": actor}
+    if profile != "source-only":
+        expected.update(schema="iris-release-qualification-v2", profile=profile, **binding)
     if _canonical({key: value[key] for key in fields if key != "checks"}) != _canonical(expected):
-        fail("qualification does not bind the exact source-only stage and reviewer")
+        fail("qualification does not bind the exact selected stage, profile and reviewer")
     _keys(value["checks"], CHECKS)
     for record in value["checks"].values():
         _keys(record, ("result", "evidence_sha256"))
         if record["result"] != "passed":
             fail("qualification includes an incomplete or failed check")
         kit._sha(record["evidence_sha256"])
+    if (profile != "source-only" and value["checks"]["source-notices-review"]["evidence_sha256"]
+            != binding["prebuilt_inputs"]["source_review_sha256"]):
+        fail("qualification source review does not name the exact staged statement")
     if confirmation != "publish " + selected["tag"] + " " + files["release.json"]["sha256"]:
         fail("explicit publication confirmation differs from the selected release")
     return value
 
 
-def acquire_stage(selected, output_dir, *, token=None):
+def acquire_stage(selected, output_dir, *, token=None, profile="source-only"):
     """Read-only hosted acquisition for qualification; no approval or publication."""
     selected = _selection(selected)
+    profile = _profile(profile)
     with _publication(output_dir) as (stage, parent_fd):
-        files = _acquire(selected, stage, parent_fd, token)
+        files, binding = _acquire(selected, stage, parent_fd, token, profile)
         record = {"schema": "iris-verified-release-stage-v1", "selection": selected, "files": files}
+        if binding is not None:
+            record.update(schema="iris-verified-release-stage-v2", profile=profile, prebuilt_binding=binding,
+                          verification_scope="authenticated exporter metadata bindings; source validators were not rerun")
         (stage / "stage-verification.json").write_bytes(_canonical(record))
         (stage / "stage-verification.json").chmod(0o400)
         _recheck_files(stage / "assets", files)
@@ -521,19 +769,23 @@ def acquire_stage(selected, output_dir, *, token=None):
 
 
 def prepare_publication(selected, output_dir, *, qualification, qualification_sha256,
-                        confirmation, actor, actor_id, triggering_actor, token=None):
+                        confirmation, actor, actor_id, triggering_actor, token=None, profile="source-only"):
     """Return a new sealed snapshot, with manual approval outside its assets/."""
     selected = _selection(selected)
+    profile = _profile(profile)
     actor, triggering_actor, actor_id = _actor(actor), _actor(triggering_actor), _positive(actor_id)
     if not isinstance(qualification, bytes) or not 0 < len(qualification) <= MAX_QUALIFICATION:
         fail("qualification must be bounded literal JSON bytes")
     with _publication(output_dir) as (stage, parent_fd):
-        files = _acquire(selected, stage, parent_fd, token)
-        _qualification(qualification, qualification_sha256, selected, files, triggering_actor, confirmation)
+        files, binding = _acquire(selected, stage, parent_fd, token, profile)
+        _qualification(qualification, qualification_sha256, selected, files, triggering_actor, confirmation, profile, binding)
         record = {"schema": "iris-release-publication-v1", "selection": selected, "files": files,
                   "qualification_sha256": qualification_sha256,
                   "dispatch": {"actor": actor, "actor_id": actor_id, "triggering_actor": triggering_actor},
                   "qualification_is_reviewer_statement": True}
+        if binding is not None:
+            record.update(schema="iris-release-publication-v2", profile=profile, prebuilt_binding=binding,
+                          verification_scope="authenticated exporter metadata bindings; source validators were not rerun")
         for name, data in (("qualification.json", qualification), ("publication.json", _canonical(record))):
             (stage / name).write_bytes(data)
             (stage / name).chmod(0o400)
@@ -557,6 +809,7 @@ def main(argv=None):
             command.add_argument("--artifact-id", type=int, required=True)
             command.add_argument("--artifact-sha256", required=True)
             command.add_argument("--output-dir", type=Path, required=True)
+            command.add_argument("--profile", choices=PROFILES, default="source-only")
         if name == "prepare-publication":
             source = command.add_mutually_exclusive_group(required=True)
             source.add_argument("--qualification-file", type=Path)
@@ -572,14 +825,14 @@ def main(argv=None):
             selected = selection(args.tag, args.commit, args.run_id, args.run_attempt,
                                  args.artifact_id, args.artifact_sha256)
             if args.command == "acquire":
-                acquire_stage(selected, args.output_dir, token=os.environ.get("GH_TOKEN"))
+                acquire_stage(selected, args.output_dir, token=os.environ.get("GH_TOKEN"), profile=args.profile)
             else:
                 data = (_read(args.qualification_file, MAX_QUALIFICATION) if args.qualification_file
                         else os.environ.get("IRIS_QUALIFICATION_JSON", "").encode())
                 prepare_publication(selected, args.output_dir, qualification=data,
                     qualification_sha256=args.qualification_sha256, confirmation=args.confirmation,
                     actor=args.actor, actor_id=args.actor_id, triggering_actor=args.triggering_actor,
-                    token=os.environ.get("GH_TOKEN"))
+                    token=os.environ.get("GH_TOKEN"), profile=args.profile)
     except (InstallError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile, RuntimeError):
         # Avoid printing redirected signed URLs, credentials, or untrusted JSON.
         print("Release stage verification failed; no publication snapshot was produced", file=sys.stderr)
