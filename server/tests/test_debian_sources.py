@@ -361,3 +361,114 @@ def test_descriptor_coverage_has_no_historical_override(fixture):
     fixture.indexes[0]['historical'] = True
     with pytest.raises(InstallError):
         build(fixture)
+
+
+def advance_source_clock(monkeypatch):
+    class Future(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=8)
+    monkeypatch.setattr(subject, 'datetime', Future)
+
+
+def validate_archived(fixture):
+    return subject.validate_source_archive(fixture.output, fixture.inventory, fixture.digest,
+                                           keyring=fixture.keyring, archived_integrity=True)
+
+
+def test_archived_integrity_survives_expiry_without_weakening_current_checks(fixture, monkeypatch):
+    build(fixture)
+    expected, before = validate(fixture), sha(fixture.output.read_bytes())
+    # Canonical pre-mode v1 README bytes must remain verifiable after upgrades.
+    assert expected['files']['README.txt']['sha256'] == '05105e8c649c7266819f01d377bc0d460ed6b16ce9751e6299382869966e1a22'
+    advance_source_clock(monkeypatch)
+    with pytest.raises(InstallError, match='expired dates'):
+        validate(fixture)
+    assert validate_archived(fixture) == expected
+    assert sha(fixture.output.read_bytes()) == before
+    assert 'archived_integrity' not in expected
+    with pytest.raises(InstallError, match='expired dates'):
+        build(fixture, fixture.output.with_name('expired-production.tar.gz'))
+    assert not fixture.output.with_name('expired-production.tar.gz').exists()
+
+
+@pytest.mark.parametrize('value', [None, 0, 1, '', 'true', {}, []])
+def test_archived_integrity_requires_exact_external_boolean(value):
+    with pytest.raises(InstallError, match='explicit boolean'):
+        subject.validate_source_archive(None, None, None, keyring=None, archived_integrity=value)
+
+
+@pytest.mark.parametrize('change', ['inventory', 'keyring', 'signature', 'index', 'source'])
+def test_archived_integrity_still_requires_independent_signatures_and_hashes(fixture, monkeypatch, change):
+    build(fixture)
+    if change == 'inventory':
+        fixture.digest = 'f' * 64
+    elif change == 'keyring':
+        fixture.keyring.write_bytes(b'not an independent public key')
+    else:
+        def mutate(manifest, files):
+            if change == 'signature':
+                path = manifest['evidence'][0]['inrelease']
+                files[path] = files[path].replace(b'Origin: Debian', b'Origin: Forged')
+            elif change == 'index':
+                files[manifest['evidence'][0]['sources']] = lzma.compress(b'forged source index')
+            else:
+                files[next(name for name in files if name.endswith('.orig.tar.gz'))] = b'forged source'
+        archive_rewrite(fixture, mutate)
+    advance_source_clock(monkeypatch)
+    with pytest.raises(InstallError):
+        validate_archived(fixture)
+
+
+@pytest.mark.parametrize('change', ['identity', 'future', 'inverted', 'missing-security-expiry', 'missing-updates-expiry'])
+def test_archived_integrity_keeps_signed_identity_and_date_constraints(fixture, monkeypatch, change):
+    build(fixture)
+    suite = 'trixie-updates' if change == 'missing-updates-expiry' else 'trixie-security'
+    def change_release(text):
+        now = datetime.now(timezone.utc)
+        replacements = {'Origin': 'Other'} if change == 'identity' else {
+            'Date': format_datetime(now + timedelta(days=12)),
+            'Valid-Until': format_datetime(now + timedelta(days=19)),
+        } if change == 'future' else {'Valid-Until': format_datetime(now - timedelta(days=1))}
+        rows = []
+        for line in text.split('\n'):
+            field = line.partition(':')[0]
+            if change.startswith('missing-'):
+                if field != 'Valid-Until':
+                    rows.append(line)
+            else:
+                rows.append(field + ': ' + replacements[field] if field in replacements else line)
+        return '\n'.join(rows)
+    release_change(fixture, suite, change_release)
+    def mutate(manifest, files):
+        row = next(row for row in manifest['evidence'] if row['suite'] == suite)
+        files[row['inrelease']] = (fixture.base / suite / 'InRelease').read_bytes()
+    archive_rewrite(fixture, mutate)
+    advance_source_clock(monkeypatch)
+    with pytest.raises(InstallError, match='identity' if change == 'identity' else 'dates'):
+        validate_archived(fixture)
+
+
+def test_companion_manifest_cannot_select_archived_integrity(fixture, monkeypatch):
+    build(fixture)
+    archive_rewrite(fixture, lambda manifest, _files: manifest.update(archived_integrity=True))
+    advance_source_clock(monkeypatch)
+    with pytest.raises(InstallError):
+        validate(fixture)
+    with pytest.raises(InstallError):
+        validate_archived(fixture)
+
+
+def test_cli_archived_mode_is_explicit_verification_only(fixture):
+    build(fixture)
+    cli = Path(__file__).resolve().parents[2] / 'tools/build-debian-sources.py'
+    common = [sys.executable, str(cli), '--inventory', str(fixture.inventory), '--inventory-sha256', fixture.digest,
+              '--keyring', str(fixture.keyring)]
+    for mode, flags in [('current-metadata', []), ('archived-integrity', ['--archived-integrity'])]:
+        result = subprocess.run([*common, '--verify-bundle', str(fixture.output), *flags], capture_output=True, text=True)
+        assert result.returncode == 0
+        assert json.loads(result.stdout)['verification_mode'] == mode
+    output = fixture.output.with_name('forbidden-production.tar.gz')
+    invalid = subprocess.run([*common, '--out', str(output), '--archived-integrity'], capture_output=True, text=True)
+    assert invalid.returncode == 2 and 'cannot produce a new companion' in invalid.stderr
+    assert not output.exists()

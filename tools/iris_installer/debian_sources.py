@@ -192,7 +192,7 @@ def load_index_inputs(path):
     return _descriptors(value['indexes'])
 
 
-def _index(value, keyring, payload, directory, files, required):
+def _index(value, keyring, payload, directory, files, required, *, archived_integrity=False):
     signed = sources._bytes(value['inrelease'], 1024**2)
     prefix = 'evidence/' + hashlib.sha256(signed).hexdigest()
     signed_name = prefix + '/InRelease'
@@ -215,7 +215,7 @@ def _index(value, keyring, payload, directory, files, required):
         expiry = parsedate_to_datetime(release['Valid-Until']) if 'Valid-Until' in release else None
         if (date > now + timedelta(days=1)
                 or (suite != 'trixie' and expiry is None)
-                or (expiry is not None and (expiry < date or expiry < now))):
+                or (expiry is not None and (expiry < date or (not archived_integrity and expiry < now)))):
             raise ValueError()
     except (KeyError, TypeError, ValueError, OverflowError):
         fail('signed Debian Release has invalid or expired dates')
@@ -247,13 +247,15 @@ def _index(value, keyring, payload, directory, files, required):
     return evidence, matches
 
 
-def _assemble(raw, bindings, binaries, expected, values, pool, keyring, payload, directory, guard):
+def _assemble(raw, bindings, binaries, expected, values, pool, keyring, payload, directory, guard,
+              *, archived_integrity=False):
     required = {(item['name'], item['version']) for binary in binaries
                 for item in [binary['source'], *binary['built_using'], *binary['static_built_using']]}
     files, evidence, found = {}, [], {}
     for value in sorted(values, key=lambda row: (row['repository'], row['suite'], row['component'])):
         guard()
-        item, matches = _index(value, keyring, payload, directory, files, required)
+        item, matches = _index(value, keyring, payload, directory, files, required,
+                               archived_integrity=archived_integrity)
         evidence.append(item)
         for identity, entries in matches.items():
             content = {PurePosixPath(name).name: details for name, details in entries.items()}
@@ -356,8 +358,18 @@ def inspect_source_archive(path, *, expected_inventory_sha256=None, destination=
         os.close(fd)
 
 
-def validate_source_archive(archive, inventory, expected_inventory_sha256, *, keyring):
-    """Rebuild the complete manifest from externally pinned inventory and trust."""
+def validate_source_archive(archive, inventory, expected_inventory_sha256, *, keyring,
+                            archived_integrity=False):
+    """Rebuild source integrity from independent inventory and archive trust.
+
+    Default validation requires current repository metadata. An explicit caller
+    may select archived integrity to allow past Valid-Until only. Signatures,
+    identities, date ordering, future-date bounds and every hash remain checked.
+    This is not current publication readiness, a producer option, or a policy
+    the companion can select for itself. Canonical v1 README bytes stay stable.
+    """
+    if type(archived_integrity) is not bool:
+        fail('archived integrity must be an explicit boolean')
     raw, bindings, binaries = _inventory(inventory, expected_inventory_sha256)
     work = Path('/tmp') / ('iris-debian-source-verify-' + secrets.token_hex(16))
     with custody._new_directory(work, remove=True) as held:
@@ -381,7 +393,8 @@ def validate_source_archive(archive, inventory, expected_inventory_sha256, *, ke
         with custody._new_directory(payload) as directory:
             expected = _assemble(raw, bindings, binaries, expected_inventory_sha256, values,
                                  extracted / 'sources', work / 'keyring.gpg', payload, directory,
-                                 lambda: custody._same_directory(work, held))
+                                 lambda: custody._same_directory(work, held),
+                                 archived_integrity=archived_integrity)
             if sources._canonical(manifest) != sources._canonical(expected):
                 fail('manifest differs from independently verified source inputs')
         custody._same_directory(work, held)

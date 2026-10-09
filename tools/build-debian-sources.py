@@ -25,14 +25,20 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--out', type=Path)
     action.add_argument('--verify-bundle', type=Path)
+    parser.add_argument('--archived-integrity', action='store_true',
+                        help='Verify retained source integrity past repository expiry; requires --verify-bundle')
     args = parser.parse_args()
+    if args.archived_integrity and args.verify_bundle is None:
+        parser.error('--archived-integrity requires --verify-bundle and cannot produce a new companion')
     try:
         if args.verify_bundle is not None:
             if args.indexes is not None or args.source_pool is not None:
                 parser.error('--verify-bundle uses bundled evidence and independently supplied inventory/keyring')
-            manifest = validate_source_archive(args.verify_bundle, args.inventory, args.inventory_sha256, keyring=args.keyring)
+            manifest = validate_source_archive(args.verify_bundle, args.inventory, args.inventory_sha256,
+                                               keyring=args.keyring, archived_integrity=args.archived_integrity)
             result = {'inventory_sha256': manifest['inventory_sha256'], 'sources': len(manifest['sources']),
-                      'scope': 'debian-source-only', 'source_coverage_complete': False}
+                      'scope': 'debian-source-only', 'source_coverage_complete': False,
+                      'verification_mode': 'archived-integrity' if args.archived_integrity else 'current-metadata'}
         else:
             if args.indexes is None or args.source_pool is None:
                 parser.error('--out requires --indexes and --source-pool')
