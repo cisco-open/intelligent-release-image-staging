@@ -21,7 +21,7 @@ const attached = p => model.participantRows(snapshot([p]))[0];
 const response = (body, status = 200) => ({status, ok: status >= 200 && status < 300, json: async () => body});
 const deferred = () => {let resolve, reject; const promise = new Promise((yes, no) => {resolve = yes; reject = no;}); return {promise, resolve, reject};};
 const flush = async () => {for (let n = 0; n < 40; n++) await Promise.resolve();};
-const receipt = (id = 'a') => ({request_id: id.repeat(32), requested_at: 100, expires_at: 700});
+const directive = (id = 'a') => ({request_id: id.repeat(32), requested_at: 100, expires_at: 700});
 const intervalReply = (dry, overrides = {}) => ({ok: true, device_id: 'd1', requested_interval_s: 10,
   revision: 8, candidate_revision: 8, dry_run: dry, requires_confirmation: false, confirm_token: null, ...overrides});
 
@@ -42,7 +42,7 @@ async function fixture(options = {}) {
       if (url.endsWith('/effective-qos')) return response({revision: 8, device_id: 'd1', degraded: false,
         fail_closed: false, qos: {peer_telemetry_interval_s: {value: 10}}});
       if (url.endsWith('/reports')) return response({device_id: 'd1', observed_at: 102, pending_request: null, reports: []});
-      if (url.endsWith('/request-report')) return response({ok: true, device_id: 'd1', ...receipt()});
+      if (url.endsWith('/request-report')) return response({ok: true, device_id: 'd1', ...directive()});
       if (url.includes('/peer-telemetry')) return response(intervalReply(url.includes('?')));
       throw Error('Unexpected test request: ' + url);
     }, ...options,
@@ -235,11 +235,11 @@ test('participant disappearing during interval preflight cannot commit', async (
   assert.equal(f.writes().length, 1); assert.equal(f.c.actionsFor('d1').interval.busy, false); f.c.stop();
 });
 test('native directive IDs cannot be regex-coerced', () => {
-  assert.equal(model.validDirective({...receipt(), request_id: ['a'.repeat(32)]}), false);
-  assert.equal(model.validDirective(receipt()), true);
+  assert.equal(model.validDirective({...directive(), request_id: ['a'.repeat(32)]}), false);
+  assert.equal(model.validDirective(directive()), true);
 });
-for (const [name, body] of Object.entries({falseSuccess: {ok: false}, wrongDevice: {ok: true, device_id: 'other', ...receipt()},
-  invalidId: {ok: true, device_id: 'd1', ...receipt(), request_id: 'bad'}})) {
+for (const [name, body] of Object.entries({falseSuccess: {ok: false}, wrongDevice: {ok: true, device_id: 'other', ...directive()},
+  invalidId: {ok: true, device_id: 'd1', ...directive(), request_id: 'bad'}})) {
   test(`${name} report acceptance remains unknown without replay until review`, async () => {
     const f = await fixture(); f.handler(url => url.endsWith('/request-report') ? response(body) : undefined);
     await f.c.requestPull(); await f.c.requestPull(); assert.equal(f.writes().length, 1);
@@ -249,19 +249,19 @@ for (const [name, body] of Object.entries({falseSuccess: {ok: false}, wrongDevic
   });
 }
 test('pull requires exact request identity and preserves a newer pending directive', async () => {
-  const f = await fixture(); let pending = receipt(), reports = [];
+  const f = await fixture(); let pending = directive(), reports = [];
   f.handler(url => url.endsWith('/reports') ? response({device_id: 'd1', observed_at: 103, pending_request: pending, reports}) : undefined);
   const request = f.c.requestPull(); await flush();
-  assert.equal(f.c.actionsFor('d1').pull.request.request_id, receipt().request_id);
+  assert.equal(f.c.actionsFor('d1').pull.request.request_id, directive().request_id);
   reports = [{schema: 'v2', event: 'staging-complete', report_id: 'b'.repeat(32), report_request_id: null, received_at: 9999999999}];
   await f.advance(2500); assert.doesNotMatch(f.c.actionsFor('d1').pull.message, /Matching report received/);
   reports.push({schema: 'v2', event: 'pull', report_id: 'c'.repeat(32), report_request_id: 'd'.repeat(32)});
   await f.advance(2500); assert.doesNotMatch(f.c.actionsFor('d1').pull.message, /Matching report received/);
-  reports.push({schema: 'v2', event: 'pull', report_id: ['e'.repeat(32)], report_request_id: receipt().request_id});
+  reports.push({schema: 'v2', event: 'pull', report_id: ['e'.repeat(32)], report_request_id: directive().request_id});
   await f.advance(2500); assert.doesNotMatch(f.c.actionsFor('d1').pull.message, /Matching report received/);
   assert.equal(f.c.state.reportMessage, 'Historical participation unavailable.');
   reports.pop(); // Reject the malformed envelope; a subsequent valid read recovers.
-  reports.push({schema: 'v2', event: 'pull', report_id: 'f'.repeat(32), report_request_id: receipt().request_id}); pending = receipt('b');
+  reports.push({schema: 'v2', event: 'pull', report_id: 'f'.repeat(32), report_request_id: directive().request_id}); pending = directive('b');
   await f.advance(2500); await request;
   assert.match(f.c.actionsFor('d1').pull.message, /Matching report received/);
   assert.equal(f.c.actionsFor('d1').pull.request.request_id, pending.request_id); assert.equal(f.c.canPull(), false); f.c.stop();

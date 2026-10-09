@@ -68,7 +68,7 @@ test('schedule success requires exact persisted mode/hour and complete response'
   }
   assert.equal(checkedVerificationResult('schedule', reply(body, 202), body, payload), 'unknown');
 });
-for (const action of ['refresh', 'offline']) test(action + ' requires exact status/outcome/counts and does not trust a count-only or contradictory receipt', () => {
+for (const action of ['refresh', 'offline']) test(action + ' requires exact status/outcome/counts and does not trust a count-only or contradictory response', () => {
   assert.equal(checkedVerificationResult(action, reply(success()), success()), 'complete');
   for (const body of [counts, {...success(), outcome: 'fail'}, {...success(), matched: -1}, {...success(), matched: true}, {...success(), matched: 1.5}]) {
     assert.equal(checkedVerificationResult(action, reply(body), body), 'unknown');
@@ -163,9 +163,9 @@ test('oversized offline archive and invalid draft never allocate a transport', a
   const f = await fixture(); await f.c.perform('offline', file(OFFLINE_FEED_LIMIT + 1)); assert.equal(f.uploads.length, 0);
   f.c.field('hour', '25'); await f.c.perform('schedule'); assert.equal(f.writes().length, 0);
 });
-for (const event of ['onerror', 'onabort', 'ontimeout', 'bad-json', 'bad-receipt']) test('offline ' + event + ' requires review and never re-sends the archive', async () => {
+for (const event of ['onerror', 'onabort', 'ontimeout', 'bad-json', 'bad-response']) test('offline ' + event + ' requires review and never re-sends the archive', async () => {
   const f = await fixture(), write = f.c.perform('offline', file()), xhr = f.uploads[0];
-  if (event === 'bad-json') xhr.finish('<html>bad</html>'); else if (event === 'bad-receipt') xhr.finish(counts); else xhr[event]();
+  if (event === 'bad-json') xhr.finish('<html>bad</html>'); else if (event === 'bad-response') xhr.finish(counts); else xhr[event]();
   await write; assert.equal(f.c.state.unknown, true); await f.c.perform('offline', file()); assert.equal(f.uploads.length, 1);
   await f.c.review(); assert.equal(f.uploads.length, 1); assert.equal(f.c.state.unknown, false);
 });

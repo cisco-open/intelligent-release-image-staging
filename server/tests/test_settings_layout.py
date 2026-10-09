@@ -16,6 +16,7 @@ APP = (SERVER / "webroot/app.js").read_text()
 NAV = (UI / "src/settings-navigation.jsx").read_text()
 SHELL = (UI / "src/main.jsx").read_text()
 SETTINGS = (UI / "src/settings.jsx").read_text()
+VERIFICATION = (UI / "src/image-verification.jsx").read_text()
 CSS = (UI / "src/shell.css").read_text()
 SECTIONS = {"general", "tls", "certificates", "backups", "telemetry", "bulkhash", "packages", "audit", "setup"}
 
@@ -71,8 +72,10 @@ def test_settings_form_ids_and_submit_handlers_remain_intact():
         assert 'id="' + form_id + '"' not in HTML
         assert f"document.getElementById('{form_id}')" not in APP
     assert "onSubmit={event => {event.preventDefault(); c.perform(action);}}" in SETTINGS
-    assert HTML.count('id="iv-schedule-form"') == 1
-    assert "document.getElementById('iv-schedule-form').addEventListener('submit'" in APP
+    assert VERIFICATION.count('id="iv-schedule-form"') == 1
+    assert "onSubmit={event => {event.preventDefault(); controller.perform('schedule');}}" in VERIFICATION
+    assert 'id="iv-schedule-form"' not in HTML
+    assert "document.getElementById('iv-schedule-form')" not in APP
     for control_id in (
         "pw-cur", "pw-new", "pw-confirm", "revoke-others", "cert-pem", "cert-key",
         "cert-passphrase", "cert-passphrase-row", "trust-pem", "ca-url", "ca-auto",
