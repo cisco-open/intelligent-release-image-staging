@@ -28,6 +28,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   source/notices, Debian and Alpine image sources, and core Python/pip sources
   independently. Preserve original notices and inventory every
   distributed image layer before completing publication checks.
+  Allow explicit integrity checks of retained Debian source archives after
+  repository metadata expires, while keeping fresh-build checks unchanged.
 
 - Bound local packaging-source reads by their original timeout, including silent
   Git processes, and isolate them from unrelated Git configuration.

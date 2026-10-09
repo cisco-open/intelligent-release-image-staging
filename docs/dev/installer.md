@@ -313,6 +313,12 @@ an existing archive against the same external inventory and keyring. Neither
 operation runs source recipes. This companion covers Debian source files only;
 other image components and notice preservation need their own review.
 
+For a retained archive whose repository metadata has expired, add
+`--archived-integrity` to `--verify-bundle`. This still checks signatures, exact
+versions and every file hash, but reports archived integrity rather than current
+metadata. It cannot build a new companion or establish publication readiness.
+Installer and apt freshness checks remain unchanged.
+
 ### Alpine and core Python companions
 
 `tools/build-alpine-sources.py` takes the reviewed image inventory and its SHA-256,
