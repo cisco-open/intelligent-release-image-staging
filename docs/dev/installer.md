@@ -393,8 +393,9 @@ It checks the original source manifest rather than replacing it.
 
 These inputs remain unsigned until the authorized hosted workflow authenticates
 them. The helper checks the review's file bindings, not the reviewer's authority.
-The current workflows still use the source-only path; prebuilt upload and
-authentication require their separately approved integration.
+The tag workflow still authenticates source-only builds; prebuilt upload and
+authentication require their separately approved integration. The manual
+publisher accepts an explicit profile and its matching qualification record.
 
 ## Bootstrap the installer offline
 

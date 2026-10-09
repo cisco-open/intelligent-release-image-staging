@@ -38,8 +38,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   files for qualification; a later manual workflow checks the exact files and
   reviewer approval before publishing them without a rebuild.
   Add local prebuilt preparation with independent source checks, an exact-file
-  review record and explicit run metadata. Keep hosted prebuilt delivery closed
-  until its approved integration is available.
+  review record and explicit run metadata. Let the manual publisher select the
+  matching profile and qualification record. Hosted prebuilt authentication still
+  needs its approved candidate-input integration.
 
 - Bound local packaging-source reads by their original timeout, including silent
   Git processes, and isolate them from unrelated Git configuration.

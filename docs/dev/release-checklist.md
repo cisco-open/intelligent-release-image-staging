@@ -24,8 +24,9 @@ also binds the files to that workflow run and attempt.
 
 The tag workflow exports `iris-authenticated-<run-id>-<attempt>` and stops.
 It does not publish a release. Its permissions are repository `contents: read`,
-`attestations: write` and GitHub OIDC `id-token: write`. Prebuilt-kit publication
-remains disabled until its separate source and qualification checks are connected.
+`attestations: write` and GitHub OIDC `id-token: write`. This workflow currently
+authenticates source-only builds. Prebuilt authentication still needs its
+approved candidate-input integration.
 
 Download and verify the exact stage for qualification using the reviewed local
 `tools/release-stage.py acquire` helper. Supply the tag, full commit, run ID,
@@ -44,12 +45,13 @@ For the separately prepared prebuilt route, the local helper accepts an explicit
 `--profile prepared-host` or `--profile ubuntu-dependencies`. Publication requires a
 `iris-release-qualification-v2` record that also binds the kit, image identities,
 source review and preparation evidence. The source-review check must name the
-exact staged review file's hash. This helper support does not enable prebuilt
-upload or authentication in the current workflows; they remain source-only.
+exact staged review file's hash. Selecting a prebuilt profile does not upload
+or authenticate its inputs; those steps must already be complete.
 
 An authorized repository contributor can then manually run
-`.github/workflows/publish-release.yml` from `main`. Supply the same stage
-identities, the literal qualification JSON and its SHA-256, and the confirmation
+`.github/workflows/publish-release.yml` from `main`. Select the matching profile;
+the default is `source-only`. Supply the same stage identities, the literal
+qualification JSON and its SHA-256, and the confirmation
 `publish <tag> <release.json SHA256>`. The record's `reviewed_by` must match the
 person triggering publication. The workflow re-verifies a private snapshot and
 publishes those exact files without rebuilding. It retains the qualification and
