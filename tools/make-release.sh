@@ -76,7 +76,7 @@ SHIP=(
   tools/irisctl tools/iris_installer tools/iris-key-setup
   tools/release-auth.py
   tools/build-installer-package.py tools/finalize-device-image.py
-  tools/build-release-kit.py
+  tools/build-release-kit.py tools/build-release-candidate.py
   tools/build-packaging-inputs.py tools/build-offline-dependencies.py tools/build-guest-inputs.py
   tools/bootstrap-offline.py
   tools/agent-source-freshness.sh

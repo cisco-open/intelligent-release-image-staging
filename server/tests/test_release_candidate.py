@@ -1,0 +1,420 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Exercise real private Git snapshots with mocked builders; no Docker builds."""
+
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools'))
+from iris_installer.state import InstallError
+
+SPEC = importlib.util.spec_from_file_location('iris_release_candidate', ROOT / 'tools/build-release-candidate.py')
+c = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(c)
+TAG = 'v2026.10.09'
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def git(repo, *arguments):
+    return subprocess.check_output(['git', '-C', str(repo), *arguments], stderr=subprocess.DEVNULL).decode().strip()
+
+
+@pytest.fixture
+def repository(tmp_path):
+    repo = tmp_path / 'owner'
+    repo.mkdir()
+    git(repo, 'init')
+    git(repo, 'config', 'user.name', 'Candidate fixture')
+    git(repo, 'config', 'user.email', 'fixture@example.invalid')
+    files = {'VERSION': b'2026.10.09\n', 'LICENSE': b'license\n', 'NOTICE': b'notice\n',
+             '.gitignore': b'release/\ncreds/\n', 'source.txt': b'committed source\n',
+             'empty': b'', 'server/Dockerfile': b'FROM scratch\n',
+             'server/Dockerfile.console': b'FROM scratch\n',
+             **{'tools/' + name: b'# committed builder fixture\n' for name in c.BUILDERS}}
+    for name, data in files.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o755 if name.endswith('.sh') else 0o644)
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'Committed source fixture')
+    return repo, git(repo, 'rev-parse', 'HEAD'), files
+
+
+class Builders:
+    def __init__(self, commit, files, change=None):
+        self.commit, self.files, self.change = commit, files, change
+        self.calls, self.environments, self.source = [], [], None
+
+    def __call__(self, arguments, *, environment, cwd):
+        args = list(map(str, arguments))
+        self.calls.append(args)
+        self.environments.append(dict(environment))
+        self.source = cwd
+        assert c._git(cwd, ['rev-parse', 'HEAD'], environment).decode().strip() == self.commit
+        assert not (cwd / 'creds').exists()
+        assert (cwd / 'source.txt').read_bytes() == self.files['source.txt']
+
+        def option(name):
+            return Path(args[args.index(name) + 1])
+
+        script = Path(args[2]).name if args[1:2] == ['-B'] else Path(args[1]).name
+        if script == 'build-packaging-inputs.py':
+            output = option('--output-dir')
+            output.mkdir()
+            (output / c.NAMES['packaging-tools']).write_bytes(b'XR source with license, no binary')
+        elif script == 'build-installer-package.py':
+            output = option('--out')
+            self.package = output / ('iris-installer_2026.10.09+installer.0.g' + self.commit[:12] + '_amd64.deb')
+            self.package.write_bytes(b'mocked installer archive')
+            self.inventory = {name: sha(data) for name, data in self.files.items()}
+            self.package.with_suffix('.deb.source.json').write_text(json.dumps(
+                {'schema': 1, 'commit': self.commit, 'files': self.inventory}))
+            self.package.with_suffix('.deb.sha256').write_text(sha(self.package.read_bytes()) + '  ' + self.package.name + '\n')
+            if self.change == 'package-checksum':
+                self.package.with_suffix('.deb.sha256').write_text('wrong\n')
+            if self.change == 'package-commit':
+                self.package.with_suffix('.deb.source.json').write_text(json.dumps(
+                    {'schema': 1, 'commit': '0' * 40, 'files': self.inventory}))
+        elif args[0] == 'dpkg-deb':
+            canonical = Path(args[-1]) / 'usr/lib/iris-installer/source'
+            for name in self.files:
+                path = canonical / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(cwd / name, path)
+                path.chmod((cwd / name).stat().st_mode & 0o777)
+            (canonical / 'INSTALLER-SOURCE.json').write_text(json.dumps(self.inventory))
+            if self.change == 'installed-bytes':
+                (canonical / 'source.txt').write_text('different')
+            elif self.change == 'installed-mode':
+                (canonical / 'source.txt').chmod(0o755)
+            elif self.change == 'installed-extra':
+                (canonical / 'unlisted').write_text('unlisted')
+            elif self.change == 'installed-link':
+                (canonical / 'source.txt').unlink()
+                (canonical / 'source.txt').symlink_to(cwd / 'source.txt')
+        elif script == 'make-release.sh':
+            release = cwd / 'release'
+            release.mkdir()
+            with tarfile.open(release / 'iris.tgz', 'w:gz') as archive:
+                for name, data in self.files.items():
+                    if self.change == 'source-omission' and name == 'source.txt':
+                        continue
+                    if self.change == 'source-bytes' and name == 'source.txt':
+                        data = b'changed source'
+                    item = tarfile.TarInfo('iris/' + name)
+                    item.size = len(data)
+                    item.mode = (cwd / name).stat().st_mode & 0o777
+                    if self.change == 'source-mode' and name == 'source.txt':
+                        item.mode = 0o755
+                    archive.addfile(item, io.BytesIO(data))
+        elif script == 'build-guest-inputs.py':
+            assert option('--source-dir') == cwd.parent / 'installed/usr/lib/iris-installer/source'
+            assert option('--source-manifest') == option('--source-dir') / 'INSTALLER-SOURCE.json'
+            output = option('--output-dir')
+            output.mkdir()
+            (output / c.NAMES['guest-inputs']).write_bytes(b'guest references')
+        elif args[0] == 'docker':
+            Path(str(option('--output')).split('dest=', 1)[1]).write_bytes(b'core docker archive')
+            if self.change == 'tracked-mutation':
+                (cwd / 'NOTICE').write_text('changed after build')
+        elif script == 'build-device-image.sh':
+            output = option('--output')
+            output.write_bytes(b'neutral both-platform OCI')
+            Path(str(output) + '.manifest').write_text('neutral builder receipt\n')
+        elif script == 'build-release-kit.py':
+            if self.change == 'late-failure':
+                raise InstallError('mocked late build failure')
+            output = option('--out')
+            for role, name in c.NAMES.items():
+                shutil.copyfile(option('--' + role), output / name)
+            profile = 'prepared-host'
+            if '--ubuntu-dependencies' in args:
+                profile = 'ubuntu-dependencies'
+                shutil.copyfile(option('--ubuntu-dependencies'), output / 'iris-ubuntu-dependencies.tar.gz')
+            (output / 'release-kit.json').write_text(json.dumps(
+                {'commit': self.commit, 'tag': TAG, 'profile': profile}))
+            if self.change == 'unexpected-asset':
+                (output / 'attestations.jsonl').write_text('not an attestation')
+            elif self.change == 'kit-identity':
+                (output / 'release-kit.json').write_text(json.dumps({'commit': '0' * 40, 'tag': TAG, 'profile': profile}))
+        else:
+            pytest.fail('Unexpected command: ' + str(args))
+
+
+def assemble(tmp_path, repository, *, builders=None, **kwargs):
+    repo, commit, files = repository
+    builders = builders or Builders(commit, files)
+    output = c.assemble(repo, tmp_path / 'candidate', commit=commit, tag=TAG,
+                        appmgr_repository=repo, runner=builders, **kwargs)
+    return output, builders
+
+
+def test_exact_commit_sequence_and_local_only_receipt(tmp_path, repository, monkeypatch):
+    for name in ('IRIS_INSTRUCTION_ROOTS_DIR', 'ARIA2C_BIN_x86_64', 'IRIS_FORCE_DEVICE_IMAGE_BUILD',
+                 'SCRUB_PASS', 'SCRUB_USER', 'PYTHONPATH', 'BASH_ENV', 'GIT_CONFIG_COUNT', 'BUILDX_BUILDER'):
+        monkeypatch.setenv(name, 'ignored ambient value')
+    output, builders = assemble(tmp_path, repository, builder='native-builder')
+    receipt = json.loads((output / 'local-candidate.json').read_bytes())
+    assert receipt['format'] == 'iris-local-release-candidate-v1'
+    assert receipt['authenticated'] is False
+    assert receipt['commit'] == repository[1] and receipt['tag'] == TAG
+    assert receipt['version'] == TAG[1:] and receipt['profile'] == 'prepared-host'
+    assert receipt['source_match']['canonical_source_matches'] is True
+    assert receipt['source_match']['file_count'] == len(repository[2])
+    assert 'redistribution gates remain separate' in receipt['scope']
+    assert set(receipt['files']) == {path.name for path in output.iterdir()} - {'local-candidate.json'}
+    assert 'release.json' not in receipt['files'] and 'attestations.jsonl' not in receipt['files']
+    for name, record in receipt['files'].items():
+        assert record == {'sha256': sha((output / name).read_bytes()), 'size': (output / name).stat().st_size}
+        assert (output / name).stat().st_mode & 0o777 == 0o444
+    assert output.stat().st_mode & 0o777 == 0o700
+    assert len(builders.calls) == 9
+    assert 'build-packaging-inputs.py' in builders.calls[0][2]
+    assert 'build-release-kit.py' in builders.calls[-1][2]
+    docker = [args for args in builders.calls if args[0] == 'docker']
+    assert len(docker) == 2
+    for args in docker:
+        assert args[args.index('--platform') + 1] == 'linux/amd64'
+        assert args[args.index('--builder') + 1] == 'native-builder'
+        assert 'org.opencontainers.image.revision=' + repository[1] in args
+        assert '--load' not in args and '--push' not in args
+    neutral = builders.calls[-2]
+    assert neutral[-1] == '--neutral-trust'
+    assert '--instruction-roots-dir' not in neutral
+    for env in builders.environments:
+        assert env['BUILDX_BUILDER'] == 'native-builder'
+        assert env['GIT_NO_REPLACE_OBJECTS'] == env['GIT_NO_LAZY_FETCH'] == '1'
+        assert env['GIT_ALLOW_PROTOCOL'] == ''
+        assert env['PYTHONNOUSERSITE'] == '1'
+        assert not any(name.startswith(('IRIS_', 'ARIA2C_', 'SCRUB_')) for name in env)
+        assert 'PYTHONPATH' not in env and 'BASH_ENV' not in env and 'GIT_CONFIG_COUNT' not in env
+    assert not builders.source.parent.exists()
+
+
+def test_dirty_owner_and_ignored_credentials_and_release_are_preserved(tmp_path, repository):
+    repo, commit, files = repository
+    (repo / 'source.txt').write_bytes(b'owner uncommitted edits')
+    (repo / 'creds').mkdir()
+    (repo / 'creds/private').write_text('ignored credential sentinel')
+    (repo / 'release').mkdir()
+    (repo / 'release/iris.tgz').write_text('owner previous release sentinel')
+    before = git(repo, 'status', '--porcelain=v1', '--untracked-files=all')
+    refs = git(repo, 'show-ref')
+    assemble(tmp_path, repository)
+    assert (repo / 'source.txt').read_bytes() == b'owner uncommitted edits'
+    assert (repo / 'creds/private').read_text() == 'ignored credential sentinel'
+    assert (repo / 'release/iris.tgz').read_text() == 'owner previous release sentinel'
+    assert git(repo, 'status', '--porcelain=v1', '--untracked-files=all') == before
+    assert git(repo, 'show-ref') == refs
+    assert git(repo, 'rev-parse', 'HEAD') == commit
+
+
+def test_owner_filters_hooks_and_replacement_refs_do_not_execute_or_change_snapshot(tmp_path, repository):
+    repo, commit, files = repository
+    (repo / '.gitattributes').write_text('*.txt filter=unsafe\n')
+    git(repo, 'add', '.gitattributes')
+    git(repo, 'commit', '-m', 'Declare filter without copying owner configuration')
+    commit = git(repo, 'rev-parse', 'HEAD')
+    files = {**files, '.gitattributes': b'*.txt filter=unsafe\n'}
+    marker = tmp_path / 'must-not-execute'
+    git(repo, 'config', 'filter.unsafe.smudge', 'touch ' + str(marker))
+    git(repo, 'config', 'filter.unsafe.clean', 'cat')
+    git(repo, 'config', 'filter.unsafe.required', 'true')
+    hook = repo / '.git/hooks/post-checkout'
+    hook.write_text('#!/bin/sh\ntouch ' + str(marker) + '\n')
+    hook.chmod(0o755)
+    (repo / 'source.txt').write_text('replacement source')
+    git(repo, 'add', 'source.txt')
+    git(repo, 'commit', '-m', 'Different replacement')
+    git(repo, 'replace', commit, git(repo, 'rev-parse', 'HEAD'))
+    assemble(tmp_path, (repo, commit, files))
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize('change', ['package-checksum', 'package-commit', 'installed-bytes', 'installed-mode',
+    'installed-extra', 'installed-link', 'source-omission', 'source-bytes', 'source-mode', 'late-failure',
+    'unexpected-asset', 'kit-identity', 'tracked-mutation'])
+def test_bad_or_failed_builder_never_publishes(tmp_path, repository, change):
+    builders = Builders(repository[1], repository[2], change)
+    with pytest.raises((InstallError, OSError)):
+        assemble(tmp_path, repository, builders=builders)
+    assert not (tmp_path / 'candidate').exists()
+    assert not builders.source.parent.exists()
+    if change.startswith(('package-', 'installed-', 'source-')):
+        assert not any(args[0] == 'docker' for args in builders.calls)
+
+
+@pytest.mark.parametrize('target', ['existing-directory', 'existing-file', 'symlink'])
+def test_existing_output_never_runs_builds_or_changes_owner_bytes(tmp_path, repository, target):
+    output = tmp_path / 'candidate'
+    if target == 'existing-directory':
+        output.mkdir()
+        (output / 'sentinel').write_text('owner')
+    elif target == 'existing-file':
+        output.write_text('owner')
+    else:
+        output.symlink_to(tmp_path / 'not-created')
+    with pytest.raises(InstallError, match='already exists|symbolic links'):
+        assemble(tmp_path, repository, builders=lambda *_a, **_k: pytest.fail('must not build'))
+    assert output.is_symlink() if target == 'symlink' else (output / 'sentinel' if output.is_dir() else output).read_text() == 'owner'
+
+
+@pytest.mark.parametrize('commit', ['HEAD', 'a' * 12, 'A' * 40, 'a' * 40 + '\n', '0' * 40])
+def test_nonexact_or_missing_commit_refuses_before_builds(tmp_path, repository, commit):
+    with pytest.raises(InstallError):
+        c.assemble(repository[0], tmp_path / 'candidate', commit=commit, tag=TAG,
+                   appmgr_repository=repository[0], runner=lambda *_a, **_k: pytest.fail('must not build'))
+    assert not (tmp_path / 'candidate').exists()
+
+
+def test_tag_mismatch_refuses_before_builds(tmp_path, repository):
+    with pytest.raises(InstallError, match='VERSION'):
+        c.assemble(repository[0], tmp_path / 'candidate', commit=repository[1], tag='v2026.10.08',
+                   appmgr_repository=repository[0], runner=lambda *_a, **_k: pytest.fail('must not build'))
+
+
+def test_committed_link_refuses_before_checkout_or_builder(tmp_path, repository):
+    repo, _, _ = repository
+    (repo / 'link').symlink_to('/etc/passwd')
+    git(repo, 'add', 'link')
+    git(repo, 'commit', '-m', 'Unsupported link')
+    with pytest.raises(InstallError, match='regular files'):
+        c.assemble(repo, tmp_path / 'candidate', commit=git(repo, 'rev-parse', 'HEAD'), tag=TAG,
+                   appmgr_repository=repo, runner=lambda *_a, **_k: pytest.fail('must not build'))
+
+
+def test_partial_source_never_lazily_fetches_missing_blobs_or_mutates_owner(tmp_path, repository):
+    repo, commit, _ = repository
+    git(repo, 'config', 'uploadpack.allowFilter', 'true')
+    partial = tmp_path / 'partial'
+    subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout',
+                    repo.as_uri(), str(partial)], check=True, capture_output=True)
+    packs = partial / '.git/objects/pack'
+    assert list(packs.glob('*.promisor'))
+    before = {path.name: path.read_bytes() for path in packs.iterdir()}
+    with pytest.raises(InstallError, match='exact local committed source'):
+        c.assemble(partial, tmp_path / 'candidate', commit=commit, tag=TAG,
+                   appmgr_repository=repo, runner=lambda *_a, **_k: pytest.fail('must not build'))
+    assert {path.name: path.read_bytes() for path in packs.iterdir()} == before
+    assert not (tmp_path / 'candidate').exists()
+
+
+@pytest.mark.parametrize('kind', ['silent', 'over-limit'])
+def test_git_deadline_and_output_limit_terminate_the_owned_child(tmp_path, monkeypatch, kind):
+    original, children = subprocess.Popen, []
+    code = 'import time; time.sleep(30)' if kind == 'silent' else (
+        'import sys,time; sys.stdout.buffer.write(b"x"*2048); sys.stdout.flush(); time.sleep(30)')
+    def child(_command, **kwargs):
+        process = original([sys.executable, '-c', code], **kwargs)
+        children.append(process)
+        return process
+    monkeypatch.setattr(c.subprocess, 'Popen', child)
+    monkeypatch.setattr(c, 'GIT_SECONDS', 0.1)
+    monkeypatch.setattr(c, 'MAX_TREE', 1024)
+    started = time.monotonic()
+    with pytest.raises(InstallError, match='deadline' if kind == 'silent' else 'metadata exceeds'):
+        c._git(tmp_path, ['irrelevant'], dict(os.environ))
+    assert time.monotonic() - started < 3
+    assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_uncommitted_required_helper_cannot_be_built(tmp_path, repository):
+    repo, _, _ = repository
+    git(repo, 'rm', 'tools/build-release-candidate.py')
+    git(repo, 'commit', '-m', 'Commit without candidate helper')
+    with pytest.raises(InstallError, match='omits'):
+        c.assemble(repo, tmp_path / 'candidate', commit=git(repo, 'rev-parse', 'HEAD'), tag=TAG,
+                   appmgr_repository=repo, runner=lambda *_a, **_k: pytest.fail('must not build'))
+
+
+def test_checkout_transform_is_detected_before_any_builder(tmp_path, repository, monkeypatch):
+    original = c._git
+    def changed(repo, arguments, environment):
+        result = original(repo, arguments, environment)
+        if 'checkout' in arguments:
+            (repo / 'source.txt').write_text('transformed bytes')
+        return result
+    monkeypatch.setattr(c, '_git', changed)
+    with pytest.raises(InstallError, match='checkout bytes'):
+        assemble(tmp_path, repository, builders=lambda *_a, **_k: pytest.fail('must not build'))
+
+
+def test_optional_closure_is_snapshotted_before_use(tmp_path, repository, monkeypatch):
+    from iris_installer import offline_inputs
+    original = tmp_path / 'closure.tar.gz'
+    original.write_bytes(b'closure candidate')
+    checked = []
+    def inspect(path):
+        assert path != original and path.read_bytes() == b'closure candidate'
+        original.write_bytes(b'changed original')
+        checked.append(path)
+    monkeypatch.setattr(offline_inputs, 'inspect_dependency_archive', inspect)
+    output, builders = assemble(tmp_path, repository, ubuntu_dependencies=original)
+    assert len(checked) == 1
+    assert (output / 'iris-ubuntu-dependencies.tar.gz').read_bytes() == b'closure candidate'
+    assert json.loads((output / 'local-candidate.json').read_bytes())['profile'] == 'ubuntu-dependencies'
+
+
+def test_publication_race_preserves_new_owner_directory(tmp_path, repository, monkeypatch):
+    original = c.kit._snapshot
+    def racing(source, destination, maximum):
+        result = original(source, destination, maximum)
+        if '/proc/self/fd/' in str(destination) and not (tmp_path / 'candidate').exists():
+            (tmp_path / 'candidate').mkdir()
+            (tmp_path / 'candidate/sentinel').write_text('owner')
+        return result
+    monkeypatch.setattr(c.kit, '_snapshot', racing)
+    with pytest.raises(InstallError, match='already exists'):
+        assemble(tmp_path, repository)
+    assert (tmp_path / 'candidate/sentinel').read_text() == 'owner'
+    assert set((tmp_path / 'candidate').iterdir()) == {tmp_path / 'candidate/sentinel'}
+
+
+def test_publication_parent_replacement_never_cleans_replacement(tmp_path, repository, monkeypatch):
+    parent = tmp_path / 'output-parent'
+    parent.mkdir(mode=0o700)
+    original = c.kit._snapshot
+    changed = False
+    def substituted(source, destination, maximum):
+        nonlocal changed
+        result = original(source, destination, maximum)
+        if '/proc/self/fd/' in str(destination) and not changed:
+            changed = True
+            temporary_name = destination.parent.name
+            parent.rename(tmp_path / 'original-parent')
+            parent.mkdir(mode=0o700)
+            replacement = parent / temporary_name
+            replacement.mkdir()
+            (replacement / 'sentinel').write_text('owner')
+        return result
+    monkeypatch.setattr(c.kit, '_snapshot', substituted)
+    with pytest.raises(InstallError, match='parent changed'):
+        c.assemble(repository[0], parent / 'candidate', commit=repository[1], tag=TAG,
+                   appmgr_repository=repository[0], runner=Builders(repository[1], repository[2]))
+    assert [p.read_text() for p in parent.glob('*/sentinel')] == ['owner']
+    assert not (parent / 'candidate').exists()
+
+
+def test_helper_is_in_source_allowlist_and_cli_requires_explicit_inputs():
+    assert 'tools/build-release-candidate.py' in (ROOT / 'tools/make-release.sh').read_text()
+    with pytest.raises(SystemExit) as caught:
+        c.main([])
+    assert caught.value.code == 2
