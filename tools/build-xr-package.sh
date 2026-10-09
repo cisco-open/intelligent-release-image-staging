@@ -53,11 +53,12 @@ RPM_NAME="${RPM_NAME:-iris-xr}"
 APPMGR_RELEASE="${APPMGR_RELEASE:-ThinXR_7.3.15}"
 APPMGR_BUILD_REPO_URL="${APPMGR_BUILD_REPO_URL:-https://github.com/ios-xr/xr-appmgr-build.git}"
 APPMGR_BUILD_COMMIT="${APPMGR_BUILD_COMMIT:-37d79607}"
-APPMGR_BUILD_DIR="${APPMGR_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/iris/xr-appmgr-build}"
+APPMGR_BUILD_DIR="${APPMGR_BUILD_DIR:-}"
 APPMGR_BUILD_CMD="${APPMGR_BUILD_CMD:-./appmgr_build}"
 PKG_VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
 IMAGE_TAR_NAME="${RPM_NAME}.tar.gz"
 if [ -z "$FINALIZED_DIR" ]; then
+APPMGR_BUILD_DIR="${APPMGR_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/iris/xr-appmgr-build}"
 case "$APPMGR_BUILD_DIR" in
   /*) ;;
   *) echo "!! APPMGR_BUILD_DIR must be an absolute path" >&2; exit 2 ;;

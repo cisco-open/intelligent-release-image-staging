@@ -538,6 +538,20 @@ _run_finalized_xr() {
   [ ! -e "$OUT_DIR/iris-xr.rpm" ]
 }
 
+@test "finalized XR needs no home directory or source-builder cache" {
+  _finalized_xr_setup
+  run env -u HOME -u XDG_CACHE_HOME -u APPMGR_BUILD_DIR \
+    -u IRIS_INSTRUCTION_ROOTS_DIR -u APPMGR_BUILD_CMD \
+    PATH="$STUBDIR/bin:$PATH" ORIGINAL_APPMGR_DIR="$APPMGR_DIR" \
+    bash "$STUBDIR/tools/build-xr-package.sh" \
+    --finalized-dir "$FINALIZED" --finalization-sha256 "$FINAL_SHA" \
+    --appmgr-archive "$APPMGR_ARCHIVE" --appmgr-sha256 "$APPMGR_SHA" \
+    --appmgr-revision "$APPMGR_REVISION" --out "$OUT_DIR"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$OUT_DIR/iris-xr.rpm")" = "finalized rpm" ]
+  [ ! -e "$FORBIDDEN_LOG" ]
+}
+
 @test "finalized XR preflights isolated Python YAML without installing dependencies" {
   _finalized_xr_setup
   cat > "$STUBDIR/bin/python3" <<'PY'
