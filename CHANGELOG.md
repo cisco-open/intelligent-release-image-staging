@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Close an interrupted Console response without appending a second HTTP error
+  to its body. Failures before a response starts still return the documented
+  unavailable response, without retrying the operation.
+
 - Add reviewed distribution-access controls in Policies. Preview exact device
   and address counts before applying bounded origin restrictions. Keep shared
   addresses out of the blocklist, retain approvals across endpoint expiry, and
