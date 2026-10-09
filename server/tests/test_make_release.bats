@@ -43,6 +43,7 @@
   for path in \
     iris/docs/zensical/index.md \
     iris/docs/dev/README.md \
+    iris/docs/dev/api-soak.md \
     iris/zensical.toml \
     iris/requirements-docs.txt \
     iris/requirements-dev.txt \
@@ -76,6 +77,10 @@
     iris/tools/api-exercise.py \
     iris/tools/api_exercise_fixtures.py \
     iris/tools/test_api_exercise.py \
+    iris/tools/api-soak.py \
+    iris/tools/api_soak_workload.py \
+    iris/tools/api_soak_fixture.py \
+    iris/tools/test_api_soak.py \
     iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
@@ -83,6 +88,9 @@
   run env PYTHONPATH="$FIX/release/iris/tools" python3 -c \
     'from api_exercise_fixtures import exercise; assert callable(exercise)'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run python3 "$FIX/release/iris/tools/api-soak.py" --help
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"--accept-isolated-load"* ]]
   run python3 "$FIX/release/iris/tools/irisctl" doctor --help
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"kubernetes"* ]]
@@ -122,6 +130,7 @@ _make_release_fixture() {
   echo "# index" > "$FIX/docs/zensical/index.md"
   # docs/ ships whole, so the contributor folder travels with the manual.
   echo "# dev" > "$FIX/docs/dev/README.md"
+  cp "$repo/docs/dev/api-soak.md" "$FIX/docs/dev/api-soak.md"
   echo "# server" > "$FIX/server/tracker.py"
   echo "PUBLIC CERT" > "$FIX/server/certs/cisco_bulkhash_verify.pem"
   echo "# device" > "$FIX/device/bootstrap.sh"
@@ -140,6 +149,9 @@ _make_release_fixture() {
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
+  for f in api-soak.py api_soak_workload.py api_soak_fixture.py test_api_soak.py; do
+    cp "$repo/tools/$f" "$FIX/tools/$f"
+  done
   cp "$repo/tools/irisctl" "$FIX/tools/irisctl"
   cp "$repo/tools/iris-key-setup" "$FIX/tools/iris-key-setup"
   cp "$repo/tools/release-auth.py" "$FIX/tools/release-auth.py"
