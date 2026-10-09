@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Update the build-only source-map-js dependency to 1.2.2 to fix malformed
+  source maps blocking the build process (CVE-2026-93749).
+
 - Complete the React workflow migration with the standalone Swarm map and
   remaining Inventory messages. Preserve filters, keyboard focus, sourced
   transfer arrows and device controls. Expire measured arrows while paused,
