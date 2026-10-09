@@ -29,7 +29,7 @@ try {
         return route.fulfill({json: rotation}); // A valid status, but not the requested transition.
       }
       const inventory = {scope: 'server-certificate-files', observed_at: 1790160000, custody: null, items: [
-        {id: 'root-a', label: '<img src=x onerror=alert(1)>', kind: 'public-key', source: 'server-file', state: 'public-key-present',
+        {id: 'root-<img src=x onerror=alert(1)>', label: 'Offline root ignored', kind: 'public-key', source: 'server-file', state: 'public-key-present',
           fingerprint_sha256: 'SHA256:fixture', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, impact: 'Confirm the public root with its holder.'},
         ...['device-tls', 'management-tls', 'peer-ca', 'instruction-signer'].map(id => ({id, label: id, kind: 'certificate', source: 'server-file',
           state: id === 'instruction-signer' ? 'renewal-due' : 'within-validity', fingerprint_sha256: 'ab'.repeat(32), valid_from: 1788864000,
@@ -48,7 +48,9 @@ try {
   const idle = () => page.waitForFunction(() => window.irisCertificates && !window.irisCertificates.state.busy && !Object.values(window.irisCertificates.state.loading).some(Boolean));
   await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor(); await idle();
   assert.equal(await page.locator('#certificate-rows img').count(), 0);
-  assert.match(await page.locator('#certificate-rows').innerText(), /<img src=x/); assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);
+  assert.match(await page.locator('#certificate-rows').innerText(), /Root signing key: <img src=x/);
+  assert.doesNotMatch(await page.locator('#certificate-rows').innerText(), /Offline root ignored/);
+  assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);
   assert.match(await page.locator('#iris-certificates-renewal').innerText(), /routine expiry.*keeps its signing key/s);
   assert.match(await page.locator('#rotation-next-step').innerText(), /current key remains active/);
   assert.match(await page.locator('#certificate-rows').innerText(), /Public key found/);

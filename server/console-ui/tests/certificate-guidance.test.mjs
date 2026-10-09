@@ -30,6 +30,13 @@ test('file validity does not claim live service trust or private key readiness',
   assert.match(signingHealth('keylist_missing'), /holder.*approve/);
   assert.match(signingHealth('phase0'), /not initialized/);
 });
+test('root signing labels name the root without assuming private key storage', () => {
+  const row = {id: 'root-root-a', label: 'Offline root root-a', impact: 'Public trust only.'};
+  assert.equal(certificateGuidance(row).title, 'Root signing key: root-a');
+  assert.equal(row.label, 'Offline root root-a', 'The native inventory is unchanged');
+  const untrusted = {id: 'root-<img src=x onerror=alert(1)>', label: 'Offline root ignored'};
+  assert.equal(certificateGuidance(untrusted).title, 'Root signing key: <img src=x onerror=alert(1)>');
+});
 test('each signing state gives an action without claiming fleet adoption', () => {
   for (const state of ['idle', 'awaiting-approval', 'committing', 'retirement-pending', 'retiring', 'completed', 'cancelled']) {
     const guide = signerGuidance(state);

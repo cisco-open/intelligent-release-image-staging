@@ -15,7 +15,7 @@ const purposes = {
 export function certificateGuidance(row) {
   const known = lookup(purposes, row.id);
   if (known) return {title: known[0], purpose: known[1], next: known[2]};
-  if (row.id.startsWith('root-')) return {title: row.label, purpose: 'Public trust used by devices to check signing approvals.',
+  if (row.id.startsWith('root-')) return {title: 'Root signing key: ' + row.id.slice('root-'.length), purpose: 'Public trust used by devices to check signing approvals.',
     next: 'Ask this root signing key holder for signed confirmation under Deployment keys. Replacing the root requires new packages and re-onboarding.'};
   return {title: row.label, purpose: row.impact, next: 'Review this identity with the person responsible for its keys before making changes.'};
 }
