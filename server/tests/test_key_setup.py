@@ -68,6 +68,9 @@ def test_root_resume_never_generates_or_overwrites(root, monkeypatch):
 def test_private_storage_and_output_symlinks_refused(tmp_path):
     private = tmp_path / "private"
     private.mkdir(mode=0o755)
+    # mkdir's mode is filtered by the caller's umask. Establish the insecure
+    # fixture explicitly so a private (077) test environment still tests refusal.
+    private.chmod(0o755)
     with pytest.raises(InstallError, match="0700"):
         helper.private_directory(private)
     alias = tmp_path / "alias"
