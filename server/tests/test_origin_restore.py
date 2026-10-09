@@ -321,7 +321,8 @@ def test_all_topologies_stage_current_origin_authority_before_publication(
 
     base = tmp_path / "installation"
     base.mkdir(mode=0o700)
-    document = {"config": {"target": target}, "root_digests": {}, "source_manifest": {}}
+    document = {"config": {"target": target}, "root_digests": {},
+                "source_manifest": {}, "completed": {}}
     sources = {}
     for name in ("source", "roots", "images", "artifacts", "volume-iris-config"):
         sources[name] = base / name
