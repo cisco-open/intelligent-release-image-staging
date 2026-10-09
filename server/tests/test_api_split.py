@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
-from collections import deque
 import hashlib
 import http.client
 import http.server
@@ -468,21 +467,6 @@ def _console_transport_failure(error):
             result["stage"] = stage
         trace = trace.tb_next
     return result
-
-
-@pytest.fixture
-def console_transport_failures(monkeypatch):
-    """Observe the existing 503 boundary; do not intercept or retry requests."""
-    failures = deque(maxlen=8)
-    original = api_problem.send
-
-    def observe(handler, status, code, *args, **kwargs):
-        if status == 503 and code == "management-api-unavailable":
-            failures.append(_console_transport_failure(sys.exc_info()[1]))
-        return original(handler, status, code, *args, **kwargs)
-
-    monkeypatch.setattr(api_problem, "send", observe)
-    return failures
 
 
 def _certificate_http_diagnostic(status, body, transport_failures=()):
