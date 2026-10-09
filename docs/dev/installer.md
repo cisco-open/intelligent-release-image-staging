@@ -6,9 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Production installer development
 
-The Ubuntu 24.04 amd64 `.deb` contains the deployment engine,
-managed maintenance service, terminal key and recovery tools, and runtime
-diagnostics. It supports single-host Docker, split Docker and Kubernetes.
+The Ubuntu 24.04 amd64 `.deb` contains deployment, maintenance, key, recovery and
+diagnostic tools. It supports single-host Docker, split Docker and Kubernetes.
 
 ## Build the Ubuntu installer
 
@@ -21,16 +20,14 @@ python3 tools/build-installer-package.py --out /path/to/candidate-output
 The package includes only allowlisted committed source, both committed aria2c
 architectures, notices and a file inventory. It has no maintainer hooks that
 deploy services, generate keys or create accounts. Local output is unauthenticated.
-The public `release.yml` workflow builds the tagged commit and authenticates every
-asset with GitHub artifact attestations. It publishes the `.deb`, its committed
-source inventory, the source archive and member manifest, matching aria2 binaries
-and corresponding source, and an authenticated release inventory. Follow
+The public `release.yml` workflow authenticates the tagged commit's assets with
+GitHub artifact attestations: the `.deb`, source inventories and archive,
+matching aria2 binaries, corresponding source and release inventory. Follow
 [download and authentication](../zensical/install/managed-package.md#download-and-authenticate)
 before installing a public package. The publisher identity is the public GitHub
 repository and tagged release workflow, separate from deployment instruction roots.
 
-On an isolated Ubuntu 24.04 amd64 test host, install the reviewed package with
-`sudo apt install ./iris-installer_<version>_amd64.deb`. Then:
+On an isolated Ubuntu test host, run `sudo apt install ./iris-installer_<version>_amd64.deb`.
 
 Run `irisctl setup` without sudo for the owner-selected local-key workflow. It
 creates or checks protected signing roots and the recovery identity outside
@@ -66,10 +63,9 @@ local or separate-holder helper. Private setup keys are outside the deployment
 snapshot and backup. Keep an independent recovery copy and protect local custody.
 
 Docker installs accept `--image-root` for a dedicated host import folder.
-`irisctl image-root` can connect one to an existing one-host deployment while
-its previous import folder is empty. The recorded folder is mounted read-only
-and included in backup and restore alongside the separate uploads volume.
-Folder changes retain a recovery record until restart and backup checks pass.
+`irisctl image-root` can change it while the previous folder is empty. The folder
+is mounted read-only and included in backup and restore alongside uploads.
+Changes retain a recovery record until restart and backup checks pass.
 
 The engine pauses with exit 20 and exports `requests/online.pub` below its state
 directory. Local setup guides approval and resumes automatically. For separate
@@ -101,11 +97,9 @@ The installer does not complete those approvals automatically. See
 and [backup controls](../zensical/admin-guide/backups.md#console-backup-controls).
 Neither status is a production READY declaration.
 
-The packaged `iris-key-setup` script guides separate key holders through creating
-protected keys, approving public requests and copying only public files. Owners
-keeping keys on the deployment host use `iris-key-setup --local` for later
-approvals. See
-[offline approval](../zensical/install/offline-approval.md).
+`iris-key-setup` guides separate key holders through key creation and approvals,
+copying only public files. Use `iris-key-setup --local` for later approvals when
+keys remain on the deployment host. See [offline approval](../zensical/install/offline-approval.md).
 
 The installer also has explicit `docker-split` and `kubernetes` targets; see the
 [managed installation procedure](../zensical/install/managed-package.md).
@@ -123,11 +117,8 @@ backup, verification, isolated extraction and same-deployment restore cutover
 are implemented as described in [Lifecycle development](lifecycle.md).
 Restore requires current security authority and the same credential generation;
 it does not adopt a replacement host or reset missing replay history.
-The source-build package needs network access and is not an offline kit.
-The same scoped worker supports planned credential maintenance, with a verified
-backup prerequisite and `irisctl maintenance` for interrupted-operation
-recovery when the Console is stopped.
-The Kubernetes doctor below is a separate read-only diagnostic command.
+The scoped worker requires a verified backup for credential maintenance;
+`irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.
 
 ## Implemented: native-package runtime checks
@@ -146,29 +137,20 @@ label selector. Docker optionally accepts `--context` for a selected local or
 remote Docker endpoint. The command uses existing Docker/kubectl authentication;
 it does not install those clients or acquire broader privileges.
 
-Both adapters stream the same Python probe to the server over stdin, without
-copying files or installing software there. The probe uses the running image's
-`setup_status` implementation and refuses any identity other than uid/gid
-10001. Python runs in isolated mode with bytecode writes disabled. The command
-has a configurable timeout (120 seconds by default).
+Both adapters stream the running image's `setup_status` probe over stdin.
+It requires uid/gid 10001 and isolated Python with bytecode writes disabled.
+The configurable timeout defaults to 120 seconds. Both IOx architectures and
+the XR RPM are required; `--optional-xr` permits only an absent XR RPM.
+The Docker freshness helper retains that IOx-only option.
 
-By default both IOx architectures and the XR RPM are required. `--optional-xr`
-only permits an absent XR RPM, never a present but invalid one. The existing
-Docker freshness helper uses this option to preserve its IOx-only contract.
-All failures, including unavailable clients and invalid responses, return 1;
-invalid command arguments return 2. `--format json` emits schema version 1 with
-the scope `native-package-readability-and-provenance`. Only complete evidence
-within that scope returns `checks-passed` and exit 0, never installation READY.
-
-The probe reads complete wrapper bytes and their provenance sidecars, and
-fingerprints the distributed catalog certificate. It does not authenticate the
-sidecar, inspect package contents/native signatures, check live TLS endpoints,
-qualify Guest Shell, test instruction signing or establish Console ownership.
-The installation engine separately requires fresh Guest Shell publication
-evidence; the standalone native-package doctor's scope is unchanged.
-The existing Docker freshness helper still performs its separate live versus
-distributed certificate comparison. Errors from transport clients are not
-echoed because they can contain authentication material.
+Failures return 1; invalid arguments return 2. `--format json` emits schema 1
+with scope `native-package-readability-and-provenance`. Complete evidence returns
+`checks-passed` and exit 0, never installation READY. The probe reads wrapper
+bytes, sidecars and the distributed certificate fingerprint. It does not prove
+publisher or native signatures, live TLS, Guest Shell readiness, instruction
+signing or Console ownership. The engine separately checks Guest Shell publication.
+The Docker freshness helper separately compares live and distributed certificates.
+Transport errors are withheld because they can contain authentication material.
 
 ## Prebuilt input implementation
 
@@ -200,7 +182,7 @@ approved package plan again while apt holds its mutation lock. This module's
 disconnected package tests do not establish complete deployment qualification.
 
 The installer records the accepted dependency plan before applying it. Resume
-can retry an unchanged host or recognise that the exact plan finished before
+can retry an unchanged host or recognize that the exact plan finished before
 its completion was recorded. Partial apt operations and unexpected changes
 stop for inspection with the plan retained. Once complete, ordinary Ubuntu
 security updates are allowed when the required dependencies remain available;
@@ -239,24 +221,70 @@ A backup without these caches needs the originals to remain intact. Keep the
 release kit, verifier and independent trust files at their recorded locations.
 
 The current publication workflow supplies source-build artifacts. Complete kit
-publication, dependency bootstrap and offline topology qualification remain
-release gates. A local candidate or a successful wrapper build is not proof of
-publisher authentication or native Cisco signature acceptance.
+publication and offline topology qualification remain release gates. A local
+candidate does not prove publisher authentication or native Cisco signature acceptance.
+
+## Assemble a local candidate
+
+Use a reviewed local commit, the pinned XR builder checkout and an existing
+Buildx builder supporting amd64 and arm64. Build dependencies may need network access.
+
+```bash
+python3 tools/build-release-candidate.py --repo /path/to/iris-checkout \
+  --commit '<full-commit>' --tag 'v<version>' \
+  --appmgr-repository /path/to/xr-appmgr-build \
+  --builder existing-amd64-arm64-builder --output-dir /path/to/new-private-candidate
+```
+
+The helper checks committed source in a private checkout and reuses the package,
+source, image and input builders. It checks installer/source agreement before
+image builds and writes `local-candidate.json` with `authenticated: false`.
+Add `--ubuntu-dependencies /path/to/iris-ubuntu-dependencies.tar.gz` for a prepared
+Ubuntu dependency archive. Use a new output directory within a protected parent.
+
+Before publication, review corresponding source and notices for every shipped
+component, including Ubuntu packages, and confirm redistribution permission.
+Cisco's licensed ioxclient remains separately supplied. Candidate checks do not
+create release attestations or satisfy these publication and topology gates.
+
+## Bootstrap the installer offline
+
+This developer route needs an authenticated `ubuntu-dependencies` kit and its
+matching `.deb`. Start with Ubuntu 24.04 amd64 server, Python 3.12, apt,
+dpkg/dpkg-deb, gpgv and Ubuntu's archive keyring. Independently provision and trust
+the loader, root-owned GitHub CLI and trusted-root file before running anything
+from the kit. A minimal image without Python needs a separately prepared baseline.
+
+Preview the prerequisite plan using a new bootstrap state path:
+
+```bash
+sudo /usr/bin/python3 -I /path/to/trusted/bootstrap-offline.py \
+  --deb '/path/to/kit/iris-installer_<version>_amd64.deb' --release-kit /path/to/kit \
+  --release-tag 'v<version>' --release-commit '<full-commit>' \
+  --release-verifier /usr/bin/gh --release-trusted-root /path/to/independent-root.json \
+  --state-dir /var/lib/iris-offline-bootstrap
+```
+
+Review the plan, then repeat with `--accept-changes`. The loader authenticates
+the private package before importing its controller. The controller records the
+accepted Python, age, CA-certificate and SSH-client dependency plan before applying
+it, then installs the exact local `.deb`. Unrecorded installer packages and unknown
+destination files are refused. Dependencies never fall back to network downloads.
+
+Resume with the original inputs, `--accept-changes` and the same state path.
+Keep bootstrap and deployment journals separate. Missing receipts, partial package
+changes and altered files stop for inspection; preserve that evidence. Deployment
+authentication, approvals and public-kit qualification remain separate requirements.
 
 ## Delivery and qualification contract
 
-Production is the design target. Release qualification covers
-single/split Docker and single-/multi-node Kubernetes, prebuilt and managed
-source-build paths, both device architectures, custody/signing activation,
-resumable operations, upgrades, renewal, backup/restore and failure recovery.
-The server remains single-replica; multi-node scheduling is not multi-writer HA.
-Optional demo mode cannot satisfy production acceptance gates.
+Qualify single/split Docker and single-/multi-node Kubernetes, source and prebuilt
+inputs, both device architectures, signing, resume, upgrades, renewal, backup/restore
+and failure recovery. The server remains single-replica. Multi-node scheduling
+and optional demo mode alone do not satisfy high-availability or production acceptance.
 
-The authenticated release workflow publishes the reviewed source and installer.
-Installation resumes from its protected journal after offline approval; the
-managed worker performs backup, credential maintenance and approved restore.
-Existing crypto operations remain the authority; builders receive public roots
-only. Publication requires passing tests and recorded live topology and device
+Builders receive public roots only. Existing crypto approvals remain authoritative.
+Publication requires passing tests and recorded live topology and device
 qualification, not just a successful package build.
 
 ## Tests
@@ -266,10 +294,7 @@ python3 -m pytest server/tests/test_installer_runtime.py -q
 bats server/tests/test_package_freshness.bats device/iox/tests/test_stage_iox_package.bats
 ```
 
-The ordinary suite stubs transports and checks real fixture bytes. For the
-opt-in Docker permission regression, set `IRIS_INSTALLER_DOCKER_TEST_IMAGE` to
-an existing, trusted server image's immutable `sha256:` image ID. It starts one
-isolated container, exposes no ports, mounts only disposable test fixtures,
-tests real service-user EACCES and removes its container afterward. It does not
-contact inventory devices or an existing IRIS deployment. Docker transport
-evidence does not qualify Kubernetes; record its live tests separately.
+Ordinary tests stub transports and check fixture bytes. The optional Docker
+permission test uses `IRIS_INSTALLER_DOCKER_TEST_IMAGE`, an existing trusted image's
+immutable `sha256:` ID. Its temporary container exposes no ports and uses disposable
+fixtures; inventory devices and existing deployments remain untouched.

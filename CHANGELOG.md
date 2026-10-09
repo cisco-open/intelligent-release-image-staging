@@ -17,6 +17,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add an offline installer bootstrap for the supported Ubuntu server baseline.
+  Authenticate the package before importing its controller, record its accepted
+  prerequisite plan, and preserve exact package evidence for interrupted recovery.
+
+- Assemble local release candidates from an exact reviewed commit, with matching
+  installer/source inventories and isolated output. Keep publisher authentication,
+  corresponding-source notices and redistribution approval as separate release gates.
+
 - Add authenticated prebuilt inputs for the installer, with explicit release
   selection, offline verification and pinned local packaging tools. Preserve
   the selected input mode on resume and check saved package bytes before reuse.
