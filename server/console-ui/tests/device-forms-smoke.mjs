@@ -33,6 +33,7 @@ try {
         writes.push({url: url.pathname, method: request.method(), body});
         if (mode === 'hold') { held = route; heldResolve(); return; }
         if (mode === 'refused') return route.fulfill({status: 409, json: {error: 'fixture-only-password', detail: 'Do not echo this secret'}});
+        if (mode === 'unavailable') return route.fulfill({status: 503, json: {code: 'management-api-unavailable'}});
         if (mode === 'lost') return route.abort('failed');
         if (mode === 'malformed') return route.fulfill({json: {}});
         if (url.pathname === '/api/v1/devices') { device = {...body, assigned_image_ids: []}; return route.fulfill({json: {device}}); }
@@ -125,6 +126,26 @@ try {
   assert.doesNotMatch(await page.locator('#cf-err').innerText(), /fixture-only-password|Do not echo/);
   mode = 'malformed'; await credentialSave(); await outcome('cf-err', /outcome is unknown/);
   assert.equal(await page.locator('#cf-pass').inputValue(), ''); assert.equal(await page.locator('#cf-name').inputValue(), 'Operators updated');
+  await page.waitForFunction(() => !window.irisDeviceForms.state.credentialsLoading);
+  assert.equal(await page.locator('#cred-form button[type="submit"]').isDisabled(), true);
+  assert.equal(await page.locator('#cf-refresh').evaluate(el => el === document.activeElement), true);
+  const unknownCount = writes.length;
+  await page.locator('#cf-close').click(); await page.locator('#manage-creds').click();
+  await page.waitForFunction(() => !window.irisDeviceForms.state.credentialsLoading);
+  assert.equal(await page.locator('#cred-form button[type="submit"]').isDisabled(), true);
+  unavailable = true; await page.locator('#cf-refresh').click();
+  await page.waitForFunction(() => !window.irisDeviceForms.state.credentialsLoading);
+  assert.equal(await page.locator('#cred-form button[type="submit"]').isDisabled(), true);
+  assert.equal(writes.length, unknownCount);
+  unavailable = false; await page.locator('#cf-refresh').click();
+  await page.waitForFunction(() => !window.irisDeviceForms.state.credentialReviewRequired);
+  await fillPasswords(); await page.locator('#cf-en').fill('fixture-only-enable');
+  mode = 'unavailable'; await credentialSave(); await outcome('cf-err', /outcome is unknown/);
+  await page.waitForFunction(() => !window.irisDeviceForms.state.credentialsLoading);
+  for (const id of ['cf-pass', 'cf-pass2', 'cf-en']) assert.equal(await page.locator('#' + id).inputValue(), '');
+  assert.equal(await page.locator('#cred-form button[type="submit"]').isDisabled(), true);
+  assert.equal(await page.getByRole('button', {name: 'Delete operator', exact: true}).isDisabled(), true);
+  await page.locator('#cf-refresh').click(); await page.waitForFunction(() => !window.irisDeviceForms.state.credentialReviewRequired);
   await fillPasswords(); mode = 'ok'; await credentialSave(); await outcome('cf-err', /Profile operator saved/);
   assert.equal(await page.locator('#cf-pass').inputValue(), ''); assert.equal(await page.locator('#cf-id').inputValue(), '');
   assert.deepEqual(writes.at(-1).body, {id: 'operator', name: 'Operators updated', device_user: '<script>evil()</script>', device_pass: 'fixture-only-password', enable_secret: ''});

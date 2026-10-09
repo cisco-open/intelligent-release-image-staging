@@ -12,7 +12,7 @@ function Field({id, label, children, hidden = false}) {
 }
 function DeviceForms({controller}) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot), form = state.device, cred = state.credential;
-  const idInput = useRef(null), profileInput = useRef(null), passwordInput = useRef(null);
+  const idInput = useRef(null), profileInput = useRef(null), passwordInput = useRef(null), refreshProfiles = useRef(null);
   const wasDeviceOpen = useRef(false);
   useEffect(() => {
     if (state.deviceOpen) idInput.current?.focus();
@@ -22,7 +22,13 @@ function DeviceForms({controller}) {
       && (document.activeElement === document.body || document.getElementById('dev-form')?.contains(document.activeElement))) document.getElementById('add-dev')?.focus();
     wasDeviceOpen.current = state.deviceOpen;
   }, [controller, state.deviceOpen]);
-  useEffect(() => { if (state.credentialsOpen) profileInput.current?.focus(); }, [state.credentialsOpen]);
+  useEffect(() => {
+    if (state.credentialsOpen) (state.credentialReviewRequired ? refreshProfiles : profileInput).current?.focus();
+  }, [state.credentialsOpen, state.credentialReviewRequired]);
+  useEffect(() => {
+    if (state.credentialsOpen && state.credentialReviewRequired && !state.credentialBusy && !state.credentialsLoading &&
+      (document.activeElement === document.body || document.activeElement?.disabled)) refreshProfiles.current?.focus();
+  }, [state.credentialsOpen, state.credentialReviewRequired, state.credentialBusy, state.credentialsLoading]);
   const closeDevice = () => { controller.closeDevice(); document.getElementById('add-dev')?.focus(); };
   const closeCredentials = () => { controller.closeCredentials(); document.getElementById('manage-creds')?.focus(); };
   const network = networkFields(form.management);
@@ -31,7 +37,7 @@ function DeviceForms({controller}) {
   </Field>;
   const profileInputField = (key, id, label, placeholder, type = 'text', ref) => <Field id={id} label={label}>
     <input ref={ref} id={id} type={type} value={cred[key]} placeholder={placeholder} autoComplete={type === 'password' ? 'new-password' : undefined}
-      readOnly={key === 'id' && state.editing} disabled={state.credentialBusy} onChange={event => controller.setCredential(key, event.target.value)} />
+      readOnly={key === 'id' && state.editing} disabled={state.credentialBusy || state.credentialReviewRequired} onChange={event => controller.setCredential(key, event.target.value)} />
   </Field>;
   return <>
     <form className="inline-form" id="dev-form" hidden={!state.deviceOpen} aria-label="Add device"
@@ -73,14 +79,14 @@ function DeviceForms({controller}) {
         <table className="tbl"><thead><tr><th>Profile id</th><th>Name</th><th>Device username</th><th>Actions</th></tr></thead>
           <tbody id="cred-rows">{state.profiles.map(profile => <tr key={profile.id} data-id={profile.id}>
             <td className="machine"><b>{profile.id}</b></td><td>{profile.name}</td><td>{profile.device_user}</td><td>
-              <button type="button" className="linkish cred-edit" disabled={state.credentialBusy || !state.credentialsOk} aria-label={`Edit ${profile.id}`}
+              <button type="button" className="linkish cred-edit" disabled={state.credentialBusy || state.credentialReviewRequired || !state.credentialsOk} aria-label={`Edit ${profile.id}`}
                 onClick={() => { controller.editCredential(profile.id); passwordInput.current?.focus(); }}>Edit</button>{' · '}
-              <button type="button" className="linkish cred-del" disabled={state.credentialBusy || !state.credentialsOk} aria-label={`Delete ${profile.id}`}
+              <button type="button" className="linkish cred-del" disabled={state.credentialBusy || state.credentialReviewRequired || !state.credentialsOk} aria-label={`Delete ${profile.id}`}
                 onClick={() => controller.deleteCredential(profile.id)}>Delete</button></td></tr>)}
             {!state.profiles.length && <tr><td colSpan={4} className="muted">{state.credentialsLoading ? 'Loading profiles…' : state.credentialsOk ? 'No credential profiles yet.' : 'Credential profiles unavailable.'}</td></tr>}
           </tbody></table></div>
       {!state.credentialsOk && state.profiles.length > 0 && <p className="err" role="status">Credential profiles unavailable. Showing the last successful read.</p>}
-      <button className="btn ghost" type="button" id="cf-refresh" disabled={state.credentialBusy || state.credentialsLoading} onClick={() => controller.refreshCredentials()}>Refresh profiles</button>
+      <button className="btn ghost" type="button" id="cf-refresh" ref={refreshProfiles} disabled={state.credentialBusy || state.credentialsLoading} onClick={() => controller.refreshCredentials(true)}>Refresh profiles</button>
       <form id="cred-form" aria-label="Credential profile" onSubmit={event => { event.preventDefault(); controller.saveCredential(); }}>
         {profileInputField('id', 'cf-id', 'Profile id', 'e.g. lab-switches', 'text', profileInput)}
         {profileInputField('name', 'cf-name', 'Display name', 'e.g. Lab switches')}
@@ -88,8 +94,8 @@ function DeviceForms({controller}) {
         {profileInputField('password', 'cf-pass', 'Device password', 'Device password', 'password', passwordInput)}
         {profileInputField('confirm', 'cf-pass2', 'Confirm password', 'Confirm password', 'password')}
         {profileInputField('enable', 'cf-en', 'Enable secret', 'Blank = same as password', 'password')}
-        <div className="form-actions"><button className="btn" type="submit" disabled={state.credentialBusy}>Save profile</button>
-          <button className="btn ghost" type="button" id="cf-reset" disabled={state.credentialBusy} onClick={() => { controller.newCredential(); profileInput.current?.focus(); }}>New</button>
+        <div className="form-actions"><button className="btn" type="submit" disabled={state.credentialBusy || state.credentialReviewRequired}>Save profile</button>
+          <button className="btn ghost" type="button" id="cf-reset" disabled={state.credentialBusy || state.credentialReviewRequired} onClick={() => { controller.newCredential(); profileInput.current?.focus(); }}>New</button>
           <button className="btn ghost" type="button" id="cf-close" onClick={closeCredentials}>Close</button></div>
         <span className={state.credentialFailed ? 'err' : state.credentialBusy || state.editing ? 'form-help muted' : 'err ok'} id="cf-err" role="alert">{state.credentialMessage}</span>
       </form>

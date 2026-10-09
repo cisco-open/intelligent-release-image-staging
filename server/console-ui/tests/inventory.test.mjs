@@ -278,11 +278,21 @@ test('quarantine uses a reviewed confirmation, CSRF and exact current revision p
   services.confirm = () => false; await controller.edit('constructor', 'quarantine', false); assert.equal(writes.length, 1);
 });
 
-for (const outcome of ['lost', 'malformed', 'refused']) test(`an inline ${outcome} result never retries or claims success`, async t => {
+for (const outcome of ['lost', 'malformed', 'refused', 500, 503]) test(`an inline ${outcome} result never retries or claims success`, async t => {
   const {controller, services, outcomes} = await fixture(t); let writes = 0;
-  services.post = async () => { writes++; if (outcome === 'lost') throw new Error('lost'); return response(outcome === 'refused' ? {error: 'not allowed'} : {}, outcome === 'refused' ? 409 : 200); };
+  services.post = async () => { writes++; if (outcome === 'lost') throw new Error('lost'); return response(outcome === 'refused' ? {error: 'not allowed'} : {}, outcome === 'refused' ? 409 : typeof outcome === 'number' ? outcome : 200); };
   await controller.edit('a', 'platform', 'iox'); assert.equal(writes, 1);
   assert.equal(outcomes.at(-1)[1], true); assert.match(outcomes.at(-1)[0], outcome === 'refused' ? /refused.*not allowed/ : /outcome is unknown/);
+});
+test('forwarded quarantine 503 remains an unknown intent without another PUT', async t => {
+  const {controller, services, outcomes} = await fixture(t), original = services.fetch; let writes = 0;
+  services.fetch = async (url, options) => {
+    if (options.method !== 'PUT') return original(url, options);
+    writes++; return response({code: 'management-api-unavailable'}, 503);
+  };
+  await controller.edit('a', 'quarantine', true);
+  assert.equal(writes, 1); assert.match(outcomes.at(-1)[0], /outcome is unknown/);
+  assert.equal(controller.snapshot().rowBusy.size, 0);
 });
 
 test('navigation during a write records the result without starting a hidden-route policy read', async t => {

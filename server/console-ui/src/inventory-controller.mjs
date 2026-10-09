@@ -205,6 +205,7 @@ export class InventoryController {
         body: JSON.stringify({quarantined: value, if_revision: policy.revision})})
         : await this.services.post('/api/v1/devices/' + encodeURIComponent(id) + '/' + kind,
           kind === 'credential' ? {credential_profile_id: value} : {platform: value});
+      if (response.status >= 500) throw new Error('Unknown result');
       const body = await response.json();
       if (!response.ok) this.report(`${label} update refused for ${id}: ${body?.error || body?.title || response.status}.`, true);
       else if (body?.ok !== true || (kind === 'quarantine' && (body.quarantined !== value || !Number.isSafeInteger(body.revision)))) {

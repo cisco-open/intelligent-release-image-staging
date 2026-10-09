@@ -108,10 +108,10 @@ test('device save exact body and single lock survive close/reopen, hide avoids i
   assert.equal(c.state.deviceOpen, true); assert.equal(c.state.device.id, ' edge '); assert.equal(c.state.deviceBusy, false);
   assert.equal(refreshes(), 0); assert.match(reports[0][0], /saved/);
 });
-for (const mode of ['refused', 'lost', 'malformed', 'wrong-id']) test(`device save ${mode} keeps draft and never retries`, async () => {
+for (const mode of ['refused', 'lost', 'malformed', 'wrong-id', 500, 503]) test(`device save ${mode} keeps draft and never retries`, async () => {
   const {controller: c} = fixture(); await device(c); let calls = 0;
   c.services.post = async () => { calls++; if (mode === 'lost') throw Error('gone');
-    return response(mode === 'refused' ? {error: 'review model'} : mode === 'wrong-id' ? {device: {device_id: 'other'}} : {}, mode === 'refused' ? 422 : 200); };
+    return response(mode === 'refused' ? {error: 'review model'} : mode === 'wrong-id' ? {device: {device_id: 'other'}} : {}, mode === 'refused' ? 422 : typeof mode === 'number' ? mode : 200); };
   await c.saveDevice(); assert.equal(calls, 1); assert.equal(c.state.deviceOpen, true); assert.equal(c.state.deviceFailed, true);
   assert.match(c.state.deviceMessage, mode === 'refused' ? /refused.*review model/ : /outcome is unknown/);
 });
@@ -162,27 +162,79 @@ test('save credentials verifies identity, clears secrets and refreshes choices a
   assert.deepEqual(c.state.credential, emptyCredential()); assert.equal(c.state.credentialsOk, true); assert.equal(refreshes(), 1);
   assert.match(c.state.credentialMessage, /saved/);
 });
-for (const mode of ['refused', 'lost', 'malformed', 'wrong-id']) test(`credential save ${mode}: never replay or echo secrets`, async () => {
+for (const mode of ['refused', 'lost', 'malformed', 'wrong-id', 500, 503]) test(`credential save ${mode}: never replay or echo secrets`, async () => {
   const {controller: c, reports} = fixture(); await credential(c); let writes = 0;
   c.services.post = async () => { writes++; if (mode === 'lost') throw Error(' secret ');
-    return response(mode === 'refused' ? {error: ' secret ', detail: ' enable '} : mode === 'wrong-id' ? {profile: {id: 'wrong'}} : {}, mode === 'refused' ? 422 : 200); };
+    return response(mode === 'refused' ? {error: ' secret ', detail: ' enable '} : mode === 'wrong-id' ? {profile: {id: 'wrong'}} : {}, mode === 'refused' ? 422 : typeof mode === 'number' ? mode : 200); };
   await c.saveCredential(); assert.equal(writes, 1); assert.equal(c.state.credentialFailed, true);
   assert.doesNotMatch(c.state.credentialMessage + JSON.stringify(reports), / secret | enable /);
   assert.equal(c.state.credential.password, mode === 'refused' ? ' secret ' : '');
+  assert.equal(c.state.credential.confirm, mode === 'refused' ? ' secret ' : '');
+  assert.equal(c.state.credential.enable, mode === 'refused' ? ' enable ' : '');
+  assert.equal(c.state.credentialReviewRequired, mode !== 'refused');
   assert.match(c.state.credentialMessage, mode === 'refused' ? /refused.*422/ : /outcome is unknown/);
 });
-for (const result of [true, false, 'refused', 'lost', 'malformed']) test(`credential delete result ${result}`, async () => {
+for (const result of [true, false, 'refused', 'lost', 'malformed', 500, 503]) test(`credential delete result ${result}`, async () => {
   const {controller: c, reports} = fixture(); await credential(c); let confirmed = false; const writes = [];
   c.services.confirm = () => confirmed; await c.deleteCredential('operator'); assert.equal(writes.length, 0);
   confirmed = true;
   c.services.fetch = async (path, options) => {
     if (options?.method !== 'DELETE') return response({profiles: [profile]});
     writes.push({path, options}); if (result === 'lost') throw Error('gone');
-    return response(typeof result === 'boolean' ? {deleted: result} : {}, result === 'refused' ? 409 : 200);
+    return response(typeof result === 'boolean' ? {deleted: result} : {}, result === 'refused' ? 409 : typeof result === 'number' ? result : 200);
   };
   await c.deleteCredential('operator'); assert.equal(writes.length, 1);
   assert.equal(writes[0].path, '/api/v1/credentials/operator'); assert.deepEqual(writes[0].options.headers, {'X-CSRF-Token': 'fixture'});
   assert.match(reports.at(-1)[0], result === true ? /deleted/ : result === false ? /already absent/ : result === 'refused' ? /refused/ : /unknown/);
+});
+test('unknown profile write requires explicit current review, not polling or reopening', async () => {
+  const {controller: c} = fixture(); await credential(c); let writes = 0;
+  c.services.post = async () => {writes++; return response({}, 503);};
+  await c.saveCredential(); assert.equal(writes, 1);
+  assert.equal(c.state.credentialsOk, true, 'Automatic public read succeeds but cannot waive review');
+  await c.refreshCredentials(); c.closeCredentials(); await c.toggleCredentials();
+  c.setCredential('password', 'new secret'); c.newCredential(); c.editCredential('operator');
+  await c.saveCredential(); await c.deleteCredential('operator');
+  assert.equal(writes, 1); assert.equal(c.state.credential.password, '');
+  assert.equal(c.state.credentialReviewRequired, true);
+  assert.equal(await c.refreshCredentials(true), true);
+  assert.equal(c.state.credentialReviewRequired, false);
+  assert.match(c.state.credentialMessage, /Current profiles loaded/);
+  c.setCredential('password', 'new secret'); c.setCredential('confirm', 'new secret');
+  c.services.post = async () => {writes++; return response({profile: {id: 'operator'}});};
+  await c.saveCredential(); assert.equal(writes, 2);
+});
+for (const failure of ['http', 202, 206, 'malformed', 'network', 'superseded', 'close', 'hide']) test(`profile review ${failure} cannot clear uncertain-write guard`, async () => {
+  const {controller: c} = fixture(); await credential(c);
+  c.services.post = async () => response({}, 503); await c.saveCredential();
+  const gate = deferred();
+  c.services.fetch = async () => {
+    if (failure === 'network') throw Error('unavailable');
+    if (failure === 'http') return response({}, 503);
+    if (typeof failure === 'number') return response({profiles: [profile]}, failure);
+    if (failure === 'malformed') return response({profiles: [{id: ''}]});
+    return {ok: true, status: 200, json: () => gate.promise};
+  };
+  const reviewing = c.refreshCredentials(true); await Promise.resolve();
+  if (failure === 'superseded') c.beginCredentialRead();
+  if (failure === 'close') c.closeCredentials();
+  if (failure === 'hide') c.hide();
+  gate.resolve({profiles: [profile]}); await reviewing;
+  assert.equal(c.state.credentialReviewRequired, true);
+  assert.equal(c.state.credential.password, '');
+});
+for (const result of ['lost', 503]) test(`late unknown profile ${result} explains the global review guard after reopen`, async () => {
+  const {controller: c} = fixture(); await credential(c); const gate = deferred(); let writes = 0;
+  c.services.post = async () => { writes++; return gate.promise; };
+  const save = c.saveCredential(); c.closeCredentials(); await c.toggleCredentials();
+  if (result === 'lost') gate.reject(Error('lost acknowledgement'));
+  else gate.resolve(response({}, result));
+  await save;
+  assert.equal(c.state.credentialsOpen, true); assert.equal(c.state.credentialBusy, false);
+  assert.equal(c.state.credentialReviewRequired, true); assert.equal(c.state.credentialFailed, true);
+  assert.match(c.state.credentialMessage, /outcome is unknown.*Refresh profiles/);
+  for (const key of ['password', 'confirm', 'enable']) assert.equal(c.state.credential[key], '');
+  await c.saveCredential(); assert.equal(writes, 1);
 });
 test('close/hide wipe secrets; write lock survives reopen and completion cannot erase a new form', async () => {
   const {controller: c, refreshes} = fixture(); await credential(c); const gate = deferred(); let calls = 0;
