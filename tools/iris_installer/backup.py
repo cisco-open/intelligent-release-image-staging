@@ -52,11 +52,17 @@ def initialize(journal, installation):
     return key
 
 
-def capture_plan(installation):
+def capture_plan(installation, *, allow_missing_prebuilt=False):
     from .restore import guard
     guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None))
     hook = getattr(installation, 'capture_plan', None)
-    return hook() if hook is not None else docker_capture_plan(installation)
+    sources, volumes, containers = hook() if hook is not None else docker_capture_plan(installation)
+    from .prebuilt_backup import capture_sources
+    caches = capture_sources(installation, allow_missing=allow_missing_prebuilt)
+    if set(caches) & sources.keys():
+        raise InstallError('Backup cache component conflicts with the deployment topology')
+    sources.update(caches)
+    return sources, volumes, containers
 
 
 def docker_capture_plan(installation, *, services=('console', 'iris')):

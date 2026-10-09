@@ -459,7 +459,7 @@ def transaction(tmp_path, monkeypatch, request):
         install.journal = journal
         return install
     monkeypatch.setattr(restore.backup, '_installation', installation)
-    monkeypatch.setattr(restore.backup, 'capture_plan', lambda _: (sources, volumes, []))
+    monkeypatch.setattr(restore.backup, 'capture_plan', lambda _, **kwargs: (sources, volumes, []))
     monkeypatch.setattr(restore, '_pin_runtime', lambda _: None)
     monkeypatch.setattr(restore, '_fence', lambda *args: calls.append('fenced'))
     monkeypatch.setattr(restore, '_producer_proof', lambda _: {'signing_authority': 'verified'})

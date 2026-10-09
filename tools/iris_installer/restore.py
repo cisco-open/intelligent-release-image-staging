@@ -24,7 +24,7 @@ import sys
 import time
 import uuid
 
-from . import backup, backup_archive, restore_storage as storage, restore_topology
+from . import backup, backup_archive, prebuilt_backup, restore_storage as storage, restore_topology
 from .credential_maintenance import _consumer_proof, _memory, _pin_runtime, _stop
 from .state import InstallError, Journal, atomic_write, regular_bytes
 
@@ -509,7 +509,7 @@ def _fence(install, containers, recovery):
     # Re-resolve resource ownership and every foreign writable Docker mount.
     # Kubernetes assert_writers_stopped checks PVC consumers and object UIDs.
     if install.config['target'] != 'kubernetes':
-        backup.capture_plan(install)
+        backup.capture_plan(install, allow_missing_prebuilt=True)
 
 
 def _start(install):
@@ -595,7 +595,9 @@ class Transaction:
             guard(self.base, operation_id=self.id if self.record is not None else None,
                   instance_id=journal.document['id'])
             install.restore_operation_id = self.id
-            sources, volumes, containers = backup.capture_plan(install)
+            sources, volumes, containers = backup.capture_plan(install, allow_missing_prebuilt=True)
+            if self.record is not None and self.record.get('plan'):
+                prebuilt_backup.assert_restore_authority(install, self.record.get('prebuilt_cache_authority'))
             # Both authenticated sets and topology are checked before downtime.
             data = backup_archive.read(self.backups / self.backup_id, self.identity, self.signer)
             keys = backup_archive.read(self.recoveries / self.backup_id, self.identity, self.signer)
@@ -654,7 +656,9 @@ class Transaction:
                     self.record['mutations_admitted'] = True
                     self.save('publishing')
                     for item in self.record['plan']:
-                        if item.get('pvc'):
+                        if item.get('prebuilt_cache'):
+                            prebuilt_backup.publish_missing(install, item, self.record['prebuilt_cache_authority'], self.id)
+                        elif item.get('pvc'):
                             restore_topology.publish(install, self.id, item['pvc'], item['before'], item['after'])
                         else:
                             storage.publish(item['target'], item['staged'], item['retained'], item['before'], item['after'])
@@ -715,6 +719,8 @@ class Transaction:
             for field in ('config', 'source_manifest', 'root_digests'):
                 if archived_journal.get(field) != current.get(field):
                     raise InstallError('Deployment or trust inputs changed since this backup')
+            cache_authority, cache_plan = prebuilt_backup.prepare_restore(
+                install, extracted, archived_journal, self.id, lambda name: _records(extracted, name))
             for name in ('deployment', 'environment', 'source', 'roots'):
                 if not _same_tree(sources[name], extracted / name):
                     raise InstallError('Restore requires the same deployment and source generation')
@@ -739,7 +745,7 @@ class Transaction:
             state_authority(sources['volume-iris-state'], extracted / 'volume-iris-state')
             proof = replay_overlay(sources['volume-iris-state'], extracted / 'volume-iris-state')
             proof.update(authority)
-            plan = []
+            plan = list(cache_plan)
             components = [name for name in sources if name.startswith('volume-') or name in ('images', 'artifacts')]
             if generated_ca:
                 # This public projection is regenerated from the unchanged
@@ -768,7 +774,7 @@ class Transaction:
                         raise InstallError('Insufficient space for restore candidate and retained original')
                     storage.candidate(source, staged, records)
                     plan.append(dict(target=str(live), staged=str(staged), retained=str(retained), before=before, after=after))
-            self.record.update(plan=plan, security_proof=proof)
+            self.record.update(plan=plan, security_proof=proof, prebuilt_cache_authority=cache_authority)
             self.save('staged')
 
 
