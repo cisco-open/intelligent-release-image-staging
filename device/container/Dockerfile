@@ -62,13 +62,25 @@ COPY agent/*.py /opt/iris/agent/
 # execs it directly -- execlp, no shell -- so it needs the exec bit below.
 COPY agent/peer-transfer-hook.sh /opt/iris/agent/peer-transfer-hook.sh
 COPY agent/VERSION /opt/iris/agent/VERSION
+# Release-kit builds use empty COPY inputs and remove them below; ordinary
+# builds still require two rendered trust files. Never ship a neutral image
+# with an active/example root. Finalization adds reviewed trust offline.
+ARG IRIS_NEUTRAL_TRUST=0
 COPY agent/iris-signers.allowed_signers /opt/iris/agent/iris-signers.allowed_signers
 COPY agent/iris-root.allowed_signers /opt/iris/agent/iris-root.allowed_signers
 COPY entrypoint.sh /entrypoint.sh
 COPY reconcile.sh /reconcile.sh
-RUN chmod +x /entrypoint.sh /opt/iris/bin/aria2c /opt/iris/agent/peer-transfer-hook.sh \
-    && chmod 0444 /reconcile.sh /opt/iris/agent/iris-signers.allowed_signers \
-        /opt/iris/agent/iris-root.allowed_signers
+RUN case "$IRIS_NEUTRAL_TRUST" in \
+      0) test -s /opt/iris/agent/iris-signers.allowed_signers \
+         && test -s /opt/iris/agent/iris-root.allowed_signers \
+         && chmod 0444 /opt/iris/agent/iris-signers.allowed_signers /opt/iris/agent/iris-root.allowed_signers ;; \
+      1) test ! -s /opt/iris/agent/iris-signers.allowed_signers \
+         && test ! -s /opt/iris/agent/iris-root.allowed_signers \
+         && rm /opt/iris/agent/iris-signers.allowed_signers /opt/iris/agent/iris-root.allowed_signers ;; \
+      *) exit 1 ;; \
+    esac \
+    && chmod +x /entrypoint.sh /opt/iris/bin/aria2c /opt/iris/agent/peer-transfer-hook.sh \
+    && chmod 0444 /reconcile.sh
 
 # CAF on IOS-XE can mount a multi-layer archive in an order different from
 # manifest.json, restoring overwritten libraries and deleted installer files.
