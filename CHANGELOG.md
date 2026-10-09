@@ -17,6 +17,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify Policies around device sharing, saved distribution permissions and
+  confirmed blocking. Describe approval withdrawal without presenting diagnostic
+  counts as new blocks.
+
+- Explain what each certificate protects and what to do next in Settings.
+  Separate certificate renewal from signing key replacement, simplify approval
+  steps, and update the administration guides to match.
+
+- Treat lost replies and server errors during device or credential changes as
+  uncertain outcomes. Clear submitted secrets and require an explicit, successful
+  profile refresh before another credential change.
+
 - Keep current distribution-access approvals and shared-address safety history
   when restoring an older deployment backup. Preserve uncertain apply attempts,
   refuse missing or conflicting authority, and require fresh application proof
