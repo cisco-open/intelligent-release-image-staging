@@ -36,7 +36,7 @@ export function signingHealth(state) {
 export function signerGuidance(state) {
   return lookup({idle: ['No replacement in progress', 'For routine certificate expiry, use renewal above. To change the key, prepare a replacement.'],
     'awaiting-approval': ['Waiting for a root key holder', 'Download the replacement public key and obtain its signed certificate. The current key remains active.'],
-    committing: ['Key switch needs review', 'Publication was interrupted. Refresh the request and check signing diagnostics before continuing.'],
+    committing: ['Key switch needs review', 'Publication is incomplete. Refresh the request and check signing diagnostics before continuing.'],
     'retirement-pending': ['New key active; old key retirement needed', 'Download a retirement request. The selected root key holder must approve revoking the old key.'],
     retiring: ['Old key retirement needs review', 'Refresh the request. Re-submit the matching approval only after checking the current revocation list.'],
     completed: ['Replacement published', 'The old key revocation is published. Verify fresh signed instructions and the updated revocation list on your devices.'],

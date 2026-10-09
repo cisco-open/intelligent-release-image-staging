@@ -10179,7 +10179,7 @@ def test_settings_forms_are_wrapped_in_bounded_card_sections():
             "%s must have an open card ancestor" % heading
     component = _react_shell("settings.jsx")
     assert '<div className="card" data-iv-action="schedule"><h3>Schedule</h3>' in _react_shell('image-verification.jsx')
-    for group, heading in (("peer", "Peer transfer TLS"), ("cert", "Console certificate"),
+    for group, heading in (("peer", "Peer transfer TLS"), ("cert", "Console browser certificate"),
                            ("trust", "Trusted certificate authorities"), ("ca", "Public CA bundle"),
                            ("ae", "Audit export")):
         assert ('data-setting="%s"><h3>%s</h3>' % (group, heading)) in component
