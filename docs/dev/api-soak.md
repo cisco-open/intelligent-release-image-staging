@@ -9,8 +9,15 @@ SPDX-License-Identifier: Apache-2.0
 `tools/api-soak.py` measures a mixed HTTP workload on a new, disposable local
 Docker deployment. It complements the short [API exercise](api-exercise.md)
 and the per-operation scaling tests. A short fixture run is not a capacity
-qualification. Reserve a quiet measurement window before running the default
-38-minute workload and its restart and admission checks.
+qualification. Reserve a measurement window before running the default
+38-minute workload and its restart and admission checks. Finish image and
+package builds before starting. Keep competing activity quiet or explicitly
+bounded, and record its timing, resource limits and transferred bytes.
+
+A run with bounded concurrent device testing qualifies that shared-host
+workload. The same absolute latency, correctness and resource limits apply;
+competing work does not excuse a failed check. Such a run is not a clean
+before-and-after performance comparison with a quiet baseline.
 
 ## Isolation and resources
 
