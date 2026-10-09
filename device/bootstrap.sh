@@ -451,6 +451,7 @@ ROOT_FILES = (
     "aria2c", "bootstrap.sh", "guestshell-start.sh", "rotate-logs.sh",
     "iris-signers.allowed_signers", "iris-root.allowed_signers",
 )
+PUBLIC_TRUST_FILES = ("iris-signers.allowed_signers", "iris-root.allowed_signers")
 ARCHIVE_FILES = tuple("agent/" + name for name in AGENT_FILES) + ROOT_FILES
 TOP_LEVEL = (
     "agent", "aria2c", "bootstrap.sh", "guestshell-start.sh",
@@ -898,6 +899,15 @@ def inspect_and_extract(bundle_path, digest_path, new_dir):
                         copied = 0
                         try:
                             with os.fdopen(out_fd, "wb") as target:
+                                # These two files contain public keys only.
+                                # Native IOS more/verify/copy can remap a guest
+                                # file's owner to nobody while retaining its
+                                # mode. Keep verified public trust readable,
+                                # without granting anyone else write access.
+                                # Apply only to this new exclusive descriptor;
+                                # never repair an unexpected live trust file.
+                                if name in PUBLIC_TRUST_FILES:
+                                    os.fchmod(target.fileno(), 0o644)
                                 while True:
                                     chunk = source.read(1024 * 1024)
                                     if not chunk:
@@ -1205,11 +1215,11 @@ def install(stage, bundle_path, digest_path, signer_path):
         # Put every dependency in place before the executable agent entrypoint.
         for name in ROOT_FILES:
             os.replace(os.path.join(new_dir, name), os.path.join(stage, name))
-        # Guest-share mounts can change ownership during promotion. Bootstrap
+        # Guest-share mounts can remap ownership after native IOS access. Bootstrap
         # and the agent run as the same guest user: test actual read access at
         # the final paths before publishing the new agent entrypoint. Never
         # chmod/chown around a trust failure; roll back the entire transaction.
-        for name in ("iris-root.allowed_signers", "iris-signers.allowed_signers"):
+        for name in PUBLIC_TRUST_FILES:
             try:
                 stream, identity = open_regular(os.path.join(stage, name), 65536)
                 with stream:

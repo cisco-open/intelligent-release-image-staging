@@ -757,6 +757,110 @@ PYTHON
   done
 }
 
+assert_public_trust_modes() {
+  local mask="$1"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash -c 'umask "$1"; exec bash "$2"' _ "$mask" "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/new-agent-invoked" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  python3 - "$STAGE" <<'PYTHON'
+import os
+import stat
+import sys
+
+stage = sys.argv[1]
+public = ("iris-root.allowed_signers", "iris-signers.allowed_signers")
+for name in public:
+    path = os.path.join(stage, name)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644, name
+    with open(path) as stream:
+        assert stream.read() == "fixture:" + name + "\n"
+for name in ("agent/iris_agent.py", "agent/instr.py"):
+    assert stat.S_IMODE(os.stat(os.path.join(stage, name)).st_mode) == 0o600
+for name in ("agent", "aria2c", "agent/ssh-keygen", "guestshell-start.sh"):
+    assert stat.S_IMODE(os.stat(os.path.join(stage, name)).st_mode) == 0o700
+PYTHON
+}
+
+@test "new public trust is read-only to others under restrictive umask 077" {
+  assert_public_trust_modes 077
+}
+
+@test "new public trust has exact safe modes under umask 022" {
+  assert_public_trust_modes 022
+}
+
+@test "native owner remapping cannot make newly promoted public trust unreadable" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  hook="$TMP/trust-owner-remap-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_replace = os.replace
+_open = os.open
+_remapped = set()
+_trust = ("iris-root.allowed_signers", "iris-signers.allowed_signers")
+
+def replace(source, destination, *args, **kwargs):
+    result = _replace(source, destination, *args, **kwargs)
+    if '/new/' in str(source) and os.path.basename(destination) in _trust:
+        _remapped.add(str(destination))
+    return result
+
+def open_file(path, flags, *args, **kwargs):
+    # IOS native reads preserve mode but change the projected owner away from
+    # the guest UID. Model its resulting permission check without root/chown.
+    if str(path) in _remapped and not os.stat(path).st_mode & 0o004:
+        raise PermissionError('fixture: remapped trust lacks other-read permission')
+    return _open(path, flags, *args, **kwargs)
+
+os.replace = replace
+os.open = open_file
+PYTHON
+  run env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash -c 'umask 077; exec bash "$1"' _ "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"bundle rejected"* ]]
+  [ -f "$TMP/new-agent-invoked" ]
+  [ ! -e "$TMP/prior-agent-invoked" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+}
+
+@test "public trust mode failure rejects extraction without changing existing trust" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  hook="$TMP/trust-mode-failure-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_fchmod = os.fchmod
+
+def fchmod(descriptor, mode):
+    if mode == 0o644:
+        raise PermissionError('fixture: new public trust mode cannot be applied')
+    return _fchmod(descriptor, mode)
+
+os.fchmod = fchmod
+PYTHON
+  run env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"bundle rejected (invalid-archive)"* ]]
+  [ ! -e "$TMP/new-agent-invoked" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [ "$(cat "$STAGE/iris-root.allowed_signers")" = "prior root signer trust" ]
+  [ "$(cat "$STAGE/iris-signers.allowed_signers")" = "prior instruction signer trust" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+}
+
 @test "an incomplete promotion is rolled back before anything launches" {
   TX="$STAGE/.bundle-transaction"
   mkdir -p "$TX/prior/files/agent" "$TX/prior/absent"
