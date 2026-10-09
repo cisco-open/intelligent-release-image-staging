@@ -186,6 +186,11 @@ the default is `/usr/bin/gh`. `--offline` requires `--release-trusted-root` and
 keeps release verification local. Retain the release directory and verifier at
 their recorded paths so `resume` can authenticate the same inputs again.
 
+For Kubernetes without an installed client, supply `--kubectl` with the local
+binary matching the installer's pinned version and checksum. This input is
+checked before host changes and copied without downloading. An existing
+`kubectl` or `k3s` client is preserved and still checked against the cluster.
+
 The prepared-host profile checks existing dependencies without installing them.
 The `ubuntu-dependencies` profile additionally binds the local Ubuntu package
 archive and its inner manifest to the authenticated release inventory.

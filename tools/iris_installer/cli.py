@@ -50,6 +50,7 @@ def parser():
     kit.add_argument('--release-trusted-root', type=Path, help='independently obtained Sigstore trusted root for offline verification')
     kit.add_argument('--offline', action='store_true', help='verify the release without network access; requires a trusted root')
     kit.add_argument('--ioxclient', type=Path, help='licensed local ioxclient executable matching the release pin')
+    kit.add_argument('--kubectl', type=Path, help='optional pinned local Kubernetes client; used only when no client is installed')
     install.add_argument("--state-dir", type=Path)
     install.add_argument("--instance", default="iris")
     install.add_argument("--host", help="device-facing IPv4 address on this host")

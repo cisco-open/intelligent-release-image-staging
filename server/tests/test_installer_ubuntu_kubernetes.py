@@ -101,3 +101,47 @@ def test_publication_race_never_replaces_the_other_executable(tmp_path, monkeypa
     with pytest.raises(InstallError, match='appeared'):
         ubuntu.provision_kubernetes_client(run)
     assert destination.read_bytes() == b'operator-race'
+
+
+def test_local_client_is_pinned_then_published_without_download(tmp_path, monkeypatch):
+    destination, calls, run = setup_download(tmp_path, monkeypatch)
+    source = tmp_path / 'local-client'
+    source.write_bytes(b'fixture verified client')
+    ubuntu.validate_kubernetes_input(source)
+    assert calls == []
+    assert ubuntu.provision_kubernetes_client(run, local_source=source) == ('kubectl',)
+    assert destination.read_bytes() == source.read_bytes()
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
+    assert len(calls) == 1 and calls[0][1:] == ['version', '--client', '-o', 'json']
+    assert not list(tmp_path.glob('.iris-kubectl-*'))
+
+
+@pytest.mark.parametrize('content', [b'', b'untrusted client'])
+def test_bad_local_client_never_executes_or_falls_back_to_download(tmp_path, monkeypatch, content):
+    destination, calls, run = setup_download(tmp_path, monkeypatch)
+    source = tmp_path / 'local-client'
+    source.write_bytes(content)
+    with pytest.raises(InstallError):
+        ubuntu.validate_kubernetes_input(source)
+    with pytest.raises(InstallError):
+        ubuntu.provision_kubernetes_client(run, local_source=source)
+    assert calls == [] and not destination.exists()
+    assert not list(tmp_path.glob('.iris-kubectl-*'))
+
+
+def test_local_client_symlink_is_not_followed(tmp_path, monkeypatch):
+    destination, calls, run = setup_download(tmp_path, monkeypatch)
+    source = tmp_path / 'local-client'
+    source.write_bytes(b'fixture verified client')
+    link = tmp_path / 'linked-client'
+    link.symlink_to(source)
+    with pytest.raises(InstallError, match='symbolic links'):
+        ubuntu.provision_kubernetes_client(run, local_source=link)
+    assert calls == [] and not destination.exists()
+
+
+@pytest.mark.parametrize('available,expected', [('kubectl', ('kubectl',)), ('k3s', ('k3s', 'kubectl'))])
+def test_local_input_never_replaces_an_existing_client(monkeypatch, available, expected):
+    monkeypatch.setattr(ubuntu.shutil, 'which', lambda command, **kw: '/usr/bin/' + command if command == available else None)
+    assert ubuntu.provision_kubernetes_client(
+        lambda *a, **kw: pytest.fail('No client mutation'), local_source='/not-needed') == expected

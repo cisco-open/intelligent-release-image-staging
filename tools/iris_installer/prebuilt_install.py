@@ -30,7 +30,7 @@ def prepare_selection(args, manifest, workspace):
     """
     directory = getattr(args, 'release_kit', None)
     names = ('release_tag', 'release_commit', 'release_verifier',
-             'release_trusted_root', 'ioxclient')
+             'release_trusted_root', 'ioxclient', 'kubectl')
     if directory is None:
         if (any(getattr(args, name, None) is not None for name in names)
                 or getattr(args, 'offline', False)):
@@ -38,6 +38,9 @@ def prepare_selection(args, manifest, workspace):
         return {'input_selection': release_kit.selection()}
     if not all(getattr(args, name, None) for name in ('release_tag', 'release_commit', 'ioxclient')):
         raise InstallError('A prebuilt install requires --release-tag, --release-commit and --ioxclient')
+    client = getattr(args, 'kubectl', None)
+    if client is not None and getattr(args, 'target', None) != 'kubernetes':
+        raise InstallError('--kubectl requires the prebuilt Kubernetes target')
     locator = {
         'directory': str(Path(directory).absolute()),
         'verifier': str(Path(getattr(args, 'release_verifier', None) or '/usr/bin/gh').absolute()),
@@ -53,8 +56,14 @@ def prepare_selection(args, manifest, workspace):
     verify_guest_inputs(kit, args.source, manifest)
     tool = Path(args.ioxclient).absolute()
     validate_packaging_tool(kit, tool, workspace)
-    return {'input_selection': release_kit.selection('prebuilt', kit=kit, offline=kit.offline),
-            'release_kit': locator, 'prebuilt_ioxclient': str(tool)}
+    result = {'input_selection': release_kit.selection('prebuilt', kit=kit, offline=kit.offline),
+              'release_kit': locator, 'prebuilt_ioxclient': str(tool)}
+    if client is not None:
+        from .ubuntu import validate_kubernetes_input
+        client = Path(client).absolute()
+        validate_kubernetes_input(client)
+        result['prebuilt_kubectl'] = str(client)
+    return result
 
 
 def validate_packaging_tool(kit, tool, workspace):
@@ -79,7 +88,7 @@ def selected(document):
     """Old journals remain source builds; malformed new selections never do."""
     value = document.get('input_selection', release_kit.selection())
     release_kit.assert_resume_selection(value, value)
-    if value['mode'] == 'source' and any(name in document for name in ('release_kit', 'prebuilt_ioxclient')):
+    if value['mode'] == 'source' and any(name in document for name in ('release_kit', 'prebuilt_ioxclient', 'prebuilt_kubectl')):
         raise InstallError('Source-build journal contains a conflicting release kit')
     return value['mode'] == 'prebuilt'
 
@@ -107,8 +116,13 @@ def public_selection(document):
     tool = document.get('prebuilt_ioxclient')
     if not _public_path(tool):
         raise InstallError('Recorded licensed ioxclient location is invalid')
-    return {'input_selection': {**value, 'kit': dict(value['kit'])},
-            'release_kit': _recorded_locator(document), 'prebuilt_ioxclient': tool}
+    result = {'input_selection': {**value, 'kit': dict(value['kit'])},
+              'release_kit': _recorded_locator(document), 'prebuilt_ioxclient': tool}
+    if 'prebuilt_kubectl' in document:
+        if not _public_path(document['prebuilt_kubectl']):
+            raise InstallError('Recorded Kubernetes client location is invalid')
+        result['prebuilt_kubectl'] = document['prebuilt_kubectl']
+    return result
 
 
 def assert_setup_selection(args, status):
@@ -116,7 +130,7 @@ def assert_setup_selection(args, status):
     recorded = public_selection(status)
     value = recorded['input_selection']
     paths = {'release_kit': 'directory', 'release_verifier': 'verifier',
-             'release_trusted_root': 'trusted_root', 'ioxclient': None}
+             'release_trusted_root': 'trusted_root', 'ioxclient': None, 'kubectl': None}
     options = (*paths, 'release_tag', 'release_commit')
     supplied = {name: getattr(args, name, None) for name in options
                 if getattr(args, name, None) is not None}
@@ -126,7 +140,7 @@ def assert_setup_selection(args, status):
             raise InstallError('Recorded installation uses source builds; prebuilt and offline options cannot resume it')
         return
     expected = {'release_tag': value['kit']['tag'], 'release_commit': value['kit']['commit'],
-                'ioxclient': recorded['prebuilt_ioxclient']}
+                'ioxclient': recorded['prebuilt_ioxclient'], 'kubectl': recorded.get('prebuilt_kubectl')}
     expected.update({name: recorded['release_kit'][field] for name, field in paths.items() if field})
     for name, supplied_value in supplied.items():
         actual = str(Path(supplied_value).absolute()) if name in paths else supplied_value

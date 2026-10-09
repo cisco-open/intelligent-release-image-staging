@@ -31,7 +31,7 @@ def test_public_prebuilt_options_survive_interactive_helper_forwarding(command):
     args = cli.parser().parse_args([command, *OPTIONS])
     forwarded = cli.parser().parse_args(local_setup.install_arguments(args))
     for name in ('release_kit', 'release_tag', 'release_commit', 'release_verifier',
-                 'release_trusted_root', 'offline', 'ioxclient'):
+                 'release_trusted_root', 'offline', 'ioxclient', 'kubectl'):
         assert getattr(forwarded, name) == getattr(args, name)
 
 
@@ -40,7 +40,7 @@ def test_source_selection_has_no_kit_or_offline_fallback(tmp_path):
     assert prebuilt_install.prepare_selection(args, {}, tmp_path) == {
         'input_selection': release_kit.selection()}
     for name in ('release_tag', 'release_commit', 'release_verifier',
-                 'release_trusted_root', 'offline', 'ioxclient'):
+                 'release_trusted_root', 'offline', 'ioxclient', 'kubectl'):
         changed = SimpleNamespace(**vars(args))
         setattr(changed, name, True)
         with pytest.raises(InstallError, match='require --release-kit'):
@@ -124,6 +124,29 @@ def test_guest_input_failure_stops_before_licensed_tool_access(tmp_path, monkeyp
     with pytest.raises(InstallError, match='Guest inputs'):
         prebuilt_install.prepare_selection(args, {}, tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_local_kubernetes_input_is_checked_before_selection_is_recorded(tmp_path, monkeypatch, kit):
+    from iris_installer import ubuntu
+    args = cli.parser().parse_args(['install', *OPTIONS, '--target', 'kubernetes', '--kubectl', '/local/kubectl'])
+    events = []
+    monkeypatch.setattr(release_kit, 'verify_kit', lambda *a, **kw: kit)
+    monkeypatch.setattr(prebuilt_install, 'bind_source', lambda *a: events.append('source'))
+    monkeypatch.setattr(guest_inputs, 'verify_guest_inputs', lambda *a: events.append('guest'))
+    monkeypatch.setattr(prebuilt_install, 'validate_packaging_tool', lambda *a: events.append('packaging'))
+    monkeypatch.setattr(ubuntu, 'validate_kubernetes_input', lambda path: events.append(str(path)))
+    result = prebuilt_install.prepare_selection(args, {}, tmp_path)
+    assert result['prebuilt_kubectl'] == '/local/kubectl'
+    assert events == ['source', 'guest', 'packaging', '/local/kubectl']
+    forwarded = cli.parser().parse_args(local_setup.install_arguments(args))
+    assert forwarded.kubectl == args.kubectl
+
+
+def test_local_kubernetes_input_requires_kubernetes_target(tmp_path, monkeypatch):
+    args = cli.parser().parse_args(['install', *OPTIONS, '--kubectl', '/local/kubectl'])
+    monkeypatch.setattr(release_kit, 'verify_kit', lambda *a, **kw: pytest.fail('Invalid target'))
+    with pytest.raises(InstallError, match='Kubernetes target'):
+        prebuilt_install.prepare_selection(args, {}, tmp_path)
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason='real installer journal ownership requires root')
@@ -252,6 +275,18 @@ def test_setup_resume_refuses_new_offline_constraint_for_recorded_online_kit(rec
     with pytest.raises(InstallError, match='--offline differs'):
         prebuilt_install.assert_setup_selection(args, recorded_prebuilt)
     prebuilt_install.assert_setup_selection(cli.parser().parse_args(['setup']), recorded_prebuilt)
+
+
+def test_setup_resume_preserves_optional_recorded_kubernetes_client(recorded_prebuilt):
+    recorded_prebuilt['prebuilt_kubectl'] = '/local/kubectl'
+    assert prebuilt_install.public_selection(recorded_prebuilt)['prebuilt_kubectl'] == '/local/kubectl'
+    for options in ([], ['--kubectl', '/local/kubectl']):
+        prebuilt_install.assert_setup_selection(cli.parser().parse_args(['setup', *options]), recorded_prebuilt)
+    with pytest.raises(InstallError, match='--kubectl differs'):
+        prebuilt_install.assert_setup_selection(cli.parser().parse_args(['setup', '--kubectl', '/different']), recorded_prebuilt)
+    recorded_prebuilt['prebuilt_kubectl'] = None
+    with pytest.raises(InstallError, match='Kubernetes client location'):
+        prebuilt_install.public_selection(recorded_prebuilt)
 
 
 @pytest.mark.parametrize('options', [['--offline'], ['--release-kit', '/release'],
