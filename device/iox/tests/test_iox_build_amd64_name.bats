@@ -110,7 +110,7 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   [ "$status" -eq 0 ]
 }
 
-@test "IOx wrapper atomically publishes provenance bound to the canonical OCI" {
+_iox_stub_setup() {
   STUB="$BATS_TEST_TMPDIR/stub"
   BIN="$BATS_TEST_TMPDIR/bin"
   OUT="$BATS_TEST_TMPDIR/out"
@@ -140,6 +140,15 @@ EOF
 STUB_COMMON
   cat > "$BIN/skopeo" <<'STUB_SKOPEO'
 #!/usr/bin/env bash
+if [ -n "${SELECTION_LOG:-}" ]; then
+  for arg in "$@"; do
+    case "$arg" in oci-archive:*)
+      source="${arg#oci-archive:}"
+      printf '%s %s %s\n' "$source" "$(stat -c %a "$source")" "$(sha256sum "$source" | cut -d' ' -f1)" >> "$SELECTION_LOG"
+      ;;
+    esac
+  done
+fi
 for arg in "$@"; do case "$arg" in docker-archive:*) out="${arg#docker-archive:}"; out="${out%%:*}" ;; esac; done
 d="$(mktemp -d)"
 printf '[{"Config":"config.json","RepoTags":["iris-device:test"],"Layers":[]}]\n' > "$d/manifest.json"
@@ -148,6 +157,7 @@ rm -rf "$d"
 STUB_SKOPEO
   cat > "$BIN/ioxclient" <<'STUB_IOX'
 #!/usr/bin/env bash
+[ -z "${TOOL_LOG:-}" ] || printf '%s\n' "$0" >> "$TOOL_LOG"
 python3 - <<'PY'
 import hashlib, io, tarfile
 payloads = {'package.yaml': b'descriptor\n', 'artifacts.tar.gz': b'unchanged image'}
@@ -162,7 +172,10 @@ with tarfile.open('package.tar', 'w') as archive:
 PY
 STUB_IOX
   chmod +x "$STUB/tools/build-device-image.sh" "$BIN/skopeo" "$BIN/ioxclient"
+}
 
+@test "IOx wrapper atomically publishes provenance bound to the canonical OCI" {
+  _iox_stub_setup
   for arch in arm64 amd64; do
   run env PATH="$BIN:$PATH" TEST_ROOT="$BATS_TEST_TMPDIR" \
     bash "$STUB/device/iox/build.sh" "--$arch" "$OUT"
@@ -180,4 +193,86 @@ STUB_IOX
   [ "$status" -eq 0 ]
   ! find "$OUT" -maxdepth 1 -name ".iris-$arch.tar.*" | grep -q .
   done
+}
+
+_finalized_iox_setup() {
+  _iox_stub_setup
+  ln -s "$BATS_TEST_DIRNAME/../../../tools/prepare-device-context.py" "$STUB/tools/prepare-device-context.py"
+  ln -s "$BATS_TEST_DIRNAME/../../../tools/iris_installer" "$STUB/tools/iris_installer"
+  FINALIZED="$BATS_TEST_TMPDIR/finalized"
+  mkdir -p "$FINALIZED"
+  python3 - "$STUB/tools" "$FINALIZED" <<'PY'
+from pathlib import Path
+import hashlib, json, sys
+sys.path.insert(0, sys.argv[1])
+from iris_installer.device_finalize import TRUST
+directory = Path(sys.argv[2])
+archive = b'finalized canonical OCI fixture'
+(directory / 'iris-device.oci.tar').write_bytes(archive)
+sha, descriptor = 'a' * 64, 'sha256:' + 'b' * 64
+platform = dict.fromkeys(('base_manifest_digest', 'manifest_digest', 'config_digest', 'layer_digest', 'diff_id'), descriptor)
+platform.update(runtime_inventory_sha256=sha, runtime_members=1)
+receipt = dict(format='iris-device-finalized-v1', base_archive_sha256=sha,
+    neutral_source_sha256=sha, base_index_digest=descriptor, finalizer_source_commit='c' * 40,
+    finalizer_module_sha256=sha, trust_renderer_sha256=sha,
+    root_files_sha256={'a.pub': sha, 'b.pub': sha}, trust_files_sha256=dict.fromkeys(TRUST, sha),
+    archive_sha256=hashlib.sha256(archive).hexdigest(), archive_size=len(archive), index_digest=descriptor,
+    platforms={'amd64': platform, 'arm64': platform})
+(directory / 'iris-device.oci.tar.finalization.json').write_text(json.dumps(receipt))
+PY
+  FINAL_SHA="$(sha256sum "$FINALIZED/iris-device.oci.tar.finalization.json" | cut -d' ' -f1)"
+  TOOL_SHA="$(sha256sum "$BIN/ioxclient" | cut -d' ' -f1)"
+  export SELECTION_LOG="$BATS_TEST_TMPDIR/selection.log" TOOL_LOG="$BATS_TEST_TMPDIR/tool.log"
+  export FORBIDDEN_LOG="$BATS_TEST_TMPDIR/forbidden.log"
+  for path in "$STUB/tools/build-device-image.sh" "$STUB/tools/get-ioxclient.sh" \
+      "$BIN/docker" "$BIN/curl" "$BIN/git"; do
+    printf '#!/bin/sh\necho forbidden >> "$FORBIDDEN_LOG"\nexit 99\n' > "$path"
+    chmod +x "$path"
+  done
+}
+
+_run_finalized_iox() {
+  run env -u IRIS_INSTRUCTION_ROOTS_DIR -u IOXCLIENT_HOME PATH="$BIN:$PATH" IOXCLIENT="$BIN/ioxclient" \
+    bash "$STUB/device/iox/build.sh" --arm64 --finalized-dir "$FINALIZED" \
+    --finalization-sha256 "$FINAL_SHA" --ioxclient-sha256 "$TOOL_SHA" "$@" "$OUT"
+}
+
+@test "finalized IOx wraps a verified private snapshot with exact v2 provenance and no source build" {
+  _finalized_iox_setup
+  _run_finalized_iox
+  [ "$status" -eq 0 ]
+  manifest="$OUT/iris-arm64.tar.manifest"
+  [ "$(wc -l < "$manifest")" -eq 9 ]
+  grep -qx 'format=iris-device-wrapper-v2' "$manifest"
+  grep -qx "canonical_finalization_sha256=$FINAL_SHA" "$manifest"
+  grep -qx "canonical_neutral_source_sha256=$(printf '%064d' 0 | tr 0 a)" "$manifest"
+  grep -qx "canonical_archive_sha256=$(sha256sum "$FINALIZED/iris-device.oci.tar" | cut -d' ' -f1)" "$manifest"
+  ! grep -q '^canonical_source_sha256=' "$manifest"
+  grep -q '/finalized/iris-device.oci.tar 444 ' "$SELECTION_LOG"
+  grep -q '/iox-tool/ioxclient$' "$TOOL_LOG"
+  [ ! -e "$FORBIDDEN_LOG" ]
+}
+
+@test "finalized IOx refuses altered receipt or local tool before executing packaging" {
+  _finalized_iox_setup
+  FINAL_SHA="$(printf '%064d' 0)" _run_finalized_iox
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"receipt differs"* ]]
+  TOOL_SHA="$(printf '%064d' 0)" _run_finalized_iox
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ioxclient differs"* ]]
+  [ ! -e "$TOOL_LOG" ]
+  [ ! -e "$SELECTION_LOG" ]
+  [ ! -e "$FORBIDDEN_LOG" ]
+  [ ! -e "$OUT/iris-arm64.tar" ]
+}
+
+@test "finalized IOx requires paired inputs and rejects source trust overrides" {
+  _finalized_iox_setup
+  run bash "$STUB/device/iox/build.sh" --finalized-dir "$FINALIZED" "$OUT"
+  [ "$status" -eq 2 ]
+  _run_finalized_iox --instruction-roots-dir "$BATS_TEST_TMPDIR/roots"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cannot use instruction roots"* ]]
+  [ ! -e "$FORBIDDEN_LOG" ]
 }

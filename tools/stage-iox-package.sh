@@ -26,23 +26,41 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$REPO/device/iox/build.sh"
+IOXCLIENT_EXPLICIT="${IOXCLIENT:-}"
 IOXCLIENT="${IOXCLIENT:-$REPO/tools/bin/ioxclient}"
 IRIS_CONTAINER="${IRIS_CONTAINER:-iris}"
 
 ARCH=amd64
 ARTIFACTS_DIR=""
 ARTIFACTS_DIR_EXPLICIT=0
+FINALIZED_DIR=""
+FINALIZATION_SHA=""
+IOXCLIENT_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch) ARCH="${2:?--arch needs a value}"; shift 2 ;;
     --artifacts-dir) ARTIFACTS_DIR="${2:?--artifacts-dir needs a value}"; ARTIFACTS_DIR_EXPLICIT=1; shift 2 ;;
+    --finalized-dir) FINALIZED_DIR="${2:?--finalized-dir needs a value}"; shift 2 ;;
+    --finalization-sha256) FINALIZATION_SHA="${2:?--finalization-sha256 needs a value}"; shift 2 ;;
+    --ioxclient-sha256) IOXCLIENT_SHA="${2:?--ioxclient-sha256 needs a value}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 [--arch amd64|arm64] [--artifacts-dir DIR]"
+      echo "usage: $0 [--arch amd64|arm64] [--artifacts-dir DIR] [--finalized-dir DIR --finalization-sha256 SHA256 --ioxclient-sha256 SHA256]"
       exit 0
       ;;
     *) echo "!! unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+FINALIZED_ARGS=()
+if [ -n "$FINALIZED_DIR$FINALIZATION_SHA$IOXCLIENT_SHA" ]; then
+  [ -n "$FINALIZED_DIR" ] && [[ "$FINALIZATION_SHA" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$IOXCLIENT_SHA" =~ ^[0-9a-f]{64}$ ]] \
+    || { echo "!! finalized input requires a receipt SHA256 and pinned local ioxclient" >&2; exit 2; }
+  [ -n "$IOXCLIENT_EXPLICIT" ] \
+    || { echo "!! finalized packaging requires IOXCLIENT to name a local executable" >&2; exit 2; }
+  [ -x "$IOXCLIENT" ] || { echo "!! finalized packaging requires existing local ioxclient; nothing was downloaded" >&2; exit 1; }
+  FINALIZED_ARGS=(--finalized-dir "$FINALIZED_DIR" --finalization-sha256 "$FINALIZATION_SHA" --ioxclient-sha256 "$IOXCLIENT_SHA")
+fi
 
 case "$ARCH" in
   amd64) PKG_NAME=iris-amd64.tar ;;
@@ -63,7 +81,7 @@ arm64_emulation_ready() {
   fi
   docker run --rm --platform linux/arm64 alpine:3.20 true >/dev/null 2>&1
 }
-if [ "$ARCH" = arm64 ] && ! arm64_emulation_ready; then
+if [ -z "$FINALIZED_DIR" ] && [ "$ARCH" = arm64 ] && ! arm64_emulation_ready; then
   echo ">> enabling Docker arm64 emulation for the arm64 IOx package build"
   : "${BINFMT_IMAGE_DIGEST:?set BINFMT_IMAGE_DIGEST to an audited tonistiigi/binfmt sha256 digest}"
   [[ "$BINFMT_IMAGE_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] \
@@ -99,7 +117,7 @@ if [ ! -d "$ARTIFACTS_DIR" ] || [ ! -w "$ARTIFACTS_DIR" ]; then
     exit 1
   fi
 fi
-if [ ! -x "$IOXCLIENT" ]; then
+if [ -z "$FINALIZED_DIR" ] && [ ! -x "$IOXCLIENT" ]; then
   "$REPO/tools/get-ioxclient.sh" "$(dirname "$IOXCLIENT")"
 fi
 
@@ -107,7 +125,7 @@ echo ">> building IOx package (arch=$ARCH -> $PKG_NAME)"
 BUILD_OUT="$(mktemp -d)"
 trap 'rm -rf "$BUILD_OUT"' EXIT
 IOX_ARCH="$ARCH" PACKAGE_NAME="$PKG_NAME" IOXCLIENT="$IOXCLIENT" \
-  bash "$BUILD" "$BUILD_OUT"
+  bash "$BUILD" "${FINALIZED_ARGS[@]}" "$BUILD_OUT"
 
 SRC="$BUILD_OUT/$PKG_NAME"
 MANIFEST_SRC="$SRC.manifest"

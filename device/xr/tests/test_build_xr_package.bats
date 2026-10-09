@@ -424,3 +424,146 @@ STUB
   [[ "$output" != *"SKOPEO-STUB"* ]]
   [ ! -e "$OUT_DIR/iris-xr.rpm" ]
 }
+
+_finalized_xr_setup() {
+  _xr_stub_setup
+  ln -s "$BATS_TEST_DIRNAME/../../../tools/prepare-device-context.py" "$STUBDIR/tools/prepare-device-context.py"
+  ln -s "$BATS_TEST_DIRNAME/../../../tools/iris_installer" "$STUBDIR/tools/iris_installer"
+  FINALIZED="$BATS_TEST_TMPDIR/finalized"
+  mkdir -p "$FINALIZED"
+  export FORBIDDEN_LOG="$BATS_TEST_TMPDIR/forbidden.log" TOOL_LOG="$BATS_TEST_TMPDIR/tool.log"
+  for path in "$STUBDIR/tools/build-device-image.sh" "$STUBDIR/bin/git" "$STUBDIR/bin/docker" "$STUBDIR/bin/curl"; do
+    printf '#!/bin/sh\necho forbidden >> "$FORBIDDEN_LOG"\nexit 99\n' > "$path"
+    chmod +x "$path"
+  done
+  cat > "$APPMGR_DIR/appmgr_build" <<'PY'
+#!/usr/bin/env python3
+from pathlib import Path
+import os
+import subprocess
+import yaml
+
+def main():
+    command = [
+        "./build_rpm.sh",
+        "--output-dir", "RPMS",
+        "--verbose",
+    ]
+    root = Path(__file__).resolve().parent
+    assert Path.cwd() == root
+    assert root != Path(os.environ["ORIGINAL_APPMGR_DIR"])
+    assert Path("release_configs/ThinXR_7.3.15.yaml").is_file()
+    config = yaml.safe_load(Path("build.yaml").read_text())
+    assert config["packages"][0]["copy_hostname"] is False
+    Path(os.environ["TOOL_LOG"]).write_text(str(root))
+    subprocess.run(command, check=True)
+
+main()
+PY
+  printf '#!/bin/sh\nmkdir -p RPMS\nprintf "finalized rpm" > RPMS/iris-xr.rpm\n' > "$APPMGR_DIR/build_rpm.sh"
+  printf 'release: test\n' > "$APPMGR_DIR/release_configs/ThinXR_7.3.15.yaml"
+  chmod +x "$APPMGR_DIR/appmgr_build" "$APPMGR_DIR/build_rpm.sh"
+  APPMGR_ARCHIVE="$BATS_TEST_TMPDIR/appmgr.tar.gz"
+  python3 - "$STUBDIR/tools" "$FINALIZED" "$APPMGR_DIR" "$APPMGR_ARCHIVE" <<'PY'
+from pathlib import Path
+import gzip, hashlib, io, json, sys, tarfile
+sys.path.insert(0, sys.argv[1])
+from iris_installer.device_finalize import TRUST
+directory, tool, output = map(Path, sys.argv[2:])
+archive = b'finalized canonical OCI fixture'
+(directory / 'iris-device.oci.tar').write_bytes(archive)
+sha, descriptor = 'a' * 64, 'sha256:' + 'b' * 64
+platform = dict.fromkeys(('base_manifest_digest', 'manifest_digest', 'config_digest', 'layer_digest', 'diff_id'), descriptor)
+platform.update(runtime_inventory_sha256=sha, runtime_members=1)
+receipt = dict(format='iris-device-finalized-v1', base_archive_sha256=sha,
+    neutral_source_sha256=sha, base_index_digest=descriptor, finalizer_source_commit='c' * 40,
+    finalizer_module_sha256=sha, trust_renderer_sha256=sha,
+    root_files_sha256={'a.pub': sha, 'b.pub': sha}, trust_files_sha256=dict.fromkeys(TRUST, sha),
+    archive_sha256=hashlib.sha256(archive).hexdigest(), archive_size=len(archive), index_digest=descriptor,
+    platforms={'amd64': platform, 'arm64': platform})
+(directory / 'iris-device.oci.tar.finalization.json').write_text(json.dumps(receipt))
+metadata = dict(format='iris-appmgr-source-v1', source_repository='https://github.com/ios-xr/xr-appmgr-build.git',
+                source_revision='37d79607a32a129107819f08fb3a74187efd2d47')
+(tool / 'iris-appmgr-source.json').write_text(json.dumps(metadata))
+with tarfile.open(output, 'w:gz') as packed:
+    for name in ('appmgr_build', 'build_rpm.sh', 'release_configs', 'iris-appmgr-source.json'):
+        packed.add(tool / name, arcname=name)
+PY
+  FINAL_SHA="$(sha256sum "$FINALIZED/iris-device.oci.tar.finalization.json" | cut -d' ' -f1)"
+  APPMGR_SHA="$(sha256sum "$APPMGR_ARCHIVE" | cut -d' ' -f1)"
+  APPMGR_REVISION=37d79607a32a129107819f08fb3a74187efd2d47
+}
+
+_run_finalized_xr() {
+  run env -u IRIS_INSTRUCTION_ROOTS_DIR -u APPMGR_BUILD_CMD \
+    PATH="$STUBDIR/bin:$PATH" ORIGINAL_APPMGR_DIR="$APPMGR_DIR" \
+    APPMGR_BUILD_DIR="$APPMGR_DIR" bash "$STUBDIR/tools/build-xr-package.sh" \
+    --finalized-dir "$FINALIZED" --finalization-sha256 "$FINAL_SHA" \
+    --appmgr-archive "$APPMGR_ARCHIVE" --appmgr-sha256 "$APPMGR_SHA" \
+    --appmgr-revision "$APPMGR_REVISION" --out "$OUT_DIR" "$@"
+}
+
+@test "finalized XR builds only its wrapper from private pinned inputs and publishes exact v2" {
+  _finalized_xr_setup
+  before="$(sha256sum "$APPMGR_DIR/appmgr_build" | cut -d' ' -f1)"
+  _run_finalized_xr
+  [ "$status" -eq 0 ]
+  [ "$(cat "$OUT_DIR/iris-xr.rpm")" = "finalized rpm" ]
+  manifest="$OUT_DIR/iris-xr.rpm.manifest"
+  [ "$(wc -l < "$manifest")" -eq 9 ]
+  grep -qx 'format=iris-device-wrapper-v2' "$manifest"
+  grep -qx "canonical_finalization_sha256=$FINAL_SHA" "$manifest"
+  grep -qx "canonical_neutral_source_sha256=$(printf '%064d' 0 | tr 0 a)" "$manifest"
+  ! grep -q '^canonical_source_sha256=' "$manifest"
+  [ "$(sha256sum "$APPMGR_DIR/appmgr_build" | cut -d' ' -f1)" = "$before" ]
+  [ -s "$TOOL_LOG" ]
+  [ ! -e "$APPMGR_DIR/RPMS" ]
+  [ ! -e "$APPMGR_DIR/build.yaml" ]
+  [ ! -e "$FORBIDDEN_LOG" ]
+}
+
+@test "finalized XR refuses changed receipt archive or revision before tool execution" {
+  _finalized_xr_setup
+  FINAL_SHA="$(printf '%064d' 0)" _run_finalized_xr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"receipt differs"* ]]
+  APPMGR_SHA="$(printf '%064d' 0)" _run_finalized_xr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"appmgr archive differs"* ]]
+  APPMGR_REVISION="$(printf '%040d' 0)" _run_finalized_xr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"source metadata differs"* ]]
+  [ ! -e "$TOOL_LOG" ]
+  [ ! -e "$FORBIDDEN_LOG" ]
+  [ ! -e "$OUT_DIR/iris-xr.rpm" ]
+}
+
+@test "finalized XR preflights isolated Python YAML without installing dependencies" {
+  _finalized_xr_setup
+  cat > "$STUBDIR/bin/python3" <<'PY'
+#!/bin/sh
+echo "NO-YAML: $*" >&2
+exit 7
+PY
+  chmod +x "$STUBDIR/bin/python3"
+  _run_finalized_xr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NO-YAML: -I -c import yaml"* ]]
+  [[ "$output" == *"requires local Python YAML support"* ]]
+  [ ! -e "$OUT_DIR" ]
+  [ ! -e "$TOOL_LOG" ]
+  [ ! -e "$FORBIDDEN_LOG" ]
+}
+
+@test "finalized XR requires paired hashes and refuses arbitrary appmgr commands" {
+  _finalized_xr_setup
+  run bash "$STUBDIR/tools/build-xr-package.sh" --finalized-dir "$FINALIZED"
+  [ "$status" -eq 2 ]
+  run env APPMGR_BUILD_CMD='./appmgr_build' bash "$STUBDIR/tools/build-xr-package.sh" \
+    --finalized-dir "$FINALIZED" --finalization-sha256 "$FINAL_SHA" \
+    --appmgr-archive "$APPMGR_ARCHIVE" --appmgr-sha256 "$APPMGR_SHA" \
+    --appmgr-revision "$APPMGR_REVISION"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unpinned appmgr command"* ]]
+  [ ! -e "$FORBIDDEN_LOG" ]
+}

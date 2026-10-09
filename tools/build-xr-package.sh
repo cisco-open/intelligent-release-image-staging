@@ -15,19 +15,39 @@ XR_DIR="$REPO/device/xr"
 OUT="$XR_DIR/out"
 DRY_RUN=0
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
+ROOTS_EXPLICIT="${IRIS_INSTRUCTION_ROOTS_DIR+x}"
+FINALIZED_DIR=""
+FINALIZATION_SHA=""
+APPMGR_ARCHIVE=""
+APPMGR_SHA=""
+APPMGR_REVISION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="${2:?--out needs a value}"; shift 2 ;;
     --instruction-roots-dir)
-      ROOTS="${2:?--instruction-roots-dir needs a value}"; shift 2 ;;
+      ROOTS="${2:?--instruction-roots-dir needs a value}"; ROOTS_EXPLICIT=1; shift 2 ;;
+    --finalized-dir) FINALIZED_DIR="${2:?--finalized-dir needs a value}"; shift 2 ;;
+    --finalization-sha256) FINALIZATION_SHA="${2:?--finalization-sha256 needs a value}"; shift 2 ;;
+    --appmgr-archive) APPMGR_ARCHIVE="${2:?--appmgr-archive needs a value}"; shift 2 ;;
+    --appmgr-sha256) APPMGR_SHA="${2:?--appmgr-sha256 needs a value}"; shift 2 ;;
+    --appmgr-revision) APPMGR_REVISION="${2:?--appmgr-revision needs a value}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
-      echo "usage: $0 [--out DIR] [--instruction-roots-dir DIR] [--dry-run]"
+      echo "usage: $0 [--out DIR] [--instruction-roots-dir DIR | --finalized-dir DIR --finalization-sha256 SHA256 --appmgr-archive FILE --appmgr-sha256 SHA256 --appmgr-revision COMMIT] [--dry-run]"
       exit 0 ;;
     -*) echo "!! unknown option: $1" >&2; exit 2 ;;
     *) echo "!! unexpected argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$FINALIZED_DIR$FINALIZATION_SHA$APPMGR_ARCHIVE$APPMGR_SHA$APPMGR_REVISION" ]; then
+  [ -n "$FINALIZED_DIR" ] && [ -n "$APPMGR_ARCHIVE" ] \
+    && [[ "$FINALIZATION_SHA" =~ ^[0-9a-f]{64}$ ]] && [[ "$APPMGR_SHA" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$APPMGR_REVISION" =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "!! finalized input requires receipt and local appmgr archive SHA256 values and full source revision" >&2; exit 2; }
+  [ -z "$ROOTS_EXPLICIT" ] && [ -z "${APPMGR_BUILD_CMD+x}" ] \
+    || { echo "!! finalized mode cannot use instruction roots or an unpinned appmgr command" >&2; exit 2; }
+fi
 
 RPM_NAME="${RPM_NAME:-iris-xr}"
 APPMGR_RELEASE="${APPMGR_RELEASE:-ThinXR_7.3.15}"
@@ -37,12 +57,14 @@ APPMGR_BUILD_DIR="${APPMGR_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/iris/xr-ap
 APPMGR_BUILD_CMD="${APPMGR_BUILD_CMD:-./appmgr_build}"
 PKG_VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
 IMAGE_TAR_NAME="${RPM_NAME}.tar.gz"
+if [ -z "$FINALIZED_DIR" ]; then
 case "$APPMGR_BUILD_DIR" in
   /*) ;;
   *) echo "!! APPMGR_BUILD_DIR must be an absolute path" >&2; exit 2 ;;
 esac
+fi
 
-if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
+if [ -z "$FINALIZED_DIR" ] && [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
   # shellcheck source=tools/agent-source-freshness.sh
   . "$REPO/tools/agent-source-freshness.sh"
   iris_check_agent_freshness "$REPO" \
@@ -50,10 +72,15 @@ if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
     || exit 1
 fi
 
-[ -x "$REPO/tools/build-device-image.sh" ] \
+[ -n "$FINALIZED_DIR" ] || [ -x "$REPO/tools/build-device-image.sh" ] \
   || { echo "!! missing tools/build-device-image.sh" >&2; exit 1; }
 
 if [ "$DRY_RUN" -eq 1 ]; then
+  if [ -n "$FINALIZED_DIR" ]; then
+    echo ">> [dry-run] would verify and snapshot the finalized OCI and authenticated local appmgr archive"
+    echo ">> [dry-run] would select linux/amd64 and publish $OUT/iris-xr.rpm; no build, clone or fetch"
+    exit 0
+  fi
   cat <<PLAN
 >> [dry-run] would build or verify one canonical amd64+arm64 OCI archive via:
    tools/build-device-image.sh --context <temporary-dir> --instruction-roots-dir $ROOTS
@@ -74,18 +101,35 @@ fi
 # ship it in the "rpm" package.
 command -v rpmbuild >/dev/null 2>&1 \
   || { echo "!! rpmbuild is required to build the XR appmgr RPM — install the 'rpm' package" >&2; exit 1; }
+if [ -n "$FINALIZED_DIR" ]; then
+  python3 -I -c 'import yaml' \
+    || { echo "!! finalized XR packaging requires local Python YAML support (python3-yaml); nothing was installed" >&2; exit 1; }
+fi
 
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$OUT"
-"$REPO/tools/build-device-image.sh" --context "$CTX" --instruction-roots-dir "$ROOTS"
-OCI_ARCHIVE="$(cat "$CTX/iris-device-oci-path")"
-OCI_INDEX="$(sed -n 's/^index_digest=//p' "$CTX/iris-device-oci.manifest")"
-OCI_ARCHIVE_SHA="$(sed -n 's/^archive_sha256=//p' "$CTX/iris-device-oci.manifest")"
-OCI_SOURCE_SHA="$(sed -n 's/^source_sha256=//p' "$CTX/iris-device-oci.manifest")"
+INPUT_CTX="$CTX"
+if [ -n "$FINALIZED_DIR" ]; then
+  INPUT_CTX="$CTX/finalized"
+  python3 "$REPO/tools/prepare-device-context.py" --finalized-dir "$FINALIZED_DIR" \
+    --finalization-sha256 "$FINALIZATION_SHA" --output-dir "$INPUT_CTX"
+  python3 "$REPO/tools/prepare-device-context.py" --appmgr-archive "$APPMGR_ARCHIVE" \
+    --appmgr-sha256 "$APPMGR_SHA" --appmgr-revision "$APPMGR_REVISION" --output-dir "$CTX/appmgr-tool"
+  APPMGR_BUILD_DIR="$CTX/appmgr-tool"
+else
+  "$REPO/tools/build-device-image.sh" --context "$CTX" --instruction-roots-dir "$ROOTS"
+fi
+OCI_ARCHIVE="$(cat "$INPUT_CTX/iris-device-oci-path")"
+OCI_INDEX="$(sed -n 's/^index_digest=//p' "$INPUT_CTX/iris-device-oci.manifest")"
+OCI_ARCHIVE_SHA="$(sed -n 's/^archive_sha256=//p' "$INPUT_CTX/iris-device-oci.manifest")"
+SOURCE_FIELD=source_sha256
+[ -z "$FINALIZED_DIR" ] || SOURCE_FIELD=neutral_source_sha256
+OCI_SOURCE_SHA="$(sed -n "s/^$SOURCE_FIELD=//p" "$INPUT_CTX/iris-device-oci.manifest")"
 [ -n "$OCI_INDEX" ] && [ -n "$OCI_ARCHIVE_SHA" ] && [ -n "$OCI_SOURCE_SHA" ] \
   || { echo "!! canonical OCI provenance manifest is incomplete" >&2; exit 1; }
 
+if [ -z "$FINALIZED_DIR" ]; then
 echo ">> resolving ios-xr/xr-appmgr-build"
 mkdir -p "$(dirname "$APPMGR_BUILD_DIR")"
 if [ ! -x "$APPMGR_BUILD_DIR/appmgr_build" ]; then
@@ -111,6 +155,7 @@ else
       *) echo "!! warning: appmgr builder is at $head, expected $APPMGR_BUILD_COMMIT" >&2 ;;
     esac
   fi
+fi
 fi
 
 # The pinned upstream appmgr_build invokes build_rpm.sh without its supported
@@ -205,7 +250,9 @@ EOF
 rm -rf -- "$RPM_OUTPUT_DIR"
 mkdir -p "$RPM_OUTPUT_DIR"
 LOG="$BUILD_WORKDIR/.iris-appmgr-build.log"
-if [ "$APPMGR_BUILD_CMD" = "./appmgr_build" ]; then
+if [ -n "$FINALIZED_DIR" ]; then
+  ( cd "$CTX" && python3 -I "$APPMGR_RUN_CMD" -b build.yaml ) >"$LOG" 2>&1 || true
+elif [ "$APPMGR_BUILD_CMD" = "./appmgr_build" ]; then
   ( cd "$CTX" && "$APPMGR_RUN_CMD" -b build.yaml ) >"$LOG" 2>&1 || true
 else
   ( cd "$APPMGR_BUILD_DIR" && $APPMGR_RUN_CMD -b build.yaml ) >"$LOG" 2>&1 || true
@@ -231,14 +278,19 @@ trap 'rm -rf "$CTX"; rm -f "$artifact_tmp" "$manifest_tmp"' EXIT
 cp "$RPM_FILE" "$artifact_tmp"
 WRAPPER_SHA="$(sha256sum "$artifact_tmp" | awk '{print $1}')"
 {
-  echo 'format=iris-device-wrapper-v1'
+  if [ -n "$FINALIZED_DIR" ]; then echo 'format=iris-device-wrapper-v2'; else echo 'format=iris-device-wrapper-v1'; fi
   echo 'wrapper_kind=xr-appmgr'
   echo 'wrapper_file=iris-xr.rpm'
   echo "wrapper_sha256=$WRAPPER_SHA"
   echo 'platform=linux/amd64'
   echo "canonical_index_digest=$OCI_INDEX"
   echo "canonical_archive_sha256=$OCI_ARCHIVE_SHA"
-  echo "canonical_source_sha256=$OCI_SOURCE_SHA"
+  if [ -n "$FINALIZED_DIR" ]; then
+    echo "canonical_neutral_source_sha256=$OCI_SOURCE_SHA"
+    echo "canonical_finalization_sha256=$FINALIZATION_SHA"
+  else
+    echo "canonical_source_sha256=$OCI_SOURCE_SHA"
+  fi
 } > "$manifest_tmp"
 chmod 444 "$artifact_tmp" "$manifest_tmp"
 rm -f "$OUT/iris-xr.rpm.manifest"

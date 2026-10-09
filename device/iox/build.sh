@@ -21,6 +21,11 @@ PACKAGE=1
 OUT="$HERE/out"
 ARCH_FLAG=""
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
+ROOTS_EXPLICIT="${IRIS_INSTRUCTION_ROOTS_DIR+x}"
+FINALIZED_DIR=""
+FINALIZATION_SHA=""
+IOXCLIENT_SHA=""
+IOXCLIENT_EXPLICIT="${IOXCLIENT:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --image-only) PACKAGE=0 ;;
@@ -29,9 +34,12 @@ while [ "$#" -gt 0 ]; do
     --instruction-roots-dir)
       [ "$#" -ge 2 ] && [ -n "$2" ] \
         || { echo "--instruction-roots-dir needs a value" >&2; exit 2; }
-      ROOTS="$2"; shift ;;
+      ROOTS="$2"; ROOTS_EXPLICIT=1; shift ;;
+    --finalized-dir) FINALIZED_DIR="${2:?--finalized-dir needs a value}"; shift ;;
+    --finalization-sha256) FINALIZATION_SHA="${2:?--finalization-sha256 needs a value}"; shift ;;
+    --ioxclient-sha256) IOXCLIENT_SHA="${2:?--ioxclient-sha256 needs a value}"; shift ;;
     -h|--help)
-      echo "usage: $0 [--image-only] [--amd64|--arm64] [--instruction-roots-dir DIR] [OUTPUT_DIR]"
+      echo "usage: $0 [--image-only] [--amd64|--arm64] [--instruction-roots-dir DIR | --finalized-dir DIR --finalization-sha256 SHA256 --ioxclient-sha256 SHA256] [OUTPUT_DIR]"
       exit 0
       ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -39,6 +47,16 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ -n "$FINALIZED_DIR$FINALIZATION_SHA$IOXCLIENT_SHA" ]; then
+  [ -n "$FINALIZED_DIR" ] && [[ "$FINALIZATION_SHA" =~ ^[0-9a-f]{64}$ ]] \
+    && { [ "$PACKAGE" -eq 0 ] || [[ "$IOXCLIENT_SHA" =~ ^[0-9a-f]{64}$ ]]; } \
+    || { echo "!! finalized input requires a receipt SHA256 and pinned local ioxclient" >&2; exit 2; }
+  [ -z "$ROOTS_EXPLICIT" ] && [ -z "${IOXCLIENT_HOME:-}" ] \
+    || { echo "!! finalized mode cannot use instruction roots or an operator ioxclient profile" >&2; exit 2; }
+  [ "$PACKAGE" -eq 0 ] || [ -n "$IOXCLIENT_EXPLICIT" ] \
+    || { echo "!! finalized packaging requires IOXCLIENT to name a local executable" >&2; exit 2; }
+fi
 
 IOX_ARCH="${ARCH_FLAG:-${IOX_ARCH:-arm64}}"
 case "$IOX_ARCH" in
@@ -63,7 +81,7 @@ IOXCLIENT="${IOXCLIENT:-ioxclient}"
 
 # Keep wrapper metadata in the issue-72 freshness boundary as well as the
 # common image-source check performed by build-device-image.sh.
-if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
+if [ -z "$FINALIZED_DIR" ] && [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
   # shellcheck source=tools/agent-source-freshness.sh
   . "$REPO/tools/agent-source-freshness.sh"
   iris_check_agent_freshness "$REPO" \
@@ -75,11 +93,25 @@ CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$OUT"
 
-"$REPO/tools/build-device-image.sh" --context "$CTX" --instruction-roots-dir "$ROOTS"
-OCI_ARCHIVE="$(cat "$CTX/iris-device-oci-path")"
-OCI_INDEX="$(sed -n 's/^index_digest=//p' "$CTX/iris-device-oci.manifest")"
-OCI_ARCHIVE_SHA="$(sed -n 's/^archive_sha256=//p' "$CTX/iris-device-oci.manifest")"
-OCI_SOURCE_SHA="$(sed -n 's/^source_sha256=//p' "$CTX/iris-device-oci.manifest")"
+INPUT_CTX="$CTX"
+if [ -n "$FINALIZED_DIR" ]; then
+  INPUT_CTX="$CTX/finalized"
+  python3 "$REPO/tools/prepare-device-context.py" --finalized-dir "$FINALIZED_DIR" \
+    --finalization-sha256 "$FINALIZATION_SHA" --output-dir "$INPUT_CTX"
+  if [ "$PACKAGE" -eq 1 ]; then
+    python3 "$REPO/tools/prepare-device-context.py" --ioxclient "$IOXCLIENT" \
+      --ioxclient-sha256 "$IOXCLIENT_SHA" --output-dir "$CTX/iox-tool"
+    IOXCLIENT="$CTX/iox-tool/ioxclient"
+  fi
+else
+  "$REPO/tools/build-device-image.sh" --context "$CTX" --instruction-roots-dir "$ROOTS"
+fi
+OCI_ARCHIVE="$(cat "$INPUT_CTX/iris-device-oci-path")"
+OCI_INDEX="$(sed -n 's/^index_digest=//p' "$INPUT_CTX/iris-device-oci.manifest")"
+OCI_ARCHIVE_SHA="$(sed -n 's/^archive_sha256=//p' "$INPUT_CTX/iris-device-oci.manifest")"
+SOURCE_FIELD=source_sha256
+[ -z "$FINALIZED_DIR" ] || SOURCE_FIELD=neutral_source_sha256
+OCI_SOURCE_SHA="$(sed -n "s/^$SOURCE_FIELD=//p" "$INPUT_CTX/iris-device-oci.manifest")"
 [ -n "$OCI_INDEX" ] && [ -n "$OCI_ARCHIVE_SHA" ] && [ -n "$OCI_SOURCE_SHA" ] \
   || { echo "!! canonical OCI provenance manifest is incomplete" >&2; exit 1; }
 
@@ -105,7 +137,7 @@ if tar tf "$CTX/rootfs.tar" | grep -qx index.json \
 fi
 
 # ioxclient packages its entire working directory. Keep it deliberately small:
-# the deployment-neutral rootfs and descriptor only.
+# the selected rootfs and descriptor only.
 PKG="$CTX/pkg"
 mkdir -p "$PKG"
 mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"
@@ -150,14 +182,19 @@ trap 'rm -rf "$CTX"; rm -f "$artifact_tmp" "$manifest_tmp"' EXIT
 cp "$CTX/package-sha512.tar" "$artifact_tmp"
 WRAPPER_SHA="$(sha256sum "$artifact_tmp" | awk '{print $1}')"
 {
-  echo 'format=iris-device-wrapper-v1'
+  if [ -n "$FINALIZED_DIR" ]; then echo 'format=iris-device-wrapper-v2'; else echo 'format=iris-device-wrapper-v1'; fi
   echo 'wrapper_kind=iox'
   echo "wrapper_file=$PACKAGE_NAME"
   echo "wrapper_sha256=$WRAPPER_SHA"
   echo "platform=linux/$IOX_ARCH"
   echo "canonical_index_digest=$OCI_INDEX"
   echo "canonical_archive_sha256=$OCI_ARCHIVE_SHA"
-  echo "canonical_source_sha256=$OCI_SOURCE_SHA"
+  if [ -n "$FINALIZED_DIR" ]; then
+    echo "canonical_neutral_source_sha256=$OCI_SOURCE_SHA"
+    echo "canonical_finalization_sha256=$FINALIZATION_SHA"
+  else
+    echo "canonical_source_sha256=$OCI_SOURCE_SHA"
+  fi
 } > "$manifest_tmp"
 chmod 444 "$artifact_tmp" "$manifest_tmp"
 # Never expose a new wrapper beside stale provenance. Each published file is
