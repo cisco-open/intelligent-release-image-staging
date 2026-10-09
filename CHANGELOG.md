@@ -17,6 +17,19 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add reviewed distribution-access controls in Policies. Preview exact device
+  and address counts before applying bounded origin restrictions. Keep shared
+  addresses out of the blocklist, retain approvals across endpoint expiry, and
+  show confirmed application separately from saved settings. Upgrades keep
+  review-only mode until an operator enables enforcement.
+
+- Keep the two public Guest Shell trust files readable when native IOS file
+  access changes their mapped owner. Preserve private-file permissions and
+  reject an unreadable bundle before replacing the running agent.
+
+- Add an isolated mixed-API capacity test with real uploads, device heartbeats,
+  latency and resource checks, restart recovery and shared rate-limit tests.
+
 - Update the build-only source-map-js dependency to 1.2.2 to fix malformed
   source maps blocking the build process (CVE-2026-93749).
 

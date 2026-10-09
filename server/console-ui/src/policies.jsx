@@ -6,6 +6,7 @@ import {createRoot} from 'react-dom/client';
 import {distributionAllowed, enforcementLabel, roleConnections} from './policy-model.mjs';
 import {PoliciesController} from './policies-controller.mjs';
 import {PolicyDialogs} from './policy-dialogs.jsx';
+import {OriginEnforcement} from './origin-enforcement.jsx';
 
 function Policies({controller}) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
@@ -19,7 +20,6 @@ function Policies({controller}) {
     if (!state.dialog && controller.visible() && node && (!node.isConnected || node.disabled)
       && (document.activeElement === node || document.activeElement === document.body)) document.getElementById('policy-advanced-open')?.focus();
   }, [state, controller]);
-  const previewOnly = state.policyOk && policy.enforcement?.mutual_origin?.mode === 'preflight';
   return <div onFocusCapture={event => {lastFocus.current = event.target;}}>
     <div className="page-header"><h2 className="page-title">Policies</h2></div>
     <p className="page-description">Choose who can share images and use the distribution server. Assign devices to roles in <a href="#devices">Inventory</a>.</p>
@@ -53,10 +53,10 @@ function Policies({controller}) {
       <dl>
         <div><dt>Role-to-role sharing</dt><dd>Controls which peers the tracker introduces. Existing transfers may continue.</dd></div>
         <div><dt>Distribution server blocklist</dt><dd>{enforcementLabel(policy, state.policyOk)}<span className="policy-member-count">Status of the existing blocklist, not all role restrictions.</span></dd></div>
-        <div><dt>Role restrictions at the server</dt><dd className="policy-access-no">{previewOnly ? 'Preview only — not enforced at the distribution server' : 'Enforcement status unavailable'}</dd></div>
       </dl>
       <p className="muted">Device reports are not independent proof of enforcement. Advanced shows delivery, drift and troubleshooting details.</p>
     </section>
+    <OriginEnforcement controller={controller.origin} />
     <PolicyDialogs controller={controller} state={state} disabled={disabled} />
   </div>;
 }

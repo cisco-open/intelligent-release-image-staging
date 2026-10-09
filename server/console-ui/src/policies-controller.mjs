@@ -4,11 +4,13 @@
 
 import {checkedPolicy, roleCapabilityMessage} from './policy-model.mjs';
 import {revisionOk} from './role-actions-model.mjs';
+import {OriginEnforcementController} from './origin-enforcement-controller.mjs';
 import {POLICY_BODY_LIMIT, POLICY_CSV_LIMIT, checkedDefinitions, definitionForm, definitionPayload, policyBody,
   checkedDefinitionPreview, definitionWriteResult, definitionProblem, definitionPreviewText} from './policy-definitions-model.mjs';
 
 export class PoliciesController {
   constructor() {
+    this.origin = new OriginEnforcementController();
     this.state = {policy: {}, policyOk: false, definitions: {}, definitionsRevision: null, definitionsOk: false,
       loading: false, readError: '', dialog: null, editor: null, form: definitionForm(), preview: null,
       busy: false, committing: false, externalBusy: false, message: '', failed: false, formMessage: '', reviewRequired: false,
@@ -18,16 +20,22 @@ export class PoliciesController {
   snapshot = () => this.state;
   subscribe = listener => {this.listeners.add(listener); return () => this.listeners.delete(listener);};
   update(patch) {this.state = {...this.state, ...patch}; this.listeners.forEach(listener => listener());}
-  connect(services) {this.services = services;}
+  connect(services) {
+    this.services = services;
+    this.origin.connect({...services, warning: () => this.capability(), policyRevision: () => this.state.policyOk ? this.state.policy.revision : null});
+  }
   visible() {return this.services?.isVisible?.() === true;}
   capability(policy = this.state.policy, ready = this.state.policyOk) {return roleCapabilityMessage(policy, ready);}
   current() {return this.state.policyOk && this.state.definitionsOk && this.state.definitionsRevision === this.state.policy.revision;}
-  policy(policy, policyOk) {this.update({policy, policyOk});}
-  prerequisites(inventory) {this.update({externalBusy: (inventory.bulkBusy && !this.ownsLock) || inventory.rowBusy.size > 0});}
+  policy(policy, policyOk) {this.update({policy, policyOk}); this.origin.policy(policyOk ? policy.revision : null);}
+  prerequisites(inventory) {
+    this.update({externalBusy: (inventory.bulkBusy && !this.ownsLock) || inventory.rowBusy.size > 0});
+    this.origin.prerequisites(inventory);
+  }
   say(message, failed = false) {this.update({message, failed});}
   cancelReads() {this.readGeneration++; this.reader?.abort(); this.reader = null; this.update({loading: false});}
   close() {this.writeGeneration++; this.update({dialog: null, preview: null}); if (!this.state.busy) this.release();}
-  hide() {this.close(); this.cancelReads(); this.downloadReader?.abort(); this.downloadReader = null; this.update({downloading: false});}
+  hide() {this.close(); this.origin.hide(); this.cancelReads(); this.downloadReader?.abort(); this.downloadReader = null; this.update({downloading: false});}
   advanced() {if (this.state.dialog === 'editor') this.close(); this.update({dialog: 'advanced'});}
   async refresh(review = false) {
     if (!this.visible() || this.state.busy) return false;
@@ -60,6 +68,7 @@ export class PoliciesController {
         this.release();
         this.say('Policies refreshed. Review current definitions before another preview.');
       }
+      await this.origin.refresh();
       return this.current() && !this.capability();
     } catch (error) {
       if (!current()) return false;

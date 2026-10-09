@@ -78,6 +78,7 @@ SHIP=(
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
+  tools/api-soak.py tools/api_soak_workload.py tools/api_soak_fixture.py tools/test_api_soak.py
   tools/aria2c-patches tools/aria2c-build tools/aria2c-source
   # ...and the tested aria2c clients themselves. They are committed (see the
   # re-inclusions in .gitignore), so the release is complete offline: bin/aria2c

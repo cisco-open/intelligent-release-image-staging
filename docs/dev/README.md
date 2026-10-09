@@ -38,6 +38,7 @@ tracked `docs/` tree, so a recipient unpacking a release gets this folder too.
 | [instruction-crypto.md](instruction-crypto.md) | Instruction encryption and signature implementation. |
 | [upgrade-notes.md](upgrade-notes.md) | Migration constraints and compatibility. |
 | [api-exercise.md](api-exercise.md) | API exercise harness and its evidence. |
+| [api-soak.md](api-soak.md) | Isolated sustained API workload, resource limits and recovery checks. |
 | [console-ui.md](console-ui.md) | Console implementation and UI conventions. |
 | [dashboards.md](dashboards.md) | Dashboard development and data contracts. |
 | [validation-records.md](validation-records.md) | Dated lab evidence and remaining validation gaps. |

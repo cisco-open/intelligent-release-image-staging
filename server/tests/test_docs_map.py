@@ -622,12 +622,13 @@ def test_docs_state_policy_outbox_backlog():
 
 def test_docs_state_phase_zero_role_and_qos_contract():
     """Phase 0 documentation must distinguish server enforcement from future
-    device instructions and preserve the preflight-only origin boundary."""
+    device instructions and preserve the reviewed origin boundary."""
     _require("security.md", [
         "virtual role ACL",
         "shadows the role",
         "does not sever existing connections",
-        "preflight only",
+        "default is **preflight**",
+        "reviewed opt-in",
         "shared_permit_deny",
         "agent-distribution exemption",
     ])
@@ -663,7 +664,13 @@ def test_docs_state_phase_zero_role_and_qos_contract():
                  "the agent-distribution exemption must list the controls")
     _assert_unit(security, ("reconciler", "preflight",
                             "keeps applying the rules in force"),
-                 "mutual-origin blocking must stay preflight only")
+                 "mutual-origin blocking must stay inert by default")
+    _assert_unit(security, ("exact device identities", "IPv4 addresses",
+                           "limits", "another preview"),
+                 "origin activation must bind exact reviewed identities and addresses")
+    _require("user-guide/roles.md", ["Distribution access", "Review only",
+        "New address limit", "New device limit", "Apply reviewed change",
+        "Requested mode", "Refresh status"])
     _require("architecture/limitations.md",
              ["per-role origin shaping is not expressible"])
     _require("reference/peer-policy-api.md", [
@@ -1801,8 +1808,9 @@ def test_docs_phase1_changelog_and_release_boundary():
 
     _assert_section_terms(_page("architecture/security-model.md"),
                           "What the status shows and what it hides",
-                          ("mutual-origin", "preflight only"),
-                 "the open mutual-origin boundary must remain explicit")
+                          ("mutual-origin", "default", "preflight", "reviewed opt-in",
+                           "current aria2 session", "shared", "degraded"),
+                 "reviewed opt-in and evidence boundaries must remain explicit")
 
 
 # ---------------------------------------------------------------------------

@@ -656,9 +656,9 @@ class TestMutualOriginPreflight:
 
 
 # ---------------------------------------------------------------------------
-# Issue #153: the APPLIED set self-evaluates the device ACL. The pair result
-# is computed (prospective_denied_ips) but stays preflight-only until the
-# documented, separately authorized activation release.
+# Unreviewed/default origin behavior remains inert. The pure baseline still
+# self-evaluates device ACLs; reviewed activation is tested through the complete
+# origin-enforcement store and tracker in test_origin_enforcement.py.
 # ---------------------------------------------------------------------------
 
 # (shape, seq the device's own ACL permits the DEVICE at,
@@ -702,7 +702,7 @@ def _origin_denied_doc(shape):
     return doc
 
 
-class TestIssue153AppliedSetSelfEvaluates:
+class TestUnreviewedOriginBaseline:
     @pytest.mark.parametrize(
         "shape, self_seq, denying_owner, deny_seq", _ORIGIN_DENIED_SHAPES)
     def test_applied_set_asks_the_device_acl_about_the_device_itself(
@@ -729,16 +729,13 @@ class TestIssue153AppliedSetSelfEvaluates:
         assert result.denied_ips == []                  # handed to aria2
         assert result.prospective_denied_ips == ["10.0.0.3"]  # pair result
 
-    @pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="issue #153: applied denied_ips self-evaluate the device ACL; "
-               "the mutual-origin union is preflight-only until the "
-               "separately authorized activation release (security.md)")
     @pytest.mark.parametrize(
         "shape", [row[0] for row in _ORIGIN_DENIED_SHAPES])
-    def test_origin_denied_device_lands_in_applied_set(self, shape):
+    def test_unreviewed_origin_denial_remains_observation_only(self, shape):
         doc = _origin_denied_doc(shape)
         result = br.derive_denied_set(
             _pr(doc), _endpoints(("device:d1", "device", "d1", "10.0.0.3")),
             {}, [], set(), SEEDER_IP)
-        assert result.denied_ips == ["10.0.0.3"]
+        assert result.denied_ips == []
+        assert result.prospective_denied_ips == ["10.0.0.3"]
+        assert result.newly_denied_device_ids == ["d1"]

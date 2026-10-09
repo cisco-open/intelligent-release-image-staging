@@ -93,7 +93,7 @@ link to its definition.
 | tick | one pass of the agent's check-in loop |
 | LKG | the last policy the device accepted (last known good) |
 | keyed state | the files the server keeps per device, under that device's id |
-| mutual origin | two devices that both hold a full copy of the same image |
+| mutual origin | permission in both directions between a device and the distribution server |
 | quarantine (image) | an image that failed the Cisco hash check and is held back from devices |
 | quarantine (device) | a device told to stop sharing with every peer |
 | principal | who a request is from: a device, the server's seeder, or a legacy device |

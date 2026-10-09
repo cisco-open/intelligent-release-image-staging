@@ -102,7 +102,7 @@ jobs:
         run: |
           python3 -m pytest -p no:cacheprovider -q \
             server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ \
-            lab/tests/ device/test_verify_image.py tools/test_api_exercise.py
+            lab/tests/ device/test_verify_image.py tools/test_api_exercise.py tools/test_api_soak.py
 
       - name: Managed-worker custody and private-umask regressions
         if: ${{ !cancelled() }}

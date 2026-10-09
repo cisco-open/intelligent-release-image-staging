@@ -32,6 +32,7 @@ import peer_handouts as _peer_handouts
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
 import origin_qos as _origin_qos
+import origin_enforcement as _origin_enforcement
 import reconciler_status as _status_codes
 import secrets_store
 import service_shutdown
@@ -994,6 +995,8 @@ class TrackerReconciler:
         self._enforcement_path = enforcement_path
         self._origin_qos_path = origin_qos_path or os.path.join(
             os.path.dirname(enforcement_path), "origin-qos.json")
+        self._origin_enforcement = _origin_enforcement.Runtime(
+            os.path.dirname(enforcement_path))
         self._aria = aria
         self._pending = pending_queue
         self._active_participants = active_participants
@@ -1187,7 +1190,8 @@ class TrackerReconciler:
         return (_stat_key(self._policy_paths[0]),
                 # The durable endpoint map is a keyed shard directory, not one
                 # document, so its change key is the directory's.
-                _peer_endpoints.change_key(self._endpoints_path))
+                _peer_endpoints.change_key(self._endpoints_path),
+                _stat_key(self._origin_enforcement.control_path))
 
     def _poll_should_run(self, waked):
         """Decide whether this loop iteration should reconcile.
@@ -1253,6 +1257,13 @@ class TrackerReconciler:
     # -- one reconcile pass -------------------------------------------------
 
     def run_once(self):
+        _peer_policy.load_policy(*self._policy_paths)
+        # The management writer uses the same control lock. A reviewed change
+        # cannot replace the approval midway through a native RPC apply.
+        with _origin_enforcement.locked(self._origin_enforcement.control_path):
+            return self._run_once()
+
+    def _run_once(self):
         now = self._now()
 
         # 1) Snapshot pending BEFORE retry so a pending tuple affects the
@@ -1265,7 +1276,7 @@ class TrackerReconciler:
 
         # 2) Recompute desired from durable + pending + active + revocation +
         #    policy + protected seeder (never in-memory residue).
-        policy = _peer_policy.load_policy(*self._policy_paths)
+        policy = _peer_policy.load_policy(*self._policy_paths, initialize_missing=False)
         revoked = set(self._revoked_principals() or set())
         # Rows of revoked principals and of principals the policy denies at
         # that address outlive ENDPOINT_TTL (spec 7 retirement): the seeder
@@ -1320,6 +1331,12 @@ class TrackerReconciler:
         derived = _reconciler.derive_denied_set(
             policy, durable, pending_snapshot, active, revoked,
             self._protected_seeder_ip)
+        origin_runtime = self._origin_enforcement
+        origin_derived = origin_runtime.prepare(
+            policy, durable, pending_snapshot, revoked,
+            self._protected_seeder_ip, derived)
+        if origin_derived is not None:
+            derived = origin_derived
 
         # 3) Decide whether to force a full apply (startup / session change /
         #    RPC recovery) — otherwise skip a redundant identical apply.
@@ -1334,17 +1351,21 @@ class TrackerReconciler:
                  or session != self._last_session
                  or self._rpc_ok is not True
                  or desired_hash != self._last_hash)
+        if origin_runtime.enabled:
+            previous = (origin_runtime.application or {}).get("last_applied") or {}
+            force = force or previous.get("revision") != origin_runtime.control["revision"]
 
         outcome = None
-        if force:
+        if force and origin_derived is not None and origin_runtime.before_apply(session):
             outcome = _reconciler.apply_blocklist(
                 self._aria, derived.denied_ips, derived.apply_empty,
-                session_id=session) if self._qos_enabled else \
+                session_id=session) if self._qos_enabled or origin_runtime.enabled else \
                 _reconciler.apply_blocklist(
                     self._aria, derived.denied_ips, derived.apply_empty)
 
         qos_status = None
-        if self._qos_enabled:
+        session_stable = bool(session)
+        if self._qos_enabled or origin_runtime.enabled:
             session_stable = bool(session) and self._probe_session() == session
             if not session_stable:
                 self._rpc_ok = False
@@ -1353,13 +1374,34 @@ class TrackerReconciler:
                         success=False,
                         last_error=(_status_codes.ARIA_SESSION_CHANGED if session
                                     else _status_codes.ARIA_SESSION_UNAVAILABLE))
-            qos_status = self._finish_origin_qos(
-                now, session, session_stable, desired_qos, qos_outcome,
-                qos_error)
+            if self._qos_enabled:
+                qos_status = self._finish_origin_qos(
+                    now, session, session_stable, desired_qos, qos_outcome,
+                    qos_error)
 
         # 4) Persist the exact count-only enforcement status.
         status = self._build_status(
             now, policy, derived, desired_hash, outcome, pending_outstanding)
+        if origin_runtime.enabled:
+            # Policy commits use their own lock; detect an intervening policy
+            # edit before reporting a healthy origin acknowledgement.
+            current_policy = _peer_policy.load_policy(*self._policy_paths,
+                                                     initialize_missing=False)
+            if _origin_enforcement.policy_hash(current_policy) != \
+                    _origin_enforcement.policy_hash(policy):
+                origin_runtime.reason = "policy_changed"
+            success = (origin_derived is not None and session_stable
+                       and self._rpc_ok is True and not pending_outstanding
+                       and (not force or outcome is not None and outcome.success))
+            origin_runtime.finish(success=success, session=session, now=now,
+                                  applied=outcome is not None and outcome.success)
+            status["mutual_origin"] = {
+                "mode": origin_runtime.control["mode"],
+                "newly_denied_device_count": None,
+                "newly_denied_device_ids": None}
+            if origin_runtime.reason is not None or not success:
+                status["state"] = "degraded"
+                status["last_error"] = _status_codes.PEER_RECONCILE_FAILED
 
         # 5) Export the policy operation outbox (revision order, ack-gated).
         #    Read the prior ack watermark once (centralized) and carry it

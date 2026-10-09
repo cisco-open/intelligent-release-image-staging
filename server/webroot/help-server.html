@@ -146,6 +146,13 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       save needs a refresh and review; <strong>Reload current definition</strong>
       discards your draft. Role CSV exports include seeder and leecher timing
       overrides; blank or missing timing columns remove those overrides on import.</li>
+      <li>Policies → <strong>Distribution access</strong> starts in
+      <strong>Review only</strong>. To enforce reviewed restrictions, set the
+      new-device and new-address limits, select <strong>Preview change</strong>,
+      check the counts, then <strong>Apply reviewed change</strong>. Wait for
+      application status, not just the requested mode. A shared allowed/denied
+      address needs separate addresses. After an uncertain save, use
+      <strong>Refresh status</strong> before another preview.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>

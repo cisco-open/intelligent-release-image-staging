@@ -887,7 +887,8 @@ try {
   assert.match(await branchRow.innerText(), /staging/);
   assert.match(await branchRow.innerText(), /Not allowed by role/);
   assert.doesNotMatch(await branchRow.innerText(), /isolated/);
-  assert.match(await page.locator('#iris-policies-root').innerText(), /Preview only — not enforced at the distribution server/);
+  assert.equal(await page.locator('#origin-application-state').innerText(), 'Status unavailable');
+  assert.equal(await page.locator('#origin-apply').isDisabled(), true);
   await page.getByRole('button', {name: 'Edit role branch', exact: true}).click();
   assert.equal(await page.locator('#role-editor-advanced').getAttribute('open'), null);
   await page.locator('#role-editor-advanced > summary').click();

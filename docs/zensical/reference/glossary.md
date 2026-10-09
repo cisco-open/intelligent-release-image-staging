@@ -41,7 +41,7 @@ The files the server keeps per device, under that device's id. See
 
 ## mutual origin
 
-Two devices that both hold a full copy of the same image. See
+Permission in both directions between a device and the distribution server. See
 [Security model](../architecture/security-model.md).
 
 ## quarantine (image)

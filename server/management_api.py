@@ -65,6 +65,7 @@ import iox_transport
 import iox_verification
 import live_samples
 import origin_qos
+import origin_enforcement
 import otlp
 import peer_endpoints
 import peer_policy
@@ -3491,6 +3492,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     ("PUT", "/internal/v1/peer-policy/roles/{name}"),
                     ("DELETE", "/internal/v1/peer-policy/roles/{name}"),
                     ("PUT", "/internal/v1/peer-policy/qos"),
+                    ("GET", "/internal/v1/peer-policy/origin-enforcement"),
+                    ("PUT", "/internal/v1/peer-policy/origin-enforcement"),
                     ("POST", "/internal/v1/devices/{device_id}/role"),
                     ("POST", "/internal/v1/devices/{device_id}/peer-telemetry"),
                     ("POST", "/internal/v1/devices/bulk-role"),
@@ -4606,6 +4609,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._projection_busy(); return
                 self._json(200, view, extra_headers=[
                     ("ETag", _revision_etag("peer-policy", view["revision"]))])
+                return
+            if path == "/api/peer-policy/origin-enforcement":
+                if app.session_info(self._sid()) is None:
+                    self._session_refusal(); return
+                self._origin_enforcement_request()
                 return
             if path == "/api/audit":
                 if app.session_info(self._sid()) is None:
@@ -5795,6 +5803,49 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        def _origin_enforcement_request(self, actor=None):
+            store = origin_enforcement.Store(policy_state_dir(),
+                os.environ.get("IRIS_HOST_IP"), revoked=instruction_revocation_snapshot,
+                now=now_fn)
+            try:
+                if urlsplit(self.path).query:
+                    raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                if actor is None:
+                    result = store.read()
+                else:
+                    try:
+                        length = int(self.headers.get("Content-Length", "0") or 0)
+                    except ValueError:
+                        raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                    if length <= 0 or length > _MAX_BODY:
+                        raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                    try:
+                        body = json.loads(self.rfile.read(length))
+                    except (ValueError, UnicodeDecodeError, RecursionError):
+                        raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                    result = store.change(body, self.headers.get_all("If-Match", []))
+                    if result["dry_run"] is False:
+                        self._audit("peer_policy_change", "device", actor=actor,
+                            action="put", target="origin-enforcement",
+                            detail="reviewed control revision %d; mode %s" %
+                                   (result["revision"], result["mode"]))
+                self._json(200, result, extra_headers=[
+                    ("ETag", origin_enforcement.etag(result["revision"]))])
+            except (origin_enforcement.OriginError, peer_endpoints.EndpointStoreError,
+                    OSError, ValueError) as exc:
+                code = exc.code if isinstance(exc, origin_enforcement.OriginError) \
+                    else "origin_enforcement_unavailable"
+                status = exc.status if isinstance(exc, origin_enforcement.OriginError) else 503
+                self._finish_idempotency(None)
+                headers = []
+                try:
+                    current = origin_enforcement.load_control(store.control_path)
+                    headers.append(("ETag", origin_enforcement.etag(current["revision"])))
+                except (origin_enforcement.OriginError, OSError):
+                    pass
+                api_problem.send(self, status, code,
+                    code.replace("_", " ").capitalize(), error=code, headers=headers)
+
         def _policy_problem(self, status, code, revision=None, **details):
             self._finish_idempotency(None)
             for key in ("code", "type", "title", "status", "error"):
@@ -6143,6 +6194,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            if path == "/api/peer-policy/origin-enforcement":
+                info = self._require_session_csrf()
+                if info is not None:
+                    self._origin_enforcement_request("console:" + info["username"])
+                return
             if re.fullmatch(r"/api/schedules/[^/]+", path):
                 try:
                     length = int(self.headers.get("Content-Length", "0") or 0)

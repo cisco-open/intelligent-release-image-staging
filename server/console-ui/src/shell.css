@@ -118,6 +118,16 @@
 }
 .iris-react-shell .iris-skip { position: absolute; left: 12px; top: -80px; padding: 8px 14px; color: var(--iris-header); background: white; z-index: 200; }
 .iris-react-shell .iris-skip:focus { top: 8px; }
+.iris-react-shell .origin-enforcement { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--iris-rule); }
+.iris-react-shell .origin-enforcement h3:focus { outline: 2px solid var(--iris-action); outline-offset: 4px; }
+.iris-react-shell .origin-enforcement-fields { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(2, minmax(120px, 1fr)); gap: 16px; }
+.iris-react-shell .origin-enforcement-fields .field { display: flex; flex-direction: column; min-width: 0; }
+.iris-react-shell .origin-enforcement-fields :is(input,select) { width: 100%; min-width: 0; box-sizing: border-box; }
+.iris-react-shell .origin-enforcement-preview { padding: 16px; margin: 16px 0; border: 1px solid var(--iris-rule); border-left: 3px solid var(--iris-action); background: var(--surface); overflow-wrap: anywhere; }
+.iris-react-shell .origin-enforcement .role-def-actions { flex-wrap: wrap; }
+@media (max-width: 800px) {
+  .iris-react-shell .origin-enforcement-fields { grid-template-columns: minmax(0, 1fr); }
+}
 .iris-react-shell :is(.iris-header,.iris-navigation) :is(a,button):focus-visible { outline: 2px solid #2998fa; outline-offset: -2px; }
 
 /* The selection column is a control gutter, not a text-input column. Keep

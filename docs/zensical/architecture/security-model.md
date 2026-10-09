@@ -140,7 +140,13 @@ Under `fail_closed` the tracker derives an emergency deny list: every address it
 
 The status route is the operator boundary and is count-only. It returns counts: role definitions, restrictions and members, queue occupancy, the applied revision, the addresses the tracker wants denied, conflicts by type, and origin rate counts. It never returns the raw blocklist, peer addresses, aria2 option dictionaries, session ids, or the device ids behind the mutual-origin preflight.
 
-Two devices that both hold a full copy of the same image are a mutual origin. Mutual-origin blocking is **preflight only**: the reconciler counts how many devices a future rule would newly deny and keeps applying the rules in force. The count is `null` when the protected seeder address is unknown; zero means the evaluation found no newly denied device.
+Mutual-origin blocking checks whether the device and distribution server permit each other. The default is **preflight**: the reconciler counts newly denied devices and keeps applying the rules in force. The count is `null` when the protected seeder address is unknown; zero means the evaluation found no newly denied device.
+
+**Policies → Distribution access** offers a reviewed opt-in. A preview binds the exact device identities and IPv4 addresses, the policy, and the limits on newly restricted devices and addresses. A change to those inputs requires another preview. Requested mode and applied status are separate: `enforced` needs a recent acknowledgement from the current aria2 session.
+
+An unknown or mismatched origin, unavailable state, or a changed policy stops new origin restrictions. The tracker preserves its last acknowledged list and reports the problem; a healthy newer policy still applies ordinary quarantine and revocation. If an interrupted apply has no acknowledgement, the live list is left untouched until valid current evidence permits an exact reviewed apply. Known protected addresses are excluded. A shared permitted/denied address refuses activation; if one appears later, the tracker removes that address from the blocklist and reports degraded enforcement. That exclusion survives endpoint expiry and restart until another explicit review. IP blocking cannot separate devices behind one shared address.
+
+Approvals retain exact device/address bindings after endpoint expiry, with a total bound of 10,000 devices and 41,024 bindings. Each review permits at most 1,000 new devices and 1,000 new addresses, defaulting to 10 each. Switching back to review only requires a preview and releases origin-only restrictions while preserving ordinary quarantine and revocation rules.
 
 A conflict record names the single address that two principals disagree about, so the status file is **not address-free**. See [Control which devices share with each other](../user-guide/roles.md).
 

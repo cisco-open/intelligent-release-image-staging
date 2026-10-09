@@ -372,9 +372,11 @@ def test_policy_preflight_schema_distinguishes_unknown_and_zero_without_ids():
         validator = OAS32Validator(schema)
         for count in (None, 0, 2):
             validator.validate({"mode": "preflight", "newly_denied_device_count": count})
+        validator.validate({"mode": "enforce", "newly_denied_device_count": None})
         for bad in (
                 {"mode": "preflight"},
                 {"mode": "enforced", "newly_denied_device_count": 0},
+                {"mode": "enforce", "newly_denied_device_count": 0},
                 {"mode": "preflight", "newly_denied_device_count": 0,
                  "newly_denied_device_ids": []},
                 *[{"mode": "preflight", "newly_denied_device_count": value}

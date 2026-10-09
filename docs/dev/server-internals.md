@@ -33,18 +33,30 @@ and a burst of fetches never triggers a burst of deletion work.
 
 ## The mutual-origin preflight gate
 
-Two devices that both hold a full copy of the same image are a mutual
-origin. A future rule could stop such devices from becoming peers, but that
-rule is not active yet. The reconciler that shares a pass with origin quality
-of service only measures the effect for now. It counts how many devices a
-mutual-origin rule would newly deny if it ran, using the same self-evaluation
-blocklist the tracker already applies, and it changes nothing else. The
-management surface reports that count, never the device IDs or addresses
-behind it. The count is unavailable, reported as null, when the protected
-seeder's IPv4 address is unknown, and a count of zero means the check ran and
-found no device it would newly deny.
+The preflight measures additional origin blocks from the device/distribution
+pair decision, beyond the existing quarantine and revocation blocklist. It is
+the default after installation or upgrade. Public status contains counts, not
+addresses or device identities. An unavailable count is null, not zero.
 
-This preflight stays open, tracked internally, until one full tagged-release dwell of observation has completed with no surprises. Only a later, separately authorized activation can turn the count into an enforced rule. That activation would apply the union of the current self-evaluation blocklist and the mutual-origin evaluation, across every ACL, including one written by hand. Nothing in the reconciler pass itself starts that dwell or grants that authorization; turning the gate on is a distinct, reviewed release. See
+`origin_enforcement.Store` lets an operator preview and approve an exact policy,
+origin, device and address set with separate device/address growth limits. Its
+control revision has its own ETag. The tracker is the sole native RPC writer;
+it journals an attempted set before applying it and verifies the aria2 session
+before reporting success. Saving an approval reports pending, not applied.
+
+Approvals retain their exact bounded bindings across endpoint expiry. Newly
+observed addresses require a fresh review. Protected origin addresses and
+shared allowed/denied addresses stay excluded; a shared-address exclusion
+persists for its approved binding until another review. Missing, corrupt or
+inconsistent private state stops application instead of clearing a live list.
+A healthy changed policy still controls ordinary quarantine and revocation,
+while origin-only restrictions need another review. An uncertain prior apply
+is not treated as a successful acknowledgement.
+
+The count-only application proof expires after 120 seconds. Read requested
+mode and actual state separately. Native tests cover transfer disconnection,
+permitted peers and reviewed rollback; live qualification is recorded separately
+from those isolated tests. See
 [Roles and peer sharing](../zensical/architecture/security-model.md#roles-and-peer-sharing)
 for the rule as an operator sees it today.
 

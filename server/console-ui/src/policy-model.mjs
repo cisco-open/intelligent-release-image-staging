@@ -92,6 +92,7 @@ export function policyDiagnostics(policy, ready, formatDate) {
     members: instructionMapRows(roles.members, false, ready && roles.defined === 0 ? 'No roles defined.' : 'Role member counts unavailable.'),
     origin: `Last origin QoS state: ${originState} · ${policyCount(origin.applied_download_count)}/${policyCount(origin.target_download_count)} downloads applied · last reconciled: ${reconciled}. Origin limits apply globally or per torrent, not per role.`,
     mutual: mutual.mode === 'preflight' ? (count(mutual.newly_denied_device_count) ? `Mutual-origin preflight only: ${mutual.newly_denied_device_count} newly denied devices.`
-      : 'Mutual-origin preflight count unavailable.') + ' This additional origin restriction is not active.' + (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '') : 'Mutual-origin preflight status unavailable.',
+      : 'Mutual-origin preflight count unavailable.') + ' This additional origin restriction is not active.' + (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '')
+      : mutual.mode === 'enforce' ? 'Reviewed origin restrictions requested. Distribution access shows the separately verified application status.' : 'Mutual-origin preflight status unavailable.',
     instruction: instructionDiagnostics(p, formatDate)};
 }

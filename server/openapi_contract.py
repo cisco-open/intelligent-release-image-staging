@@ -22,6 +22,7 @@ import trust_rotation
 import peer_policy
 import schedules
 import deployment_info
+import origin_enforcement
 
 
 ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
@@ -896,11 +897,79 @@ def _policy_mutation(route):
     return (route.method, _resource_suffix(route)) in POLICY_MUTATIONS
 
 
+def _origin_control_schema(write=False):
+    count = {"type": "integer", "minimum": 0}
+    nullable_count = {"type": ["integer", "null"], "minimum": 0}
+    fields = {name: dict(count) for name in (
+        "revision", "policy_revision", "approved_ip_count", "approved_device_count")}
+    fields.update({name: dict(nullable_count) for name in (
+        "new_ip_count", "new_device_count", "retained_ip_count", "proposed_ip_count",
+        "proposed_device_count", "shared_conflict_count", "protected_conflict_count",
+        "applied_ip_count", "applied_device_count")})
+    fields.update({
+        "mode": {"enum": ["preflight", "enforce"]},
+        "state": {"enum": sorted(origin_enforcement.STATES)},
+        "max_new_ips": dict(count, maximum=origin_enforcement.MAX_BUDGET),
+        "max_new_devices": dict(count, maximum=origin_enforcement.MAX_BUDGET),
+        "reason": {"enum": [None, *sorted(origin_enforcement.REASONS)]},
+        "last_verified_at": {"type": ["number", "null"], "minimum": 0},
+        "blockers": {"type": "array", "maxItems": len(origin_enforcement.REASONS),
+                     "items": {"enum": sorted(origin_enforcement.REASONS)}},
+    })
+    if write:
+        fields.update({"dry_run": {"type": "boolean"},
+                       "requires_confirmation": {"type": "boolean"},
+                       "confirm_token": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}})
+    schema = _schedule_object(fields)
+    schema["description"] = (
+        "Count-only distribution-access approval and application evidence. Mode is "
+        "requested intent; state is separately verified tracker evidence. A saved "
+        "approval is pending, never immediate proof of enforcement. Null counts "
+        "mean unavailable. No addresses or private application journal are exposed.")
+    if write:
+        schema["allOf"] = [{
+            "if": {"properties": {"dry_run": {"const": False}}},
+            "then": {"properties": {
+                "requires_confirmation": {"const": False}, "confirm_token": {"const": None},
+                "state": {"const": "pending"}, "applied_ip_count": {"const": None},
+                "applied_device_count": {"const": None}, "last_verified_at": {"const": None}}},
+            "else": {"properties": {"requires_confirmation": {"const": True}}},
+        }]
+    else:
+        schema["allOf"] = [{
+            "if": {"properties": {"state": {"const": "enforced"}}},
+            "then": {"properties": {"mode": {"const": "enforce"},
+                "reason": {"const": None}, "blockers": {"maxItems": 0},
+                "applied_ip_count": dict(count), "applied_device_count": dict(count),
+                "last_verified_at": {"type": "number", "exclusiveMinimum": 0}}},
+        }]
+    return schema
+
+
+def _origin_control_example(**changes):
+    return {"revision": 0, "policy_revision": 4, "mode": "preflight",
+            "max_new_ips": 10, "max_new_devices": 10,
+            "approved_ip_count": 0, "approved_device_count": 0,
+            "new_ip_count": 2, "new_device_count": 3, "retained_ip_count": 0,
+            "proposed_ip_count": 2, "proposed_device_count": 3,
+            "shared_conflict_count": 0, "protected_conflict_count": 0,
+            "state": "preflight", "reason": None,
+            "applied_ip_count": None, "applied_device_count": None,
+            "last_verified_at": None, "blockers": [], **changes}
+
+
 def _policy_business_errors(route):
     """Business refusals by the exact handler branch, excluding tier guards."""
     key = (route.method, _resource_suffix(route))
     specific = {
         ("GET", "/peer-policy"): {},
+        ("GET", "/peer-policy/origin-enforcement"): {
+            503: ("origin_enforcement_unavailable",)},
+        ("PUT", "/peer-policy/origin-enforcement"): {
+            409: ("policy_revision_conflict", "origin_review_stale", "origin_enforcement_blocked"),
+            412: ("precondition_failed",), 413: ("payload-too-large",),
+            422: ("invalid_origin_enforcement",), 428: ("precondition_required",),
+            503: ("origin_enforcement_unavailable",)},
         ("GET", "/peer-policy/roles"): {503: ("policy_unavailable",)},
         ("GET", "/peer-policy/roles/export-csv"): {503: ("policy_unavailable",)},
         ("POST", "/peer-policy/roles/import-csv"): {
@@ -1926,6 +1995,26 @@ def _request_body(route):
         return None
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix == "/peer-policy/origin-enforcement":
+        fields = {"mode": {"enum": ["preflight", "enforce"]},
+                  "max_new_ips": {"type": "integer", "minimum": 0, "maximum": 1000},
+                  "max_new_devices": {"type": "integer", "minimum": 0, "maximum": 1000},
+                  "if_policy_revision": {"type": "integer", "minimum": 0},
+                  "dry_run": {"type": "boolean"},
+                  "confirm_token": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+        schema = _schedule_object(fields)
+        schema["required"].remove("confirm_token")
+        schema["allOf"] = [{"if": {"properties": {"dry_run": {"const": False}}},
+                            "then": {"required": ["confirm_token"]}}]
+        schema["description"] = (
+            "Preview with dry_run=true using the current control ETag and policy revision. "
+            "Commit the exact same mode, limits and revisions with dry_run=false and "
+            "the returned confirmation token. Both enabling and disabling require "
+            "a preview bound to the exact reviewed policy, origin and peer bindings. "
+            "A changed peer set requires a new preview even if counts are unchanged.")
+        return {"required": True, "content": {"application/json": _media(schema, {
+            "mode": "enforce", "max_new_ips": 10, "max_new_devices": 10,
+            "if_policy_revision": 4, "dry_run": True})}}
     if "/images/upload/" in path or suffix == "/image-verification/offline":
         return {"required": True, "content": {
             "application/octet-stream": _media(
@@ -2542,6 +2631,24 @@ def _success(route):
         return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix == "/peer-policy/origin-enforcement":
+        writing = route.method == "PUT"
+        media = _media(_origin_control_schema(writing), _origin_control_example())
+        if writing:
+            media.pop("example")
+            media["examples"] = {
+                "preview": {"value": _origin_control_example(mode="enforce", dry_run=True,
+                    requires_confirmation=True, confirm_token="a" * 64)},
+                "blocked": {"value": _origin_control_example(mode="enforce", dry_run=True,
+                    requires_confirmation=True, confirm_token=None, blockers=["shared_address"], shared_conflict_count=1)},
+                "accepted": {"value": _origin_control_example(revision=1, mode="enforce", state="pending",
+                    approved_ip_count=2, approved_device_count=3, dry_run=False,
+                    requires_confirmation=False, confirm_token=None)},
+            }
+        return "200", {"description": "Reviewed approval or count-only application evidence",
+                       "headers": {"ETag": {"schema": {"type": "string", "pattern": '^"origin-enforcement-[0-9]+"$'},
+                                            "example": '"origin-enforcement-0"'}},
+                       "content": {"application/json": media}}
     if suffix == "/deployment":
         nullable = {"type": ["string", "null"], "maxLength": 256}
         component = _schedule_object({field: dict(nullable) for field in deployment_info.FIELDS})
@@ -3099,13 +3206,15 @@ def _success(route):
         schema["properties"]["roles_supported"]["const"] = True
         mutual = schema["properties"]["enforcement"]["properties"]["mutual_origin"]
         mutual["additionalProperties"] = False
-        mutual["properties"]["mode"]["const"] = "preflight"
+        mutual["properties"]["mode"]["enum"] = ["preflight", "enforce"]
+        mutual["allOf"] = [{"if": {"properties": {"mode": {"const": "enforce"}}},
+                            "then": {"properties": {"newly_denied_device_count": {"const": None}}}}]
         mutual["properties"]["newly_denied_device_count"] = {
             "type": ["integer", "null"], "minimum": 0,
             "description": (
-                "Prospective count only; additional mutual-origin enforcement "
-                "is inactive. Null means unavailable, including when the "
-                "protected seeder IPv4 address is unknown. Zero is a completed "
+                "Prospective count in preflight mode only. Null means unavailable "
+                "or requested enforce mode; use GET peer-policy/origin-enforcement "
+                "for separately verified application evidence. Zero is a completed "
                 "preflight with no newly denied devices."),
         }
         schema["properties"]["roles"]["properties"]["members"] = {
@@ -3273,6 +3382,11 @@ def _operation(route):
         op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
             "description": "One exact strong policy ETag. Missing: 428; stale: 412; race under the policy lock: 409. Confirmation is candidate-bound at threshold zero, including every changed QoS document.",
             "schema": {"type": "string"}, "example": '\"iris-peer-policy-4\"'})
+    if _resource_suffix(route) == "/peer-policy/origin-enforcement" and route.method == "PUT":
+        op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
+            "description": "One exact strong control ETag from GET distribution access; distinct from the policy revision in the body. Required for both preview and commit. Missing: 428; malformed, weak or stale: 412.",
+            "schema": {"type": "string", "pattern": '^"origin-enforcement-[0-9]+"$'},
+            "example": '"origin-enforcement-0"'})
     if _schedule_resource(route):
         for parameter in op["parameters"]:
             if parameter["in"] == "path" and parameter["name"] == "id":

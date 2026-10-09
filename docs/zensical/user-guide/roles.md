@@ -67,6 +67,26 @@ them. Pair explanations are available only through
 !!! warning
     Do not edit server state files by hand.
 
+### Review distribution access
+
+Open **Policies → Distribution access**. The default is **Review only**.
+
+1. Choose **Enforce reviewed restrictions** to apply the current device-to-server
+   access rules at the distribution service.
+2. Check **New address limit** and **New device limit**. Both start at 10 and
+   limit additions in this review, not the total already approved.
+3. Select **Preview change**. Review new and retained counts and resolve any
+   checks shown. Applying can disconnect existing transfers from those addresses.
+4. Select **Apply reviewed change**. Wait for **Application status** to confirm
+   enforcement; **Requested mode** alone is not proof.
+
+A changed policy or a newly observed address needs another review. Unknown
+origin information or shared allowed/denied addresses prevents full enforcement.
+Use distinct addresses for those devices. Returning to **Review only** uses the
+same preview and apply steps; ordinary quarantine and revocation remain active.
+If a save is uncertain, select **Refresh status** and check the current settings
+before previewing again.
+
 ### Import and export the definitions file
 
 **Import CSV…** replaces every definition with a comma-separated values (CSV)

@@ -501,7 +501,10 @@
                           "properties": {
                             "mode": {
                               "type": "string",
-                              "const": "preflight"
+                              "enum": [
+                                "preflight",
+                                "enforce"
+                              ]
                             },
                             "newly_denied_device_count": {
                               "type": [
@@ -509,14 +512,32 @@
                                 "null"
                               ],
                               "minimum": 0,
-                              "description": "Prospective count only; additional mutual-origin enforcement is inactive. Null means unavailable, including when the protected seeder IPv4 address is unknown. Zero is a completed preflight with no newly denied devices."
+                              "description": "Prospective count in preflight mode only. Null means unavailable or requested enforce mode; use GET peer-policy/origin-enforcement for separately verified application evidence. Zero is a completed preflight with no newly denied devices."
                             }
                           },
                           "required": [
                             "mode",
                             "newly_denied_device_count"
                           ],
-                          "additionalProperties": false
+                          "additionalProperties": false,
+                          "allOf": [
+                            {
+                              "if": {
+                                "properties": {
+                                  "mode": {
+                                    "const": "enforce"
+                                  }
+                                }
+                              },
+                              "then": {
+                                "properties": {
+                                  "newly_denied_device_count": {
+                                    "const": null
+                                  }
+                                }
+                              }
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -4564,6 +4585,1308 @@
                 },
                 "role": "boat",
                 "confirm_token": "candidate-bound-sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peer-policy/origin-enforcement": {
+      "get": {
+        "operationId": "console_get_api_v1_peer_policy_origin_enforcement",
+        "summary": "Read reviewed distribution restrictions",
+        "description": "Read reviewed distribution restrictions. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Reviewed approval or count-only application evidence",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"origin-enforcement-[0-9]+\"$"
+                },
+                "example": "\"origin-enforcement-0\""
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "policy_revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_ip_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_device_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "new_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "new_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "retained_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "shared_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "protected_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "mode": {
+                      "enum": [
+                        "preflight",
+                        "enforce"
+                      ]
+                    },
+                    "state": {
+                      "enum": [
+                        "degraded",
+                        "enforced",
+                        "pending",
+                        "preflight",
+                        "review_required",
+                        "unavailable"
+                      ]
+                    },
+                    "max_new_ips": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "max_new_devices": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "reason": {
+                      "enum": [
+                        null,
+                        "application_pending",
+                        "application_state_unavailable",
+                        "apply_failed",
+                        "aria_unavailable",
+                        "control_state_unavailable",
+                        "device_budget_exceeded",
+                        "endpoint_set_changed",
+                        "endpoint_state_unavailable",
+                        "ip_budget_exceeded",
+                        "origin_mismatch",
+                        "origin_unknown",
+                        "origin_unobserved",
+                        "policy_changed",
+                        "policy_unavailable",
+                        "protected_address",
+                        "retention_capacity_exceeded",
+                        "session_changed",
+                        "shared_address"
+                      ]
+                    },
+                    "last_verified_at": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "maxItems": 18,
+                      "items": {
+                        "enum": [
+                          "application_pending",
+                          "application_state_unavailable",
+                          "apply_failed",
+                          "aria_unavailable",
+                          "control_state_unavailable",
+                          "device_budget_exceeded",
+                          "endpoint_set_changed",
+                          "endpoint_state_unavailable",
+                          "ip_budget_exceeded",
+                          "origin_mismatch",
+                          "origin_unknown",
+                          "origin_unobserved",
+                          "policy_changed",
+                          "policy_unavailable",
+                          "protected_address",
+                          "retention_capacity_exceeded",
+                          "session_changed",
+                          "shared_address"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "policy_revision",
+                    "approved_ip_count",
+                    "approved_device_count",
+                    "new_ip_count",
+                    "new_device_count",
+                    "retained_ip_count",
+                    "proposed_ip_count",
+                    "proposed_device_count",
+                    "shared_conflict_count",
+                    "protected_conflict_count",
+                    "applied_ip_count",
+                    "applied_device_count",
+                    "mode",
+                    "state",
+                    "max_new_ips",
+                    "max_new_devices",
+                    "reason",
+                    "last_verified_at",
+                    "blockers"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Count-only distribution-access approval and application evidence. Mode is requested intent; state is separately verified tracker evidence. A saved approval is pending, never immediate proof of enforcement. Null counts mean unavailable. No addresses or private application journal are exposed.",
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "state": {
+                            "const": "enforced"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "mode": {
+                            "const": "enforce"
+                          },
+                          "reason": {
+                            "const": null
+                          },
+                          "blockers": {
+                            "maxItems": 0
+                          },
+                          "applied_ip_count": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "applied_device_count": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "last_verified_at": {
+                            "type": "number",
+                            "exclusiveMinimum": 0
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "revision": 0,
+                  "policy_revision": 4,
+                  "mode": "preflight",
+                  "max_new_ips": 10,
+                  "max_new_devices": 10,
+                  "approved_ip_count": 0,
+                  "approved_device_count": 0,
+                  "new_ip_count": 2,
+                  "new_device_count": 3,
+                  "retained_ip_count": 0,
+                  "proposed_ip_count": 2,
+                  "proposed_device_count": 3,
+                  "shared_conflict_count": 0,
+                  "protected_conflict_count": 0,
+                  "state": "preflight",
+                  "reason": null,
+                  "applied_ip_count": null,
+                  "applied_device_count": null,
+                  "last_verified_at": null,
+                  "blockers": []
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid content length or Request body not supported",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid content length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management api unavailable or Origin enforcement unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "origin_enforcement_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management api unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "origin_enforcement_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_enforcement_unavailable",
+                      "title": "Origin enforcement unavailable",
+                      "status": 503,
+                      "code": "origin_enforcement_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "console_put_api_v1_peer_policy_origin_enforcement",
+        "summary": "Review or apply distribution restrictions",
+        "description": "Review or apply distribution restrictions. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "One exact strong control ETag from GET distribution access; distinct from the policy revision in the body. Required for both preview and commit. Missing: 428; malformed, weak or stale: 412.",
+            "schema": {
+              "type": "string",
+              "pattern": "^\"origin-enforcement-[0-9]+\"$"
+            },
+            "example": "\"origin-enforcement-0\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reviewed approval or count-only application evidence",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"origin-enforcement-[0-9]+\"$"
+                },
+                "example": "\"origin-enforcement-0\""
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "policy_revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_ip_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_device_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "new_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "new_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "retained_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "shared_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "protected_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "mode": {
+                      "enum": [
+                        "preflight",
+                        "enforce"
+                      ]
+                    },
+                    "state": {
+                      "enum": [
+                        "degraded",
+                        "enforced",
+                        "pending",
+                        "preflight",
+                        "review_required",
+                        "unavailable"
+                      ]
+                    },
+                    "max_new_ips": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "max_new_devices": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "reason": {
+                      "enum": [
+                        null,
+                        "application_pending",
+                        "application_state_unavailable",
+                        "apply_failed",
+                        "aria_unavailable",
+                        "control_state_unavailable",
+                        "device_budget_exceeded",
+                        "endpoint_set_changed",
+                        "endpoint_state_unavailable",
+                        "ip_budget_exceeded",
+                        "origin_mismatch",
+                        "origin_unknown",
+                        "origin_unobserved",
+                        "policy_changed",
+                        "policy_unavailable",
+                        "protected_address",
+                        "retention_capacity_exceeded",
+                        "session_changed",
+                        "shared_address"
+                      ]
+                    },
+                    "last_verified_at": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "maxItems": 18,
+                      "items": {
+                        "enum": [
+                          "application_pending",
+                          "application_state_unavailable",
+                          "apply_failed",
+                          "aria_unavailable",
+                          "control_state_unavailable",
+                          "device_budget_exceeded",
+                          "endpoint_set_changed",
+                          "endpoint_state_unavailable",
+                          "ip_budget_exceeded",
+                          "origin_mismatch",
+                          "origin_unknown",
+                          "origin_unobserved",
+                          "policy_changed",
+                          "policy_unavailable",
+                          "protected_address",
+                          "retention_capacity_exceeded",
+                          "session_changed",
+                          "shared_address"
+                        ]
+                      }
+                    },
+                    "dry_run": {
+                      "type": "boolean"
+                    },
+                    "requires_confirmation": {
+                      "type": "boolean"
+                    },
+                    "confirm_token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "policy_revision",
+                    "approved_ip_count",
+                    "approved_device_count",
+                    "new_ip_count",
+                    "new_device_count",
+                    "retained_ip_count",
+                    "proposed_ip_count",
+                    "proposed_device_count",
+                    "shared_conflict_count",
+                    "protected_conflict_count",
+                    "applied_ip_count",
+                    "applied_device_count",
+                    "mode",
+                    "state",
+                    "max_new_ips",
+                    "max_new_devices",
+                    "reason",
+                    "last_verified_at",
+                    "blockers",
+                    "dry_run",
+                    "requires_confirmation",
+                    "confirm_token"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Count-only distribution-access approval and application evidence. Mode is requested intent; state is separately verified tracker evidence. A saved approval is pending, never immediate proof of enforcement. Null counts mean unavailable. No addresses or private application journal are exposed.",
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "dry_run": {
+                            "const": false
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "requires_confirmation": {
+                            "const": false
+                          },
+                          "confirm_token": {
+                            "const": null
+                          },
+                          "state": {
+                            "const": "pending"
+                          },
+                          "applied_ip_count": {
+                            "const": null
+                          },
+                          "applied_device_count": {
+                            "const": null
+                          },
+                          "last_verified_at": {
+                            "const": null
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "requires_confirmation": {
+                            "const": true
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "examples": {
+                  "preview": {
+                    "value": {
+                      "revision": 0,
+                      "policy_revision": 4,
+                      "mode": "enforce",
+                      "max_new_ips": 10,
+                      "max_new_devices": 10,
+                      "approved_ip_count": 0,
+                      "approved_device_count": 0,
+                      "new_ip_count": 2,
+                      "new_device_count": 3,
+                      "retained_ip_count": 0,
+                      "proposed_ip_count": 2,
+                      "proposed_device_count": 3,
+                      "shared_conflict_count": 0,
+                      "protected_conflict_count": 0,
+                      "state": "preflight",
+                      "reason": null,
+                      "applied_ip_count": null,
+                      "applied_device_count": null,
+                      "last_verified_at": null,
+                      "blockers": [],
+                      "dry_run": true,
+                      "requires_confirmation": true,
+                      "confirm_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                  },
+                  "blocked": {
+                    "value": {
+                      "revision": 0,
+                      "policy_revision": 4,
+                      "mode": "enforce",
+                      "max_new_ips": 10,
+                      "max_new_devices": 10,
+                      "approved_ip_count": 0,
+                      "approved_device_count": 0,
+                      "new_ip_count": 2,
+                      "new_device_count": 3,
+                      "retained_ip_count": 0,
+                      "proposed_ip_count": 2,
+                      "proposed_device_count": 3,
+                      "shared_conflict_count": 1,
+                      "protected_conflict_count": 0,
+                      "state": "preflight",
+                      "reason": null,
+                      "applied_ip_count": null,
+                      "applied_device_count": null,
+                      "last_verified_at": null,
+                      "blockers": [
+                        "shared_address"
+                      ],
+                      "dry_run": true,
+                      "requires_confirmation": true,
+                      "confirm_token": null
+                    }
+                  },
+                  "accepted": {
+                    "value": {
+                      "revision": 1,
+                      "policy_revision": 4,
+                      "mode": "enforce",
+                      "max_new_ips": 10,
+                      "max_new_devices": 10,
+                      "approved_ip_count": 2,
+                      "approved_device_count": 3,
+                      "new_ip_count": 2,
+                      "new_device_count": 3,
+                      "retained_ip_count": 0,
+                      "proposed_ip_count": 2,
+                      "proposed_device_count": 3,
+                      "shared_conflict_count": 0,
+                      "protected_conflict_count": 0,
+                      "state": "pending",
+                      "reason": null,
+                      "applied_ip_count": null,
+                      "applied_device_count": null,
+                      "last_verified_at": null,
+                      "blockers": [],
+                      "dry_run": false,
+                      "requires_confirmation": false,
+                      "confirm_token": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid content length",
+            "x-iris-problem-codes": [
+              "invalid-content-length"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                  "title": "Invalid content length",
+                  "status": 400,
+                  "code": "invalid-content-length"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Csrf validation failed",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                  "title": "Csrf validation failed",
+                  "status": 403,
+                  "code": "csrf-validation-failed"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Origin enforcement blocked or Origin review stale or Policy revision conflict",
+            "x-iris-problem-codes": [
+              "origin_enforcement_blocked",
+              "origin_review_stale",
+              "policy_revision_conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "origin_enforcement_blocked": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_enforcement_blocked",
+                      "title": "Origin enforcement blocked",
+                      "status": 409,
+                      "code": "origin_enforcement_blocked"
+                    }
+                  },
+                  "origin_review_stale": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_review_stale",
+                      "title": "Origin review stale",
+                      "status": 409,
+                      "code": "origin_review_stale"
+                    }
+                  },
+                  "policy_revision_conflict": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#policy_revision_conflict",
+                      "title": "Policy revision conflict",
+                      "status": 409,
+                      "code": "policy_revision_conflict"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Precondition failed",
+            "x-iris-problem-codes": [
+              "precondition_failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_failed",
+                  "title": "Precondition failed",
+                  "status": 412,
+                  "code": "precondition_failed"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid origin enforcement",
+            "x-iris-problem-codes": [
+              "invalid_origin_enforcement"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_origin_enforcement",
+                  "title": "Invalid origin enforcement",
+                  "status": 422,
+                  "code": "invalid_origin_enforcement"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Precondition required",
+            "x-iris-problem-codes": [
+              "precondition_required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_required",
+                  "title": "Precondition required",
+                  "status": 428,
+                  "code": "precondition_required"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management api unavailable or Origin enforcement unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "origin_enforcement_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management api unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "origin_enforcement_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_enforcement_unavailable",
+                      "title": "Origin enforcement unavailable",
+                      "status": 503,
+                      "code": "origin_enforcement_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "preflight",
+                      "enforce"
+                    ]
+                  },
+                  "max_new_ips": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "max_new_devices": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "if_policy_revision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dry_run": {
+                    "type": "boolean"
+                  },
+                  "confirm_token": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "max_new_ips",
+                  "max_new_devices",
+                  "if_policy_revision",
+                  "dry_run"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "dry_run": {
+                          "const": false
+                        }
+                      }
+                    },
+                    "then": {
+                      "required": [
+                        "confirm_token"
+                      ]
+                    }
+                  }
+                ],
+                "description": "Preview with dry_run=true using the current control ETag and policy revision. Commit the exact same mode, limits and revisions with dry_run=false and the returned confirmation token. Both enabling and disabling require a preview bound to the exact reviewed policy, origin and peer bindings. A changed peer set requires a new preview even if counts are unchanged."
+              },
+              "example": {
+                "mode": "enforce",
+                "max_new_ips": 10,
+                "max_new_devices": 10,
+                "if_policy_revision": 4,
+                "dry_run": true
               }
             }
           }
@@ -43369,7 +44692,10 @@
                           "properties": {
                             "mode": {
                               "type": "string",
-                              "const": "preflight"
+                              "enum": [
+                                "preflight",
+                                "enforce"
+                              ]
                             },
                             "newly_denied_device_count": {
                               "type": [
@@ -43377,14 +44703,32 @@
                                 "null"
                               ],
                               "minimum": 0,
-                              "description": "Prospective count only; additional mutual-origin enforcement is inactive. Null means unavailable, including when the protected seeder IPv4 address is unknown. Zero is a completed preflight with no newly denied devices."
+                              "description": "Prospective count in preflight mode only. Null means unavailable or requested enforce mode; use GET peer-policy/origin-enforcement for separately verified application evidence. Zero is a completed preflight with no newly denied devices."
                             }
                           },
                           "required": [
                             "mode",
                             "newly_denied_device_count"
                           ],
-                          "additionalProperties": false
+                          "additionalProperties": false,
+                          "allOf": [
+                            {
+                              "if": {
+                                "properties": {
+                                  "mode": {
+                                    "const": "enforce"
+                                  }
+                                }
+                              },
+                              "then": {
+                                "properties": {
+                                  "newly_denied_device_count": {
+                                    "const": null
+                                  }
+                                }
+                              }
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -47082,6 +48426,1202 @@
                 },
                 "role": "boat",
                 "confirm_token": "candidate-bound-sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/peer-policy/origin-enforcement": {
+      "get": {
+        "operationId": "management_get_internal_v1_peer_policy_origin_enforcement",
+        "summary": "Read reviewed distribution restrictions",
+        "description": "Read reviewed distribution restrictions. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Reviewed approval or count-only application evidence",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"origin-enforcement-[0-9]+\"$"
+                },
+                "example": "\"origin-enforcement-0\""
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "policy_revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_ip_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_device_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "new_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "new_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "retained_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "shared_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "protected_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "mode": {
+                      "enum": [
+                        "preflight",
+                        "enforce"
+                      ]
+                    },
+                    "state": {
+                      "enum": [
+                        "degraded",
+                        "enforced",
+                        "pending",
+                        "preflight",
+                        "review_required",
+                        "unavailable"
+                      ]
+                    },
+                    "max_new_ips": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "max_new_devices": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "reason": {
+                      "enum": [
+                        null,
+                        "application_pending",
+                        "application_state_unavailable",
+                        "apply_failed",
+                        "aria_unavailable",
+                        "control_state_unavailable",
+                        "device_budget_exceeded",
+                        "endpoint_set_changed",
+                        "endpoint_state_unavailable",
+                        "ip_budget_exceeded",
+                        "origin_mismatch",
+                        "origin_unknown",
+                        "origin_unobserved",
+                        "policy_changed",
+                        "policy_unavailable",
+                        "protected_address",
+                        "retention_capacity_exceeded",
+                        "session_changed",
+                        "shared_address"
+                      ]
+                    },
+                    "last_verified_at": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "maxItems": 18,
+                      "items": {
+                        "enum": [
+                          "application_pending",
+                          "application_state_unavailable",
+                          "apply_failed",
+                          "aria_unavailable",
+                          "control_state_unavailable",
+                          "device_budget_exceeded",
+                          "endpoint_set_changed",
+                          "endpoint_state_unavailable",
+                          "ip_budget_exceeded",
+                          "origin_mismatch",
+                          "origin_unknown",
+                          "origin_unobserved",
+                          "policy_changed",
+                          "policy_unavailable",
+                          "protected_address",
+                          "retention_capacity_exceeded",
+                          "session_changed",
+                          "shared_address"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "policy_revision",
+                    "approved_ip_count",
+                    "approved_device_count",
+                    "new_ip_count",
+                    "new_device_count",
+                    "retained_ip_count",
+                    "proposed_ip_count",
+                    "proposed_device_count",
+                    "shared_conflict_count",
+                    "protected_conflict_count",
+                    "applied_ip_count",
+                    "applied_device_count",
+                    "mode",
+                    "state",
+                    "max_new_ips",
+                    "max_new_devices",
+                    "reason",
+                    "last_verified_at",
+                    "blockers"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Count-only distribution-access approval and application evidence. Mode is requested intent; state is separately verified tracker evidence. A saved approval is pending, never immediate proof of enforcement. Null counts mean unavailable. No addresses or private application journal are exposed.",
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "state": {
+                            "const": "enforced"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "mode": {
+                            "const": "enforce"
+                          },
+                          "reason": {
+                            "const": null
+                          },
+                          "blockers": {
+                            "maxItems": 0
+                          },
+                          "applied_ip_count": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "applied_device_count": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "last_verified_at": {
+                            "type": "number",
+                            "exclusiveMinimum": 0
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "revision": 0,
+                  "policy_revision": 4,
+                  "mode": "preflight",
+                  "max_new_ips": 10,
+                  "max_new_devices": 10,
+                  "approved_ip_count": 0,
+                  "approved_device_count": 0,
+                  "new_ip_count": 2,
+                  "new_device_count": 3,
+                  "retained_ip_count": 0,
+                  "proposed_ip_count": 2,
+                  "proposed_device_count": 3,
+                  "shared_conflict_count": 0,
+                  "protected_conflict_count": 0,
+                  "state": "preflight",
+                  "reason": null,
+                  "applied_ip_count": null,
+                  "applied_device_count": null,
+                  "last_verified_at": null,
+                  "blockers": []
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Origin enforcement unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "origin_enforcement_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "origin_enforcement_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_enforcement_unavailable",
+                      "title": "Origin enforcement unavailable",
+                      "status": 503,
+                      "code": "origin_enforcement_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "management_put_internal_v1_peer_policy_origin_enforcement",
+        "summary": "Review or apply distribution restrictions",
+        "description": "Review or apply distribution restrictions. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "One exact strong control ETag from GET distribution access; distinct from the policy revision in the body. Required for both preview and commit. Missing: 428; malformed, weak or stale: 412.",
+            "schema": {
+              "type": "string",
+              "pattern": "^\"origin-enforcement-[0-9]+\"$"
+            },
+            "example": "\"origin-enforcement-0\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reviewed approval or count-only application evidence",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"origin-enforcement-[0-9]+\"$"
+                },
+                "example": "\"origin-enforcement-0\""
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "policy_revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_ip_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "approved_device_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "new_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "new_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "retained_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "proposed_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "shared_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "protected_conflict_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_ip_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "applied_device_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "mode": {
+                      "enum": [
+                        "preflight",
+                        "enforce"
+                      ]
+                    },
+                    "state": {
+                      "enum": [
+                        "degraded",
+                        "enforced",
+                        "pending",
+                        "preflight",
+                        "review_required",
+                        "unavailable"
+                      ]
+                    },
+                    "max_new_ips": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "max_new_devices": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "reason": {
+                      "enum": [
+                        null,
+                        "application_pending",
+                        "application_state_unavailable",
+                        "apply_failed",
+                        "aria_unavailable",
+                        "control_state_unavailable",
+                        "device_budget_exceeded",
+                        "endpoint_set_changed",
+                        "endpoint_state_unavailable",
+                        "ip_budget_exceeded",
+                        "origin_mismatch",
+                        "origin_unknown",
+                        "origin_unobserved",
+                        "policy_changed",
+                        "policy_unavailable",
+                        "protected_address",
+                        "retention_capacity_exceeded",
+                        "session_changed",
+                        "shared_address"
+                      ]
+                    },
+                    "last_verified_at": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "maxItems": 18,
+                      "items": {
+                        "enum": [
+                          "application_pending",
+                          "application_state_unavailable",
+                          "apply_failed",
+                          "aria_unavailable",
+                          "control_state_unavailable",
+                          "device_budget_exceeded",
+                          "endpoint_set_changed",
+                          "endpoint_state_unavailable",
+                          "ip_budget_exceeded",
+                          "origin_mismatch",
+                          "origin_unknown",
+                          "origin_unobserved",
+                          "policy_changed",
+                          "policy_unavailable",
+                          "protected_address",
+                          "retention_capacity_exceeded",
+                          "session_changed",
+                          "shared_address"
+                        ]
+                      }
+                    },
+                    "dry_run": {
+                      "type": "boolean"
+                    },
+                    "requires_confirmation": {
+                      "type": "boolean"
+                    },
+                    "confirm_token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "policy_revision",
+                    "approved_ip_count",
+                    "approved_device_count",
+                    "new_ip_count",
+                    "new_device_count",
+                    "retained_ip_count",
+                    "proposed_ip_count",
+                    "proposed_device_count",
+                    "shared_conflict_count",
+                    "protected_conflict_count",
+                    "applied_ip_count",
+                    "applied_device_count",
+                    "mode",
+                    "state",
+                    "max_new_ips",
+                    "max_new_devices",
+                    "reason",
+                    "last_verified_at",
+                    "blockers",
+                    "dry_run",
+                    "requires_confirmation",
+                    "confirm_token"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Count-only distribution-access approval and application evidence. Mode is requested intent; state is separately verified tracker evidence. A saved approval is pending, never immediate proof of enforcement. Null counts mean unavailable. No addresses or private application journal are exposed.",
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "dry_run": {
+                            "const": false
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "requires_confirmation": {
+                            "const": false
+                          },
+                          "confirm_token": {
+                            "const": null
+                          },
+                          "state": {
+                            "const": "pending"
+                          },
+                          "applied_ip_count": {
+                            "const": null
+                          },
+                          "applied_device_count": {
+                            "const": null
+                          },
+                          "last_verified_at": {
+                            "const": null
+                          }
+                        }
+                      },
+                      "else": {
+                        "properties": {
+                          "requires_confirmation": {
+                            "const": true
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "examples": {
+                  "preview": {
+                    "value": {
+                      "revision": 0,
+                      "policy_revision": 4,
+                      "mode": "enforce",
+                      "max_new_ips": 10,
+                      "max_new_devices": 10,
+                      "approved_ip_count": 0,
+                      "approved_device_count": 0,
+                      "new_ip_count": 2,
+                      "new_device_count": 3,
+                      "retained_ip_count": 0,
+                      "proposed_ip_count": 2,
+                      "proposed_device_count": 3,
+                      "shared_conflict_count": 0,
+                      "protected_conflict_count": 0,
+                      "state": "preflight",
+                      "reason": null,
+                      "applied_ip_count": null,
+                      "applied_device_count": null,
+                      "last_verified_at": null,
+                      "blockers": [],
+                      "dry_run": true,
+                      "requires_confirmation": true,
+                      "confirm_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                  },
+                  "blocked": {
+                    "value": {
+                      "revision": 0,
+                      "policy_revision": 4,
+                      "mode": "enforce",
+                      "max_new_ips": 10,
+                      "max_new_devices": 10,
+                      "approved_ip_count": 0,
+                      "approved_device_count": 0,
+                      "new_ip_count": 2,
+                      "new_device_count": 3,
+                      "retained_ip_count": 0,
+                      "proposed_ip_count": 2,
+                      "proposed_device_count": 3,
+                      "shared_conflict_count": 1,
+                      "protected_conflict_count": 0,
+                      "state": "preflight",
+                      "reason": null,
+                      "applied_ip_count": null,
+                      "applied_device_count": null,
+                      "last_verified_at": null,
+                      "blockers": [
+                        "shared_address"
+                      ],
+                      "dry_run": true,
+                      "requires_confirmation": true,
+                      "confirm_token": null
+                    }
+                  },
+                  "accepted": {
+                    "value": {
+                      "revision": 1,
+                      "policy_revision": 4,
+                      "mode": "enforce",
+                      "max_new_ips": 10,
+                      "max_new_devices": 10,
+                      "approved_ip_count": 2,
+                      "approved_device_count": 3,
+                      "new_ip_count": 2,
+                      "new_device_count": 3,
+                      "retained_ip_count": 0,
+                      "proposed_ip_count": 2,
+                      "proposed_device_count": 3,
+                      "shared_conflict_count": 0,
+                      "protected_conflict_count": 0,
+                      "state": "pending",
+                      "reason": null,
+                      "applied_ip_count": null,
+                      "applied_device_count": null,
+                      "last_verified_at": null,
+                      "blockers": [],
+                      "dry_run": false,
+                      "requires_confirmation": false,
+                      "confirm_token": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "Csrf validation failed",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                  "title": "Csrf validation failed",
+                  "status": 403,
+                  "code": "csrf-validation-failed"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Origin enforcement blocked or Origin review stale or Policy revision conflict",
+            "x-iris-problem-codes": [
+              "origin_enforcement_blocked",
+              "origin_review_stale",
+              "policy_revision_conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "origin_enforcement_blocked": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_enforcement_blocked",
+                      "title": "Origin enforcement blocked",
+                      "status": 409,
+                      "code": "origin_enforcement_blocked"
+                    }
+                  },
+                  "origin_review_stale": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_review_stale",
+                      "title": "Origin review stale",
+                      "status": 409,
+                      "code": "origin_review_stale"
+                    }
+                  },
+                  "policy_revision_conflict": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#policy_revision_conflict",
+                      "title": "Policy revision conflict",
+                      "status": 409,
+                      "code": "policy_revision_conflict"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Precondition failed",
+            "x-iris-problem-codes": [
+              "precondition_failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_failed",
+                  "title": "Precondition failed",
+                  "status": 412,
+                  "code": "precondition_failed"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid origin enforcement",
+            "x-iris-problem-codes": [
+              "invalid_origin_enforcement"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_origin_enforcement",
+                  "title": "Invalid origin enforcement",
+                  "status": 422,
+                  "code": "invalid_origin_enforcement"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Precondition required",
+            "x-iris-problem-codes": [
+              "precondition_required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_required",
+                  "title": "Precondition required",
+                  "status": 428,
+                  "code": "precondition_required"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Origin enforcement unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "origin_enforcement_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "origin_enforcement_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#origin_enforcement_unavailable",
+                      "title": "Origin enforcement unavailable",
+                      "status": 503,
+                      "code": "origin_enforcement_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "preflight",
+                      "enforce"
+                    ]
+                  },
+                  "max_new_ips": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "max_new_devices": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000
+                  },
+                  "if_policy_revision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dry_run": {
+                    "type": "boolean"
+                  },
+                  "confirm_token": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "max_new_ips",
+                  "max_new_devices",
+                  "if_policy_revision",
+                  "dry_run"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "dry_run": {
+                          "const": false
+                        }
+                      }
+                    },
+                    "then": {
+                      "required": [
+                        "confirm_token"
+                      ]
+                    }
+                  }
+                ],
+                "description": "Preview with dry_run=true using the current control ETag and policy revision. Commit the exact same mode, limits and revisions with dry_run=false and the returned confirmation token. Both enabling and disabling require a preview bound to the exact reviewed policy, origin and peer bindings. A changed peer set requires a new preview even if counts are unchanged."
+              },
+              "example": {
+                "mode": "enforce",
+                "max_new_ips": 10,
+                "max_new_devices": 10,
+                "if_policy_revision": 4,
+                "dry_run": true
               }
             }
           }

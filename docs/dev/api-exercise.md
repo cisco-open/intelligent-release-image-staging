@@ -6,6 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # tools/api-exercise.py
 
+For a separate sustained mixed-workload qualification, use
+[Sustained API qualification](api-soak.md). This exercise keeps its short
+smoke-test limits.
+
 `tools/api-exercise.py` exercises the public Console API against a test
 deployment of IRIS. It discovers the routes the server registers, checks
 their authentication and CSRF guards, and reports each operation's outcome

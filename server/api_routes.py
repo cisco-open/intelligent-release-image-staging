@@ -35,6 +35,8 @@ _CONSOLE_RESOURCES = (
     ("PUT", "/peer-policy/roles/{name}", "Replace a role definition"),
     ("DELETE", "/peer-policy/roles/{name}", "Delete a role definition"),
     ("PUT", "/peer-policy/qos", "Replace global or role QoS"),
+    ("GET", "/peer-policy/origin-enforcement", "Read reviewed distribution restrictions"),
+    ("PUT", "/peer-policy/origin-enforcement", "Review or apply distribution restrictions"),
     ("POST", "/devices/{device_id}/role", "Set a device role"),
     ("POST", "/devices/bulk-role", "Set device roles in bulk"),
     ("GET", "/devices/{device_id}/effective-qos", "Explain effective device QoS"),
