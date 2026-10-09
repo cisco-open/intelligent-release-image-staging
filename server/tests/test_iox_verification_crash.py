@@ -1148,6 +1148,7 @@ def test_cancellation_with_unreaped_descendant_keeps_active_fence(tmp_path):
 
 
 def test_supervisor_eof_reap_uses_only_the_original_absolute_deadline():
+    import select
     import signal
     import subprocess
     import sys
@@ -1155,25 +1156,67 @@ def test_supervisor_eof_reap_uses_only_the_original_absolute_deadline():
 
     module = _verification_module()
     deadline = time.monotonic() + 0.8
-    supervisor = module._SupervisorClient.start(
-        None, time.monotonic, deadline)
-    child = supervisor.popen(
-        [sys.executable, "-c",
-         "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, env={}, pass_fds=(), close_fds=True,
-        start_new_session=True, role="transport",
-        timeout=max(0.01, deadline - time.monotonic()))
+    supervisor, child = None, None
+    owned = []
+
+    def own_process(pid, expected_start=None):
+        descriptor = os.pidfd_open(pid)
+        try:
+            started = module._supervisor_start(pid)
+            assert started is not None
+            assert expected_start is None or started == expected_start
+        except BaseException:
+            os.close(descriptor)
+            raise
+        owned.append(descriptor)
+
     try:
-        assert supervisor.abandon(deadline) is True
+        supervisor = module._SupervisorClient.start(
+            None, time.monotonic, deadline)
+        own_process(supervisor.pid, supervisor.start_ticks)
+        child = supervisor.popen(
+            [sys.executable, "-c",
+             "import os,signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+             "os.write(1,b'READY\\n');time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env={}, pass_fds=(), close_fds=True,
+            start_new_session=True, role="transport",
+            timeout=max(0.01, deadline - time.monotonic()))
+        own_process(child.pid)
+        ready, _, _ = select.select(
+            [child.stdout], [], [], max(0.0, deadline - time.monotonic()))
+        assert ready, "child did not install its SIGTERM handler before the deadline"
+        assert os.read(child.stdout.fileno(), 6) == b"READY\n"
+        observed_exit = supervisor.abandon(deadline)
+        returned_at = time.monotonic()
+        assert returned_at <= deadline + 0.25
+        if observed_exit:
+            assert supervisor._process.poll() is not None
+        else:
+            # A TERM-resistant child is killed only at the original deadline;
+            # abandon may truthfully time out before observing supervisor exit.
+            assert returned_at >= deadline
+        # Keep the existing allowance, and require natural EOF cleanup within
+        # it. A supervisor starting a fresh five/ten-second budget still fails.
+        supervisor._process.wait(timeout=max(
+            0.0, deadline + 0.25 - time.monotonic()))
         assert supervisor._process.poll() is not None
         assert time.monotonic() <= deadline + 0.25
     finally:
-        for pid in (child.pid, supervisor.pid):
+        # PID descriptors bind cleanup to these exact processes, even after
+        # spawn/readiness/assertion failures or numeric PID reuse.
+        for descriptor in reversed(owned):
             try:
-                os.killpg(pid, signal.SIGKILL)
-            except OSError:
+                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
+            finally:
+                os.close(descriptor)
+        if child is not None and child.stdout is not None:
+            child.stdout.close()
+        if supervisor is not None:
+            supervisor._peer.close()
+            supervisor._process.wait(timeout=1.0)
 
 
 @pytest.mark.parametrize("timeout,term_end", [(3.0, 3.0), (10.0, 5.0)])
