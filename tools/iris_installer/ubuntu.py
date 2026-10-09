@@ -70,6 +70,8 @@ def preflight_prebuilt(target):
         raise InstallError('Docker is unavailable; no dependencies were installed')
     if not command_ok([paths['docker'], 'compose', 'version']):
         raise InstallError('Docker Compose is unavailable; no dependencies were installed')
+    if not command_ok([paths['python3'], '-I', '-c', 'import yaml']):
+        raise InstallError('XR packaging requires Python YAML support (python3-yaml); no dependencies were installed')
     return {'profile': 'prepared-host', 'target': target, 'tools': paths,
             'kubernetes_client': list(client) if client else None}
 
@@ -175,6 +177,8 @@ def command_ok(command):
 
 def missing_packages():
     packages = {package for tool, package in TOOLS.items() if not shutil.which(tool)}
+    if not command_ok(['python3', '-I', '-c', 'import yaml']):
+        packages.add('python3-yaml')
     if not shutil.which("docker"):
         packages.update(("docker.io", "docker-compose-v2", "docker-buildx"))
     else:
@@ -207,6 +211,8 @@ def provision(run):
         run(["apt-get", "update"], timeout=900)
         # --no-remove prevents the solver from removing an existing runtime.
         run(["apt-get", "install", "--no-remove", "-y", *packages], timeout=1800)
+    if not command_ok(['python3', '-I', '-c', 'import yaml']):
+        raise InstallError('Python YAML support is unavailable; check the selected python3 interpreter before resuming')
     if not command_ok(["docker", "info"]):
         raise InstallError("Docker is unavailable; check its service before resuming")
     if not command_ok(["docker", "compose", "version"]) or not command_ok(["docker", "buildx", "version"]):

@@ -39,7 +39,8 @@ def test_prebuilt_preflight_only_checks_local_dependencies(prepared, target):
     report = ubuntu.preflight_prebuilt(target)
     assert report['profile'] == 'prepared-host'
     assert report['target'] == target
-    assert calls == [['/usr/bin/docker', 'info'], ['/usr/bin/docker', 'compose', 'version']]
+    assert calls == [['/usr/bin/docker', 'info'], ['/usr/bin/docker', 'compose', 'version'],
+                     ['/usr/bin/python3', '-I', '-c', 'import yaml']]
     assert not {'curl', 'git', 'qemu-aarch64', 'buildx'} & set(looked_up)
     assert ('ssh' in looked_up) == (target == 'docker-split')
     assert ('ip' in looked_up) == (target == 'kubernetes')
@@ -76,6 +77,37 @@ def test_local_k3s_client_is_preserved_without_download(prepared, monkeypatch):
     monkeypatch.setattr(ubuntu.shutil, 'which',
                         lambda name, **kwargs: None if name == 'kubectl' else original(name, **kwargs))
     assert ubuntu.preflight_prebuilt('kubernetes')['kubernetes_client'] == ['/usr/bin/k3s', 'kubectl']
+
+
+def test_missing_yaml_stops_prebuilt_without_installing(prepared, monkeypatch):
+    calls = []
+
+    def command_ok(command):
+        calls.append(command)
+        return 'import yaml' not in command
+
+    monkeypatch.setattr(ubuntu, 'command_ok', command_ok)
+    with pytest.raises(InstallError, match='python3-yaml'):
+        ubuntu.preflight_prebuilt('docker')
+    assert calls[-1] == ['/usr/bin/python3', '-I', '-c', 'import yaml']
+    assert not any(command[0] in ('apt', 'apt-get', 'curl', 'pip') for command in calls)
+
+
+def test_source_provision_adds_yaml_when_module_is_absent(monkeypatch):
+    monkeypatch.setattr(ubuntu.shutil, 'which', lambda name: '/usr/bin/' + name)
+    monkeypatch.setattr(ubuntu, 'command_ok', lambda command: 'import yaml' not in command)
+    assert 'python3-yaml' in ubuntu.missing_packages()
+
+
+def test_source_provision_rejects_interpreter_without_distro_yaml(monkeypatch):
+    monkeypatch.setattr(ubuntu, 'check_platform', lambda: None)
+    monkeypatch.setattr(ubuntu, 'missing_packages', lambda: ['python3-yaml'])
+    monkeypatch.setattr(ubuntu, 'command_ok', lambda command: 'import yaml' not in command)
+    calls = []
+    with pytest.raises(InstallError, match='selected python3 interpreter'):
+        ubuntu.provision(lambda command, **kwargs: calls.append(command))
+    assert calls == [['apt-get', 'update'],
+                     ['apt-get', 'install', '--no-remove', '-y', 'python3-yaml']]
 
 
 def test_missing_kubernetes_client_stops_before_commands(prepared, monkeypatch):
