@@ -1074,11 +1074,28 @@ def test_peer_interval_roundtrip_over_both_authenticated_tiers(policy_tiers, tie
     assert request(tier, "POST", path, {"interval_s": 10}, authorized=False)[0] == 401
     assert request(tier, "POST", path, {"interval_s": 10}, match=False)[0] == 428
     for interval in (10, 60):
+        revision = request(tier, "GET", "/peer-policy")[2]["revision"]
         status, _, preview = request(tier, "POST", path + "?dry_run=1", {"interval_s": interval})
         assert status == 200
         status, _, saved = request(tier, "POST", path, {"interval_s": interval,
             "confirm_token": preview["confirm_token"]})
         assert status == 200 and saved["requested_interval_s"] == interval
+        # Check the shipped map's validators against actual authenticated
+        # server replies, not a hand-invented browser fixture.
+        map_source = (Path(__file__).parents[1] / "swarmmap.html").read_text()
+        validator = next(line for line in map_source.splitlines()
+                         if line.startswith("function intervalReply("))
+        script = validator + "\n" + (
+            "const assert=require('node:assert/strict');"
+            "const x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));"
+            "assert.equal(intervalReply(x.preview,{device_id:'d1'},x.interval,x.revision,true),true);"
+            "assert.equal(intervalReply(x.saved,{device_id:'d1'},x.interval,x.revision,false),true);")
+        subprocess.run(["node", "-e", script], input=json.dumps({
+            "preview": preview, "saved": saved, "interval": interval,
+            "revision": revision}), text=True, check=True, capture_output=True)
+        status, _, effective = request(tier, "GET", "/devices/d1/effective-qos")
+        assert status == 200 and effective["device_id"] == "d1"
+        assert effective["qos"]["peer_telemetry_interval_s"]["value"] == interval
 
 
 @pytest.mark.parametrize("failure", ["console-construction", "login-upstream"])

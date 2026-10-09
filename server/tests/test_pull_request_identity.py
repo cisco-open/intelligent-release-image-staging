@@ -50,6 +50,19 @@ def test_request_report_stores_random_request_id(tmp_path):
     assert _HEX32.match(rid)
 
 
+def test_created_directive_is_atomic_and_independent_of_subsequent_reads(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    directive = store.request_report_details("dev-1", 1000.25)
+    assert directive == store.pending_request("dev-1", 1001)
+    assert store.request_report_details("dev-1", 1002) is None
+    assert directive["requested_at"] == 1000.25
+    store.clear_report_request("dev-1", request_id=directive["request_id"])
+    replacement = store.request_report_details("dev-1", 1003)
+    assert directive["request_id"] != replacement["request_id"]
+    directive["request_id"] = "0" * 32
+    assert store.pending_request("dev-1", 1004) == replacement
+
+
 def test_request_ids_distinct_across_devices(tmp_path):
     s = catalog.CatalogStore(str(tmp_path))
     s.request_report("dev-1", 1000.0)

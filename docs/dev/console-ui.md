@@ -19,14 +19,15 @@ Console](../zensical/user-guide/console.md) for that.
 navigation, General, TLS/trust, Telemetry, Audit export, certificate inventory,
 instruction certificate renewal, online signer rotation, browser certificate
 replacement, telemetry credential rotation, deployment trust and worker rotation,
-scheduled key maintenance, backup and restore, Policies,
+scheduled key maintenance, backup and restore, setup and package readiness,
+image verification, the Swarm summary and frame, Policies,
 the full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
 device-details and Activity drawers
 with React.
-Other operational views and working forms still render from
-`server/webroot/app.js`. This is a partial migration, not a full rewrite.
+The standalone `server/swarmmap.html` still owns its graph, drawer and operational
+controls. This is a partial migration, not a full rewrite.
 
 The React entry point mounts before the older application loads. The controller
 publishes `iris:shell-state` and listens for React's `iris:logout` action.
@@ -85,7 +86,27 @@ Unknown outcomes require fresh explicit review; requests are never replayed by
 navigation. Worker controls check backup and rotation blockers together and
 recover the original job ID and intent. Accepted jobs remain distinct from
 finished maintenance. Selected public files clear on dispatch, family change
-and hide. Image-verification and package workflows remain in the older application.
+and hide.
+
+Setup, the first-run wizard and package readiness use `setup-packages.jsx` and
+its controller/model, with the `irisSetupPackages` adapter. Native-shaped
+responses determine chips; failed or superseded reads cannot leave ready chips.
+Wrapper provenance checks are distinct from native signatures and Guest Shell
+startup evidence. Telemetry and image verification are shared portals.
+
+`image-verification.jsx` and its controller/model own the Bulk Hash schedule,
+refresh and bounded raw archive upload. The `irisImageVerification` adapter
+supplies authenticated transport and invalidates assignment readiness after a
+check. One mutation lock survives navigation. Exact saved schedule fields and
+completed check outcomes are required; unknown replies need explicit review.
+Review reloads current evidence without proving a lost request's outcome.
+
+`swarm-view.jsx` and its controller/model own the summary and local map frame.
+Counts are image-peer entries, not unique devices. Reads are latest-wins and
+malformed or partial snapshots clear counts. The frame loads on first visit;
+route, tab and late frame-load events synchronize host visibility. Polling does
+not resume the user's manual pause. Standalone map workflow migration remains
+separate from this wrapper and its isolated SVG renderer.
 
 Images owns its catalog, upload and import jobs, and quarantine drawer in
 `images-controller.mjs` and `images.jsx`. The `iris:images-command` adapter

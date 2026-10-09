@@ -17,6 +17,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move setup, package readiness, image verification and the Swarm summary into
+  React. Validate native responses, clear unavailable readiness evidence, keep
+  verification writes serialized through navigation, and require explicit review
+  after lost replies. Distinguish wrapper provenance from native signatures and
+  configured schedules from successful checks. Count image-peer entries correctly
+  and pause the embedded map on navigation, tab hide and late frame load.
+- Match Swarm interval saves and fresh-report requests to their native response
+  identity. Honor required operator confirmation. Keep manual pause through
+  navigation, stop hidden interval previews
+  before submission, and provide explicit review after an uncertain response.
+  Report-request APIs expose the actual accepted ID and pending request.
+
 - Move deployment trust, worker rotations, scheduled key maintenance and
   backup/restore into React. Check exact approvals, saved policy revisions and
   accepted job IDs before reporting success. Preserve drafts and uncertain

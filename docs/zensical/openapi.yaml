@@ -18202,6 +18202,42 @@
                   "title": "ConsoleDevicesDeviceIdReportsResponse",
                   "type": "object",
                   "properties": {
+                    "device_id": {
+                      "type": "string"
+                    },
+                    "observed_at": {
+                      "type": "number"
+                    },
+                    "pending_request": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "request_id": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{32}$"
+                            },
+                            "requested_at": {
+                              "type": "number",
+                              "minimum": 0
+                            },
+                            "expires_at": {
+                              "type": "number",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "request_id",
+                            "requested_at",
+                            "expires_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "reports": {
                       "type": "array",
                       "items": {
@@ -18378,11 +18414,17 @@
                     }
                   },
                   "required": [
+                    "device_id",
+                    "observed_at",
+                    "pending_request",
                     "reports"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
+                  "device_id": "device-01",
+                  "observed_at": 1788470400.5,
+                  "pending_request": null,
                   "reports": [
                     {
                       "v": 2,
@@ -20391,21 +20433,37 @@
                   "type": "object",
                   "properties": {
                     "ok": {
-                      "type": "boolean"
+                      "const": true
+                    },
+                    "device_id": {
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    },
+                    "requested_at": {
+                      "type": "number"
                     },
                     "expires_at": {
-                      "type": "integer"
+                      "type": "number"
                     }
                   },
                   "required": [
                     "ok",
+                    "device_id",
+                    "request_id",
+                    "requested_at",
                     "expires_at"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
                   "ok": true,
-                  "expires_at": 1788474000
+                  "device_id": "device-01",
+                  "request_id": "0123456789abcdef0123456789abcdef",
+                  "requested_at": 1788473400.5,
+                  "expires_at": 1788474000.5
                 }
               }
             }
@@ -30502,6 +30560,12 @@
                         "state": {
                           "type": "string"
                         },
+                        "source": {
+                          "type": "string"
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
                         "endpoint": {
                           "type": "string",
                           "format": "uri"
@@ -30509,6 +30573,8 @@
                       },
                       "required": [
                         "state",
+                        "source",
+                        "enabled",
                         "endpoint"
                       ],
                       "additionalProperties": true
@@ -30658,6 +30724,8 @@
                   },
                   "telemetry": {
                     "state": "ok",
+                    "source": "env",
+                    "enabled": true,
                     "endpoint": "https://collector.example:4318"
                   },
                   "packages": {
@@ -30676,6 +30744,42 @@
                           "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
                           "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
                         }
+                      },
+                      {
+                        "name": "iris-arm64.tar",
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "detail": "Package bytes match build provenance",
+                        "remedy": "tools/provision-iox-packages.sh",
+                        "provenance": {
+                          "canonical_index_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                        }
+                      },
+                      {
+                        "name": "iris-xr.rpm",
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "detail": "Package bytes match build provenance",
+                        "remedy": "tools/build-xr-package.sh --out artifacts/",
+                        "provenance": {
+                          "canonical_index_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                        }
+                      },
+                      {
+                        "name": "iris-agent.tgz",
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "provenance": null,
+                        "reason": "ready",
+                        "detail": "Served Guest Shell files and embedded instruction trust match current startup provisioning.",
+                        "remedy": "Rebuild the server image and restart after correcting the provisioning error."
                       }
                     ],
                     "remedy": "tools/provision-iox-packages.sh"
@@ -59260,6 +59364,42 @@
                   "title": "ManagementDevicesDeviceIdReportsResponse",
                   "type": "object",
                   "properties": {
+                    "device_id": {
+                      "type": "string"
+                    },
+                    "observed_at": {
+                      "type": "number"
+                    },
+                    "pending_request": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "request_id": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{32}$"
+                            },
+                            "requested_at": {
+                              "type": "number",
+                              "minimum": 0
+                            },
+                            "expires_at": {
+                              "type": "number",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "request_id",
+                            "requested_at",
+                            "expires_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "reports": {
                       "type": "array",
                       "items": {
@@ -59436,11 +59576,17 @@
                     }
                   },
                   "required": [
+                    "device_id",
+                    "observed_at",
+                    "pending_request",
                     "reports"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
+                  "device_id": "device-01",
+                  "observed_at": 1788470400.5,
+                  "pending_request": null,
                   "reports": [
                     {
                       "v": 2,
@@ -61206,21 +61352,37 @@
                   "type": "object",
                   "properties": {
                     "ok": {
-                      "type": "boolean"
+                      "const": true
+                    },
+                    "device_id": {
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    },
+                    "requested_at": {
+                      "type": "number"
                     },
                     "expires_at": {
-                      "type": "integer"
+                      "type": "number"
                     }
                   },
                   "required": [
                     "ok",
+                    "device_id",
+                    "request_id",
+                    "requested_at",
                     "expires_at"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
                   "ok": true,
-                  "expires_at": 1788474000
+                  "device_id": "device-01",
+                  "request_id": "0123456789abcdef0123456789abcdef",
+                  "requested_at": 1788473400.5,
+                  "expires_at": 1788474000.5
                 }
               }
             }
@@ -69990,6 +70152,12 @@
                         "state": {
                           "type": "string"
                         },
+                        "source": {
+                          "type": "string"
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
                         "endpoint": {
                           "type": "string",
                           "format": "uri"
@@ -69997,6 +70165,8 @@
                       },
                       "required": [
                         "state",
+                        "source",
+                        "enabled",
                         "endpoint"
                       ],
                       "additionalProperties": true
@@ -70146,6 +70316,8 @@
                   },
                   "telemetry": {
                     "state": "ok",
+                    "source": "env",
+                    "enabled": true,
                     "endpoint": "https://collector.example:4318"
                   },
                   "packages": {
@@ -70164,6 +70336,42 @@
                           "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
                           "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
                         }
+                      },
+                      {
+                        "name": "iris-arm64.tar",
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "detail": "Package bytes match build provenance",
+                        "remedy": "tools/provision-iox-packages.sh",
+                        "provenance": {
+                          "canonical_index_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                        }
+                      },
+                      {
+                        "name": "iris-xr.rpm",
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "detail": "Package bytes match build provenance",
+                        "remedy": "tools/build-xr-package.sh --out artifacts/",
+                        "provenance": {
+                          "canonical_index_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                        }
+                      },
+                      {
+                        "name": "iris-agent.tgz",
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "provenance": null,
+                        "reason": "ready",
+                        "detail": "Served Guest Shell files and embedded instruction trust match current startup provisioning.",
+                        "remedy": "Rebuild the server image and restart after correcting the provisioning error."
                       }
                     ],
                     "remedy": "tools/provision-iox-packages.sh"

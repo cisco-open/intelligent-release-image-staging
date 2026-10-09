@@ -2125,18 +2125,27 @@ class CatalogStore:
         """Flag *device_id* for a fresh report with a random 32-hex
         ``request_id`` (spec §10.2b). Returns False when a non-expired directive
         is already pending (one per device)."""
-        refused = []
+        return self.request_report_details(device_id, now) is not None
+
+    def request_report_details(self, device_id, now):
+        """Return this atomically created directive, or None if already pending.
+
+        Do not read it back after committing: an immediate device report may
+        clear it, and another operator may already have created a newer one.
+        """
+        created = []
 
         def arm(ent):
             if isinstance(ent, dict) and now < ent.get("expires_at", 0):
-                refused.append(True)
                 return None             # already pending; no write
-            return {"request_id": secrets.token_hex(16),
-                    "requested_at": now,
-                    "expires_at": now + self.PULL_TTL}
+            directive = {"request_id": secrets.token_hex(16),
+                         "requested_at": now,
+                         "expires_at": now + self.PULL_TTL}
+            created.append(directive)
+            return directive
 
         self._pulls.update(device_id, arm)
-        return not refused
+        return dict(created[0]) if created else None
 
     def pending_request(self, device_id, now):
         """The full non-expired pull directive dict for *device_id* (carrying

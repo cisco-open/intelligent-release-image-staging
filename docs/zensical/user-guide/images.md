@@ -155,6 +155,11 @@ A server with no internet access uploads the feed archive instead. The same
 pane takes a raw `.tar` of up to 256 MiB and runs the identical signature check
 and parse.
 
+The Console keeps one check or schedule save in progress at a time. Leaving
+the page does not cancel it. If its reply is lost, select **Review current
+status** before retrying. Review reloads the schedule and latest check, discarding
+unsaved schedule edits; it cannot prove the outcome of an earlier lost reply.
+
 The server retains a successfully verified offline archive for seven days
 after upload. Images published during that window automatically use it, even
 if the archive was uploaded before any images. Every use rechecks the signature;

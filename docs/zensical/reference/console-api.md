@@ -100,13 +100,13 @@ See [Security model and trust boundaries](../architecture/security-model.md) for
 | `POST /api/v1/devices/import-csv` | Bulk inventory import (8 MiB cap, all or nothing). |
 | `GET /api/v1/install-options?model=<model>` | The onboarding options a model supports. |
 | `GET /api/v1/devices/<id>/plan` | The resolved deployment plan for one device. |
-| `GET /api/v1/devices/<id>/reports` | The device's stored telemetry history. |
+| `GET /api/v1/devices/<id>/reports` | The device's stored telemetry history, device ID, observation time and pending report request. |
 | `GET /api/v1/devices/<id>/deployment` | The deployment record for the device. |
 | `POST /api/v1/devices/<id>/assign` | Sets the device's approved image set, up to ten images. |
 | `POST /api/v1/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the agent platform and storage target. |
 | `POST /api/v1/devices/bulk-credential` | Sets one credential profile on many devices in one call. |
 | `POST /api/v1/devices/<id>/forget-host-key` | Clears a device's saved SSH host key after a re-image or replacement. |
-| `POST /api/v1/devices/<id>/request-report` | Asks the device for a fresh telemetry report. |
+| `POST /api/v1/devices/<id>/request-report` | Returns the accepted device ID, request ID, request time and expiry. Completion needs a pull report with that request ID. |
 | `POST /api/v1/devices/<id>/adopt` | Adopts a pre-existing deployment; routers cannot be adopted. |
 | `POST /api/v1/devices/<id>/onboard`, `.../undeploy` | Starts the onboarding or undeploy job. See Onboarding jobs, below. Both accept an optional `log` flag. Undeploy with no deployment record returns 409 unless you send `force`, which removes only the IRIS-installed agent. |
 

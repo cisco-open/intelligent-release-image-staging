@@ -578,7 +578,7 @@ def test_xr_package_carries_its_own_build_script_remedy(tmp_path):
     """The XR RPM and the IOx tars are rebuilt by two DIFFERENT scripts, so
     each item now carries its own remedy command rather than relying on the
     single card-level packages.remedy (which stays the IOx script -- see
-    setupPkgRemedyText in app.js, which reads the per-item value so a stale
+    packageRemedy in setup-packages-model.mjs, which reads each item so a stale
     XR row is never handed the wrong rebuild command)."""
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
     st = _call(d, served)
@@ -625,6 +625,9 @@ def test_route_is_registered_and_session_gated():
     window = src[idx:idx + 400]
     assert "session_info" in window          # gated like its neighbours
     assert "setup_status.build_status" in window
+    route = src[idx:src.index('if path == "/api/settings/peer-tls"', idx)]
+    assert "provision_status_path=" in route
+    assert "provision_startup_state=" in route
 
 
 # --- console pane ---------------------------------------------------------
@@ -634,183 +637,96 @@ def _webroot(name):
     return open(os.path.join(here, "webroot", name)).read()
 
 
-def test_console_has_a_setup_pane_wired_to_the_endpoint():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
+def _react_source(name):
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(here, "console-ui", "src", "settings-navigation.jsx"), encoding="utf-8") as stream:
-        assert "['setup', 'Setup checklist'," in stream.read()
-    assert 'id="settings-pane-setup"' in html
-    assert "'setup'" in js                       # registered in the pane list
-    assert "'/api/v1/settings/setup-status'" in js
+    with open(os.path.join(here, "console-ui", "src", name), encoding="utf-8") as stream:
+        return stream.read()
 
 
-def test_setup_pane_explains_why_each_step_matters():
-    """Each card carries operator-facing rationale, not just a status chip."""
-    html = _webroot("index.html")
-    for phrase in ("deployment-neutral", "current certificate", "published anywhere"):
-        assert phrase.lower() in html.lower()
+def test_console_has_a_setup_pane_wired_to_the_endpoint():
+    html, adapter = _webroot("index.html"), _webroot("app.js")
+    assert "['setup', 'Setup checklist'," in _react_source("settings-navigation.jsx")
+    for mount in ("settings-pane-setup", "iris-setup-checklist", "iris-device-packages",
+                  "iris-setup-wizard", "iris-setup-nudge", "iris-setup-packages-root"):
+        assert 'id="%s"' % mount in html
+    assert "setupPackages.select(" in adapter
+    assert "'/api/v1/settings/setup-status'" in _react_source("setup-packages-model.mjs")
+    assert "mountSetupPackages();" in _react_source("main.jsx")
+    assert "function renderPackageStatus" not in adapter
+
+
+def test_setup_pane_explains_package_evidence_without_claiming_native_signatures():
+    source = _react_source("setup-packages.jsx")
+    for phrase in ("deployment-neutral", "current server certificate",
+                   "does not authenticate that manifest or verify native package signatures",
+                   "file modification time", "startup provisioning evidence"):
+        assert phrase in source
+    assert "function PackageTable(" in source
+    assert source.count("<PackageTable ") == 3
 
 
 def test_setup_pane_telemetry_card_funnels_into_the_setup_flow():
-    """The card still reports telemetry state -- Settings > Setup survives as
-    the status panel -- but its action now enters the setup flow instead of
-    dropping the operator on a settings page to find the form themselves."""
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="setup-td-chip"' in html
-    # scope to the card itself (between its heading and the next h3) so this
-    # cannot pass merely because the sidebar nav happens to link there too
-    card = html.split('id="setup-td-chip"', 1)[1].split("<h3>", 1)[0]
+    source = _react_source("setup-packages.jsx")
+    card = source.split("setup-td-chip", 1)[1].split("</div>", 1)[0]
     assert 'href="#setup"' in card
-    assert 'href="#settings/telemetry"' not in card
-    assert "published anywhere" in card.lower()
-    assert "s.telemetry.state" in js
-    assert "setupTelemetryNote" in js
+    assert "Optional export" in card
+    assert "telemetryNote(status?.telemetry)" in card
 
 
 def test_setup_pane_image_verification_card_now_enters_the_wizard():
-    """Task 9 (USER DIRECTIVE: Setup becomes a real flow) supersedes the
-    earlier decision this test used to pin -- image verification was kept
-    out of the wizard because a scheduled/manual/offline check "cannot be
-    squeezed into first-run setup". Task 9's step proves that decision
-    wrong: it mounts the SAME Settings > Image verification controls
-    (schedule, Refresh now, offline import) the wizard's telemetry step
-    already reuses from Settings, via mountImageVerification (a move, not a
-    template clone -- see its own comment in app.js for why). So the Setup
-    status card now sends the operator into the wizard, the same precedent
-    telemetry/packages already follow, instead of off to Settings on its
-    own."""
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="setup-iv-chip"' in html
-    card = html.split('id="setup-iv-chip"', 1)[1].split("</div>", 1)[0]
+    source = _react_source("setup-packages.jsx")
+    card = source.split("setup-iv-chip", 1)[1].split("</div>", 1)[0]
     assert 'href="#setup"' in card
-    assert 'href="#settings/bulkhash"' not in card
-    assert "cisco" in card.lower()
-    assert "s.image_verification.state" in js
-    # NOW a real wizard step -- the opposite of the old decision
-    assert "image_verification" in js.split(
-        "var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
+    assert "Cisco's Bulk Hash feed" in card
+    assert "configured schedule and a successful check" in card
 
 
-# --- console pane: packages.reason must not produce the wrong remedy ------
-#
-# app.js has no runtime test harness in this repo (no node/jsdom driver
-# anywhere under server/tests/) -- every existing app.js test asserts on the
-# SOURCE TEXT of the function bodies, the same idiom used throughout
-# test_onboard_feedback_ux.py / test_tls_page_ux.py. These tests follow that
-# idiom: they are source-level, not behavioural -- they cannot execute the
-# JS and observe the rendered DOM. What they DO prove is that the specific
-# code shape the bug required is gone, and the specific code shape the fix
-# requires is present, so reverting either half of the fix fails them.
-
-def _setup_pkg_remedy_fn(js):
-    return js.split("function setupPkgRemedyText(pkg) {", 1)[1].split(
-        "\n  function setupShowUnknown", 1)[0]
-
-
-def _setup_pkg_reason_map(js):
-    return js.split("var SETUP_PKG_REASON_TEXT = {", 1)[1].split(
-        "\n  };", 1)[0]
+# These integration guards complement executable Node model/controller tests
+# and the built React/CSP browser suite in console-ui/tests/setup-packages-*.
 
 
 def test_mismatch_reason_gets_its_own_guidance_not_the_rebuild_remedy():
-    """served-vs-distributed-mismatch must render mismatch-specific text,
-    and the package-rebuild remedy line must be structurally unreachable
-    when that reason is set. Rebuilding does not fix a mismatch
-    (setup_status.build_status forces state='unknown', never 'stale', for
-    this reason) -- so handing the operator the rebuild remedy here is
-    exactly the wrong advice the fix removes."""
-    js = _webroot("app.js")
-    reason_map = _setup_pkg_reason_map(js)
-    assert "'served-vs-distributed-mismatch':" in reason_map
-    mismatch_text = reason_map.split(
-        "'served-vs-distributed-mismatch':", 1)[1].split(
+    source = _react_source("setup-packages-model.mjs")
+    reason = source.split("'served-vs-distributed-mismatch':", 1)[1].split(
         "'distributed-cert-unavailable':", 1)[0]
-    assert "match" in mismatch_text.lower()
-    # The explanation may legitimately SAY rebuilding won't help, but must
-    # never contain the rebuild instruction/remedy path itself.
-    assert "Rebuild on the Docker host" not in mismatch_text
-    assert "provision-iox-packages.sh" not in mismatch_text
-
-    fn = _setup_pkg_remedy_fn(js)
-    # Wave C generalized this from a single card-level pkg.remedy (one
-    # rebuild command for the whole card) to a per-ITEM remedy, because the
-    # IOx tars and the new iris-xr.rpm row are rebuilt by two DIFFERENT
-        # scripts -- multiple package families can need repair at once, and
-    # a single hardcoded command could no longer speak for the card. The
-    # push must still require BOTH the outer mismatch-reason gate AND each
-        # item's own state being non-ready;
-    # losing either
-    # half of this guard (e.g. falling back to "any non-ok item gets the
-    # rebuild line", or dropping the outer mismatch gate) is exactly the
-    # bug this test guards against.
-    assert "if (pkg.reason !== 'served-vs-distributed-mismatch') {" in fn
-    assert "i.state !== 'ok'" in fn
+    assert "Fix the certificate copies" in reason
+    assert "tools/" not in reason
+    assert "if (pkg.reason !== 'served-vs-distributed-mismatch')" in source
+    assert "row.state !== 'ok'" in source
 
 
 def test_remedy_text_dedupes_and_joins_multiple_package_remedies():
-    """Invalid IOx and XR provenance needs two DIFFERENT rebuild scripts.
-    Both must show up, deduplicated (two bad tars sharing REMEDY must not
-    print the same command twice), joined into one line rather than one
-    remedy silently winning over the other."""
-    js = _webroot("app.js")
-    fn = _setup_pkg_remedy_fn(js)
-    assert "remedies.indexOf(i.remedy) === -1" in fn
-    assert "remedies.join('; ')" in fn
+    source = _react_source("setup-packages-model.mjs")
+    assert "new Set(pkg.items.filter(" in source
+    assert ".map(row => row.remedy)" in source
+    assert "remedies.join('; ')" in source
 
 
 def test_absent_packages_show_complete_host_build_commands():
-    """A fresh lab's absent artifacts must not leave the remedy area blank."""
-    js = _webroot("app.js")
-    fn = _setup_pkg_remedy_fn(js)
-    assert "i.state !== 'ok'" in fn
+    assert "row.state !== 'ok'" in _react_source("setup-packages-model.mjs")
     assert setup_status.REMEDY == "tools/provision-iox-packages.sh"
-    assert setup_status.REMEDY_XR == \
-        "tools/build-xr-package.sh --out artifacts/"
+    assert setup_status.REMEDY_XR == "tools/build-xr-package.sh --out artifacts/"
 
 
 def test_distributed_cert_unavailable_reason_explains_itself():
-    """distributed-cert-unavailable must say the distributed copy couldn't
-    be read and that package state can't be confirmed -- not the generic
-    rebuild line, which assumes a package is actually known to be stale."""
-    js = _webroot("app.js")
-    reason_map = _setup_pkg_reason_map(js)
-    assert "'distributed-cert-unavailable':" in reason_map
-    text = reason_map.split("'distributed-cert-unavailable':", 1)[1]
-    assert "could not be read" in text
-    assert "cannot be confirmed" in text
+    source = _react_source("setup-packages-model.mjs")
+    reason = source.split("'distributed-cert-unavailable':", 1)[1].split(
+        "'served-cert-unavailable':", 1)[0]
+    assert "could not be read" in reason
+    assert "cannot be confirmed" in reason
 
 
 def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
-    """A failed status fetch (non-ok response) or a thrown/network error
-    must never leave the PREVIOUS render on screen -- that would be
-    evidence-free chips still reading "done". Both paths must route
-    through the same reset, which must paint all four chips unknown and
-    clear the package table and remedy line (spec: never silently render a
-    stale/empty checklist as if it were healthy)."""
-    js = _webroot("app.js")
-    rf = js.split("async function refreshSetup() {", 1)[1].split(
-        "\n  async function refreshSettings", 1)[0]
-    assert "try {" in rf and "catch (e)" in rf
-
-    ok_branch = rf.split("if (!r.ok)", 1)[1].split("\n", 1)[0]
-    assert "setupShowUnknown()" in ok_branch, \
-        "a failed (non-ok) fetch must reset the pane, not just bail out"
-
-    catch_branch = rf.split("catch (e) {", 1)[1].split("}", 1)[0]
-    assert "setupShowUnknown()" in catch_branch, \
-        "a thrown/network error must reset the pane too"
-
-    reset = js.split("function setupShowUnknown() {", 1)[1].split(
-        "\n  }", 1)[0]
-    for chip_id in ("setup-admin-chip", "setup-td-chip",
-                    "setup-pkg-chip", "setup-iv-chip"):
-        assert ("getElementById('%s')" % chip_id) in reset
-    assert reset.count("setupChip('unknown')") == 4
-    assert "#setup-pkg-table tbody" in reset
-    assert "setup-pkg-remedy" in reset
+    source = _react_source("setup-packages-controller.mjs")
+    assert "loading: true, status: null, configured: null" in source
+    assert "reply.status !== 200" in source
+    assert "validate(await reply.json())" in source
+    assert "catch {return null;}" in source
+    assert "mine !== this.generation" in source
+    assert "abort.signal.aborted" in source
+    view = _react_source("setup-packages.jsx")
+    assert "state = 'unknown'" in view
+    assert "(pkg?.items || [])" in view
 
 
 def test_fingerprint_reads_a_combined_cert_and_key_file(tmp_path):
@@ -864,142 +780,89 @@ def test_first_run_setup_hands_off_to_the_wizard():
         "the handoff must be one-shot, or every later sign-in lands there"
 
 
-# ---------------------------------------------------------------------------
-# Task 9: the Magnetic Stepper flow -- a real third step (Image
-# verification), the left-panel/right-content anatomy, and the M37 fold-in
-# (a configured-but-never-succeeded schedule reads differently from a truly
-# unconfigured one). Same source-guard idiom as the rest of this file: no JS
-# runtime harness exists in this repo, so these assert on the SOURCE TEXT.
-#
-# The stage-host step (#101) was removed: console onboarding always stages
-# per-device material locally, so the stage-host SSH credential the step
-# collected had no consumer. The wizard now has three steps, not four.
-# ---------------------------------------------------------------------------
+# Setup remains a three-step workflow with shared React form instances.
+
 
 def test_wizard_steplist_carries_three_steps_including_image_verification():
-    js = _webroot("app.js")
-    steps = js.split("var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
+    source = _react_source("setup-packages-model.mjs")
+    steps = source.split("export const setupSteps = [", 1)[1].split("];", 1)[0]
     for key in ("telemetry", "packages", "image_verification"):
-        assert ("key: '%s'" % key) in steps, key
+        assert "key: '%s'" % key in steps
     assert "stage_host" not in steps
-    assert steps.count("{ id:") == 3
+    assert steps.count("{id:") == 3
 
 
 def test_wizard_step_three_is_image_verification_with_a_form_mount():
-    html = _webroot("index.html")
-    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
-    assert 'id="wz-step-imageverification"' in wiz
-    step = wiz.split('id="wz-step-imageverification"', 1)[1].split(
-        "</div>", 1)[0]
+    source = _react_source("setup-packages.jsx")
+    step = source.split('id="wz-step-imageverification"', 1)[1].split("</div>", 1)[0]
     assert 'id="wz-iv-mount"' in step
-    assert 'id="wz-iv-chip"' in step
-    # a mount point, not inlined markup -- the moved #iv-content supplies the
-    # actual controls at runtime (mountImageVerification)
+    assert "'wz-iv-chip'" in step
     assert "<form" not in step
 
 
 def test_wizard_uses_the_left_panel_right_content_stepper_anatomy():
-    """Captured anatomy (agentinfo/facelift-2026-08-30-visual-direction.md
-    lines 63-70): left step panel ~320px, content area right. wz-steplist
-    must live in the panel column and every wz-step-*/wz-nav in the content
-    column, not stacked flat above them as the pre-Task-9 layout did."""
-    html = _webroot("index.html")
-    css = _webroot("styles.css")
-    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
-    panel = wiz.split('class="wz-panel"', 1)[1].split("</div>", 1)[0]
+    source = _react_source("setup-packages.jsx")
+    panel = source.split('className="wz-panel"', 1)[1].split('className="wz-content"', 1)[0]
     assert 'id="wz-steplist"' in panel
-    content = wiz.split('class="wz-content"', 1)[1]
+    content = source.split('className="wz-content"', 1)[1]
     for marker in ("wz-step-telemetry", "wz-step-packages",
                    "wz-step-imageverification", 'id="wz-nav"'):
-        assert marker in content, marker
+        assert marker in content
     assert "wz-step-stagehost" not in content
-    assert ".wz-panel {" in css and "320px" in css.split(".wz-panel {", 1)[1].split("}", 1)[0]
+    assert 'role="listitem"' in panel
+    assert "aria-current={current ? 'step' : undefined}" in panel
+    css = _webroot("styles.css")
+    assert "320px" in css.split(".wz-panel {", 1)[1].split("}", 1)[0]
 
 
-def test_image_verification_content_is_moved_not_cloned_between_setup_and_settings():
-    """Unlike the telemetry form (a <template>, cloned fresh per
-    mount, re-wired each time via FORM_MOUNTS), the Image verification
-    controls bind their handlers once at load -- so relocating them must be a
-    live DOM move (appendChild), never a second clone that would duplicate
-    ids or leave the original's listeners behind."""
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="iv-content"' in html
-    # #iv-content's static home is inside the Settings pane, not a <template>
-    bulkhash_pane = html.split('id="settings-pane-bulkhash" hidden>', 1)[1]
-    assert 'id="iv-content"' in bulkhash_pane.split("</section>", 1)[0]
-    fn = js.split("function mountImageVerification(hostId) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "cloneNode" not in fn
-    assert "appendChild(content)" in fn
-    assert "mountImageVerification('wz-iv-mount')" in js
-    assert "mountImageVerification('settings-pane-bulkhash')" in js
+def test_image_verification_uses_one_react_form_between_setup_and_settings():
+    source = _react_source("image-verification.jsx")
+    adapter = _webroot("app.js")
+    assert "createPortal(" in source
+    assert "mountImageVerification('wz-iv-mount')" in adapter
+    assert "mountImageVerification('settings-pane-bulkhash')" in adapter
+    assert "imageVerification.select(hostId)" in adapter
+    assert "cloneNode" not in source
+    assert "renderIvStatusFields" not in adapter
 
 
 def test_m37_configured_but_unrun_schedule_gets_its_own_wording():
-    """M37 fold-in (carried from the KGV close-out): setup_status.py's
-    image_verification card only ever reports ok/unset (a scheduled-but-
-    never-run config and a truly unconfigured one both resolve to "unset"
-    from that field alone -- see its docstring). The console tells them
-    apart using the schedule's own mode, fetched separately from
-    /api/v1/settings/image-verification, and renders a distinct label rather
-    than conflating the two."""
-    js = _webroot("app.js")
-    assert "'Configured — no successful run yet'" in js
-    assert "function fetchIvScheduleConfigured()" in js
-    fn = js.split("function fetchIvScheduleConfigured() {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "'/api/v1/settings/image-verification'" in fn
-    assert "(iv.mode || 'off') !== 'off'" in fn
-    item_fn = js.split("function setupItemChipHTML(key, state, ivScheduleConfigured) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "configured_unrun" in item_fn
-    assert "key === 'image_verification'" in item_fn
+    model = _react_source("setup-packages-model.mjs")
+    controller = _react_source("setup-packages-controller.mjs")
+    assert "'Configured — no successful run yet'" in model
+    assert "'/api/v1/settings/image-verification'" in model
+    assert "state === 'unset' && configured === true" in model
+    assert "read(verificationURL, verificationSettings)" in controller
+    assert "annotation === this.annotationGeneration" in controller
 
 
 def test_setup_pills_route_through_the_real_status_pill_system():
-    """Task 9: the Setup pane's ad-hoc badge-* chips became real Magnetic
-    status pills (levelPillHTML) -- setupChip keeps its name and its pinned
-    setupChip('unknown') call (test_refresh_setup_paints_unknown_on_failed_
-    or_thrown_fetch above), but its body now renders through the shared pill
-    renderer instead of a bespoke <span class="badge ...">."""
-    js = _webroot("app.js")
-    fn = js.split("function setupChip(state, levelOverride) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "levelPillHTML(" in fn
-    assert "class=\"badge " not in fn
+    source = _react_source("setup-packages.jsx")
+    assert "className={'status-pill is-' + level}" in source
+    assert "setupChip(item, state, configured)" in source
+    assert "i-triangle-warn" in source
+    assert 'className="badge' not in source
 
 
 def test_absent_package_state_renders_inactive_not_warning():
-    """Fix wave (reviewer Critical): 'absent' means a package for an
-    architecture this deployment does not build -- console.md's own words,
-    "needs no action" -- not an operator gap. setup_status._RANK ranks
-    absent ABOVE ok in the worst-of roll-up, so any single-architecture
-    deployment (one of iris-amd64.tar/iris-arm64.tar never built on
-    purpose) rolls packages.state up to 'absent' and would otherwise paint
-    a permanent false amber Warning in both Settings > Setup and wizard
-    step 3, with nothing the operator could do to clear it. The server side
-    only pins the raw state string (setup_status.py has no concept of a
-    client-side pill level at all) -- this is the client-side level pin
-    that was missing."""
-    js = _webroot("app.js")
-    levels = js.split("var SETUP_CHIP_LEVELS = {", 1)[1].split("\n  };", 1)[0]
-    assert "absent: 'inactive'" in levels
-    assert "absent: 'warning'" not in levels
+    source = _react_source("setup-packages-model.mjs")
+    assert "absent: 'inactive'" in source
+    assert "absent: 'warning'" not in source
 
-
-# The stage-host step was removed (#101): console onboarding always stages
-# locally (gui_onboard._build_env exports IRIS_STAGE_LOCAL=1 to every
-# recipe), so the stage-host credential the step collected had no consumer.
-# The stage-host-specific assertions that used to live here (the setup-status
-# card's required: false, and the wizard copy that used to warn onboarding
-# "cannot start" without it) covered only that now-deleted feature and were
-# deleted along with it. The general skip-optional-steps mechanism the old
-# test also exercised (telemetry and image_verification are still optional
-# items) survives below, now proved without reference to stage_host.
 
 def test_wizard_first_incomplete_step_skips_optional_items():
-    js = _webroot("app.js")
-    first = js.split("function wizardFirstIncompleteStep(", 1)[1].split("\n  }", 1)[0]
-    assert "required === false" in first
-    assert "SETUP_ITEM_OPTIONAL[WIZARD_STEPS[i].key]" in first
+    source = _react_source("setup-packages-model.mjs")
+    first = source.split("export function firstIncomplete(", 1)[1].split("\n", 1)[0]
+    assert "status.packages.state !== 'ok' ? 1 : 2" in first
+    assert "telemetry" not in first and "image_verification" not in first
+    controller = _react_source("setup-packages-controller.mjs")
+    assert "initial && navigation === this.navigation" in controller
+
+
+def test_setup_nudge_is_session_only_and_handles_disabled_browser_storage():
+    source = _react_source("setup-packages-controller.mjs")
+    assert "iris_setup_nudge_dismissed" in source
+    assert "Storage can be unavailable" in source
+    assert "Dismiss for this document even if storage is disabled" in source
+    assert "['unknown', 'stale'].includes(status.packages.state)" in _react_source(
+        "setup-packages-model.mjs")

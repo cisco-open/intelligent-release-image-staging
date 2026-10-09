@@ -23,18 +23,32 @@ const browser = await chromium.launch({headless: true});
 try {
   const page = await browser.newPage({viewport: {width: 1440, height: 1000}, reducedMotion: 'reduce'});
   await page.clock.install();
-  const errors = [], writes = [];
-  let refused = false;
+  const errors = [], writes = [], confirmations = [];
+  let acceptConfirmation = true;
+  page.on('dialog', async dialog => { confirmations.push(dialog.message());
+    if (acceptConfirmation) await dialog.accept(); else await dialog.dismiss(); });
+  let refused = false, wrongCommit = false, holdPolicy = false, heldPolicy = null, swarmReads = 0;
+  const directive = {request_id: 'a'.repeat(32), requested_at: now, expires_at: now + 600};
+  let reports = [], pending = null, pulls = 0;
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/*', async route => {
     const url = new URL(route.request().url());
     assert.equal(url.origin, 'http://iris.test');
     if (url.pathname === '/swarmmap') return route.fulfill({contentType: 'text/html', body: html,
       headers: {'Content-Security-Policy': "default-src 'self'; script-src 'nonce-test'; style-src 'nonce-test'; connect-src 'self'; img-src 'self'"}});
-    if (url.pathname === '/api/v1/swarm') return route.fulfill({json: data});
+    if (url.pathname === '/api/v1/swarm') { swarmReads++; return route.fulfill({json: data}); }
     if (url.pathname === '/api/v1/session') return route.fulfill({json: {csrf: 'test-only'}});
-    if (url.pathname === '/api/v1/peer-policy') return route.fulfill({json: {revision: 7}});
-    if (url.pathname.endsWith('/reports')) return route.fulfill({json: {reports: []}});
+    if (url.pathname === '/api/v1/peer-policy') {
+      if (holdPolicy) { heldPolicy = route; return; }
+      return route.fulfill({json: {revision: 7}});
+    }
+    if (url.pathname.endsWith('/effective-qos')) return route.fulfill({json: {
+      device_id: 'XE-B', revision: 8, degraded: false, fail_closed: false,
+      qos: {peer_telemetry_interval_s: {value: 60}}}});
+    if (url.pathname.endsWith('/reports')) return route.fulfill({json: {
+      device_id: 'XE-B', observed_at: now + 5, pending_request: pending, reports}});
+    if (url.pathname.endsWith('/request-report')) { pulls++; pending = directive;
+      return route.fulfill({json: {ok: true, device_id: 'XE-B', ...directive}}); }
     if (url.pathname.endsWith('/peer-telemetry')) {
       assert.equal(route.request().method(), 'POST');
       assert.equal(route.request().headers()['x-csrf-token'], 'test-only');
@@ -43,7 +57,9 @@ try {
       writes.push({preview: url.searchParams.get('dry_run') === '1', body});
       if (refused) return route.fulfill({status: 412, json: {code: 'policy_changed'}});
       if (!url.search) assert.equal(body.confirm_token, 'preview-only-fixture');
-      return route.fulfill({json: url.search ? {confirm_token: 'preview-only-fixture'} : {ok: true}});
+      return route.fulfill({json: {ok: true, device_id: wrongCommit && !url.search ? 'OTHER' : 'XE-B',
+        requested_interval_s: body.interval_s, revision: 8, candidate_revision: 8,
+        dry_run: !!url.search, requires_confirmation: true, confirm_token: 'preview-only-fixture'}});
     }
     if (url.pathname.startsWith('/fonts/')) return route.fulfill({body:
       await fs.readFile(new URL('../../webroot' + url.pathname, import.meta.url))});
@@ -63,13 +79,24 @@ try {
   await page.getByText(/Saved. Waiting for the device/).waitFor();
   assert.deepEqual(writes, [{preview: true, body: {interval_s: 10}},
     {preview: false, body: {interval_s: 10, confirm_token: 'preview-only-fixture'}}]);
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0], /XE-B to 10 seconds/);
+  assert.match(confirmations[0], /revision 7 will become 8/);
   // A saved request must not be presented as already effective on the device.
   assert.match(await page.locator('#peer-details').textContent(), /Reported interval60s/);
+  // Cancelling the reviewed policy change never sends the mutation.
+  acceptConfirmation = false;
+  await page.locator('#peer-interval').selectOption('60');
+  await page.locator('#save-peer-interval').click();
+  await page.getByText('Interval change cancelled. No update was sent.').waitFor();
+  assert.equal(writes.length, 3); assert.equal(writes.at(-1).preview, true);
+  assert.match(confirmations.at(-1), /XE-B to 60 seconds/);
+  acceptConfirmation = true;
   refused = true;
   await page.locator('#peer-interval').selectOption('60');
   await page.locator('#save-peer-interval').click();
-  await page.getByText('Policy changed. Try again.').waitFor();
-  assert.equal(writes.length, 3, 'A failed preview must never commit');
+  await page.getByText('Policy changed. Review the current interval before trying again.').waitFor();
+  assert.equal(writes.length, 4, 'A failed preview must never commit');
   await page.keyboard.press('Escape');
   await page.locator('#peerfind').fill('XR-A');
   assert.equal(await arrow.count(), 0, 'No arrows to hidden endpoints');
@@ -89,6 +116,48 @@ try {
   await page.reload();
   await page.getByRole('button', {name: 'Open XE-B (C8000V) details', exact: true}).click();
   assert.equal(await page.locator('#peer-interval option[value="10"]').isDisabled(), true);
+  refused = false;
+  // Wrong target replies never produce success, and re-opening cannot replay.
+  wrongCommit = true;
+  await page.locator('#save-peer-interval').click();
+  await page.getByText('Save outcome is not confirmed. Review the current interval before trying again.').waitFor();
+  assert.equal(await page.locator('#save-peer-interval').isDisabled(), true);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', {name: 'Open XE-B (C8000V) details', exact: true}).click();
+  assert.equal(await page.locator('#save-peer-interval').isDisabled(), true);
+  wrongCommit = false;
+  await page.locator('#review-peer-interval').click();
+  await page.getByText(/Current requested interval: 60 seconds/).waitFor();
+  // A host-hidden preflight cannot commit, even if it completes afterward.
+  holdPolicy = true; const priorWrites = writes.length;
+  await page.locator('#save-peer-interval').click();
+  while (!heldPolicy) await new Promise(resolve => setTimeout(resolve, 5));
+  await page.evaluate(() => window.postMessage('MAP_PAUSE', location.origin));
+  await page.getByText(/^Paused\./).waitFor();
+  await heldPolicy.fulfill({json: {revision: 7}}); holdPolicy = false;
+  await page.waitForTimeout(30);
+  assert.equal(writes.length, priorWrites);
+  await page.evaluate(() => window.postMessage('MAP_RESUME', location.origin));
+  await page.getByText(/^Live\./).waitFor();
+  // A fresh unrelated completion does not satisfy the exact pull request.
+  reports = [{schema: 'v2', event: 'staging-complete', report_id: 'b'.repeat(32),
+    report_request_id: null, received_at: now + 999}];
+  await page.locator('#pullbtn').click();
+  await page.getByText(/accepted. Waiting for its matching report/).waitFor();
+  await page.clock.fastForward(2500);
+  assert.doesNotMatch(await page.locator('#pullstatus').textContent(), /Matching report received/);
+  reports.push({schema: 'v2', event: 'pull', report_id: 'c'.repeat(32),
+    report_request_id: directive.request_id, received_at: now}); pending = null;
+  await page.clock.fastForward(2500);
+  await page.getByText(/Matching report received for request/).waitFor();
+  assert.equal(pulls, 1);
+  // Parent resume must not undo the operator's manual pause.
+  await page.keyboard.press('Escape'); await page.locator('#pause').click();
+  const readsBeforePause = swarmReads;
+  await page.evaluate(() => { window.postMessage('MAP_PAUSE', location.origin); window.postMessage('MAP_RESUME', location.origin); });
+  await page.waitForTimeout(30); await page.clock.fastForward(10000);
+  assert.equal(await page.locator('#pause').textContent(), 'Resume');
+  assert.equal(swarmReads, readsBeforePause);
   assert.deepEqual(errors, []);
   console.log('Swarm peer arrows, keyboard/pointer access, expiry and signed interval UI passed.');
 } finally { await browser.close(); }

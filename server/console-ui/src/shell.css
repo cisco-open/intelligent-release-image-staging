@@ -268,3 +268,16 @@
 [data-policies-react] .field { display: flex; width: 100%; }
 [data-policies-react] .field :is(input,select) { width: 100%; }
 [data-policies-react] .modal-body { overflow-wrap: anywhere; }
+/* Setup and verification share their forms with the first-run wizard. */
+[data-setup-packages] .machine { overflow-wrap: anywhere; }
+[data-setup-packages] .wz-steplist-item { width: 100%; min-width: 0; flex-wrap: wrap; }
+[data-setup-packages] .wz-steplist-label { min-width: 0; }
+[data-setup-packages] .wz-content { width: 100%; min-width: 0; }
+[data-setup-packages] .status-pill { white-space: normal; }
+[data-setup-packages] .tbl :is(th,td):last-child { text-align: left; }
+[data-setup-packages] .tbl td:first-child { white-space: nowrap; }
+#setup-nudge { flex-wrap: wrap; }
+.iris-image-verification { min-width: 0; overflow-wrap: anywhere; }
+.iris-image-verification .iv-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.iris-image-verification button { height: auto; }
+.iris-image-verification .dropzone[aria-disabled="true"] { opacity: .65; cursor: not-allowed; }

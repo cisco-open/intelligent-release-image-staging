@@ -919,6 +919,10 @@ def test_settings_and_optional_success_shapes_match_runtime():
         setup = doc["paths"][
             prefix + "/settings/setup-status"]["get"]["responses"]["200"][
                 "content"]["application/json"]
+        assert setup["example"]["telemetry"]["source"] == "env"
+        assert setup["example"]["telemetry"]["enabled"] is True
+        assert {row["name"] for row in setup["example"]["packages"]["items"]} == {
+            "iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm", "iris-agent.tgz"}
         fingerprint = setup["schema"]["properties"]["packages"][
             "properties"]["reference_fingerprint"]
         assert fingerprint["type"] == ["string", "null"]

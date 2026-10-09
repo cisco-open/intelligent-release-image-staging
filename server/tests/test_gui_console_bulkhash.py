@@ -1,14 +1,12 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Source guards for the console UI of the KGV / Cisco Bulk Hash reconciler
-(spec Task 5): the Settings > Image verification pane (schedule, Refresh
-now, offline upload), the Images page verdict badges + image-detail drawer
-(release / typed-confirm override), and the multi-image picker's quarantine
-blocking. Settings keeps its source wiring guards. The migrated Images and
-assignment controllers also run executable JavaScript behavior tests. The
-HTTP endpoints these panes call are already covered end-to-end by
-test_gui_server_bulkhash.py (Task 4); nothing here re-tests the server."""
+"""Console image verification ownership and executable workflow guards.
+
+Native HTTP, signed-feed parsing and quarantine remain covered separately.
+This suite runs the shipped React controller's exact-result, scheduling,
+bounded raw upload and stale/unknown request regression tests.
+"""
 import os
 
 import management_api as gui_server
@@ -23,206 +21,88 @@ def _slice(container, start_marker, end_marker):
     return container.split(start_marker, 1)[1].split(end_marker, 1)[0]
 
 
-# --- Settings sub-menu / sub-page registration -----------------------------
-
-def test_settings_submenu_has_image_verification_entry():
-    """React navigation keeps the operational verification page reachable."""
-    source = os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "src", "settings-navigation.jsx")
-    with open(source, encoding="utf-8") as stream:
-        shell = stream.read()
-    assert "['bulkhash', 'Image verification'," in shell
-    assert 'href={`#settings/${id}`}' in shell
-    assert 'id="settings-pane-bulkhash"' in _read("index.html")
+def _verification_source(name):
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT),
+                           "console-ui", "src", name), encoding="utf-8") as f:
+        return f.read()
 
 
-def test_app_js_registers_the_bulkhash_settings_sub_via_push_not_the_pinned_literal():
-    """House rule: the original SETTINGS_SUBS trio stays a literal (a
-    different source guard pins it exactly); every pane added since is
-    appended with its own SETTINGS_SUBS.push(...) call, never by editing
-    that array. This pane follows the same convention as 'audit'/'setup'."""
-    js = _read("app.js")
-    assert re_pinned_trio_intact(js)
-    assert "SETTINGS_SUBS.push('bulkhash')" in js
-
-
-def re_pinned_trio_intact(js):
-    import re
-    return bool(re.search(
-        r"SETTINGS_SUBS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js))
-
-
-# --- Settings > Image verification pane: markup -----------------------------
-
-def _bulkhash_pane(html):
-    return _slice(html, 'id="settings-pane-bulkhash" hidden>', "</section>")
-
-
-def test_pane_present_and_hidden_by_default():
+def test_image_verification_navigation_and_single_react_mount():
+    nav = _verification_source("settings-navigation.jsx")
+    assert "['bulkhash', 'Image verification'," in nav
+    assert 'href={`#settings/${id}`}' in nav
     html = _read("index.html")
+    assert html.count('id="iris-image-verification-root"') == 1
     assert 'id="settings-pane-bulkhash" hidden' in html
+    assert 'id="iv-content"' not in html
+    assert "mountImageVerification" in _verification_source("main.jsx")
 
 
-def test_schedule_controls_have_the_binding_copy():
-    """UI copy decisions (binding): the weekly option must name its Monday
-    UTC anchor, the daily option must say UTC, and the hour is 00:00-23:00
-    UTC."""
-    pane = _bulkhash_pane(_read("index.html"))
-    assert 'id="iv-mode"' in pane
-    mode = _slice(pane, 'id="iv-mode"', "</select>")
-    assert '<option value="off">Off</option>' in mode
-    assert '<option value="daily">Daily (UTC)</option>' in mode
-    assert '<option value="weekly">Weekly (Mondays, UTC)</option>' in mode
-    assert 'id="iv-hour"' in pane
-
-
-def test_hour_select_is_built_client_side_for_00_00_through_23_00_utc():
+def test_react_owns_both_settings_and_wizard_with_authenticated_adapter():
     js = _read("app.js")
-    assert "getElementById('iv-hour')" in js
-    assert "for (var h = 0; h < 24; h++)" in js
-    assert ":00</option>" in js
+    assert "SETTINGS_SUBS.push('bulkhash')" in js
+    assert "var imageVerification = window.irisImageVerification;" in js
+    assert "fetch: fetch, headers: csrfHdr, formatDate: fmtDate" in js
+    assert "imageVerification.select(hostId)" in js
+    assert "imageVerification.refresh()" in js
+    assert "imageVerification.select(null)" in js
+    adapter = _slice(js, "var imageVerification =", "// React owns certificate inventory")
+    assert "refreshImages().catch" in adapter
+    assert "refreshDevices().catch" in adapter
+    assert "assignments.services.publishImages(assignments.acceptImages({ok: false}, assignments.beginImageRead()))" in adapter
+    for removed in ("function uploadOfflineTar(", "function renderIvStatusFields(",
+                    "function fmtBulkhashLastRun(", "function wireDropzone("):
+        assert removed not in js
 
 
-def test_refresh_now_button_and_last_run_line_present():
-    pane = _bulkhash_pane(_read("index.html"))
-    assert 'id="iv-refresh"' in pane
-    btn = _slice(pane, 'id="iv-refresh"', "</button>")
-    assert "Refresh now" in btn
-    assert 'id="iv-last-run"' in pane
+def test_schedule_keeps_utc_anchor_and_accessible_native_controls():
+    component = _verification_source("image-verification.jsx")
+    assert '<option value="off">Off</option>' in component
+    assert '<option value="daily">Daily (UTC)</option>' in component
+    assert '<option value="weekly">Weekly (Mondays, UTC)</option>' in component
+    assert "Array.from({length: 24}" in component
+    assert "padStart(2, '0')}:00" in component
+    assert 'htmlFor="iv-mode"' in component
+    assert 'htmlFor="iv-hour"' in component
+    assert 'id="iv-refresh"' in component
+    assert 'id="iv-last-run" role="status" aria-live="polite"' in component
+    assert 'id="iv-offline-dropzone" tabIndex={0} role="button" aria-disabled={!canWrite}' in component
+    assert 'aria-label="Choose or drop a Cisco Bulk Hash feed tar file"' in component
+    assert 'id="iv-offline-dropzone-input"' in component
+    assert "event.target.value = ''" in component
+    assert "Upload sent. Waiting for signature verification and catalog results." in component
 
 
-def test_offline_dropzone_present_and_accessible():
-    pane = _bulkhash_pane(_read("index.html"))
-    assert 'id="iv-offline-dropzone"' in pane
-    open_tag = _slice(pane, 'id="iv-offline-dropzone"', ">")
-    assert 'tabindex="0"' in open_tag
-    assert 'role="button"' in open_tag
-    assert 'aria-label="' in open_tag
-    zone = _slice(pane, 'id="iv-offline-dropzone"', "</div>")
-    assert 'id="iv-offline-dropzone-input"' in zone
-    assert 'type="file"' in zone
+def test_offline_archive_stays_raw_and_never_treated_as_verified_at_upload_completion():
+    controller = _verification_source("image-verification-controller.mjs")
+    model = _verification_source("image-verification-model.mjs")
+    assert "xhr.open('POST', verificationPaths.offline)" in controller
+    assert "Object.entries(this.services.headers({}))" in controller
+    assert "xhr.send(file)" in controller
+    assert "FormData" not in controller
+    assert "256 * 1024 * 1024" in model
+    assert "body.outcome === 'ok'" in model
+    assert "body.outcome === 'already_running'" in model
+    assert "body.outcome === 'fail'" in model
+    assert "run.outcome.startsWith('fail: ')" in model
 
 
-# --- Settings > Image verification pane: app.js wiring ----------------------
-
-def test_app_js_wires_the_dropzone_via_the_shared_wireDropzone_helper():
-    """Drag-drop pattern mirrored from the TLS pane, per the brief."""
-    js = _read("app.js")
-    assert "wireDropzone(document.getElementById('iv-offline-dropzone')" in js
-    assert "function uploadOfflineTar(file)" in js
-
-
-def test_offline_upload_is_a_raw_body_post_not_multipart():
-    """Endpoint contract (Task 4): raw binary POST, not RFC 2046 multipart
-    and not form-encoded -- mirrors the PUT /api/v1/images/upload/<name> XHR
-    idiom (xhr.send(file) sends the raw File body)."""
-    js = _read("app.js")
-    fn = js.split("function uploadOfflineTar(file) {", 1)[1].split(
-        "\n  wireDropzone(document.getElementById('iv-offline-dropzone')", 1)[0]
-    assert "'/api/v1/image-verification/offline'" in fn
-    assert "xhr.open('POST'" in fn
-    assert "setRequestHeader('X-CSRF-Token'" in fn
-    assert "xhr.send(file)" in fn
-    assert "FormData" not in fn
-    assert "multipart" not in fn.lower()
-
-
-def test_refresh_now_disables_while_in_flight_and_handles_already_running():
-    js = _read("app.js")
-    fn = js.split(
-        "document.getElementById('iv-refresh').addEventListener('click'", 1)[1][:1600]
-    assert "btn.disabled = true" in fn
-    assert "btn.disabled = false" in fn
-    assert "r.status === 409" in fn
-    assert "already in progress" in fn
-    assert "'/api/v1/image-verification/refresh'" in fn
-
-
-def test_failed_status_get_shows_could_not_load_not_stale_never_run():
-    """Setup pane's never-render-stale-as-healthy pattern (setupShowUnknown
-    in this same file): a failed GET must not silently leave whatever text
-    was already in #iv-last-run standing in as current -- neither the
-    static "Never run." markup index.html ships on first load, nor a stale
-    prior successful render."""
-    js = _read("app.js")
-    fn = js.split(
-        "async function refreshImageVerificationSettings() {", 1)[1].split(
-        "\n  // Hour select is built once here", 1)[0]
-    assert fn.count("Could not load status.") == 2   # !r.ok AND catch(e)
-    assert "catch (e)" in fn
-
-
-def test_success_messages_render_in_the_ok_color_outside_inline_form():
-    """Important 2 fix: #iv-refresh-msg and #iv-offline-msg sit outside any
-    .inline-form (unlike every other -msg span in this pane), so the
-    pre-existing '.inline-form .err.ok' scoped rule never matched them --
-    classList.add('ok') was a silent no-op and "Refresh complete: ..."
-    painted in the error red (#c0362c). The fix must be a rule that matches
-    .err.ok regardless of ancestor."""
-    html = _read("index.html")
-    pane = _bulkhash_pane(html)
-    form = _slice(pane, '<form class="inline-form" id="iv-schedule-form">', "</form>")
-    assert "iv-refresh-msg" not in form
-    assert "iv-offline-msg" not in form
-
-
-def test_success_message_css_wins_the_cascade_both_inside_and_outside_forms():
-    """Important 2, round 2: a global `.err.ok` rule alone is not enough --
-    `.inline-form .err` and `.err.ok` are BOTH two-class selectors (equal
-    0-2-0 specificity), and same-specificity ties resolve by SOURCE ORDER,
-    not by which selector reads as more specific to a human. A `.err.ok`
-    declared BEFORE `.inline-form .err` loses that tie: the plain `.err`
-    (red) rule wins inside every form, repainting eight previously-working
-    success messages (ae-msg, ca-msg, cert-msg, iv-schedule-msg, pw-msg,
-    sh-msg, td-msg, trust-msg) red on success. `.err.ok` must appear
-    strictly AFTER the last `.inline-form .err` rule in the stylesheet.
-    Outside a form this ordering doesn't matter -- `.err.ok` (0-2-0)
-    already outranks the bare `.err` (0-1-0) by specificity alone -- so
-    this pins the case that actually depends on order."""
+def test_success_message_css_wins_inside_and_outside_forms():
     css = _read("styles.css")
-    assert ".err.ok {" in css
-    inline_form_err_idx = css.rindex(".inline-form .err {")
-    err_ok_idx = css.index(".err.ok {")
-    assert err_ok_idx > inline_form_err_idx, (
-        ".err.ok must be declared textually AFTER .inline-form .err -- "
-        "equal specificity means source order decides which one wins "
-        "inside a form")
+    assert css.index(".err.ok {") > css.rindex(".inline-form .err {")
 
 
-def test_refresh_now_and_offline_upload_also_refresh_the_devices_view():
-    """Adjacent fix (e): imageQuarantined -- the picker's block list -- is
-    populated by refreshDevices(), not refreshImages(). Without also
-    calling refreshDevices() after a run, a freshly-quarantined image
-    stayed pickable until the next periodic devices-view poll interval."""
-    js = _read("app.js")
-    refresh_fn = js.split(
-        "document.getElementById('iv-refresh').addEventListener('click'", 1)[1].split(
-        "\n  });\n  // Offline upload:", 1)[0]
-    assert "refreshDevices().catch" in refresh_fn
-    finish_fn = js.split("function finish(text, ok) {", 1)[1].split("\n    }", 1)[0]
-    assert "refreshDevices().catch" in finish_fn
-
-
-def test_last_run_rendering_never_equals_fail_it_checks_the_prefix():
-    """Binding rule from the endpoint contract: last_run.outcome is "ok" or
-    "fail: <detail>" -- an equality check against the literal "fail" would
-    never match, so this must be a startswith-style prefix check."""
-    js = _read("app.js")
-    fn = js.split("function bulkhashOutcomeFailed(outcome) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "slice(0, 4) === 'fail'" in fn
-    assert "=== 'fail'" not in js.split(
-        "function fmtBulkhashLastRun(lr) {", 1)[1].split("\n  }", 1)[0], \
-        "the last-run renderer must route failure detection through the " \
-        "prefix helper, never a bare equality check"
-
-
-def test_schedule_form_posts_mode_and_hour_utc():
-    js = _read("app.js")
-    fn = js.split(
-        "document.getElementById('iv-schedule-form').addEventListener('submit'", 1)[1][:900]
-    assert "'/api/v1/settings/image-verification'" in fn
-    assert "mode: mode" in fn
-    assert "hour_utc: hour" in fn
+def test_image_verification_controller_executes_race_and_result_contracts():
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("Node is required for the image verification controller tests")
+    path = os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui",
+                        "tests", "image-verification.test.mjs")
+    result = subprocess.run(["node", "--test", path], capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # --- Images page: verdict badges --------------------------------------------

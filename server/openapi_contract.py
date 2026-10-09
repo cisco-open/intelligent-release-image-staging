@@ -2258,6 +2258,8 @@ def _json_success_example(route):
                      "resolved": {"platform": "iox",
                                   "management_type": "inband"}}},
         "/devices/{device_id}/reports": {
+            "device_id": "device-01", "observed_at": 1788470400.5,
+            "pending_request": None,
             "reports": [{
                 "v": 2, "schema": "v2",
                 "report_id": "7c1f0b9a2d3e4f5061728394a5b6c7d8",
@@ -2286,7 +2288,9 @@ def _json_success_example(route):
         "/devices/{device_id}/forget-host-key": {
             "ok": True, "peer": "192.0.2.10"},
         "/devices/{device_id}/request-report": {
-            "ok": True, "expires_at": 1788474000},
+            "ok": True, "device_id": "device-01",
+            "request_id": "0123456789abcdef0123456789abcdef",
+            "requested_at": 1788473400.5, "expires_at": 1788474000.5},
         "/devices/{device_id}/adopt": {"record_id": "record-01"},
         "/devices/{device_id}/onboard": {"job_id": "job-01"},
         "/devices/{device_id}/undeploy": {"job_id": "job-01"},
@@ -2401,23 +2405,32 @@ def _json_success_example(route):
             'drain': {'ready': True, 'blocked_device_ids': [], 'removed_device_ids': []}} if route.method == 'GET' else trust_rotation._view(None, 'peer-ca', live=False),
         "/settings/setup-status": {
             "admin": {"state": "ok", "username": "admin"},
-            "telemetry": {"state": "ok", "endpoint":
+            "telemetry": {"state": "ok", "source": "env", "enabled": True, "endpoint":
                           "https://collector.example:4318"},
             "packages": {"state": "ok",
                          "reference_fingerprint": "00:" * 31 + "00",
-                         "items": [{"name": "iris-amd64.tar",
+                         "items": [{"name": name,
                                     "state": "ok",
                                     "fingerprint": None,
                                     "built_at": 1788470400,
                                     "detail": "Package bytes match build provenance",
-                                    "remedy": "tools/provision-iox-packages.sh",
+                                    "remedy": remedy,
                                     "provenance": {
                                         "canonical_index_digest":
                                             "sha256:" + "00" * 32,
                                         "canonical_archive_sha256":
                                             "11" * 32,
                                         "canonical_source_sha256":
-                                            "22" * 32}}],
+                                            "22" * 32}}
+                                   for name, remedy in (
+                                       ("iris-amd64.tar", "tools/provision-iox-packages.sh"),
+                                       ("iris-arm64.tar", "tools/provision-iox-packages.sh"),
+                                       ("iris-xr.rpm", "tools/build-xr-package.sh --out artifacts/"))] + [
+                                           {"name": "iris-agent.tgz", "state": "ok",
+                                            "fingerprint": None, "built_at": 1788470400,
+                                            "provenance": None, "reason": "ready",
+                                            "detail": "Served Guest Shell files and embedded instruction trust match current startup provisioning.",
+                                            "remedy": "Rebuild the server image and restart after correcting the provisioning error."}],
                          "remedy": "tools/provision-iox-packages.sh"},
             "image_verification": {"state": "ok"}},
         "/settings/image-verification": {
@@ -2880,6 +2893,12 @@ def _success(route):
         schema["properties"]["options"] = {
             "type": ["array", "null"], "items": {"type": "string"}}
     elif suffix == "/devices/{device_id}/reports":
+        schema["properties"]["pending_request"] = {"oneOf": [
+            _schedule_object({
+                "request_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+                "requested_at": {"type": "number", "minimum": 0},
+                "expires_at": {"type": "number", "minimum": 0}}),
+            {"type": "null"}]}
         v2_example, v1_example = example["reports"]
         v2_schema = _schema_for_example(v2_example, title + "V2Report")
         v1_schema = _schema_for_example(v1_example, title + "V1Report")
@@ -2889,6 +2908,10 @@ def _success(route):
             "type": "string", "const": "v1"}
         schema["properties"]["reports"]["items"] = {
             "oneOf": [v2_schema, v1_schema]}
+    elif suffix == "/devices/{device_id}/request-report":
+        schema["properties"]["request_id"] = {
+            "type": "string", "pattern": "^[a-f0-9]{32}$"}
+        schema["properties"]["ok"] = {"const": True}
     elif suffix == "/devices/{device_id}/deployment":
         schema["properties"]["record"] = {
             "oneOf": [

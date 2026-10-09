@@ -60,12 +60,22 @@ device-to-device traffic reported by an agent. Select a device for direction,
 speed and report age. Gray spokes show participation. Old observations expire;
 connections with no unique device match remain unattributed.
 
+The summary counts image-peer entries: one device can appear under several
+images. An unavailable snapshot clears the count. The embedded map pauses when
+you leave Swarm or hide the tab; a manual pause stays paused when you return.
+
 In the device details, use **Peer telemetry** to choose **60 seconds** (the
-default) or **10 seconds**, then **Save interval**. Faster reporting applies to
+default) or **10 seconds**, then **Save interval**. Review the device and
+interval in the confirmation dialog when it appears. Faster reporting applies to
 that device and needs the updated agent. Allow its next normal check-in to
 apply the setting, then check **Reported interval**. Paused telemetry and
 resource limits take precedence. While active, this adds up to six small
 telemetry reports a minute. Image transfer settings stay unchanged.
+
+If an interval save is unconfirmed, use **Review current interval** before
+retrying. **Pull fresh data from device** tracks a specific report request;
+unrelated reports do not complete it. Use **Review report request** after a lost
+reply or when returning to a pending request.
 
 ### Audit trail
 
@@ -102,17 +112,18 @@ Leaving a page does not cancel an already submitted request.
 
 The checklist holds four cards: admin account, telemetry destination, device
 packages, and image verification. The admin card links to General; the other
-two open the setup flow at `#setup`. Every card carries a status chip:
+cards open the setup flow at `#setup`. Every card carries a status chip:
 
 | Chip | What it means |
 | --- | --- |
-| `ok` | The server checked the state and found it good. |
-| `unset` | Nothing is configured yet. |
-| `stale` | Something is configured, but the evidence behind it no longer matches. |
-| `absent`, `unknown` | The server could not determine the state. A failed status fetch shows every chip as `unknown`. |
+| Done | The server checked the state and found it good (`ok`). |
+| Not configured | The optional integration is unset. |
+| Needs rebuild | Package evidence is stale. |
+| Not built | A package is absent; build it if you use that platform. |
+| Cannot determine | Evidence is unknown or the status fetch failed. |
 
-The image verification card can also show a sixth reading, worded distinctly
-as `Configured — no successful run yet`: a schedule exists but has not
+The image verification card can also show that it is configured with no
+successful run yet: a schedule exists but has not
 produced a successful run, which is not the same as never configured at all.
 
 In the setup flow, a step panel lists every step with its state. Open the steps
@@ -128,11 +139,12 @@ packages (`iris-arm64.tar`, `iris-amd64.tar`) and the IOS-XR package
 from the bundle the server builds, or the IOx app when they have app-hosting
 storage.
 
-Each row binds the SHA-256 of the served package to the provenance manifest
-beside it. `ok` means those bytes and that metadata agree, `stale` means the
-digest no longer matches, and missing or malformed evidence reads `absent` or
-`unknown`. The page prints the build command for every package family that is
-not `ok`; run those commands on the Docker host. See
+Each wrapper row compares the SHA-256 of the served package with its adjacent
+provenance manifest. **Done** means they agree; the check does not authenticate
+that manifest or verify a native signature. **Artifact updated** is the file's
+modification time. Guest Shell uses separate startup provisioning evidence.
+Build or repair packages for the platforms you use on the build host, then
+select **Re-check packages**. See
 [Build and publish the device packages](../install/device-packages.md).
 
 The card also turns non-green when the certificate the live service presents

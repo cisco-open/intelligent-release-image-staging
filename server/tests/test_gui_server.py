@@ -263,7 +263,9 @@ def test_no_orphaned_control_ids():
     html += _react_shell("certificates.jsx")
     ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
-    assert len(ids) > 30, "id extraction matched too little — patterns drifted"
+    # The adapter shrinks as views move to React. Pin actual cross-owner
+    # references rather than demanding an arbitrary number of legacy IDs.
+    assert {'dev-status', 'view-swarm', 'view-devices', 'settings-pane-certificates'} <= ids
     missing = sorted(i for i in ids if ('id="%s"' % i) not in html)
     assert not missing, \
         "app.js references ids missing from index.html: %s" % missing
@@ -304,7 +306,8 @@ def test_devices_toolbar_regrouped():
 def test_peer_policy_console_controls_are_typed_and_safe():
     html, js = _webroot("index.html"), _webroot("app.js")
     component, controller, model = (_react_shell(name) for name in ('inventory.jsx', 'inventory-controller.mjs', 'inventory-model.mjs'))
-    assert "'Peer policy'" in component and 'id="legacy-peer-warning" hidden' in html
+    assert "'Peer policy'" in component
+    assert 'id="legacy-peer-warning" hidden' in _react_shell('swarm-view.jsx')
     assert "function refreshPeerPolicy()" not in js
     assert "'/api/v1/peer-policy'" in controller
     assert "'/api/v1/peer-policy/quarantine/' + encodeURIComponent(id)" in controller
@@ -312,8 +315,9 @@ def test_peer_policy_console_controls_are_typed_and_safe():
     assert 'if_revision: policy.revision' in controller
     assert 'Existing device-to-device transfers may continue' in controller and 'Device software is unchanged' in controller
     assert 'Quarantined intent' in component and 'desired_ip_count' in model and 'conflict_types' in model
-    assert "participant_class === 'legacy_unattributed'" in js
-    assert "p.tracker" in js and "device_ip" not in js.split("function refreshSwarm()")[1].split("// ---- Settings ----")[0]
+    swarm = _react_shell('swarm-view-model.mjs')
+    assert "tracker.principal_type === 'legacy'" in swarm
+    assert 'const tracker = peer.tracker' in swarm and 'device_ip' not in swarm.split('export function')[1]
     assert 'otlp_export.signals' in js and 'dropped_total' in js
     assert "method: 'DELETE'" not in controller and 'acl' not in controller.lower()
 
@@ -674,23 +678,23 @@ def test_device_packages_have_a_persistent_settings_view():
     """Package readiness remains inspectable after first-run setup closes."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    assert 'href="#settings/packages"' in html
+    component = _react_shell('setup-packages.jsx')
+    controller = _react_shell('setup-packages-controller.mjs')
+    model = _react_shell('setup-packages-model.mjs')
+    assert 'href="#settings/packages"' in component
     assert "['packages', 'Device packages'," in _react_shell("settings-navigation.jsx")
     assert 'id="settings-pane-packages" hidden' in html
-    assert 'id="device-packages-table"' in html
-    assert 'id="device-packages-recheck"' in html
+    assert 'id="iris-device-packages"' in html
+    assert 'prefix="device-packages"' in component
+    assert "recheck('device-packages-recheck'" in component
     assert "SETTINGS_SUBS.push('packages')" in js
-    assert "if (sub === 'packages') refreshDevicePackages();" in js
-    refresh = js.split("async function refreshDevicePackages() {", 1)[1].split(
-        "\n  document.getElementById('device-packages-recheck')", 1)[0]
-    assert "'/api/v1/settings/setup-status'" in refresh
-    assert "renderPackageStatus(s.packages" in refresh
-    # Setup, wizard and the operational view all use one row/remedy renderer.
-    assert js.count("renderPackageStatus(") >= 5
-    assert "if (i.state !== 'ok' && i.remedy" in js
-    assert "i.detail || i.reason || ''" in js
-    assert "deployment-neutral" in html
-    assert "pins this server's certificate when they are built" not in html
+    assert "setupPackages.select(sub === 'setup' || sub === 'packages' ? sub : null)" in js
+    assert "'/api/v1/settings/setup-status'" in model and 'read(setupURL, setupStatus)' in controller
+    assert component.count('<PackageTable pkg=') == 3
+    assert 'row.detail || row.reason' in component and 'packageRemedy(pkg)' in component
+    assert 'deployment-neutral' in component
+    assert 'does not authenticate that manifest or verify native package signatures' in component
+    assert "pins this server's certificate when they are built" not in component
 
 
 def test_read_version_env_handling(monkeypatch):
@@ -4591,6 +4595,8 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         assert set(("state", "items", "remedy")) <= set(pkgs)
         # +2: the IOS-XR RPM plus the verified Guest Shell agent bundle.
         assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 2
+        assert {item['name'] for item in pkgs['items']} == {
+            'iris-amd64.tar', 'iris-arm64.tar', 'iris-xr.rpm', 'iris-agent.tgz'}
         for item in pkgs["items"]:
             assert "name" in item and "state" in item
     finally:
@@ -4917,6 +4923,14 @@ def test_request_report_session_csrf_and_429(tmp_path):
         assert st == 200
         res = json.loads(b)
         assert res["ok"] is True and res["expires_at"] > time.time()
+        assert res["device_id"] == "d1"
+        assert res["request_id"] == cat.pending_request("d1", time.time())["request_id"]
+        assert res["requested_at"] + cat.PULL_TTL == res["expires_at"]
+        st, _, b = _req(host, port, "GET", "/api/devices/d1/reports", headers=hh)
+        reviewed = json.loads(b)
+        assert st == 200 and reviewed["device_id"] == "d1"
+        assert reviewed["pending_request"]["request_id"] == res["request_id"]
+        assert reviewed["observed_at"] >= res["requested_at"]
         assert cat.pending_report(
             "d1", time.time())["report_requested"] is True
         # duplicate while pending -> 429
@@ -4939,6 +4953,31 @@ def test_request_report_rejects_unknown_fleet_device(tmp_path):
         st, _, body = _req(host, port, "POST", "/api/devices/ghost/request-report",
                            {}, headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 422 and json.loads(body)["error"] == "device is not in fleet"
+    finally:
+        stop()
+
+
+def test_request_report_reply_keeps_created_identity_after_immediate_completion(tmp_path, monkeypatch):
+    host, port, cat, stop = _serve_reports(tmp_path)
+    original = cat.request_report_details
+    created = []
+
+    def completed_before_reply(device_id, now):
+        directive = original(device_id, now)
+        created.append(directive)
+        cat.clear_report_request(device_id, request_id=directive["request_id"])
+        replacement = original(device_id, now + .001)
+        assert replacement["request_id"] != directive["request_id"]
+        return directive
+
+    monkeypatch.setattr(cat, "request_report_details", completed_before_reply)
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, raw = _req(host, port, "POST", "/api/devices/d1/request-report",
+                             {}, headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200
+        assert json.loads(raw) == {"ok": True, "device_id": "d1", **created[0]}
+        assert cat.pending_request("d1", time.time())["request_id"] != created[0]["request_id"]
     finally:
         stop()
 
@@ -8657,18 +8696,18 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     assert 'id="view-setup"' in html
     assert "'setup'" in js.split("var VIEWS =", 1)[1].split("]", 1)[0]
 
-    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    wiz = _react_shell('setup-packages.jsx')
     # the telemetry form step mounts the SHARED template rather than copying it
     assert 'id="wz-td-mount"' in wiz
     assert "settings.select('telemetry', 'wz-td-mount')" in js
     # packages is detect-and-instruct, never a form
-    assert 'id="wz-pkg-recheck"' in wiz
+    assert "recheck('wz-pkg-recheck'" in wiz
     assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
     # skippable, resumable, and it reports where you are
     assert 'id="wz-skip"' in wiz and 'id="wz-next"' in wiz and 'id="wz-back"' in wiz
-    assert "wizardFirstIncompleteStep" in js
+    assert 'firstIncomplete(status)' in _react_shell('setup-packages-controller.mjs')
     # the nudge that brings an operator back
-    assert 'id="setup-nudge"' in html
+    assert 'id="setup-nudge"' in wiz
     # first-run hands off to the wizard, not to the old checklist
     assert "'/#setup'" in login or '"/#setup"' in login
     assert "#settings/setup" not in login
@@ -8745,12 +8784,12 @@ def test_setup_wizard_shows_every_step_even_when_already_complete():
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    wiz = _react_shell('setup-packages.jsx')
     assert 'id="wz-steplist"' in wiz, "no step list: completed steps stay invisible"
     # the list is built from the same step table the wizard navigates
-    assert "renderWizardStepList" in js
+    assert 'setupSteps.map((row, index)' in wiz
     # and any step can be opened directly, not just the first incomplete one
-    assert "wz-steplist-item" in js
+    assert 'wz-steplist-item' in wiz and 'onClick={() => c.chooseStep(index)}' in wiz
 
 
 def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
@@ -9613,7 +9652,7 @@ def test_console_declares_responsive_and_a11y_foundations():
     css = _webroot("styles.css")
     assert 'id="iris-menu-toggle"' in _react_shell()
     assert "@media" in css and "prefers-reduced-motion" in css
-    assert 'class="table-scroll"' in html or "table-scroll" in _webroot("app.js")
+    assert 'className="table-scroll"' in _react_shell('setup-packages.jsx')
     assert 'aria-live' in html
 
 
@@ -9649,19 +9688,10 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("wz-pkg-table", "setup-pkg-table")
-    for tid in table_ids:
-        marker = 'id="%s"' % tid
-        assert marker in html, tid
-        before = html.split(marker, 1)[0]
-        # nearest preceding table-scroll open tag must be closer than the
-        # nearest preceding table-scroll CLOSE (i.e. this table is still
-        # inside an open wrapper, not after one that already closed)
-        last_open = before.rfind('<div class="table-scroll">')
-        assert last_open != -1, "%s has no preceding table-scroll wrapper" % tid
-        between = before[last_open:]
-        assert between.count("</div>") == 0, \
-            "%s's table-scroll wrapper closed before the table opened" % tid
+    packages = _react_shell('setup-packages.jsx')
+    for prefix in ('wz-pkg', 'setup-pkg', 'device-packages'):
+        assert 'prefix="%s"' % prefix in packages
+    assert 'aria-label="Package readiness evidence"><table className="tbl" id={prefix + \'-table\'}>' in packages
     # The unnamed credential table gets a wrapper too.
     assert html.count('<div class="table-scroll"') == html.count("<table")
     settings = _react_shell("settings.jsx")
@@ -9761,12 +9791,12 @@ def test_forms_get_persistent_field_labels():
     assert "font-size: 12px" in css.split(".field-label {", 1)[1].split("}", 1)[0]
     # a representative sample across different forms, not every field
     samples = {
-        "iv-schedule-form": ("iv-mode",),
+        "iv-schedule-form": ("iv-mode", "iv-hour"),
     }
     for form_id, field_ids in samples.items():
-        form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
+        form = _react_shell('image-verification.jsx').split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
         for fid in field_ids:
-            assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
+            assert 'htmlFor="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
     form = _react_shell('device-forms.jsx')
     assert '<label className="field" htmlFor={id}' in form
     for fid in ('df-id', 'df-management-type', 'df-cred'):
@@ -9790,17 +9820,20 @@ def test_error_and_status_regions_carry_live_roles():
     styles.css) get role=alert, so either outcome is announced without the
     operator having to go find the message by sight."""
     html = _webroot("index.html")
-    alert_ids = ("iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg")
-    for eid in alert_ids:
-        tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
-        assert 'role="alert"' in tag, eid
+    verification = _react_shell('image-verification.jsx')
+    assert 'id={`iv-${action}-msg`}' in verification
+    for action in ('schedule', 'refresh', 'offline'):
+        assert '<Outcome state={state} action="%s" />' % action in verification
+    assert 'role="status" aria-live="polite">{message?.text' in verification
     form = _react_shell('device-forms.jsx')
     for eid in ('df-err', 'cf-err'):
         assert 'role="alert"' in form.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
-    status_ids = ("dev-status", "wz-progress", "wz-msg", "swarm-summary")
-    for sid in status_ids:
-        tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+    for source, sid in ((html, 'dev-status'), (_react_shell('setup-packages.jsx'), 'wz-progress'),
+                        (_react_shell('swarm-view.jsx'), 'swarm-summary')):
+        tag = source.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
         assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    setup = _react_shell('setup-packages.jsx')
+    assert "message('wz-msg')" in setup and 'id={id} role="status" aria-live="polite"' in setup
     settings = _react_shell("settings.jsx")
     assert 'id={id} role="status" aria-live="polite" tabIndex={-1}' in settings
     for sid in ("cert-status", "td-status", "ae-status", "sessions-info", "peer-tls-status"):
@@ -9817,9 +9850,9 @@ def test_error_and_status_regions_carry_live_roles():
     # rowProg assertions right below) -- so only the offline-upload bar
     # remains here.
     for pid in ("iv-offline-progress",):
-        tag = html.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
+        tag = verification.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
         assert 'role="progressbar"' in tag, pid
-        assert 'aria-valuemin="0"' in tag and 'aria-valuemax="100"' in tag, pid
+        assert 'aria-valuemin={0}' in tag and 'aria-valuemax={100}' in tag, pid
     images = _react_shell("images.jsx")
     for eid in ("ii-override-note", "ii-release-msg"):
         assert 'role="alert"' in images.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
@@ -10142,10 +10175,11 @@ def test_settings_forms_are_wrapped_in_bounded_card_sections():
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
     parsed = CardHeadings()
     parsed.feed(settings)
-    for heading in ("Telemetry destination", "Schedule"):
+    for heading in ("Telemetry destination",):
         assert parsed.headings.get(heading) is True, \
             "%s must have an open card ancestor" % heading
     component = _react_shell("settings.jsx")
+    assert '<div className="card" data-iv-action="schedule"><h3>Schedule</h3>' in _react_shell('image-verification.jsx')
     for group, heading in (("peer", "Peer transfer TLS"), ("cert", "Console certificate"),
                            ("trust", "Trusted certificate authorities"), ("ca", "Public CA bundle"),
                            ("ae", "Audit export")):
@@ -10158,7 +10192,7 @@ def test_settings_card_never_wraps_a_template_root():
     html = _webroot("index.html")
     assert 'id="tpl-td-form"' not in html
     assert '<div class="card"><h3>Telemetry destination</h3><div id="td-mount">' in html
-    assert 'id="wz-td-mount"' in html
+    assert 'id="wz-td-mount"' in _react_shell('setup-packages.jsx')
 
 
 def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
@@ -10774,7 +10808,8 @@ def test_swarm_map_treats_error_body_as_failed_poll():
     failed poll in the map, and its poll is marked as background."""
     with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "swarmmap.html")) as f:
         html = f.read()
-    assert 'data.error)throw Error(' in html
+    assert 'if(!validSnapshot(data))throw Error(' in html
+    assert 'data.error' in html.split('function validSnapshot(data){', 1)[1].split('function ', 1)[0]
     assert '"X-IRIS-Poll":"1"' in html
 
 

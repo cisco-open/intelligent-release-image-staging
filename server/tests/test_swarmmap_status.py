@@ -45,11 +45,11 @@ const window={};
 const Option=function(label,value) { return {label,value}; };
 let fetch=async()=>{throw Error('No network in this harness');};
 const setTimeout=()=>0, clearTimeout=()=>{};
-function peer(id,state='staging') { return {device_id:id,ip:id,port:6881,_hash:'hash-os',_img:'os.iso',_image_id:'os',
+function peer(id,state='staging') { return {device_id:id,ip:id,port:6881,_hash:'a'.repeat(40),_img:'os.iso',_image_id:'os',
   tracker:{principal_type:'device',principal_id:id,role:state==='ready'?'seeder':'leecher',left:state==='ready'?0:50,progress:state==='ready'?1:.5},
   device_observation:{obs_state:'observed',stale:false},current_image_id:'os',stage_state:state,
   staged_image_ids:state==='ready'?['os']:[],errored_image_ids:[]}; }
-function snapshot(peers) { return {now:100,images:[{image:'os.iso',image_id:'os',info_hash:'hash-os',peers}]}; }
+function snapshot(peers) { return {now:100,images:[{image:'os.iso',image_id:'os',info_hash:'a'.repeat(40),peers}]}; }
 """
 
 
@@ -63,6 +63,129 @@ def run_map(scenario):
                             + "\n})().catch(e=>{console.error(e);process.exitCode=1;});\n",
                             text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+CONTROL_SETUP = r'''
+  const p=peer('d1'); DATA=snapshot([p]); selected=p;drawerGen=1;drawer.classList.add('open');
+  for(const id of ['save-peer-interval','peer-interval-status','peer-interval','review-peer-interval','pullbtn','pullstatus','review-pull','repbox'])nodes[id]=new Element(id);
+  nodes['peer-interval'].value='10';CSRF='fixture-only';
+  const response=(body,status=200)=>({status,ok:status>=200&&status<300,json:async()=>body});
+  const reply=(dry_run,over={})=>({ok:true,device_id:'d1',requested_interval_s:10,revision:8,candidate_revision:8,dry_run,requires_confirmation:false,confirm_token:null,...over});
+'''
+
+
+@pytest.mark.parametrize("bad", ["{device_id:'other'}", "{requested_interval_s:60}",
+                                  "{revision:7}", "{dry_run:false}", "{ok:false}"])
+def test_interval_mismatched_preview_never_commits(bad):
+    run_map(CONTROL_SETUP + f'''
+      let writes=0;fetch=async(url)=>{{if(url.endsWith('peer-policy'))return response({{revision:7}});writes++;return response(reply(true,{bad}));}};
+      await savePeerInterval(p,1);
+      assert.equal(writes,1);assert.equal(intervalActions.get('d1').unknown,true);
+      assert.doesNotMatch(nodes['peer-interval-status'].textContent,/^Saved/);
+    ''')
+
+
+@pytest.mark.parametrize("bad", ["{device_id:'other'}", "{requested_interval_s:60}",
+                                  "{revision:7}", "{dry_run:true}", "{ok:false}"])
+def test_interval_mismatched_commit_requires_explicit_review(bad):
+    run_map(CONTROL_SETUP + f'''
+      let writes=0;fetch=async(url)=>{{if(url.endsWith('effective-qos'))return response({{revision:8,device_id:'d1',degraded:false,fail_closed:false,qos:{{peer_telemetry_interval_s:{{value:10}}}}}});if(url.endsWith('peer-policy'))return response({{revision:7}});writes++;return response(reply(url.includes('?'),url.includes('?')?{{}}:{bad}));}};
+      await savePeerInterval(p,1);await savePeerInterval(p,1);
+      assert.equal(writes,2);assert.equal(intervalActions.get('d1').unknown,true);
+      await reviewPeerInterval(p,1);assert.equal(intervalActions.get('d1').unknown,false);
+      assert.match(nodes['peer-interval-status'].textContent,/Current requested interval: 10/);
+    ''')
+
+
+@pytest.mark.parametrize("hide", ["document.hidden=true", "hostPaused=true;stopMapReads()", "paused=true;stopMapReads()", "DATA=snapshot([])", "++drawerGen"])
+def test_interval_hidden_or_gone_preflight_never_commits(hide):
+    run_map(CONTROL_SETUP + f'''
+      let writes=0;fetch=async(url)=>{{if(url.endsWith('peer-policy'))return response({{revision:7}});writes++;{hide};return response(reply(true));}};
+      await savePeerInterval(p,1);assert.equal(writes,1);assert.equal(intervalActions.get('d1').busy,false);
+    ''')
+
+
+def test_interval_pending_lock_survives_reopened_drawer_and_finishes_once():
+    run_map(CONTROL_SETUP + '''
+      let release,writes=0;fetch=async(url)=>{if(url.endsWith('peer-policy'))return response({revision:7});writes++;if(url.includes('?'))return response(reply(true));return new Promise(resolve=>release=()=>resolve(response(reply(false))));};
+      const first=savePeerInterval(p,1);while(!release)await Promise.resolve();
+      ++drawerGen;await savePeerInterval(p,2);assert.equal(writes,2);
+      release();await first;assert.equal(intervalActions.get('d1').busy,false);
+      assert.match(intervalActions.get('d1').message,/^Saved/);
+    ''')
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_interval_required_confirmation_is_bound_to_reviewed_intent(accept):
+    run_map(CONTROL_SETUP + f'''
+      let writes=0,prompts=[];window.confirm=message=>{{prompts.push(message);return {str(accept).lower()};}};
+      fetch=async(url)=>{{if(url.endsWith('peer-policy'))return response({{revision:7}});writes++;return response(reply(url.includes('?'),{{requires_confirmation:true,confirm_token:'reviewed-intent'}}));}};
+      await savePeerInterval(p,1);assert.equal(prompts.length,1);
+      assert.match(prompts[0],/d1 to 10 seconds/);assert.match(prompts[0],/revision 7 will become 8/);
+      assert.equal(writes,{2 if accept else 1});assert.equal(intervalActions.get('d1').busy,false);
+      assert.equal(intervalActions.get('d1').unknown,false);
+      assert.match(intervalActions.get('d1').message,/{'^Saved' if accept else 'cancelled'}/);
+    ''')
+
+
+@pytest.mark.parametrize("changed", ["hostPaused=true;stopMapReads()", "document.hidden=true", "++drawerGen", "DATA=snapshot([])"])
+def test_interval_confirmation_rechecks_visibility_and_identity_before_commit(changed):
+    run_map(CONTROL_SETUP + f'''
+      let writes=0;window.confirm=()=>{{{changed};return true;}};
+      fetch=async(url)=>{{if(url.endsWith('peer-policy'))return response({{revision:7}});writes++;return response(reply(true,{{requires_confirmation:true,confirm_token:'reviewed-intent'}}));}};
+      await savePeerInterval(p,1);assert.equal(writes,1);assert.equal(intervalActions.get('d1').busy,false);
+      assert.doesNotMatch(intervalActions.get('d1').message,/^Saved/);
+    ''')
+
+
+def test_pull_matches_request_identity_not_clock_or_unrelated_completion():
+    run_map(CONTROL_SETUP + '''
+      const request={request_id:'a'.repeat(32),requested_at:100,expires_at:700};
+      const action=actionState(pullActions,'d1');action.request=request;
+      let reports=[{schema:'v2',event:'staging-complete',report_id:'b'.repeat(32),report_request_id:null,received_at:9999999999}];
+      let pending=request;fetch=async()=>response({device_id:'d1',observed_at:102,pending_request:pending,reports});
+      assert.equal(await readPull(p,1,controlEpoch,action,false),false);assert.equal(action.request.request_id,request.request_id);
+      reports.push({schema:'v2',event:'pull',report_id:'c'.repeat(32),report_request_id:'d'.repeat(32),received_at:103});
+      assert.equal(await readPull(p,1,controlEpoch,action,false),false);
+      reports.push({schema:'v2',event:'pull',report_id:'e'.repeat(32),report_request_id:request.request_id,received_at:100});
+      pending=null;
+      assert.equal(await readPull(p,1,controlEpoch,action,false),true);assert.equal(action.request,null);
+      assert.match(action.message,/Matching report received/);
+    ''')
+
+
+def test_pull_completed_request_preserves_a_newer_pending_directive():
+    run_map(CONTROL_SETUP + '''
+      const action=actionState(pullActions,'d1');action.request={request_id:'a'.repeat(32),requested_at:100,expires_at:700};
+      const next={request_id:'b'.repeat(32),requested_at:101,expires_at:701};
+      fetch=async()=>response({device_id:'d1',observed_at:102,pending_request:next,reports:[
+        {schema:'v2',event:'pull',report_id:'c'.repeat(32),report_request_id:'a'.repeat(32)}]});
+      assert.equal(await readPull(p,1,controlEpoch,action,false),true);refreshControlState();
+      assert.equal(action.request.request_id,next.request_id);assert.equal(nodes.pullbtn.disabled,true);
+      assert.match(action.message,/still pending/);
+    ''')
+
+
+def test_pull_identity_fields_reject_regex_coercion():
+    run_map(CONTROL_SETUP + '''
+      assert.equal(validDirective({request_id:['a'.repeat(32)],requested_at:100,expires_at:700}),false);
+      const action=actionState(pullActions,'d1');action.request={request_id:'a'.repeat(32),requested_at:100,expires_at:700};
+      fetch=async()=>response({device_id:'d1',observed_at:102,pending_request:null,reports:[
+        {schema:'v2',event:'pull',report_id:['c'.repeat(32)],report_request_id:'a'.repeat(32)}]});
+      assert.equal(await readPull(p,1,controlEpoch,action,false),false);
+    ''')
+
+
+@pytest.mark.parametrize("body", ["{ok:false}", "{ok:true,device_id:'other',request_id:'a'.repeat(32),requested_at:100,expires_at:700}", "{ok:true,device_id:'d1',request_id:'bad',requested_at:100,expires_at:700}"])
+def test_pull_malformed_acceptance_is_not_replayed(body):
+    run_map(CONTROL_SETUP + f'''
+      let writes=0;fetch=async()=>{{writes++;return response({body});}};
+      await requestPull(p,1);await requestPull(p,1);assert.equal(writes,1);
+      assert.equal(pullActions.get('d1').unknown,true);
+      fetch=async()=>response({{device_id:'d1',observed_at:100,pending_request:null,reports:[]}});
+      await reviewPull(p,1);assert.equal(pullActions.get('d1').unknown,false);
+      assert.doesNotMatch(pullActions.get('d1').message,/Matching report received/);
+    ''')
 
 
 def test_peer_arrows_have_direction_provenance_and_image_scope():
@@ -184,6 +307,31 @@ def test_late_failed_poll_cannot_clear_a_newer_successful_snapshot():
       await poll(); failOld(Error('older request failed')); await old;
       assert.equal(DATA.images[0].peers[0].device_id,'xr-two');
     """)
+
+
+@pytest.mark.parametrize("bad", ["{}", "{now:100,images:{}}", "{now:100,images:[null]}",
+    "{...snapshot([]),now:null}", "snapshot([{}])", "snapshot([{tracker:{principal_type:'unknown'}}])",
+    "snapshot([{...peer('d1'),staged_image_ids:{}}])",
+    "snapshot([{...peer('d1'),device_observation:{obs_state:7}}])",
+    "{...snapshot([]),peers_offset:1}"])
+def test_malformed_map_snapshot_is_unavailable_then_recovers(bad):
+    run_map(f'''
+      fetch=async()=>({{ok:true,json:async()=>({bad})}});await poll();
+      assert.equal(DATA,null);assert.equal(loadFailed,true);
+      assert.match(empty.textContent,/unavailable/);
+      fetch=async()=>({{ok:true,json:async()=>snapshot([peer('d1')])}});await poll();
+      assert.equal(DATA.images[0].peers[0].device_id,'d1');assert.equal(loadFailed,false);
+    ''')
+
+
+def test_historical_report_read_cannot_overwrite_newer_review():
+    run_map(CONTROL_SETUP + '''
+      let release;fetch=async()=>new Promise(resolve=>release=()=>resolve(response({device_id:'d1',reports:[{image_id:'old',peers:[]}]})));
+      const old=refreshDrawerReport(p,1);while(!release)await Promise.resolve();
+      fetch=async()=>response({device_id:'d1',observed_at:100,pending_request:null,reports:[{image_id:'new',peers:[]}]});
+      await reviewPull(p,1);release();await old;
+      assert.match(nodes.repbox.innerHTML,/new/);assert.doesNotMatch(nodes.repbox.innerHTML,/old/);
+    ''')
 
 
 def test_swarm_preserves_image_identity_and_separates_devices():

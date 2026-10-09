@@ -1048,12 +1048,14 @@ def test_swarmmap_pull_ui_gated_and_null_device_handled():
     assert "no device identity" in html.lower()
 
 
-def test_swarmmap_pull_arrival_uses_server_clock():
-    # The arrived-check must compare the SERVER-stamped received_at (same
-    # clock domain as requested_at) — the device-stamped ts is fallback only.
+def test_swarmmap_pull_arrival_uses_exact_request_identity():
+    # Another completion can arrive after the click without satisfying the
+    # pending pull. Native ingestion already distinguishes request identities.
     html = _swarmmap_html()
     body = html.split("async function requestPull")[1]
-    assert "latest.received_at" in body
+    assert 'report.report_request_id===request.request_id' in body
+    assert 'report.event==="pull"' in body
+    assert 'latest.received_at' not in body
 
 
 def test_swarmmap_historical_object_without_ip_is_safe():
@@ -1105,11 +1107,14 @@ def test_swarmmap_per_peer_table_is_participation_only():
 
 def test_index_html_embeds_swarmmap_iframe_lazily():
     idx = _index_html()
-    assert '<iframe id="swarm-frame"' in idx
+    assert 'id="iris-swarm-root"' in idx
     assert 'src="/swarmmap"' not in idx, \
-        "iframe src must be set lazily by app.js (avoid polling while hidden)"
-    js = _app_js()
-    assert "swarm-frame" in js and "'/swarmmap'" in js
+        "React creates the iframe lazily, avoiding hidden initial polling"
+    with open(os.path.join(_THIS_DIR, "..", "console-ui", "src", "swarm-view.jsx")) as stream:
+        jsx = stream.read()
+    assert 'state.started && <iframe id="swarm-frame"' in jsx
+    assert 'src="/swarmmap"' in jsx
+    assert 'controller.syncVisibility()' in jsx
 
 
 def test_swarmmap_has_no_inline_event_handlers():

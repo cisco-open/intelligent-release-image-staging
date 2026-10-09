@@ -4789,7 +4789,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is None or fleet.get_device(did) is None:
                     self._json(422, {"error": "device is not in fleet"}); return
                 reports = catalog.get_telemetry(did) if catalog else []
-                self._json(200, {"reports": reports}); return
+                now = time.time()
+                pending = catalog.pending_request(did, now) if catalog else None
+                self._json(200, {"reports": reports, "device_id": did,
+                                 "observed_at": now, "pending_request": pending}); return
             if path.startswith("/api/devices/") and path.endswith("/deployment"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -7443,14 +7446,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if catalog is None:
                     self._json(404, {"error": "not found"}); return
                 now = time.time()
-                if not catalog.request_report(did, now):
+                directive = catalog.request_report_details(did, now)
+                if directive is None:
                     self._json(429, {"error": "request already pending"}); return
                 self._audit("request_report", "telemetry", action="request",
                            target=did, actor=actor,
                            detail="fresh telemetry report requested (valid %dm)"
                                   % (catalog.PULL_TTL // 60))
-                self._json(200, {"ok": True,
-                                 "expires_at": int(now) + catalog.PULL_TTL})
+                self._json(200, {"ok": True, "device_id": did, **directive})
                 return
             if path == "/api/telemetry/stream":
                 # Fleet-wide stream tuning (spec 8.2): writes the settings

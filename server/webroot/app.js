@@ -1066,458 +1066,35 @@
 
     publishOverview({overview: ov});
   }
-  async function refreshSwarm() {
-    var [or_, sr] = await Promise.all([fetch('/api/v1/overview'), fetch('/api/v1/swarm')]);
-    var mapUrl = or_.ok ? (await or_.json()).swarm_map_url : '';
-    var link = document.getElementById('swarm-open');
-    if (mapUrl) { link.href = mapUrl; link.style.display = ''; } else { link.style.display = 'none'; }
-    var frame = document.getElementById('swarm-frame');
-    if (frame && !frame.src) frame.src = '/swarmmap';
-    var s = document.getElementById('swarm-summary');
-    if (!sr.ok) { s.textContent = 'Swarm data unavailable.'; return; }
-    var sw = await sr.json();
-    if (sw.error) { s.textContent = 'Swarm data unavailable (' + sw.error + ').'; return; }
-    var peers = (sw.images || []).reduce(function (n, im) {
-      return n + ((im.peers || []).length);
-    }, 0);
-    var legacyPeers = (sw.images || []).reduce(function (n, im) {
-      return n + (im.peers || []).filter(function (p) {
-        return p && p.tracker && p.tracker.participant_class === 'legacy_unattributed';
-      }).length;
-    }, 0);
-    var legacyWarning = document.getElementById('legacy-peer-warning');
-    legacyWarning.hidden = legacyPeers === 0;
-    legacyWarning.textContent = legacyPeers ? legacyPeers + ' legacy participant(s) cannot be attributed or individually quarantined until personalized torrent refresh.' : '';
-    s.textContent = peers + ' peer(s) in the swarm. Open the full map for the live view.';
-  }
+  var swarmView = window.irisSwarmView;
+  swarmView.connect({fetch: fetch, origin: location.origin, visible: function () {
+    return !document.hidden && !document.getElementById('view-swarm').hidden;
+  }});
+  function refreshSwarm() { return swarmView.refresh(); }
 
-  // ---- Settings: post-install setup checklist ----
-  // Chips render through the real Magnetic status-pill system (levelPillHTML)
-  // rather than the ad-hoc badge-* palette this used before Task 9 --
-  // "everything should match Magnetic" applies to the Setup pane's pills too.
-  // The level is state-driven by default (SETUP_CHIP_LEVELS); a caller may
-  // override it (setupItemChipHTML below) for items that are recommended
-  // rather than required, which the state alone cannot express.
-  var SETUP_CHIP_LEVELS = {
-    ok: 'positive',
-    unset: 'warning', stale: 'warning',
-    configured_unrun: 'warning',
-    // "cannot determine" is an honest unknown, not a claimed problem -- it
-    // reads closer to Magnetic's Inactive ("unknown ... indefinite holds")
-    // than to a Warning this module has no evidence to justify.
-    //
-    // 'absent' (fix wave, reviewer Critical): a package for an architecture
-    // this deployment does not use -- console.md's own words, "needs no
-    // action" -- not a gap the operator failed to fill. The server ranks
-    // absent above ok in packages.state's worst-of roll-up
-    // (setup_status._RANK), so any single-architecture deployment (the
-    // common case: one of iris-amd64.tar/iris-arm64.tar never gets built on
-    // purpose) rolled up to 'absent' and painted a PERSISTENT false amber
-    // Warning here, in both Settings > Setup and wizard step 3, with
-    // nothing an operator could do to clear it. Not-applicable, same as
-    // 'unknown'.
-    unknown: 'inactive', absent: 'inactive'
-  };
-  var SETUP_CHIP_LABELS = {
-    ok: 'Done', unset: 'Not configured', stale: 'Needs rebuild',
-    absent: 'Not built', unknown: 'Cannot determine',
-    // M37 fold-in (carried from the KGV close-out): distinct wording for "a
-    // schedule exists but has not yet produced a successful run", never
-    // conflated with "never configured at all".
-    configured_unrun: 'Configured — no successful run yet'
-  };
-  function setupChip(state, levelOverride) {
-    var level = levelOverride || SETUP_CHIP_LEVELS[state] || 'inactive';
-    var label = SETUP_CHIP_LABELS[state] || state;
-    return levelPillHTML(level, label);
-  }
-
-  // packages.reason (present only in some non-ok states) needs its own
-  // guidance -- the plain rebuild remedy is actively WRONG for a
-  // served-vs-distributed mismatch, since new onboards are broken too and
-  // rebuilding packages would not fix it.
-  var SETUP_PKG_REASON_TEXT = {
-    'served-vs-distributed-mismatch':
-      'The certificate this server currently serves does not match the ' +
-      'copy handed to devices during onboarding. New onboards are ' +
-      'affected as well as existing ones, and rebuilding packages alone ' +
-      'will not resolve this.',
-    'distributed-cert-unavailable':
-      'The copy of the certificate handed to devices could not be read, ' +
-      'so onboarding readiness cannot be confirmed.',
-    'served-cert-unavailable':
-      'The certificate used by this server could not be read, so ' +
-      'onboarding readiness cannot be confirmed.'
-  };
-
-  function setupPkgRemedyText(pkg) {
-    if (pkg.state === 'ok') return '';
-    var parts = [];
-    var reasonText = SETUP_PKG_REASON_TEXT[pkg.reason];
-    if (reasonText) parts.push(reasonText);
-    // Each non-ready package names its own build command: IOx and IOS-XR
-    // use different wrappers. Certificate rotation does not stale packages;
-    // a served/distributed certificate mismatch needs separate repair.
-    if (pkg.reason !== 'served-vs-distributed-mismatch') {
-      var remedies = [];
-      (pkg.items || []).forEach(function (i) {
-        // Every non-ready item carries an actionable host-side command.  In
-        // particular, a missing/invalid provenance sidecar is reported as
-        // "unknown", not "absent" or "stale"; hiding its remedy would leave
-        // the operator with a diagnosis but no way to repair it.
-        if (i.state !== 'ok' && i.remedy &&
-            remedies.indexOf(i.remedy) === -1) {
-          remedies.push(i.remedy);
-        }
-      });
-      if (remedies.length) {
-        parts.push('Rebuild on the Docker host, then re-onboard affected devices: '
-          + remedies.join('; '));
-      }
+  // React owns setup readiness, package tables, wizard steps and the nudge.
+  var setupPackages = window.irisSetupPackages;
+  setupPackages.connect({
+    fetch: fetch, storage: {
+      getItem: function (key) { return window.sessionStorage.getItem(key); },
+      setItem: function (key, value) { window.sessionStorage.setItem(key, value); }
+    },
+    navigate: function (hash) { location.hash = hash; },
+    visible: function (mode) {
+      if (document.hidden) return false;
+      if (mode === 'wizard') return !document.getElementById('view-setup').hidden;
+      var section = document.getElementById('settings-pane-' + mode);
+      return !document.getElementById('view-settings').hidden && !!section && !section.hidden;
+    },
+    wizardSelect: function (step) {
+      if (step !== 'telemetry') settings.hide();
+      if (step !== 'imageverification') hideImageVerification();
+      if (step === 'telemetry') { settings.select('telemetry', 'wz-td-mount'); refreshSettings(); }
+      if (step === 'imageverification') mountImageVerification('wz-iv-mount');
     }
-    return parts.join(' ');
-  }
-
-  // telemetry.source distinguishes an explicit console override from the
-  // deployment default (whatever the compose/env file happens to set) --
-  // meaningfully different to an operator, so this note names which one is
-  // in effect rather than just showing the chip.
-  function setupTelemetryNote(t) {
-    var scope = t.source === 'override' ? 'console override' : 'deployment default';
-    if (t.state === 'ok') return 'Exporting to ' + t.endpoint + ' (' + scope + ').';
-    if (!t.enabled) return 'Export is disabled (' + scope + ').';
-    return 'No endpoint is set (' + scope + ').';
-  }
-
-  // A failed or thrown fetch must never leave a PREVIOUS render on screen --
-  // that would be evidence-free chips still claiming "done" (spec:
-  // error handling must show "cannot determine" per card and never silently
-  // render a stale/empty checklist as if it were healthy).
-  function setupShowUnknown() {
-    document.getElementById('setup-admin-chip').innerHTML = setupChip('unknown');
-    document.getElementById('setup-td-chip').innerHTML = setupChip('unknown');
-    document.getElementById('setup-td-note').textContent = '';
-    document.getElementById('setup-pkg-chip').innerHTML = setupChip('unknown');
-    document.querySelector('#setup-pkg-table tbody').innerHTML = '';
-    document.getElementById('setup-pkg-remedy').textContent = '';
-    document.getElementById('setup-iv-chip').innerHTML = setupChip('unknown');
-  }
-
-  function renderPackageStatus(pkg, chipId, tableId, remedyId) {
-    var chip = document.getElementById(chipId);
-    var table = document.querySelector('#' + tableId + ' tbody');
-    var remedy = document.getElementById(remedyId);
-    if (chip) chip.innerHTML = setupChip(pkg ? pkg.state : 'unknown');
-    if (table) {
-      table.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
-        var when = i.built_at ? new Date(i.built_at * 1000).toLocaleString() : '—';
-        var evidence = i.detail || i.reason || '';
-        return '<tr><td class="muted machine">' + esc(i.name || '') + '</td><td>' +
-          setupChip(i.state) + '</td><td class="muted">' + esc(when) +
-          '</td><td class="muted">' + esc(evidence) + '</td></tr>';
-      }).join('');
-    }
-    if (remedy) remedy.textContent = pkg ? setupPkgRemedyText(pkg) : '';
-  }
-
-  // Items that are recommended rather than required to finish onboarding a
-  // server: IRIS runs without a telemetry destination or image verification,
-  // it just cannot prove either is happening. This is a per-ITEM judgment
-  // call the setup-status payload does not itself encode (it only ever
-  // reports each card's own ok/unset), so it lives here rather than in the
-  // API -- widening that response is out of scope for this task.
-  var SETUP_ITEM_OPTIONAL = { telemetry: true, image_verification: true };
-
-  // M37 fold-in (carried from the KGV close-out): setup_status.py's
-  // image_verification card reports ok only once a run has actually
-  // SUCCEEDED (see its docstring) -- a scheduled-but-never-run config and a
-  // truly unconfigured one both resolve to "unset" from that field alone.
-  // The schedule's own mode -- the same data Settings > Image verification
-  // already reads via /api/v1/settings/image-verification -- is what tells
-  // them apart. A failed/thrown fetch here must never invent "configured"
-  // without evidence, so it resolves to null (treated as "don't know",
-  // never as configured).
-  // Fix wave (reviewer Minor): the wizard's own showWizardStep needs this
-  // same payload again the instant it lands on step 4 (to populate #iv-mode/
-  // #iv-hour/#iv-last-run) -- entering the wizard and clicking Next both call
-  // this via refreshSetupWizard immediately before showing the resulting
-  // step, so without this cache that step 4 landing fetched the identical
-  // endpoint twice in a row. wizardIvStatus is consumed (read, then cleared)
-  // only by that one call site, landing on step 4 straight out of
-  // refreshSetupWizard -- Back and a direct steplist click both call
-  // showWizardStep directly, with no refresh first, so neither one clears
-  // or renews this cache. Landing on step 4 that way renders whatever this
-  // variable last held, however old: fresh if refreshSetupWizard only just
-  // set it, stale if the operator lingered on another step or edited image
-  // verification via Settings in between. The setup view is not polled, so
-  // nothing else invalidates the cache in the meantime.
-  var wizardIvStatus = null;
-  async function fetchIvScheduleConfigured() {
-    try {
-      var r = await fetch('/api/v1/settings/image-verification');
-      if (!r.ok) { wizardIvStatus = null; return null; }
-      var iv = await r.json();
-      wizardIvStatus = iv;
-      return (iv.mode || 'off') !== 'off';
-    } catch (e) {
-      wizardIvStatus = null;
-      return null;
-    }
-  }
-
-  // One place that combines: the state a card reports, the M37 distinction
-  // (image_verification only), and the required-vs-recommended pill level --
-  // shared verbatim by the Settings > Setup status pane and the wizard's own
-  // step list/chips, so the two surfaces can never disagree about how a step
-  // reads (spec: "Step titles carry status indicators, reuse pill levels").
-  function setupItemChipHTML(key, state, ivScheduleConfigured) {
-    var effectiveState = state;
-    if (key === 'image_verification' && state !== 'ok' && ivScheduleConfigured) {
-      effectiveState = 'configured_unrun';
-    }
-    var override;
-    if (effectiveState !== 'ok' && effectiveState !== 'configured_unrun' &&
-        SETUP_ITEM_OPTIONAL[key]) {
-      override = 'info';
-    }
-    return setupChip(effectiveState, override);
-  }
-
-  // ---- First-run setup wizard -------------------------------------------
-  // A flow, not a checklist: the operator finishes setup here instead of being
-  // sent back and forth to Settings pages. The telemetry step mounts the SAME
-  // React form Settings uses, so there is one implementation of that form.
-  //
-  // Every step is skippable and the wizard resumes at the first incomplete one.
-  // That is forced, not a convenience: the packages step can never complete
-  // in-console (the container has no Docker socket), so a wizard that insisted
-  // on completion could never be finished.
-  //
-  // Step 3, Image verification (Task 9, USER DIRECTIVE): supersedes the
-  // earlier decision that this card stays outside the wizard -- it now
-  // mounts the SAME Settings > Image verification controls (schedule,
-  // Refresh now, offline import) via mountImageVerification, the same
-  // one-implementation precedent as the telemetry form mount.
-  var WIZARD_STEPS = [
-    { id: 'telemetry', pane: 'wz-step-telemetry', key: 'telemetry',  chip: 'wz-td-chip',  label: 'Telemetry destination' },
-    { id: 'packages',  pane: 'wz-step-packages',  key: 'packages',   chip: 'wz-pkg-chip', label: 'Device packages' },
-    { id: 'imageverification', pane: 'wz-step-imageverification', key: 'image_verification',
-      chip: 'wz-iv-chip', label: 'Image verification' }
-  ];
-  var wizardStep = 0;
-  var wizardStatus = null;
-  // M37 fold-in for the wizard's own step list/chip -- fetched alongside
-  // wizardStatus in refreshSetupWizard, same shared helper the Settings >
-  // Setup status pane uses.
-  var wizardIvConfigured = null;
-
-  function wizardFirstIncompleteStep(status) {
-    if (!status) return 0;
-    for (var i = 0; i < WIZARD_STEPS.length; i++) {
-      var item = status[WIZARD_STEPS[i].key] || {};
-      // An optional step (the server says required: false, or the client
-      // knows it is recommended-only) never counts as outstanding.
-      if (item.required === false || SETUP_ITEM_OPTIONAL[WIZARD_STEPS[i].key]) continue;
-      if (item.state !== 'ok') return i;
-    }
-    return WIZARD_STEPS.length - 1;   // all done: rest on the last step
-  }
-
-  // Every step is listed with its current state, whatever that state is, and
-  // any of them can be opened directly. Without this the wizard opened on the
-  // first INCOMPLETE step and rendered only that one, so a step already
-  // satisfied by the deployment environment -- telemetry, when
-  // IRIS_OTLP_ENDPOINT is set in the compose env -- was never visible at all
-  // and read as missing.
-  function renderWizardStepList() {
-    var host = document.getElementById('wz-steplist');
-    if (!host) return;
-    host.innerHTML = WIZARD_STEPS.map(function (st, n) {
-      var state = wizardStatus ? ((wizardStatus[st.key] || {}).state || 'unknown')
-                               : 'unknown';
-      var isCurrent = n === wizardStep;
-      // Marker anatomy (captured Magnetic Stepper): completed = blue-outline
-      // check, current = blue filled with the step number, upcoming = plain
-      // number -- current always wins the marker even on an already-'ok'
-      // step, since the operator is standing on it right now.
-      var isDone = !isCurrent && state === 'ok';
-      var markerCls = isCurrent ? 'is-current' : (isDone ? 'is-done' : 'is-upcoming');
-      var marker = isDone
-        ? '<svg aria-hidden="true"><use href="#i-check"></use></svg>'
-        : String(n + 1);
-      var pill = wizardStatus
-        ? setupItemChipHTML(st.key, state, st.id === 'imageverification' ? wizardIvConfigured : null)
-        : setupChip('unknown');
-      return '<button type="button" role="listitem" class="wz-steplist-item' +
-        (isCurrent ? ' current' : '') + '" data-step="' + n + '">' +
-        '<span class="wz-steplist-n ' + markerCls + '">' + marker + '</span>' +
-        '<span class="wz-steplist-label">' + esc(st.label) + '</span>' +
-        pill + '</button>';
-    }).join('');
-    host.querySelectorAll('.wz-steplist-item').forEach(function (b) {
-      b.addEventListener('click', function () {
-        showWizardStep(parseInt(b.getAttribute('data-step'), 10));
-      });
-    });
-  }
-
-  function showWizardStep(i) {
-    wizardStep = Math.max(0, Math.min(WIZARD_STEPS.length - 1, i));
-    if (WIZARD_STEPS[wizardStep].id !== 'telemetry') settings.hide();
-    WIZARD_STEPS.forEach(function (st, n) {
-      document.getElementById(st.pane).hidden = n !== wizardStep;
-    });
-    // React moves the shared telemetry form without duplicating its state.
-    if (WIZARD_STEPS[wizardStep].id === 'telemetry') {
-      settings.select('telemetry', 'wz-td-mount');
-      refreshSettings();
-    } else if (WIZARD_STEPS[wizardStep].id === 'imageverification') {
-      // Moved, not cloned (see mountImageVerification) -- Settings reclaims
-      // the same live nodes back on its own way in.
-      mountImageVerification('wz-iv-mount');
-      if (wizardIvStatus) {
-        // fetchIvScheduleConfigured (called via refreshSetupWizard, just
-        // before this) already fetched this exact payload -- reuse it
-        // instead of a second GET. See wizardIvStatus's own comment.
-        renderIvStatusFields(wizardIvStatus);
-        wizardIvStatus = null;
-      } else {
-        refreshImageVerificationSettings();
-      }
-    }
-    document.getElementById('wz-progress').textContent =
-      'Step ' + (wizardStep + 1) + ' of ' + WIZARD_STEPS.length;
-    document.getElementById('wz-back').disabled = wizardStep === 0;
-    document.getElementById('wz-next').textContent =
-      wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Next \u203a';
-    renderWizardStepList();
-  }
-
-  function renderWizardPackages(pkg) {
-    renderPackageStatus(pkg, 'wz-pkg-chip', 'wz-pkg-table', 'wz-pkg-remedy');
-  }
-
-  async function refreshSetupWizard() {
-    var s = null;
-    try {
-      var r = await fetch('/api/v1/settings/setup-status');
-      if (r.ok) s = await r.json();
-    } catch (e) { /* leave s null -- never report green on missing evidence */ }
-    wizardStatus = s;
-    wizardIvConfigured = await fetchIvScheduleConfigured();
-    function chip(id, state) {
-      var el = document.getElementById(id);
-      if (el) el.innerHTML = setupChip(state);
-    }
-    chip('wz-admin-chip', s ? (s.admin || {}).state : 'unknown');
-    WIZARD_STEPS.forEach(function (st) {
-      var el = document.getElementById(st.chip);
-      if (!el) return;
-      var state = s ? (s[st.key] || {}).state : 'unknown';
-      el.innerHTML = s
-        ? setupItemChipHTML(st.key, state, st.id === 'imageverification' ? wizardIvConfigured : null)
-        : setupChip('unknown');
-    });
-    renderWizardPackages(s ? s.packages : null);
-    renderWizardStepList();
-    updateSetupNudge(s);
-    return s;
-  }
-
-  // The nudge is what brings an operator back to an unfinished setup. It
-  // dismisses for the SESSION, not for good: a package that goes stale later
-  // is a silent regression, and a permanently dismissed banner would hide
-  // exactly the failure this feature exists to catch.
-  function setupIncompleteCount(s) {
-    if (!s) return 0;
-    return WIZARD_STEPS.filter(function (st) {
-      return (s[st.key] || {}).state !== 'ok';
-    }).length;
-  }
-  function updateSetupNudge(s) {
-    var el = document.getElementById('setup-nudge');
-    if (!el) return;
-    var n = setupIncompleteCount(s);
-    if (!n || window.sessionStorage.getItem('iris_setup_nudge_dismissed')) {
-      el.hidden = true; return;
-    }
-    document.getElementById('setup-nudge-text').textContent =
-      n + ' setup step' + (n === 1 ? '' : 's') + ' still ' +
-      (n === 1 ? 'needs' : 'need') + ' attention.';
-    el.hidden = false;
-  }
-
-  async function enterSetupWizard() {
-    var s = await refreshSetupWizard();
-    showWizardStep(wizardFirstIncompleteStep(s));
-  }
-
-  document.getElementById('wz-back').addEventListener('click', function () {
-    showWizardStep(wizardStep - 1);
   });
-  document.getElementById('wz-skip').addEventListener('click', function () {
-    if (wizardStep === WIZARD_STEPS.length - 1) { location.hash = '#overview'; return; }
-    showWizardStep(wizardStep + 1);
-  });
-  document.getElementById('wz-next').addEventListener('click', async function () {
-    await refreshSetupWizard();
-    if (wizardStep === WIZARD_STEPS.length - 1) { location.hash = '#overview'; return; }
-    showWizardStep(wizardStep + 1);
-  });
-  document.getElementById('wz-pkg-recheck').addEventListener('click', function () {
-    var msg = document.getElementById('wz-msg');
-    msg.textContent = 'Re-checking\u2026';
-    refreshSetupWizard().then(function () { msg.textContent = ''; });
-  });
-  document.getElementById('setup-nudge-dismiss').addEventListener('click', function () {
-    window.sessionStorage.setItem('iris_setup_nudge_dismissed', '1');
-    document.getElementById('setup-nudge').hidden = true;
-  });
-
-  async function refreshSetup() {
-    var s;
-    try {
-      var r = await fetch('/api/v1/settings/setup-status');
-      if (!r.ok) { setupShowUnknown(); return; }
-      s = await r.json();
-    } catch (e) {
-      setupShowUnknown();
-      return;
-    }
-    var ivConfigured = await fetchIvScheduleConfigured();
-    document.getElementById('setup-admin-chip').innerHTML =
-      setupChip(s.admin.state);
-    document.getElementById('setup-td-chip').innerHTML =
-      setupItemChipHTML('telemetry', s.telemetry.state, null);
-    document.getElementById('setup-td-note').textContent =
-      setupTelemetryNote(s.telemetry);
-    renderPackageStatus(s.packages, 'setup-pkg-chip', 'setup-pkg-table',
-      'setup-pkg-remedy');
-    document.getElementById('setup-iv-chip').innerHTML =
-      setupItemChipHTML('image_verification', s.image_verification.state, ivConfigured);
-  }
-
-  async function refreshDevicePackages() {
-    var msg = document.getElementById('device-packages-msg');
-    try {
-      var r = await fetch('/api/v1/settings/setup-status');
-      if (!r.ok) throw new Error('status ' + r.status);
-      var s = await r.json();
-      renderPackageStatus(s.packages, 'device-packages-chip',
-        'device-packages-table', 'device-packages-remedy');
-      if (msg) msg.textContent = '';
-    } catch (e) {
-      renderPackageStatus(null, 'device-packages-chip',
-        'device-packages-table', 'device-packages-remedy');
-      if (msg) msg.textContent = 'Package state cannot be determined.';
-    }
-  }
-
-  document.getElementById('device-packages-recheck').addEventListener('click', function () {
-    var msg = document.getElementById('device-packages-msg');
-    if (msg) msg.textContent = 'Re-checking…';
-    refreshDevicePackages();
-  });
+  function wizardSyncImageVerification(cfg) { setupPackages.annotation(cfg ? cfg.mode !== 'off' : null); }
+  function enterSetupWizard() { return setupPackages.select('wizard'); }
 
   // React owns General, TLS/trust, Telemetry and Audit export.
   settings.connect({
@@ -1537,252 +1114,34 @@
   });
   async function refreshSettings() {
     await settings.refresh();
-    // Image verification remains separately owned until its workflow migrates.
     await refreshImageVerificationSettings();
   }
-  // ---- Settings: Image verification (KGV / Cisco Bulk Hash reconciler) ----
-  // Schedule select + hour, Refresh now, offline .tar upload. Its own
-  // dedicated GET/POST at /api/v1/settings/image-verification and
-  // /api/v1/image-verification/{refresh,offline} -- see Task 4's endpoint
-  // contracts. Factored out of refreshSettings (rather than inlined like the
-  // ae-/cert- panes above) because the Refresh now button and the offline
-  // upload both need to re-render just the last-run line afterward, without
-  // re-fetching the whole /api/v1/settings blob.
-  //
-  // last_run.outcome is "ok" or "fail: <detail>" -- NEVER compared with
-  // equality against "fail" (the detail suffix always differs); this
-  // function and its caller only ever test the "fail" PREFIX.
-  function bulkhashOutcomeFailed(outcome) {
-    return String(outcome || '').slice(0, 4) === 'fail';
-  }
-  function fmtBulkhashLastRun(lr) {
-    if (!lr || !lr.at) return 'Never run.';
-    var failed = bulkhashOutcomeFailed(lr.outcome);
-    var badge = failed ? '<span class="badge badge-fail">fail</span>'
-                       : '<span class="badge badge-ok">ok</span>';
-    var counts = lr.matched == null ? ''
-      : (' · ' + lr.matched + ' matched, ' + lr.mismatched + ' mismatched, ' +
-         lr.not_in_feed + ' not in feed');
-    var detail = failed && String(lr.outcome).indexOf(':') > -1
-      ? (' · ' + esc(String(lr.outcome).slice(String(lr.outcome).indexOf(':') + 1).trim())) : '';
-    return esc(fmtDate(lr.at)) + ' · ' + esc(lr.source || 'unknown') + ' ' + badge + counts + detail;
-  }
-  // Pure DOM write, factored out so a caller already holding a freshly
-  // fetched payload (the wizard's own showWizardStep, fix wave below) can
-  // populate these fields without a second, redundant GET to the same
-  // endpoint refreshImageVerificationSettings already just made.
-  function renderIvStatusFields(iv) {
-    document.getElementById('iv-mode').value = iv.mode || 'off';
-    document.getElementById('iv-hour').value = String(iv.hour_utc == null ? 0 : iv.hour_utc);
-    document.getElementById('iv-last-run').innerHTML = fmtBulkhashLastRun(iv.last_run);
-  }
-  async function refreshImageVerificationSettings() {
-    // Setup pane's never-render-stale-as-healthy pattern (setupShowUnknown):
-    // a failed GET must not silently leave whatever was already in
-    // #iv-last-run (the static "Never run." markup on first load, or a
-    // stale prior successful render) standing in as if it were current.
-    var lastRun = document.getElementById('iv-last-run');
-    var r;
-    try {
-      r = await fetch('/api/v1/settings/image-verification');
-    } catch (e) {
-      lastRun.textContent = 'Could not load status.';
-      return;
-    }
-    if (!r.ok) { lastRun.textContent = 'Could not load status.'; return; }
-    var iv = await r.json();
-    renderIvStatusFields(iv);
-  }
-  // Hour select is built once here (00:00-23:00 UTC) rather than spelled out
-  // as 24 <option> elements in index.html.
-  (function () {
-    var sel = document.getElementById('iv-hour');
-    if (!sel) return;
-    var opts = [];
-    for (var h = 0; h < 24; h++) {
-      opts.push('<option value="' + h + '">' + (h < 10 ? '0' : '') + h + ':00</option>');
-    }
-    sel.innerHTML = opts.join('');
-  })();
-  document.getElementById('iv-schedule-form').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var msg = document.getElementById('iv-schedule-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var mode = document.getElementById('iv-mode').value;
-    var hour = parseInt(document.getElementById('iv-hour').value, 10);
-    var r = await settingsWrite('/api/v1/settings/image-verification', { mode: mode, hour_utc: hour }, msg);
-    if (!r) return;
-    msg.textContent = 'Schedule saved.'; msg.classList.add('ok');
-    refreshImageVerificationSettings();
-  });
-  document.getElementById('iv-refresh').addEventListener('click', async function () {
-    var btn = this;
-    var msg = document.getElementById('iv-refresh-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    btn.disabled = true;
-    try {
-      var r = await settingsWrite('/api/v1/image-verification/refresh', {}, msg, null, [409]);
-      if (!r) return;
-      if (r.status === 409) {
-        msg.textContent = 'A refresh is already in progress.';
-      } else if (r.ok) {
-        var body = await settingsResult(r, msg, function (result) {
-          return ['matched', 'mismatched', 'not_in_feed'].every(function (key) {
-            return Number.isInteger(result[key]) && result[key] >= 0;
-          });
-        });
-        if (!body) return;
-        msg.textContent = 'Refresh complete: ' + body.matched + ' matched, ' +
-          body.mismatched + ' mismatched, ' + body.not_in_feed + ' not in feed.';
-        msg.classList.add('ok');
-      }
-    } finally {
-      btn.disabled = false;
-      refreshImageVerificationSettings();
-      refreshImages().catch(function () { });
-      // Also refreshes imageQuarantined (the picker's block list) -- without
-      // this it lagged the run by up to one periodic devices-view poll
-      // interval, during which a freshly-quarantined image stayed pickable.
-      refreshDevices().catch(function () { });
+  // React owns the shared Image verification settings/wizard workflow.
+  var imageVerification = window.irisImageVerification;
+  imageVerification.connect({
+    fetch: fetch, headers: csrfHdr, formatDate: fmtDate,
+    xhr: function () { return new XMLHttpRequest(); },
+    confirm: function (message) { return confirm(message); },
+    visible: function (host) {
+      if (document.hidden) return false;
+      var mount = document.getElementById(host);
+      return !!mount && !mount.closest('[hidden]');
+    },
+    annotation: function (config) { wizardSyncImageVerification(config); },
+    catalogChanged: function () {
+      // Retire earlier catalog reads before any asynchronous refresh. Hidden
+      // Inventory does not fetch; its picker stays unavailable until a fresh
+      // catalog read confirms the new quarantine state after navigation.
+      assignments.services.publishImages(assignments.acceptImages({ok: false}, assignments.beginImageRead()));
+      return Promise.all([refreshImages().catch(function () { }), refreshDevices().catch(function () { })]);
     }
   });
-  // Offline upload: a raw-body POST of the tar bytes (not multipart, not
-  // form-encoded -- see Task 4's endpoint contract), streamed via XHR the
-  // same way the image-upload PUT route sends a raw File body. Reuses the
-  // TLS pane's wireDropzone for the drag-drop mechanics; unlike the TLS
-  // dropzones (which read the file as text into a textarea) this one sends
-  // the file's raw bytes straight to the server.
-  var ivOfflineBusy = false;
-  function uploadOfflineTar(file) {
-    if (!file || ivOfflineBusy) return;
-    ivOfflineBusy = true;
-    var msg = document.getElementById('iv-offline-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var prog = document.getElementById('iv-offline-progress');
-    var bar = document.getElementById('iv-offline-bar');
-    prog.hidden = false; bar.style.width = '0%'; prog.setAttribute('aria-valuenow', '0');
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/v1/image-verification/offline');
-    xhr.setRequestHeader('X-CSRF-Token', info.csrf);
-    xhr.upload.onprogress = function (e) {
-      if (!e.lengthComputable) return;
-      var pct = e.loaded / e.total * 100;
-      bar.style.width = pct + '%';
-      prog.setAttribute('aria-valuenow', String(Math.round(pct)));
-    };
-    function finish(text, ok) {
-      ivOfflineBusy = false;
-      prog.hidden = true;
-      msg.textContent = text;
-      if (ok) msg.classList.add('ok');
-      refreshImageVerificationSettings();
-      refreshImages().catch(function () { });
-      // See the Refresh now handler's comment: keeps imageQuarantined (the
-      // picker's block list) from lagging this run by a poll interval.
-      refreshDevices().catch(function () { });
-    }
-    xhr.onload = function () {
-      var body = {};
-      try { body = JSON.parse(xhr.responseText); } catch (e) { }
-      if (xhr.status === 409) {
-        finish('A refresh is already in progress.', false);
-      } else if (xhr.status === 200) {
-        if (!body || !['matched', 'mismatched', 'not_in_feed'].every(function (key) {
-          return Number.isInteger(body[key]) && body[key] >= 0;
-        })) {
-          finish('Response unavailable. The check may have completed; refresh its status before retrying.', false);
-          return;
-        }
-        finish('Offline check complete: ' + body.matched + ' matched, ' +
-          body.mismatched + ' mismatched, ' + body.not_in_feed + ' not in feed.', true);
-      } else {
-        finish('Offline check failed: ' + (body.detail || body.error || ('status ' + xhr.status)), false);
-      }
-    };
-    xhr.onerror = function () { finish('Response unavailable. The check may have started; refresh its status before retrying.', false); };
-    xhr.send(file);
-  }
-  wireDropzone(document.getElementById('iv-offline-dropzone'), document.getElementById('iv-offline-dropzone-input'),
-    function (files) { uploadOfflineTar(files[0]); });
-
-
-  // The Image verification content (schedule form, Refresh now, offline
-  // import) is relocated the same way -- Settings and the wizard's step 3
-  // share one implementation -- but by MOVING the live nodes rather than
-  // cloning a template: its handlers
-  // (the schedule-form submit listener, the iv-refresh click
-  // handler, wireDropzone on the offline dropzone, the once-only hour-select
-  // IIFE) are bound ONCE at load, not re-wired per mount. Moving the same
-  // DOM node keeps every listener intact and needs no rewire step, and since
-  // there is only ever the one instance, its ids can never duplicate.
-  var ivMountedAt = 'settings-pane-bulkhash';
   function mountImageVerification(hostId) {
-    if (ivMountedAt === hostId) return;
-    var host = document.getElementById(hostId);
-    var content = document.getElementById('iv-content');
-    if (!host || !content) return;
-    host.appendChild(content);
-    ivMountedAt = hostId;
+    imageVerification.select(hostId);
+    return imageVerification.refresh();
   }
-
-
-  // ---- Settings: certificate / trust store / telemetry destination ----
-
-  function settingsUnknown(msg) {
-    msg.dataset.uncertain = 'true';
-    msg.textContent = 'Response unavailable. Settings may have changed; reload to check before retrying.';
-  }
-  async function settingsResult(response, msg, validate) {
-    try {
-      var result = await response.json();
-      if (!result || typeof result !== 'object' || Array.isArray(result) || !validate(result)) throw new Error('Invalid response');
-      return result;
-    } catch (e) { settingsUnknown(msg); return null; }
-  }
-  async function settingsWrite(url, body, msg, method, acceptedStatuses) {
-    // Network loss can happen after a write commits. Never imply rollback or
-    // silently retry, and tolerate non-JSON proxy errors without losing feedback.
-    delete msg.dataset.uncertain;
-    try {
-      var response = method === 'DELETE'
-        ? await fetch(url, { method: 'DELETE', headers: csrfHdr() })
-        : await jpost(url, body);
-      if (!response.ok && !(acceptedStatuses || []).includes(response.status)) {
-        var problem = await response.json().catch(function () { return {}; });
-        msg.textContent = (problem && (problem.detail || problem.error)) || ('Request failed (' + response.status + ').');
-        return null;
-      }
-      return response;
-    } catch (e) {
-      settingsUnknown(msg);
-      return null;
-    }
-  }
-
-
-  // Wires a focusable drop-zone div to: click/Enter/Space -> hidden file
-  // input; dragover/dragleave -> 'drag' class for the dashed-border hover
-  // state; and a drop/file-pick callback receiving a FileList. Image
-  // verification still uses this helper; TLS file controls belong to React.
-  function wireDropzone(zone, input, onFiles) {
-    zone.addEventListener('click', function () { input.click(); });
-    zone.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-        e.preventDefault();
-        input.click();
-      }
-    });
-    ['dragenter', 'dragover'].forEach(function (ev) {
-      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('drag'); });
-    });
-    ['dragleave', 'drop'].forEach(function (ev) {
-      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('drag'); });
-    });
-    zone.addEventListener('drop', function (e) {
-      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
-    });
-    input.addEventListener('change', function (e) {
-      if (e.target.files && e.target.files.length) onFiles(e.target.files);
-      input.value = '';   // allow re-dropping/re-picking the same file
-    });
-  }
+  function hideImageVerification() { imageVerification.select(null); }
+  function refreshImageVerificationSettings() { return imageVerification.refresh(); }
 
 
   // React owns certificate inventory, same-key renewal and signer rotation.
@@ -1866,10 +1225,9 @@
     SETTINGS_SUBS.forEach(function (t) {
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
     });
-    // Same reclaim, but a move rather than a re-mount -- see
-    // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
-    if (sub === 'packages') refreshDevicePackages();
+    else hideImageVerification();
+    setupPackages.select(sub === 'setup' || sub === 'packages' ? sub : null);
     if (sub === 'certificates') { certificates.refreshAll(); securityLifecycle.refreshAll(); }
     workerLifecycle.select(sub);
     refreshSettings();
@@ -1962,6 +1320,11 @@
   document.addEventListener('visibilitychange', function () {
     // Refresh immediately on return so the operator never reads stale state
     // while waiting out the rest of an interval.
+    swarmView.syncVisibility();
+    if (document.hidden) imageVerification.hide();
+    else if (imageVerification.visible()) imageVerification.refresh();
+    if (document.hidden) setupPackages.hide();
+    else if (setupPackages.visible()) setupPackages.refresh();
     if (document.hidden) settings.hide();
     else if (settings.visible()) settings.refresh();
     if (document.hidden) certificates.hide();
@@ -1982,7 +1345,7 @@
     var sub = view.indexOf('/') > -1 ? view.slice(view.indexOf('/') + 1) : '';
     view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
-    if (view !== 'settings' && view !== 'setup') settings.hide();
+    if (view !== 'settings' && view !== 'setup') { settings.hide(); setupPackages.select(null); hideImageVerification(); }
     if (view !== 'settings') { certificates.hide(); securityLifecycle.hide(); workerLifecycle.select(null); }
     if (view !== 'policies') {
       cancelPolicyReads();
@@ -1993,10 +1356,7 @@
     });
     if (view !== 'devices') closeDeployInfo(false);
     activityCommand('visibility', {visible: view === 'devices' && !document.hidden});
-    var swarmFrame = document.getElementById('swarm-frame');
-    if (swarmFrame && swarmFrame.contentWindow) {
-      swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);
-    }
+    swarmView.syncVisibility();
     // Close legacy workflow popovers on navigation; React owns shell menus.
     if (view !== 'settings' && view !== 'monitoring') closeMenus();
     if (view === 'settings') showSettingsSub(sub || 'general');
@@ -2013,7 +1373,6 @@
     } else if (view === 'devices') { refreshDevices(); deviceForms.resume(); schedules.resume(); poll = pollDevices; }
     else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
-    else if (view === 'settings') { refreshSetup(); } // showSettingsSub already refreshes the form data.
     else if (view === 'monitoring') { refreshMonitoring(); poll = pollMonitoring; }
     else if (view === 'setup') enterSetupWizard();
     startViewPoll(poll);

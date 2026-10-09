@@ -63,8 +63,9 @@ resumes at the first one outstanding.
    `IRIS_OTLP_ENDPOINT`.
 2. **Device packages.** Whether each IOx package and the IOS-XR agent package
    `iris-xr.rpm` still match the record of how they were built, and whether the
-   served and distributed runtime certificates agree. Run the build commands it
-   gives you on the Docker host, then select **Re-check**.
+   served and distributed runtime certificates agree. Build only the platforms
+   you use on the build host, then select **Re-check**. A ready wrapper matches
+   its adjacent provenance record; this check does not verify native signatures.
 3. **Image verification.** The check of published images against Bulk Hash, the
    checksum Cisco publishes for an image. Refresh now, schedule a daily run, or
    import a feed file.

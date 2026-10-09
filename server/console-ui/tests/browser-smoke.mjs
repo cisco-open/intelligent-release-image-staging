@@ -6,6 +6,7 @@
 // outside this package. This test uses mocked APIs and never contacts a device.
 import assert from 'node:assert/strict';
 import {maintenance, trust, backups, prepared} from './worker-fixtures.mjs';
+import {setupFixture, verificationFixture} from './setup-packages-fixtures.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +36,7 @@ try {
     audit_export: {host: '', port: 22, user: '', path: '', age_recipient: '', auto: false, password_set: false}};
   let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
+  let imageVerificationFixture = verificationFixture();
   let certificateAvailable = true, renewalAccepted = false;
   let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b'], previous_public_key: null, public_key: null,
     previous_sha256: null, replacement_sha256: null, created_at: null, activated_at: null, retired_keylist_seq: null};
@@ -66,6 +68,8 @@ try {
         return route.fulfill({status: deploymentUnavailable ? 503 : 200, json: deploymentSummary});
       }
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/setup-status' && route.request().method() === 'GET') return route.fulfill({json: setupFixture()});
+      if (url.pathname === '/api/v1/settings/image-verification' && route.request().method() === 'GET') return route.fulfill({json: imageVerificationFixture});
       if (url.pathname === '/api/v1/settings/certificates/browser/rotation' && route.request().method() === 'GET') return route.fulfill({json: browserTlsFixture});
       if (url.pathname === '/api/v1/settings/service-credentials' && route.request().method() === 'GET') return route.fulfill({json: serviceCredentialFixture});
       if (url.pathname === '/api/v1/settings/deployment-rotation' && route.request().method() === 'GET') return route.fulfill({json: deploymentFixture});
@@ -99,6 +103,10 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/image-verification') {
+          imageVerificationFixture = {...imageVerificationFixture, mode: body.mode, hour_utc: body.hour_utc};
+          return route.fulfill({json: imageVerificationFixture});
+        }
         if (url.pathname === '/api/v1/settings/certificates/browser/rotation') {
           if (body.action === 'prepare') browserTlsFixture = {...browserTlsFixture, request_id: body.request_id,
             names: body.names, mode: body.mode, state: 'awaiting-approval', csr: publicCsr, created_at: 1790160000};
@@ -462,7 +470,9 @@ try {
   await settingsTab('Image verification');
   settingsFailure = 'network';
   await page.locator('#iv-schedule-form button[type="submit"]').click();
-  await page.locator('#iv-schedule-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
+  await page.locator('#iv-schedule-msg').getByText('Response unavailable. The schedule may have changed or the check may have started. Review current status before retrying.', {exact: true}).waitFor();
+  assert.equal(await page.locator('#iv-schedule-form button[type="submit"]').isDisabled(), true, 'A lost response requires review, not automatic write replay');
+  assert.deepEqual(settingsWrites.at(-1).body, {mode: 'off', hour_utc: 0});
   settingsFailure = '';
   await settingsTab('Certificates & keys');
   await page.locator('#browser-tls-state').getByText('Browser certificate: idle.', {exact: true}).waitFor();
