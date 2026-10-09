@@ -42,7 +42,7 @@ def main():
         secretfs.decrypt_to(encrypted, plain, "/run/soak-keys/age.key")
         # Native tracker URLs require a routable address, here reachable only
         # on the isolated bridge. The driver reaches the same TLS identity
-        # through an exclusively loopback-bound host port.
+        # through the exact host-verified address on the owned internal bridge.
         secretfs.decrypt_to("/etc/iris/tls/key.pem.age", "/run/iris/catalog.key",
                             "/run/soak-keys/age.key")
         subprocess.run([

@@ -47,6 +47,29 @@ def validate_host():
         raise Failure("only the local default Docker socket is supported")
     if not hasattr(os, "sched_setaffinity"):
         raise Failure("Linux driver CPU affinity required")
+    data_root = json.loads(docker("info", "--format", "{{json .DockerRootDir}}").stdout)
+    if not isinstance(data_root, str) or not Path(data_root).is_absolute() or not Path(data_root).is_dir():
+        raise Failure("local Docker data root must be an accessible absolute directory")
+    return Path(data_root).resolve()
+
+
+def host_resources(directory, docker_root):
+    meminfo = dict((line.split()[0].rstrip(":"), int(line.split()[1]))
+                   for line in Path("/proc/meminfo").read_text().splitlines())
+    return {"host_available_kib": meminfo["MemAvailable"],
+            "host_total_kib": meminfo["MemTotal"],
+            "disk_free_bytes": shutil.disk_usage(directory).free,
+            "docker_disk_free_bytes": shutil.disk_usage(docker_root).free}
+
+
+def resource_floors(sample, initial=False):
+    # Before starting, reserve both service quotas above the ongoing host
+    # memory floor, and 1 GiB for this bounded fixture's files above disk floors.
+    memory_gib, disk_gib = (14, 6) if initial else (8, 5)
+    if (sample["host_available_kib"] < memory_gib * 1024**2
+            or sample["disk_free_bytes"] < disk_gib * 1024**3
+            or sample["docker_disk_free_bytes"] < disk_gib * 1024**3):
+        raise Failure("host memory/output/Docker disk safety floor crossed")
 
 
 def owned(kind, identity, run_id):
@@ -60,8 +83,9 @@ def owned(kind, identity, run_id):
 
 
 class Fixture:
-    def __init__(self, directory, server_image, console_image, devices):
+    def __init__(self, directory, server_image, console_image, devices, docker_root):
         self.directory = directory
+        self.docker_root = docker_root
         self.run_id = uuid.uuid4().hex
         self.prefix = "iris-soak-" + self.run_id[:12]
         self.resources = {"container": [], "volume": [], "network": []}
@@ -72,6 +96,7 @@ class Fixture:
         self.manifest["driver_sha256"] = {name: hashlib.sha256((ROOT / "tools" / name).read_bytes()).hexdigest()
                                           for name in ("api-soak.py", "api_soak_workload.py", "api_soak_fixture.py")}
         self.manifest["host_logical_cpus"] = os.cpu_count()
+        self.manifest["docker_data_root"] = str(docker_root)
         self.manifest["baseline_container_stats"] = [json.loads(line) for line in docker(
             "stats", "--no-stream", "--format", "{{json .}}").stdout.splitlines()]
         self.server_image, self.console_image = server_image, console_image
@@ -125,6 +150,9 @@ class Fixture:
         return docker("exec", container, "python3", "/soak-fixture.py", *args).stdout
 
     def start(self):
+        self.manifest["preflight_resources"] = host_resources(self.directory, self.docker_root)
+        self.save()
+        resource_floors(self.manifest["preflight_resources"], initial=True)
         for role, reference in (("server", self.server_image), ("console", self.console_image)):
             row = json.loads(docker("image", "inspect", reference).stdout)[0]
             self.manifest["images"][role] = row["Id"]
@@ -248,11 +276,7 @@ class Fixture:
             counters["memory_fraction"] = int(counters["memory.current"]) / memory
             counters["pids_fraction"] = int(counters["pids.current"]) / 256
             sample["containers"][role] = counters
-        meminfo = dict((line.split()[0].rstrip(":"), int(line.split()[1]))
-                       for line in Path("/proc/meminfo").read_text().splitlines())
-        sample["host_available_kib"] = meminfo["MemAvailable"]
-        sample["host_total_kib"] = meminfo["MemTotal"]
-        sample["disk_free_bytes"] = shutil.disk_usage(self.directory).free
+        sample.update(host_resources(self.directory, self.docker_root))
         host_cpu = [int(v) for v in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
         host_previous = self.previous.get("host")
         total, idle = sum(host_cpu[:8]), host_cpu[3] + host_cpu[4]
@@ -262,8 +286,7 @@ class Fixture:
         self.samples.append(sample)
         self.resource_log.write(json.dumps(sample) + "\n")
         self.resource_log.flush()
-        if sample["host_available_kib"] < 8 * 1024**2 or sample["disk_free_bytes"] < 5 * 1024**3:
-            raise Failure("host memory/disk safety floor crossed")
+        resource_floors(sample)
         if sample["host_cpu_fraction"] > .85:
             raise Failure("host CPU safety ceiling crossed")
         if enforce and any(row["cpu_fraction"] > .8 or row["memory_fraction"] > .8 or row["pids_fraction"] > .8
@@ -280,12 +303,29 @@ class Fixture:
         if self.samples:
             result["max_host_cpu_fraction"] = max(sample["host_cpu_fraction"] for sample in self.samples)
             result["min_host_available_kib"] = min(sample["host_available_kib"] for sample in self.samples)
+            for field in ("disk_free_bytes", "docker_disk_free_bytes"):
+                result["min_" + field] = min(sample[field] for sample in self.samples)
         return result
+
+    def stop(self, identity, reason, require_clean=True):
+        self.inspect(identity)
+        docker("container", "stop", "--time", "30", identity)
+        state = self.inspect(identity)["State"]
+        clean = (state.get("Status") == "exited" and state.get("Running") is False
+                 and state.get("ExitCode") == 0 and state.get("OOMKilled") is False
+                 and state.get("Dead", False) is False and state.get("Restarting", False) is False)
+        self.manifest.setdefault("stops", []).append({
+            "container": identity, "reason": reason, "at": time.time(),
+            "status": state.get("Status"), "exit_code": state.get("ExitCode"),
+            "oom_killed": state.get("OOMKilled"), "clean": clean})
+        self.save()
+        if require_clean and not clean:
+            raise Failure("owned service did not stop cleanly; recovery proof refused")
+        return clean
 
     def restart(self):
         for identity in (self.console, self.server):
-            self.inspect(identity)
-            docker("container", "stop", "--time", "30", identity)
+            self.stop(identity, "restart")
         # Same volumes, same identities, fresh runtime tmpfs, no writes retried.
         docker("container", "start", self.server)
         self.wait_management()
@@ -296,10 +336,8 @@ class Fixture:
     def change_budget(self, total):
         # Recreate ONLY this owned server, preserving its own volumes. The
         # workload is stopped, so there are no in-flight writes to replay.
-        self.inspect(self.console)
-        docker("container", "stop", "--time", "30", self.console)
-        self.inspect(self.server)
-        docker("container", "stop", "--time", "30", self.server)
+        self.stop(self.console, "admission-budget")
+        self.stop(self.server, "admission-budget")
         docker("container", "rm", self.server)
         self.manifest.setdefault("retired_containers", []).append(self.server)
         self.resources["container"].remove(self.server)
@@ -319,8 +357,7 @@ class Fixture:
         self.previous.clear()
 
     def dependency_outage(self, workload):
-        self.inspect(self.server)
-        docker("container", "stop", "--time", "30", self.server)
+        self.stop(self.server, "dependency-outage")
         # Console stays live. This one expected read failure must not become a
         # retry policy, and is separate from an unexplained healthy-tier 503.
         record, problem = workload.clients[0].request("GET", "/api/v1/devices?limit=1")
@@ -341,7 +378,8 @@ class Fixture:
                 try:
                     row = owned(kind, identity, self.run_id)
                     if kind == "container" and row["State"].get("Running"):
-                        docker("container", "stop", "--time", "30", identity)
+                        if not self.stop(identity, "cleanup", require_clean=False):
+                            problems.append("owned service cleanup stop was not clean")
                     docker(kind, "rm", identity)
                 except Failure as exc:
                     problems.append(str(exc))
@@ -381,13 +419,13 @@ def arguments(argv=None):
 
 def main(argv=None):
     args = arguments(argv)
-    validate_host()
+    docker_root = validate_host()
     os.umask(0o077)
     args.directory.mkdir(parents=True, mode=0o700)
     # Driver remains on one logical CPU. Docker daemon/service quotas are separate.
     driver_cpu = min(os.sched_getaffinity(0))
     os.sched_setaffinity(0, {driver_cpu})
-    fixture = Fixture(args.directory, args.server_image, args.console_image, args.devices)
+    fixture = Fixture(args.directory, args.server_image, args.console_image, args.devices, docker_root)
     report = {"qualification": args.soak_seconds >= 1800 and args.step_seconds >= 120,
               "driver_logical_cpu": driver_cpu, "steps": [], "passed": False,
               "exclusions": ["device onboarding", "Cisco software authenticity", "WAN",

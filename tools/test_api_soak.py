@@ -4,6 +4,7 @@
 """Deterministic guard/measurement tests; these never start Docker or load."""
 import importlib.util
 import ipaddress
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,125 @@ def test_remote_docker_refused_before_call(monkeypatch):
     monkeypatch.setattr(runner, "docker", lambda *a: pytest.fail("Docker must not be contacted"))
     with pytest.raises(workload.Failure, match="overrides"):
         runner.validate_host()
+
+
+def test_local_data_root_is_resolved_from_verified_daemon(monkeypatch, tmp_path):
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    calls = []
+    def fake_docker(*args):
+        calls.append(args)
+        value = ([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}]
+                 if args[0] == "context" else str(tmp_path))
+        return SimpleNamespace(stdout=json.dumps(value))
+    monkeypatch.setattr(runner, "docker", fake_docker)
+    assert runner.validate_host() == tmp_path.resolve()
+    assert calls == [("context", "inspect", "default"), ("info", "--format", "{{json .DockerRootDir}}")]
+
+
+@pytest.mark.parametrize("data_root", [None, [], "relative", "/nonexistent-iris-soak-data-root"])
+def test_invalid_local_data_root_is_refused(monkeypatch, data_root):
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    def fake_docker(*args):
+        value = ([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}]
+                 if args[0] == "context" else data_root)
+        return SimpleNamespace(stdout=json.dumps(value))
+    monkeypatch.setattr(runner, "docker", fake_docker)
+    with pytest.raises(workload.Failure, match="data root"):
+        runner.validate_host()
+
+
+def test_both_output_and_docker_filesystems_are_measured(monkeypatch, tmp_path):
+    checked = []
+    def disk_usage(path):
+        checked.append(path)
+        return SimpleNamespace(free=17 if path == tmp_path else 23)
+    monkeypatch.setattr(runner.shutil, "disk_usage", disk_usage)
+    result = runner.host_resources(tmp_path, Path("/docker-data-fixture"))
+    assert checked == [tmp_path, Path("/docker-data-fixture")]
+    assert result["disk_free_bytes"] == 17 and result["docker_disk_free_bytes"] == 23
+
+
+@pytest.mark.parametrize("initial", [False, True])
+@pytest.mark.parametrize("field", ["host_available_kib", "disk_free_bytes", "docker_disk_free_bytes"])
+def test_resource_floors_are_enforced_independently(initial, field):
+    sample = {"host_available_kib": (14 if initial else 8) * 1024**2,
+              "disk_free_bytes": (6 if initial else 5) * 1024**3,
+              "docker_disk_free_bytes": (6 if initial else 5) * 1024**3}
+    runner.resource_floors(sample, initial)
+    sample[field] -= 1
+    with pytest.raises(workload.Failure, match="safety floor"):
+        runner.resource_floors(sample, initial)
+
+
+def test_initial_resource_failure_prevents_all_docker_mutations(monkeypatch, tmp_path):
+    fixture = runner.Fixture.__new__(runner.Fixture)
+    fixture.directory = fixture.docker_root = tmp_path
+    fixture.manifest = {}
+    fixture.save = lambda: None
+    monkeypatch.setattr(runner, "host_resources", lambda *args: {
+        "host_available_kib": 13 * 1024**2, "disk_free_bytes": 8 * 1024**3,
+        "docker_disk_free_bytes": 8 * 1024**3})
+    monkeypatch.setattr(runner, "docker", lambda *args: pytest.fail("preflight must precede Docker mutation"))
+    with pytest.raises(workload.Failure, match="safety floor"):
+        fixture.start()
+    assert fixture.manifest["preflight_resources"]["host_available_kib"] == 13 * 1024**2
+
+
+@pytest.mark.parametrize("changed", [{"ExitCode": 1}, {"ExitCode": 137},
+                                        {"OOMKilled": True}, {"Running": True},
+                                        {"Status": "restarting"}, {"Dead": True},
+                                        {"Restarting": True}])
+def test_unclean_exit_is_evidenced_and_not_restarted(monkeypatch, changed):
+    fixture = runner.Fixture.__new__(runner.Fixture)
+    fixture.console, fixture.server = "console-owned", "server-owned"
+    fixture.manifest = {}
+    fixture.save = lambda: None
+    state = dict(Status="exited", Running=False, ExitCode=0, OOMKilled=False,
+                 Error="SECRET daemon detail")
+    state.update(changed)
+    inspected, commands = [], []
+    def inspect(identity):
+        inspected.append(identity)
+        return {"State": state}
+    fixture.inspect = inspect
+    monkeypatch.setattr(runner, "docker", lambda *args: commands.append(args))
+    with pytest.raises(workload.Failure, match="did not stop cleanly"):
+        fixture.restart()
+    assert inspected == ["console-owned", "console-owned"]
+    assert commands == [("container", "stop", "--time", "30", "console-owned")]
+    assert fixture.manifest["stops"][0]["clean"] is False
+    assert "SECRET" not in json.dumps(fixture.manifest)
+
+
+def test_restart_requires_two_clean_exits_before_start(monkeypatch):
+    fixture = runner.Fixture.__new__(runner.Fixture)
+    fixture.console, fixture.server = "console-owned", "server-owned"
+    fixture.manifest, fixture.previous = {}, {"stale": 1}
+    fixture.save = fixture.wait_management = fixture.wait_console = lambda: None
+    fixture.inspect = lambda _: {"State": dict(Status="exited", Running=False, ExitCode=0, OOMKilled=False)}
+    commands = []
+    monkeypatch.setattr(runner, "docker", lambda *args: commands.append(args))
+    fixture.restart()
+    assert [row[1] for row in commands] == ["stop", "stop", "start", "start"]
+    assert [row["clean"] for row in fixture.manifest["stops"]] == [True, True]
+    assert not fixture.previous
+
+
+def test_cleanup_records_unclean_exit_but_still_removes_owned_container(monkeypatch, tmp_path):
+    fixture = runner.Fixture.__new__(runner.Fixture)
+    fixture.run_id, fixture.directory = "ours", tmp_path
+    fixture.resources = {"container": ["owned"], "volume": [], "network": []}
+    fixture.manifest, fixture.resource_log = {}, io.StringIO()
+    fixture.save = lambda: None
+    fixture.stop = lambda identity, reason, require_clean: False
+    monkeypatch.setattr(runner, "owned", lambda *args: {"State": {"Running": True}})
+    commands = []
+    monkeypatch.setattr(runner, "docker", lambda *args: commands.append(args))
+    problems = fixture.cleanup()
+    assert problems == ["owned service cleanup stop was not clean"]
+    assert commands == [("container", "rm", "owned")]
 
 
 @pytest.mark.parametrize("label,identity", [("foreign", "abc"), ("ours", "different")])

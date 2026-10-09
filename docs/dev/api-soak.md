@@ -28,8 +28,10 @@ mounted in either service.
 
 The server is limited to 4 CPUs and 4 GiB; the Console to 2 CPUs and 2 GiB.
 Swap is disabled for both, and each has a 256-process limit. The driver is
-pinned to one logical CPU. Allow at least 8 GiB of host memory and 5 GiB of
-free disk beyond the workload. The runner stops if those floors are crossed,
+pinned to one logical CPU. Before starting, the runner requires 14 GiB of
+available host memory and 6 GiB free on both the evidence filesystem and the
+local Docker data filesystem. During the workload it retains floors of 8 GiB
+available memory and 5 GiB free on both filesystems. It stops if those floors are crossed,
 host CPU use exceeds 85%, or either service exceeds 80% of its CPU or memory
 allocation at a sample. Samples are taken about every five seconds and include
 cgroup CPU, memory, pressure, process, thread and file-descriptor counters.
@@ -96,7 +98,8 @@ diagnostics, not credentials or response bodies.
 
 ## Persistence, admission and evidence
 
-After the soak, the runner stops both services cleanly and starts them again
+After the soak, the runner stops both services and records their actual exit
+status. Both must exit zero without an OOM kill before it starts them again
 with the same volumes. Fresh logins check the last accepted metadata value
 for each writer, the latest accepted report for every reporting device, and
 each published image's digest. A server-side check rehashes the actual image
