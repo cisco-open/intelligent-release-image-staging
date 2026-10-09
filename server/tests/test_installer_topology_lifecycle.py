@@ -282,19 +282,21 @@ def test_remote_consumer_proof_is_still_strictly_validated():
 
 def test_topology_hooks_preserve_transport_and_stopped_writer_checks(tmp_path):
     calls = []
+    sources, volumes, writers = {'source': tmp_path / 'source'}, {}, ['owned']
     adapter = SimpleNamespace(
         base=tmp_path,
+        journal=SimpleNamespace(document={}),
         pin_runtime=lambda: calls.append('pin'),
         stop_writers=lambda c, **kw: calls.append(('stop', c, kw)),
         assert_writers_stopped=lambda: calls.append('assert'),
         before_console_start=lambda: calls.append('sync'),
-        capture_plan=lambda: ('sources', 'volumes', 'writers'),
+        capture_plan=lambda: (sources, volumes, writers),
         maintenance_run=lambda argv, **kw: (argv, kw))
     cm._pin_runtime(adapter)
     cm._stop(adapter, ['owned'], recovering_clean_operation=True)
     trust._stopped(adapter)
     cm._before_console_start(adapter)
-    assert backup.capture_plan(adapter) == ('sources', 'volumes', 'writers')
+    assert backup.capture_plan(adapter) == (sources, volumes, writers)
     assert calls == ['pin', ('stop', ['owned'], {'recovering_clean_operation': True}), 'assert', 'sync']
     argv, kwargs = trust._one_shot(adapter, 'print(1)', 'argument')
     assert argv[-1] == 'argument'
