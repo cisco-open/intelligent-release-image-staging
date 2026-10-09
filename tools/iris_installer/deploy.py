@@ -266,7 +266,8 @@ class DockerInstall:
 
     def provision_host(self):
         if self.prebuilt():
-            ubuntu.preflight_prebuilt(self.config['target'])
+            from .prebuilt_dependencies import provision
+            provision(self.journal, self._verified_kit, runner=self.command)
         else:
             ubuntu.provision(self.command)
 
@@ -289,6 +290,8 @@ class DockerInstall:
         self._verified_kit = verify_selected(self.journal)
         if self._verified_kit is not None:
             bind_source(self._verified_kit, manifest, self.base)
+            from .guest_inputs import verify_guest_inputs
+            verify_guest_inputs(self._verified_kit, self.source, manifest)
             if 'prebuilt-package-generated' not in self.journal.document['completed']:
                 validate_packaging_tool(self._verified_kit,
                                         self.journal.document.get('prebuilt_ioxclient'), self.base)
@@ -769,14 +772,13 @@ def snapshot(source, destination, *, expected_manifest=None, buffer=None):
     return manifest
 
 
-def complete_initialization(journal):
-    """Resume only inputs explicitly reserved before the first snapshot write."""
-    import io
+def _initialization_inputs(journal):
+    """Validate reserved public identities before dependency or snapshot writes."""
     record = journal.document.get('initialization')
     if record is None:
         if journal.document.get('state') == 'INITIALIZING':
             raise InstallError('Initialization intent is missing; preserve the journal')
-        return
+        return None
     if (journal.document.get('state') != 'INITIALIZING' or journal.document['completed']
             or not isinstance(record, dict) or set(record) != {'source', 'public_roots'}
             or not isinstance(record['source'], str) or not Path(record['source']).is_absolute()
@@ -796,12 +798,22 @@ def complete_initialization(journal):
     expected_roots = {name: hashlib.sha256(data).hexdigest() for name, data in root_bytes.items()}
     if expected_roots != journal.document.get('root_digests'):
         raise InstallError('Initialization root fingerprints changed; preserve the journal')
+    return record, root_bytes, expected_roots
+
+
+def complete_initialization(journal):
+    """Resume only inputs explicitly reserved before the first snapshot write."""
+    import io
+    inputs = _initialization_inputs(journal)
+    if inputs is None:
+        return
+    record, root_bytes, expected_roots = inputs
     buffer = journal.directory / '.initial-input-buffer'
     snapshot(record['source'], journal.directory / 'source',
              expected_manifest=journal.document['source_manifest'], buffer=buffer)
     directory = journal.directory / 'roots'
     _public_directory(directory)
-    if any(path.name not in roots for path in directory.iterdir()):
+    if any(path.name not in root_bytes for path in directory.iterdir()):
         raise InstallError('Unexpected roots input; preserve it for inspection')
     for name, data in root_bytes.items():
         _publish_input(io.BytesIO(data), directory / name, expected_roots[name], 0o644, buffer)
@@ -816,6 +828,19 @@ def complete_initialization(journal):
     journal.save()
 
 
+def _verify_initialization_source(journal):
+    """Check reserved bytes before packages change, even before snapshot exists."""
+    record, _, _ = _initialization_inputs(journal)
+    source = Path(record['source'])
+    manifest = journal.document['source_manifest']
+    if source.resolve() != source or source_inventory(source) != manifest:
+        raise InstallError('Reserved initialization source changed before dependency provisioning')
+    for name, expected in manifest.items():
+        path = source / name
+        if path.resolve() != path or not path.is_file() or digest(path) != expected:
+            raise InstallError('Reserved initialization source bytes changed before dependency provisioning')
+
+
 def installation(journal, runner=None):
     """Select only a recorded, validated deployment adapter; never infer context."""
     validate_config(journal.document['config'])
@@ -827,6 +852,29 @@ def installation(journal, runner=None):
         from .kube_deploy import KubeInstall
         return KubeInstall(journal, runner=runner or run)
     return DockerInstall(journal) if runner is None else DockerInstall(journal, runner=runner)
+
+
+def _new_host_preflight(config, prebuilt, roots):
+    """Repeat ownership and public-key checks until initialization completes."""
+    if config['target'] == 'docker-split':
+        from .split_deploy import preflight
+        preflight(config, runner=run)
+    elif config['target'] == 'kubernetes':
+        from .kube_deploy import preflight
+        if not prebuilt:
+            ubuntu.provision_kubernetes_client(run)
+        preflight(config, runner=run)
+    else:
+        port_preflight(config)
+    for kind in ('container', 'volume', 'network'):
+        command = ['docker', kind, 'ls', '-q']
+        if kind == 'container':
+            command.append('-a')
+        matches = run([*command, '--filter', 'label=com.docker.compose.project=' + config['instance']], capture=True)
+        if matches.strip():
+            raise InstallError('Compose instance already has resources; adoption is not implemented')
+    for data in roots.values():
+        run(['ssh-keygen', '-lf', '-'], input=data, capture=True)
 
 
 def start(args):
@@ -861,32 +909,7 @@ def start(args):
         manifest = source_inventory(args.source)
         inputs = prepare_selection(args, manifest, journal.directory)
         prebuilt = selected(inputs)
-        if prebuilt:
-            ubuntu.preflight_prebuilt(config['target'])
-        else:
-            ubuntu.provision(run)
-        if config['target'] == 'docker-split':
-            from .split_deploy import preflight
-            preflight(config, runner=run)
-        elif config['target'] == 'kubernetes':
-            from .kube_deploy import preflight
-            if not prebuilt:
-                ubuntu.provision_kubernetes_client(run)
-            preflight(config, runner=run)
-        else:
-            port_preflight(config)
-        # Refuse adoption, even if an old project's containers are stopped.
-        for kind in ("container", "volume", "network"):
-            command = ["docker", kind, "ls", "-q"]
-            if kind == "container":
-                command.append("-a")
-            matches = run([*command, "--filter", "label=com.docker.compose.project=" + config["instance"]], capture=True)
-            if matches.strip():
-                raise InstallError("Compose instance already has resources; adoption is not implemented")
-        # Validate the captured public bytes, not a path that could change
-        # between validation and recording the immutable initialization intent.
-        for data in roots.values():
-            run(['ssh-keygen', '-lf', '-'], input=data, capture=True)
+        dependencies = prebuilt and inputs['input_selection']['kit']['profile'] == 'ubuntu-dependencies'
         import uuid
         journal.document = {"schema": 1, "id": str(uuid.uuid4()), "config": config,
                             **inputs,
@@ -895,7 +918,25 @@ def start(args):
                             "completed": {}, "state": "INITIALIZING",
                             "initialization": {"source": str(Path(args.source).resolve()),
                                                "public_roots": {name: data.decode('ascii') for name, data in roots.items()}}}
-        journal.save()
+        if dependencies:
+            # Reserve original identities and authority before an accepted
+            # dependency plan can mutate the host.
+            journal.document['dependency_changes_accepted'] = True
+            journal.save()
+            _verify_initialization_source(journal)
+            from .prebuilt_install import verify_selected
+            from .prebuilt_dependencies import provision
+            provision(journal, verify_selected(journal), accept_changes=True, runner=run)
+        elif prebuilt:
+            client = journal.document.get('prebuilt_kubectl')
+            if config['target'] == 'kubernetes' and client is not None:
+                ubuntu.provision_kubernetes_client(run, local_source=client)
+            ubuntu.preflight_prebuilt(config['target'])
+        else:
+            ubuntu.provision(run)
+        _new_host_preflight(config, prebuilt, roots)
+        if not dependencies:
+            journal.save()
         complete_initialization(journal)
         return installation(journal).resume()
 
@@ -910,9 +951,18 @@ def resume(args):
         assert_no_pending_restore(journal)
         validate_config(journal.document['config'])
         if journal.document.get('state') == 'INITIALIZING':
-            from .prebuilt_install import bind_source, verify_selected
+            from .prebuilt_install import bind_source, validate_packaging_tool, verify_selected
+            reserved = _initialization_inputs(journal)
             kit = verify_selected(journal)
             if kit is not None:
                 bind_source(kit, journal.document['source_manifest'], journal.directory)
+                from .guest_inputs import verify_guest_inputs
+                verify_guest_inputs(kit, Path(reserved[0]['source']), journal.document['source_manifest'])
+                validate_packaging_tool(kit, journal.document.get('prebuilt_ioxclient'), journal.directory)
+                if kit.profile == 'ubuntu-dependencies':
+                    from .prebuilt_dependencies import provision
+                    _verify_initialization_source(journal)
+                    provision(journal, kit, runner=run)
+                    _new_host_preflight(journal.document['config'], True, reserved[1])
         complete_initialization(journal)
         return installation(journal).resume(args.certificate)

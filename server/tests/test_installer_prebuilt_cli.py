@@ -194,10 +194,14 @@ def test_initialization_resume_reauthenticates_before_copying_reserved_inputs(se
     record = json.loads((args.state_dir / 'installation.json').read_bytes())
     assert record['state'] == 'INITIALIZING'
     events = []
-    monkeypatch.setattr(prebuilt_install, 'verify_selected', lambda journal: events.append('authenticate') or object())
+    monkeypatch.setattr(prebuilt_install, 'verify_selected',
+                        lambda journal: events.append('authenticate') or SimpleNamespace(profile='prepared-host'))
     monkeypatch.setattr(prebuilt_install, 'bind_source', lambda *a: events.append('source'))
+    from iris_installer import guest_inputs
+    monkeypatch.setattr(guest_inputs, 'verify_guest_inputs', lambda *a: events.append('guest'))
+    monkeypatch.setattr(prebuilt_install, 'validate_packaging_tool', lambda *a: events.append('licensed-tool'))
     def complete(journal):
-        assert events == ['authenticate', 'source']
+        assert events == ['authenticate', 'source', 'guest', 'licensed-tool']
         return original(journal)
     monkeypatch.setattr(deploy, 'complete_initialization', complete)
     assert deploy.resume(args) == 20

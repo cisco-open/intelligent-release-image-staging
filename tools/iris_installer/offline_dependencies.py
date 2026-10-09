@@ -398,10 +398,16 @@ def _installed(path):
     return {record['Package']: record for record in records if record.get('Status', '').endswith(' installed')}
 
 
-def plan_dependencies(closure, *, status=Path('/var/lib/dpkg/status')):
+def plan_dependencies(closure, *, status=Path('/var/lib/dpkg/status'), required_roots=None):
     """Return a JSON receipt after local-only apt simulation; never install."""
     from .ubuntu import check_platform
     check_platform()
+    requested = ROOT_PACKAGES if required_roots is None else required_roots
+    if (not isinstance(requested, (list, tuple, set, frozenset)) or not requested
+            or any(not isinstance(name, str) or name not in ROOT_PACKAGES for name in requested)
+            or len(requested) != len(set(requested))):
+        raise InstallError('Offline dependency roots must be a nonempty supported subset')
+    requested = set(requested)
     status_hash = _digest(status)
     installed = _installed(status)
     with status.open(encoding='utf-8') as stream:
@@ -409,7 +415,8 @@ def plan_dependencies(closure, *, status=Path('/var/lib/dpkg/status')):
     provider = sorted(ENGINE_PACKAGES & set(installed))
     docker = shutil.which('docker', path=ENV['PATH'])
     preserve_engine = bool(provider or docker)
-    roots = [name + '=' + version for name, version in sorted(closure.manifest['roots'].items()) if name not in installed]
+    roots = [name + '=' + version for name, version in sorted(closure.manifest['roots'].items())
+             if name in requested and name not in installed]
     if preserve_engine:
         roots = [specification for specification in roots if specification.split('=')[0] != 'docker.io']
         if 'docker.io' not in installed:
@@ -427,9 +434,12 @@ def plan_dependencies(closure, *, status=Path('/var/lib/dpkg/status')):
         raise InstallError('Offline dependency solution would change a held package')
     if _digest(status) != status_hash:
         raise InstallError('Host package status changed during dependency planning')
-    return {'schema': 'iris-offline-dependency-plan-v1', 'closure_sha256': closure.digest,
+    result = {'schema': 'iris-offline-dependency-plan-v1', 'closure_sha256': closure.digest,
             'status_sha256': status_hash, 'provider': provider, 'docker_path': docker,
             'roots': roots, 'packages': solution}
+    if required_roots is not None:
+        result['required_roots'] = sorted(requested)
+    return result
 
 
 def _application_guard(directory, expected_status, *, status=Path('/var/lib/dpkg/status')):
@@ -481,7 +491,7 @@ def apply_dependencies(closure, plan, *, accept_changes=False):
         raise InstallError('Offline dependency application requires explicit acceptance')
     if os.geteuid() != 0:
         raise InstallError('Offline dependency application requires root')
-    current = plan_dependencies(closure)
+    current = plan_dependencies(closure, required_roots=plan.get('required_roots'))
     if plan != current:
         raise InstallError('Offline dependency plan or host package state changed; review a new plan')
     if not plan['packages']:

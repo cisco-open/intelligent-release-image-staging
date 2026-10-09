@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
 from iris_installer import deploy, kube_deploy as kube, prebuilt_install, release_kit
-from iris_installer import split_deploy as split, ubuntu
+from iris_installer import split_deploy as split, ubuntu, guest_inputs
 from iris_installer.state import InstallError, Journal
 
 
@@ -32,6 +32,7 @@ CLASSES = {'docker': deploy.DockerInstall, 'docker-split': split.SplitDockerInst
 
 @pytest.fixture
 def adapter(tmp_path, monkeypatch):
+    monkeypatch.setattr(guest_inputs, 'verify_guest_inputs', lambda *a: None)
     def make(target='docker'):
         base = tmp_path / target
         base.mkdir(mode=0o700)
@@ -154,6 +155,8 @@ def test_local_input_custody_precedes_kit_authentication_and_source_binding(adap
     monkeypatch.setattr(prebuilt_install, 'verify_selected', lambda journal: events.append('authenticate') or obj._verified_kit)
     monkeypatch.setattr(prebuilt_install, 'bind_source', lambda kit, inventory, workspace:
                         events.append(('bind', kit, inventory, workspace)))
+    monkeypatch.setattr(guest_inputs, 'verify_guest_inputs', lambda kit, source, inventory:
+                        events.append(('guest', kit, source, inventory)))
     monkeypatch.setattr(prebuilt_install, 'validate_packaging_tool', lambda kit, tool, workspace:
                         events.append(('tool', kit, tool, workspace)))
     if changed == 'source':
@@ -167,6 +170,7 @@ def test_local_input_custody_precedes_kit_authentication_and_source_binding(adap
     else:
         obj.verify_inputs()
         assert events == ['authenticate', ('bind', obj._verified_kit, manifest, obj.base),
+                          ('guest', obj._verified_kit, obj.source, manifest),
                           ('tool', obj._verified_kit, '/licensed/ioxclient', obj.base)]
     assert obj.calls == []
 

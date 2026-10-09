@@ -120,6 +120,37 @@ def test_complete_closure_before_readonly_host_plan(signed_repository, tmp_path,
         assert status.read_text() == ''
 
 
+def test_full_authenticated_closure_supports_narrow_console_roots(signed_repository, tmp_path, monkeypatch):
+    directory, keyring, digest = signed_repository
+    status = tmp_path / 'empty-status'
+    status.write_text('')
+    monkeypatch.setattr(dependencies.shutil, 'which', lambda *args, **kwargs: None)
+    roots = {'docker.io', 'docker-compose-v2', 'openssl'}
+    with dependencies.validate_closure(directory, digest, keyring=keyring) as closure:
+        plan = dependencies.plan_dependencies(closure, status=status, required_roots=roots)
+        assert {p['name'] for p in plan['packages']} == roots
+        assert plan['required_roots'] == sorted(roots)
+        assert len(closure.packages) > len(roots)
+        assert status.read_text() == ''
+
+
+@pytest.mark.parametrize('roots', [[], ['unsupported'], ['age', 'age'], 'age', [None], [['age']]])
+def test_unsupported_root_subset_fails_before_apt(roots, monkeypatch):
+    monkeypatch.setattr(dependencies, '_run', lambda *a, **kw: pytest.fail('Invalid subset reached apt'))
+    with pytest.raises(InstallError, match='supported subset'):
+        dependencies.plan_dependencies(None, required_roots=roots)
+
+
+def test_apply_revalidates_the_exact_accepted_root_subset(monkeypatch):
+    plan = {'required_roots': ['openssl'], 'packages': []}
+    monkeypatch.setattr(dependencies.os, 'geteuid', lambda: 0)
+    def planning(closure, **kwargs):
+        assert kwargs == {'required_roots': ['openssl']}
+        return plan
+    monkeypatch.setattr(dependencies, 'plan_dependencies', planning)
+    assert dependencies.apply_dependencies(None, plan, accept_changes=True) == plan
+
+
 @pytest.mark.parametrize('change', ['missing', 'altered', 'extra', 'symlink'])
 def test_payload_changes_fail_before_apt(payload, monkeypatch, change):
     directory, keyring, digest = payload
@@ -215,7 +246,7 @@ def test_apply_requires_acceptance_before_inspection(monkeypatch):
 
 def test_apply_rejects_any_plan_change(monkeypatch):
     monkeypatch.setattr(dependencies.os, 'geteuid', lambda: 0)
-    monkeypatch.setattr(dependencies, 'plan_dependencies', lambda _: {'status_sha256': 'changed'})
+    monkeypatch.setattr(dependencies, 'plan_dependencies', lambda _, **kw: {'status_sha256': 'changed'})
     monkeypatch.setattr(dependencies, '_run', lambda *args, **kwargs: pytest.fail('Must not apply a changed plan'))
     with pytest.raises(InstallError, match='state changed'):
         dependencies.apply_dependencies(None, {'status_sha256': 'before'}, accept_changes=True)
@@ -226,7 +257,7 @@ def test_apply_resimulates_exact_packages_before_mutation(monkeypatch, tmp_path)
     plan = {'packages': [operation], 'status_sha256': 'a' * 64}
     calls = []
     monkeypatch.setattr(dependencies.os, 'geteuid', lambda: 0)
-    monkeypatch.setattr(dependencies, 'plan_dependencies', lambda _: plan)
+    monkeypatch.setattr(dependencies, 'plan_dependencies', lambda _, **kw: plan)
     monkeypatch.setattr(dependencies, '_installed', lambda _: {'example': {'Version': '1.0'}})
     def run(command, **kwargs):
         calls.append(command)
