@@ -24,6 +24,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Assemble local release candidates from an exact reviewed commit, with matching
   installer/source inventories and isolated output. Keep publisher authentication,
   corresponding-source notices and redistribution approval as separate release gates.
+  Carry the pinned aria2 source companion for both architectures. Verify Ubuntu
+  source/notices and Debian image sources independently, and inventory every
+  distributed image layer before completing publication checks.
+
+- Bound local packaging-source reads by their original timeout, including silent
+  Git processes, and isolate them from unrelated Git configuration.
 
 - Add authenticated prebuilt inputs for the installer, with explicit release
   selection, offline verification and pinned local packaging tools. Preserve

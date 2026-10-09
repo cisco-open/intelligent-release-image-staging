@@ -403,6 +403,7 @@ TERM_FILE_ALLOWLIST.extend(
         "tools/build-release-candidate.py",
         "tools/build-release-kit.py",
         "tools/iris_installer/device_context.py",
+        "tools/iris_installer/debian_sources.py",
         "tools/iris_installer/device_finalize.py",
         "tools/iris_installer/guest_inputs.py",
         "tools/iris_installer/image_components.py",

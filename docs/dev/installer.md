@@ -298,6 +298,21 @@ This is an inventory, not complete source delivery or release authentication.
 Resolve the listed source requirements and unknown components before publication.
 Keep the record and exact input hashes with the candidate's review evidence.
 
+### Debian image source companion
+
+Use `tools/build-debian-sources.py` with that reviewed inventory and its SHA-256,
+an independently trusted Debian archive keyring, a local source pool and an
+`iris-debian-source-inputs-v1` descriptor. Its three `indexes` entries name
+`repository`, `suite`, `component`, and absolute `inrelease` and `sources` paths:
+Debian trixie/main, Debian trixie-updates/main and security trixie-security/main.
+
+The producer includes exact direct and incorporated source versions from every
+distributed layer. It checks signed indexes and every source file, then writes
+a new archive with `--out`. Use `--verify-bundle` instead to independently check
+an existing archive against the same external inventory and keyring. Neither
+operation runs source recipes. This companion covers Debian source files only;
+other image components and notice preservation need their own review.
+
 ## Bootstrap the installer offline
 
 This developer route needs an authenticated `ubuntu-dependencies` kit and its
