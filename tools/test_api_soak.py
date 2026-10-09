@@ -106,6 +106,43 @@ def test_initial_resource_failure_prevents_all_docker_mutations(monkeypatch, tmp
     assert fixture.manifest["preflight_resources"]["host_available_kib"] == 13 * 1024**2
 
 
+def test_volume_collision_is_refused_before_any_mount_or_bootstrap(monkeypatch, tmp_path):
+    fixture = runner.Fixture.__new__(runner.Fixture)
+    fixture.directory = fixture.docker_root = tmp_path
+    fixture.run_id, fixture.prefix = "ours", "fixture"
+    fixture.server_image, fixture.console_image = "server-image", "console-image"
+    fixture.manifest, fixture.volumes = {"images": {}}, {}
+    fixture.resources = {"container": [], "volume": [], "network": []}
+    fixture.save = lambda: None
+    monkeypatch.setattr(runner, "host_resources", lambda *args: {
+        "host_available_kib": 14 * 1024**2, "disk_free_bytes": 6 * 1024**3,
+        "docker_disk_free_bytes": 6 * 1024**3})
+    calls = []
+    def fake_docker(*args):
+        calls.append(args)
+        if args[:2] == ("image", "inspect"):
+            return SimpleNamespace(stdout=json.dumps([{"Id": args[2]}]))
+        if args[:2] == ("network", "create"):
+            return SimpleNamespace(stdout="owned-network")
+        if args[:2] == ("network", "inspect"):
+            return SimpleNamespace(stdout=json.dumps([{
+                "Id": "owned-network", "Labels": {runner.LABEL: "ours"},
+                "Internal": True, "IPAM": {"Config": [{"Subnet": "172.30.0.0/24"}]}}]))
+        if args[:2] == ("volume", "create"):
+            return SimpleNamespace(stdout="fixture-config")
+        if args[:2] == ("volume", "inspect"):
+            return SimpleNamespace(stdout=json.dumps([{
+                "Name": "fixture-config", "Labels": {runner.LABEL: "foreign"}}]))
+        pytest.fail("A colliding volume must never reach mount/bootstrap or mutation")
+    monkeypatch.setattr(runner, "docker", fake_docker)
+    with pytest.raises(workload.Failure, match="ownership changed"):
+        fixture.start()
+    assert not fixture.resources["container"]
+    assert [args for args in calls if args[0] == "volume"] == [
+        ("volume", "create", "--label", runner.LABEL + "=ours", "fixture-config"),
+        ("volume", "inspect", "fixture-config")]
+
+
 @pytest.mark.parametrize("changed", [{"ExitCode": 1}, {"ExitCode": 137},
                                         {"OOMKilled": True}, {"Running": True},
                                         {"Status": "restarting"}, {"Dead": True},

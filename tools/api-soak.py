@@ -172,6 +172,9 @@ class Fixture:
             name = docker("volume", "create", "--label", LABEL + "=" + self.run_id,
                           self.prefix + "-" + role).stdout.strip()
             self.volumes[role] = self.register("volume", name)
+            # Docker can return an existing named volume. Prove ownership
+            # before any bootstrap mount/chown, not only during cleanup.
+            owned("volume", name, self.run_id)
         self.server_mounts = []
         for role, target in MOUNTS.items():
             self.server_mounts += ["--mount", "type=volume,src=%s,dst=%s" % (self.volumes[role], target)]
