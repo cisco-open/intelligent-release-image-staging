@@ -5,6 +5,11 @@
 
 """Terminal helper for IRIS signing and recovery keys."""
 
+import sys
+
+# Root invocations must not add files to the authenticated installer inventory.
+sys.dont_write_bytecode = True
+
 from iris_installer.key_setup import main
 
 if __name__ == "__main__":

@@ -3,7 +3,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Development entry point for shared installer components."""
+"""Command entry point for shared installer components."""
+
+import sys
+
+# Keep the authenticated installed file inventory unchanged during normal use.
+sys.dont_write_bytecode = True
 
 from iris_installer.cli import main
 
