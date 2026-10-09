@@ -127,7 +127,7 @@ if r['action']=='claim':
   root.mkdir(mode=0o750)
   marker.write_text(json.dumps({'instance_id':identity,'project':project})); marker.chmod(0o600)
   os.chown(root,0,10001)
-else:
+elif r['action']!='ownership' or root.exists():
  if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_bytes())!={'instance_id':identity,'project':project}:
   raise RuntimeError('Console ownership could not be verified')
 def owned():
@@ -189,6 +189,14 @@ def write(name,data,mode):
   if os.path.exists(tmp): os.unlink(tmp)
 action=r['action']
 if action=='claim': pass
+elif action=='ownership':
+ import shutil
+ if r.get('require_runtime') and not root.exists():
+  raise RuntimeError('Recorded Console custody is missing')
+ if shutil.which('docker'):
+  owned()
+ elif r.get('require_runtime'):
+  raise RuntimeError('Recorded Console Docker runtime is unavailable')
 elif action=='provision':
  release=dict(line.rstrip().split('=',1) for line in pathlib.Path('/etc/os-release').read_text().splitlines() if '=' in line)
  if release.get('ID','').strip('"')!='ubuntu' or release.get('VERSION_ID','').strip('"')!='24.04' or platform.machine()!='x86_64':
@@ -432,29 +440,35 @@ class SplitDockerInstall(DockerInstall):
         if 'split-prepared' in completed:
             if digest(self.compose_file) != completed['prepared'] or digest(self.console_build_file) != completed['split-prepared']:
                 raise InstallError('Split deployment configuration changed')
-            return
-        super().prepare()
-        both = json.loads(regular_bytes(self.compose_file))
-        console = both['services'].pop('console')
-        both['services']['iris'].setdefault('environment', {})['IRIS_INSTALLER_TARGET'] = 'docker-split'
-        both['services']['iris'].setdefault('ports', []).append({
-            'target': 9443, 'published': '9443', 'host_ip': self.config['management_bind'], 'protocol': 'tcp'})
-        local_build = {'name': self.config['instance'], 'services': {'console': copy.deepcopy(console)}}
-        local_build['services']['console'].pop('depends_on', None)
-        local_build['services']['console']['volumes'] = []
-        atomic_write(self.console_build_file, json.dumps(local_build, sort_keys=True).encode())
-        atomic_write(self.compose_file, json.dumps(both, sort_keys=True, indent=2).encode())
-        self.journal.document['completed']['prepared'] = digest(self.compose_file)
-        self.journal.document['completed']['split-transport'] = self.transport_fingerprints()
-        self.journal.checkpoint('split-prepared', digest(self.console_build_file))
+        else:
+            super().prepare()
+            both = json.loads(regular_bytes(self.compose_file))
+            console = both['services'].pop('console')
+            both['services']['iris'].setdefault('environment', {})['IRIS_INSTALLER_TARGET'] = 'docker-split'
+            both['services']['iris'].setdefault('ports', []).append({
+                'target': 9443, 'published': '9443', 'host_ip': self.config['management_bind'], 'protocol': 'tcp'})
+            local_build = {'name': self.config['instance'], 'services': {'console': copy.deepcopy(console)}}
+            local_build['services']['console'].pop('depends_on', None)
+            local_build['services']['console']['volumes'] = []
+            atomic_write(self.console_build_file, json.dumps(local_build, sort_keys=True).encode())
+            atomic_write(self.compose_file, json.dumps(both, sort_keys=True, indent=2).encode())
+            self.journal.document['completed']['prepared'] = digest(self.compose_file)
+            self.journal.document['completed']['split-transport'] = self.transport_fingerprints()
+            self.journal.checkpoint('split-prepared', digest(self.console_build_file))
+        # Claim/provision belongs to preparation, never ownership inspection.
+        # Repeating this section recovers an interruption after split-prepared.
         self.remote('claim')
+        if self.prebuilt():
+            from .prebuilt_install import _kit
+            if _kit(self).profile == 'ubuntu-dependencies':
+                from .split_dependencies import provision
+                provision(self)
         self.remote('provision')
 
     def verify_resource_ownership(self):
         super().verify_resource_ownership()
         if 'split-prepared' in self.journal.document['completed']:
-            self.remote('claim')
-            self.remote('provision')
+            self.remote('ownership', require_runtime='console-image' in self.journal.document['completed'])
 
     def _transfer_image(self, image):
         """Stream docker save directly through SSH; no unbounded RAM archive."""
