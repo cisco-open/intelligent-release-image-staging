@@ -7,8 +7,8 @@ import {refusalHint} from './security-lifecycle-model.mjs';
 export const urls = {rotation: '/api/v1/settings/deployment-rotation', trust: '/api/v1/settings/trust-rotation',
   maintenance: '/api/v1/settings/key-maintenance', backups: '/api/v1/settings/backups'};
 export const rotationFamilies = ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce'];
-export const familyLabels = {'management-tls': 'Console-to-server TLS identity', 'device-tls': 'Device-pinned server TLS identity',
-  'peer-ca': 'Private swarm issuing CA', 'instruction-roots': 'Offline instruction signing roots', 'age-identity': 'Server encryption identity',
+export const familyLabels = {'management-tls': 'Console-to-server certificate', 'device-tls': 'Device connection certificate',
+  'peer-ca': 'Private swarm certificate authority', 'instruction-roots': 'Root signing keys', 'age-identity': 'Server encryption key',
   'age-recovery': 'Backup recovery recipient', 'seeder-announce': 'Seeder announce credential'};
 export const topologyLabels = {'single-docker': 'Docker on one host', 'split-docker': 'Docker on separate hosts', kubernetes: 'Kubernetes', unavailable: 'Unavailable'};
 export const stamp = value => epoch(value) && value >= 0;

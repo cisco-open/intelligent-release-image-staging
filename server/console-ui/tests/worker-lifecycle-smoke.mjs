@@ -50,9 +50,12 @@ try {
   const tab = async name => {await page.evaluate(name => {location.hash = '#settings/' + name;}, name); await page.locator('#settings-pane-' + name).waitFor({state: 'visible'}); await idle();};
   await page.goto('http://iris.test/#settings/certificates'); await idle();
   await page.locator('#deployment-rotation-family').selectOption('peer-ca');
+  assert.match(await page.locator('#deployment-rotation-purpose').innerText(), /Encrypted transfers between peers.*Remove.*IRIS deployments/s);
   await page.getByRole('link', {name: 'Open devices to remove IRIS deployments'}).click();
   await page.locator('#view-devices').waitFor({state: 'visible'}); await tab('certificates');
   await page.locator('#deployment-rotation-family').selectOption('device-tls');
+  assert.match(await page.locator('#deployment-rotation-purpose').innerText(), /Device connections.*onboard devices again/s);
+  assert.match(await page.locator('#deployment-rotation-state').innerText(), /Waiting for signed approval/);
   for (const failure of ['wrong-id', 'wrong-state']) {
     mode = failure;
     await page.locator('#deployment-rotation-certificate').setInputFiles({name: 'approved.pem', mimeType: 'text/plain', buffer: Buffer.from(certificate)});

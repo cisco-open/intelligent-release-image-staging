@@ -6,24 +6,24 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rotate credentials and certificates
 
-Replace any credential or certificate in a running deployment. Each section is one
-procedure: install the new value, confirm both sides use it, retire the old one.
-Run one rotation at a time.
+Renew the signing certificate to extend its validity without changing the key.
+Replace a certificate or key when you need a new identity. Run one change at a
+time, verify its consumers, then retire the previous value.
 
 ## In the Console
 
 | Settings page | What it does |
 | --- | --- |
-| **TLS & trust** | Installs the browser certificate this Console serves and the certificate authorities it trusts. |
+| **TLS & trust** | Shows the browser certificate this Console serves and its expiry. Imports existing certificate/key pairs and trusted authorities. |
 | **Device packages** | Compares the certificate the live services present with the public `iris-catalog.pem` copy that onboarding hands to devices. |
-| **Certificates & keys** | Shows public identities, renews instruction certificates, and guides browser TLS and telemetry credential replacement. |
+| **Certificates & keys** | Explains each identity, its deadline and next action. Guides signing renewal, key replacement and deployment maintenance. |
 
 For the guided online-certificate workflow, see
 [Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate).
 For browser TLS and telemetry credentials, use the
 [guided Console workflows](console-credentials.md).
 Installer-owned Docker, split Docker and Kubernetes deployments also have
-[guided deployment trust maintenance](deployment-rotation.md), including offline
+[guided deployment trust maintenance](deployment-rotation.md), including root key holder
 root approval and host-UI recovery-recipient changes. The procedures below
 remain relevant to deployments without that scoped worker.
 

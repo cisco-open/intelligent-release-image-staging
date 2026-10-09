@@ -11,19 +11,23 @@ the browser certificate, metrics scraping token and outbound collector
 authentication. Private material stays in encrypted server configuration and
 its private runtime copy. Deployment-mounted credential files remain unchanged.
 
+The browser certificate protects the browser-to-Console connection. See its
+current identity and expiry under **Settings > TLS & trust**. Device connections
+and the private Console-to-server connection have separate certificates.
+
 ## Replace the browser certificate
 
 1. In **Replace the Console browser certificate**, enter every exact DNS name
    and IP address used to reach the Console. Separate names with commas; do not
    enter URLs or wildcards.
-2. Choose **Request approval from my CA** and select **Create replacement
+2. Choose **My certificate authority (CA)** and select **Create replacement
    request**. Download the public request and submit it to your certificate
    authority. The private key never leaves IRIS through this workflow.
 3. Import the approved public PEM chain, leaf certificate first. Select
    **Validate approval**. The certificate must match the generated key and
    exact requested names, allow TLS server authentication, and be valid now
    with more than seven days remaining.
-4. Review the request ID, requested names and replacement fingerprint. Check
+4. Expand **Replacement names and public fingerprint** and review its details. Check
    browser clients trust its issuing authority. Select **Apply approved certificate**
    and confirm.
 5. Open a new trusted browser connection. Verify the served certificate and
@@ -104,7 +108,7 @@ adopting Console management. See the [mounted-file procedure](rotations.md#rotat
    **Finish verified rotation** and confirm.
 
 IRIS cannot revoke credentials at an external collector. Finishing removes its
-saved previous Console value; it does not attest to remote revocation. Deployment
+saved previous Console value; confirm remote revocation with its administrator. Deployment
 files remain untouched and should not be mistaken for an active override.
 
 Credentials are bound to the exact HTTPS base URL. Changing the telemetry

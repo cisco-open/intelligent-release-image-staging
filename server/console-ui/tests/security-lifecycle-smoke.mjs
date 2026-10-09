@@ -46,7 +46,12 @@ try {
   await page.goto('http://iris.test/#settings/certificates');
   const idle = () => page.waitForFunction(() => window.irisSecurityLifecycle && !window.irisSecurityLifecycle.state.busy && !Object.values(window.irisSecurityLifecycle.state.loading).some(Boolean));
   const tab = async name => {await page.evaluate(name => {location.hash = '#settings/' + name;}, name); await page.locator('#settings-pane-' + name).waitFor({state: 'visible'}); await idle();};
-  await page.locator('#browser-tls-state').getByText('Browser certificate: approved.', {exact: true}).waitFor(); await idle();
+  await page.locator('#browser-tls-state').getByText('Approved certificate ready to apply.', {exact: true}).waitFor(); await idle();
+  assert.match(await page.locator('#browser-tls-next-step').innerText(), /current browser certificate is still active/);
+  assert.match(await page.locator('[data-security-group=tls]').innerText(), /browser to the Console/);
+  await page.locator('#browser-tls-workflow summary').click();
+  assert.match(await page.locator('#browser-tls-identity').innerText(), new RegExp('ab'.repeat(32)));
+  await page.locator('#browser-tls-workflow summary').click();
   for (const failure of ['wrong-state', 'wrong-id']) {
     mode = failure; await page.locator('#browser-tls-apply').click(); await idle();
     assert.match(await page.locator('#browser-tls-result').innerText(), /Outcome unknown/);
@@ -59,6 +64,8 @@ try {
   }
   mode = 'reload-pending'; await page.locator('#browser-tls-apply').click(); await idle();
   assert.match(await page.locator('#browser-tls-result').innerText(), /has not confirmed reload/);
+  assert.match(await page.locator('#browser-tls-state').innerText(), /saved; verify browser access/);
+  assert.match(await page.locator('#browser-tls-next-step').innerText(), /every Console.*alone do not prove/);
   assert.match(await page.locator('#browser-tls-apply').innerText(), /Retry Console certificate reload/);
   mode = 'success'; await page.locator('#browser-tls-apply').click(); await idle();
   assert.match(await page.locator('#browser-tls-result').innerText(), /this Console listener reloaded/);

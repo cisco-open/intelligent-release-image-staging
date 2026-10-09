@@ -85,7 +85,7 @@ export function approvalBody(payload) {
 }
 export function publicApproval(raw, action) {
   if (action === 'renew' || action === 'activate') {
-    if (!publicCertificate(raw)) throw Error(action === 'renew' ? 'Choose the public certificate returned by your custodian, not a private key.' : 'Upload the public approval, never a private key.');
+    if (!publicCertificate(raw)) throw Error(action === 'renew' ? 'Choose the public certificate returned by the root key holder, not a private key.' : 'Upload the public approval, never a private key.');
     return raw;
   }
   if (!ascii(raw) || raw.length > KEYLIST_LIMIT || !raw.startsWith('IRIS-KEYLIST/1\n')) throw Error('Upload the public approval, never a private key.');

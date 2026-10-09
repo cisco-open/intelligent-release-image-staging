@@ -23,7 +23,7 @@ function Certificate({info = {}}) {
   if (!['custom', 'built-in'].includes(info.source)) return <div id="cert-status" role="status" aria-live="polite">Certificate details are unavailable.</div>;
   const expiry = Date.parse(info.not_after || ''), remaining = expiry - Date.now();
   return <div id="cert-status" className="tls-certificate" role="status" aria-live="polite">
-    <div className="tls-certificate-heading"><strong>Active browser identity</strong><span className="badge badge-running">{info.source === 'custom' ? 'Custom' : 'Deployment default'}</span>
+    <div className="tls-certificate-heading"><strong>Certificate this Console serves</strong><span className="badge badge-running">{info.source === 'custom' ? 'Custom' : 'Deployment default'}</span>
       {Number.isFinite(expiry) && <span className={'badge ' + (remaining <= 0 ? 'badge-fail' : remaining < 30 * 86400000 ? 'badge-queued' : 'badge-ok')}>{remaining <= 0 ? 'Expired' : remaining < 30 * 86400000 ? 'Expires soon' : 'In date'}</span>}</div>
     <dl className="tls-certificate-facts">{[['Issued to', info.subject], ['Expires', info.not_after], ['SHA-256 fingerprint', info.fingerprint_sha256]].map(([label, value]) =>
       <div key={label} className={label.startsWith('SHA') ? 'tls-fingerprint' : undefined}><dt>{label}</dt><dd>{value || 'Unavailable'}</dd></div>)}</dl>
@@ -68,7 +68,7 @@ function Settings({controller: c, roots}) {
         <div className="form-actions"><button className="btn" id="peer-tls-save" type="submit" disabled={blocked('peer') || !peer?.can_change || (f.peer.required ? 'required' : 'disabled') === s.peerBase}>Apply</button>{review('peer')}</div>{message('peer', 'peer-tls-msg')}</>)}
       <p className="muted" id="peer-tls-status" role="status" aria-live="polite">{s.peerOk ? `Origin seeder: ${peer.origin.active_mode === 'required' ? 'TLS required' : peer.origin.active_mode === 'disabled' ? 'TLS off' : 'not active'} · ${peer.origin.state}` + (peer.active_devices ? ` · ${peer.active_devices} device(s) must be undeployed before switching.` : '') + (peer.active_jobs ? ` · Wait for ${peer.active_jobs} device job(s) to finish.` : '') : 'Peer transport status unavailable. Reload before changing the mode.'}</p>
       <p className="muted">Undeploy existing agents before switching, then onboard them again. The origin seeder restarts automatically; certificates are provisioned automatically.</p></div>
-    <div className="card tls-identity" data-setting="cert"><h3>Console certificate</h3><p className="muted">The HTTPS identity presented to your browser.</p><Certificate info={data.gui_cert} />
+    <div className="card tls-identity" data-setting="cert"><h3>Console browser certificate</h3><p className="muted">Protects your browser connection. For a guided replacement request, open <a href="#settings/certificates">Certificates &amp; keys</a>. Use the form below if you already have a matching certificate and private key.</p><Certificate info={data.gui_cert} />
       <h4>Replace certificate</h4><p className="muted">Upload a PEM certificate and private key. Private keys are encrypted at rest and never returned by the server.</p>
       <Dropzone id="cert-dropzone" label="Drop a certificate and/or private key PEM file" disabled={s.busy} onFiles={files => c.certificateFiles(files)} />
       {form('cert-form', 'cert', <><details className="tls-pem" ref={certDetails}><summary>Paste certificate and key instead</summary><div className="tls-pem-fields">

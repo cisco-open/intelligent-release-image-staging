@@ -6,6 +6,7 @@ import {useLayoutEffect, useRef, useSyncExternalStore} from 'react';
 import {createRoot} from 'react-dom/client';
 import {createPortal} from 'react-dom';
 import {SecurityLifecycleController} from './security-lifecycle-controller.mjs';
+import {browserGuidance} from './certificate-guidance.mjs';
 
 function SecurityLifecycle({controller: c, roots}) {
   const s = useSyncExternalStore(c.subscribe, c.snapshot), focus = useRef(null), outcomes = useRef({}), add = useRef(null);
@@ -17,38 +18,40 @@ function SecurityLifecycle({controller: c, roots}) {
   }, [s, c]);
   const message = (key, group, id) => <p id={id} role="status" aria-live="polite" tabIndex={-1} ref={node => {outcomes.current[group] = node;}}>{s.messages[key]?.text || ''}</p>;
   const tlsState = s.valid.tls ? s.tls.state : 'unavailable';
+  const tlsGuide = browserGuidance(tlsState);
   const tlsButton = (action, label, ghost = false) => <button type="button" className={'btn' + (ghost ? ' ghost' : '')} id={'browser-tls-' + action} disabled={!c.canTls(action)} onClick={() => c.perform('tls', action)}>{label}</button>;
   const tls = <div className="card" data-security-group="tls"><h3>Replace the Console browser certificate</h3>
-    <p>Create the replacement key here, then download its public request for your CA. Import only the approved certificate. The private key stays encrypted on the server.</p>
-    <div id="browser-tls-workflow"><p id="browser-tls-state" role="status" aria-live="polite">{s.loading.tls ? 'Checking certificate request…' : 'Browser certificate: ' + tlsState.replaceAll('-', ' ') + '.'}</p>
+    <p>This certificate protects the HTTPS connection from your browser to the Console. View its current identity and expiry in <a href="#settings/tls">TLS &amp; trust</a>.</p>
+    <p>IRIS creates a new key for this replacement. Your certificate authority approves the public request; the private key stays encrypted on the server.</p>
+    <div id="browser-tls-workflow"><p id="browser-tls-state" role="status" aria-live="polite">{s.loading.tls ? 'Checking certificate request…' : tlsGuide[0] + '.'}</p>
+      <p id="browser-tls-next-step">{tlsGuide[1]}</p>
       <form id="browser-tls-prepare-form" className="maintenance-form" onSubmit={event => {event.preventDefault(); c.perform('tls', 'prepare');}}>
-        <label>Exact DNS names or IP addresses, comma-separated<input id="browser-tls-names" type="text" required value={s.names} disabled={!c.canTls('prepare')} onChange={event => c.field('names', event.target.value)} placeholder="console.example.com, 192.0.2.10" /></label>
-        <label>Approval method<select id="browser-tls-mode" value={s.mode} disabled={!c.canTls('prepare')} onChange={event => c.field('mode', event.target.value)}><option value="ca">Request approval from my CA</option><option value="self-signed">Create a self-signed certificate (90 days)</option></select></label>
+        <label>Console DNS names or IP addresses, comma-separated<input id="browser-tls-names" type="text" required value={s.names} disabled={!c.canTls('prepare')} onChange={event => c.field('names', event.target.value)} placeholder="console.example.com, 192.0.2.10" /></label>
+        <label>Who approves the certificate?<select id="browser-tls-mode" value={s.mode} disabled={!c.canTls('prepare')} onChange={event => c.field('mode', event.target.value)}><option value="ca">My certificate authority (CA)</option><option value="self-signed">Create a self-signed certificate (90 days)</option></select></label>
         <button className="btn" id="browser-tls-prepare" type="submit" disabled={!c.canTls('prepare')}>Create replacement request</button>
       </form>
-      <p className="muted">Self-signed replacements change browser trust. Download and approve the public certificate on each client before applying it. Management and device-facing certificates are unchanged.</p>
-      {s.valid.tls && s.tls.request_id && <p className="machine">Request: {s.tls.request_id}<br />Requested names: {s.tls.names.join(', ')}</p>}
-      <p className="machine" id="browser-tls-identity">{s.valid.tls && s.tls.fingerprint_sha256 ? 'Replacement SHA256: ' + s.tls.fingerprint_sha256 : ''}</p>
+      <p className="muted">Use exact names, without URLs or wildcards. For a self-signed certificate, configure each browser to trust it before applying. Device and internal server certificates stay unchanged.</p>
+      {s.valid.tls && s.tls.request_id && <details><summary>Replacement names and public fingerprint</summary><p className="machine">Request: {s.tls.request_id}<br />Requested names: {s.tls.names.join(', ')}</p>
+        <p className="machine" id="browser-tls-identity">{s.tls.fingerprint_sha256 ? 'Replacement SHA256: ' + s.tls.fingerprint_sha256 : 'Fingerprint available after approval.'}</p></details>}
       <p className="security-actions"><button className="btn ghost" id="browser-tls-refresh" disabled={s.busy || s.loading.tls} onClick={() => c.refresh('tls', true)}>Refresh request</button>
         <button className="btn ghost" id="browser-tls-csr" disabled={!c.available('tls') || !s.tls?.csr} onClick={() => c.download('csr')}>Download public request</button>
         <button className="btn ghost" id="browser-tls-certificate" disabled={!c.available('tls') || !s.tls?.certificate} onClick={() => c.download('certificate')}>Download approved certificate</button>
         {tlsButton('cancel', 'Cancel replacement', true)}</p>
       <form id="browser-tls-approve-form" className="inline-form" hidden={!s.valid.tls || !['awaiting-approval', 'approved'].includes(tlsState) || s.tls?.mode !== 'ca'} onSubmit={event => {event.preventDefault(); c.perform('tls', 'approve');}}>
-        <label htmlFor="browser-tls-approved">Approved public PEM chain, leaf first</label>
+        <label htmlFor="browser-tls-approved">Approved public certificate file (PEM, Console certificate first)</label>
         <input key={s.fileEpoch} id="browser-tls-approved" type="file" accept=".pem,.crt,.cer" disabled={!c.canTls('approve')} onChange={event => c.file(event.target.files[0])} />
         <button className="btn" id="browser-tls-approve" type="submit" disabled={!c.canTls('approve')}>Validate approval</button>
       </form>
       <p className="security-actions">{tlsButton('apply', tlsState === 'committing' ? 'Recover approved publication' : tlsState === 'published' ? 'Retry Console certificate reload' : 'Apply approved certificate')}</p>
-      {tlsState === 'published' && <p className="muted">Publication is saved on the server. Check the result below for this Console's reload, then verify a new trusted browser connection.</p>}
       {message('tls', 'tls', 'browser-tls-result')}
     </div></div>;
   const item = s.valid.credentials ? c.item() : null, replace = c.canCredential('replace'), metrics = s.family === 'metrics-token';
   const credentialButton = (action, label, ghost = false) => <button className={'btn' + (ghost ? ' ghost' : '')} id={'service-credential-' + action} disabled={!c.canCredential(action)} onClick={() => c.perform('credentials', action)}>{label}</button>;
   const credentials = <div className="card" data-security-group="credentials"><h3>Rotate telemetry credentials</h3>
-    <p>Keep deployment-mounted files intact. Console-managed replacements use the server's encrypted credential storage across restarts.</p>
+    <p>These credentials give monitoring systems access to metrics or let IRIS send telemetry to your collector. Replacements are stored encrypted on the server.</p>
     <div id="service-credential-workflow"><label className="security-field">Credential<select id="service-credential-family" value={s.family} disabled={s.busy} onChange={event => c.family(event.target.value)}><option value="metrics-token">Metrics scraping token</option><option value="collector-headers">Outbound collector authentication</option></select></label>
       <p id="service-credential-state" role="status" aria-live="polite">{s.loading.credentials ? 'Checking credential state…' : !item ? 'Credential state unavailable. Refresh before changing credentials.'
-        : item.state.replaceAll('-', ' ') + (item.observed_at !== null ? '. Successful use observed ' + c.services.formatDate(item.observed_at) + '.' : '. No replacement-use evidence recorded.')}</p>
+        : ({'deployment-managed': 'Using deployment credential files', 'awaiting-verification': 'Replacement saved; confirm all consumers have moved', completed: 'Previous credential retired from IRIS', reverted: 'Previous IRIS setting restored'}[item.state] || 'Review the current credential') + (item.observed_at !== null ? '. Successful use observed ' + c.services.formatDate(item.observed_at) + '.' : '. No replacement-use evidence recorded.')}</p>
       {item?.request_id && <p className="machine">Operation: {item.request_id}{item.endpoint && <><br />Bound destination: {item.endpoint}</>}</p>}
       {item?.state === 'awaiting-verification' && <p className="muted">{item.previous_retained ? 'The previous credential remains stored until retirement.' : 'No previous Console-managed credential is stored.'} Confirm every external consumer before finishing.</p>}
       <div id="service-credential-metrics" hidden={!metrics}>

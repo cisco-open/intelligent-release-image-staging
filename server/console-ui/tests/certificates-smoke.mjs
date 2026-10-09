@@ -30,7 +30,10 @@ try {
       }
       const inventory = {scope: 'server-certificate-files', observed_at: 1790160000, custody: null, items: [
         {id: 'root-a', label: '<img src=x onerror=alert(1)>', kind: 'public-key', source: 'server-file', state: 'public-key-present',
-          fingerprint_sha256: 'SHA256:fixture', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, impact: 'Confirm the public root with its holder.'}]};
+          fingerprint_sha256: 'SHA256:fixture', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, impact: 'Confirm the public root with its holder.'},
+        ...['device-tls', 'management-tls', 'peer-ca', 'instruction-signer'].map(id => ({id, label: id, kind: 'certificate', source: 'server-file',
+          state: id === 'instruction-signer' ? 'renewal-due' : 'within-validity', fingerprint_sha256: 'ab'.repeat(32), valid_from: 1788864000,
+          renew_at: 1790160000, expires_at: 1791456000, refuse_at: id === 'instruction-signer' ? 1790851200 : null, impact: 'Public file observation only.'}))]};
       const fixtures = {'/api/v1/session': {username: 'Certificate fixture', csrf: 'fixture-only'}, '/api/v1/help': {version: 'fixture'},
         '/api/v1/settings/certificates/instruction/rotation': rotation,
         '/api/v1/settings/certificates': inventoryAvailable ? inventory : null,
@@ -43,9 +46,21 @@ try {
   });
   await page.goto('http://iris.test/#settings/certificates');
   const idle = () => page.waitForFunction(() => window.irisCertificates && !window.irisCertificates.state.busy && !Object.values(window.irisCertificates.state.loading).some(Boolean));
-  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor(); await idle();
+  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor(); await idle();
   assert.equal(await page.locator('#certificate-rows img').count(), 0);
-  assert.match(await page.locator('#certificate-rows').innerText(), /<img src=x/); assert.match(await page.locator('#certificate-observed').innerText(), /unknown/);
+  assert.match(await page.locator('#certificate-rows').innerText(), /<img src=x/); assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);
+  assert.match(await page.locator('#iris-certificates-renewal').innerText(), /routine expiry.*keeps its signing key/s);
+  assert.match(await page.locator('#rotation-next-step').innerText(), /current key remains active/);
+  assert.match(await page.locator('#certificate-rows').innerText(), /Public key found/);
+  assert.match(await page.locator('#certificate-rows').innerText(), /Device connection certificate.*Remove IRIS deployments/s);
+  assert.match(await page.locator('#certificate-rows').innerText(), /Instruction signing certificate.*Renewal due.*New instruction signing stops/s);
+  assert.doesNotMatch(await page.locator('#certificate-rows').innerText(), /Policy \/ custody/);
+  const details = page.locator('#signer-rotation > details');
+  assert.equal(await details.evaluate(node => node.open), false);
+  await details.locator('summary').focus(); await page.keyboard.press('Enter');
+  assert.equal(await details.evaluate(node => node.open), true);
+  assert.equal(await page.locator('#rotation-replacement').innerText(), 'bb'.repeat(32));
+  await details.locator('summary').click();
   const choose = () => page.locator('#rotation-certificate').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com AAAA fixture\n')});
   await choose(); await page.locator('#rotation-activate').click(); await idle();
   assert.match(await page.locator('#rotation-result').innerText(), /Outcome unknown/); assert.equal(await page.locator('#rotation-activate').isDisabled(), true);
@@ -63,7 +78,7 @@ try {
     assert.equal(await page.locator('[data-certificate-group] input, [data-certificate-group] select').evaluateAll(nodes => nodes.every(node => node.labels.length > 0)), true);
     if (process.env.IRIS_UI_SCREENSHOTS) {
       await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
-      for (const [id, name] of [['signer-rotation', 'signer'], ['iris-certificates-renewal', 'renewal']]) {
+      for (const [id, name] of [['iris-certificates-inventory', 'inventory'], ['signer-rotation', 'signer'], ['iris-certificates-renewal', 'renewal']]) {
         await page.locator('#' + id).evaluate(node => window.scrollTo(0, window.scrollY + node.getBoundingClientRect().top - 72));
         await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'certificates-' + name + '-' + width + '.png')});
       }
@@ -83,7 +98,8 @@ try {
   await page.evaluate(() => {location.hash = '#settings/general';}); await page.locator('#settings-pane-general').waitFor({state: 'visible'});
   rotation = {...rotation, state: 'retirement-pending', activated_at: 1790160001}; await hold.fulfill({json: rotation}); await idle();
   await page.evaluate(() => {location.hash = '#settings/certificates';});
-  await page.locator('#rotation-state').getByText('Rotation: retirement pending.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('New key active; old key retirement needed.', {exact: true}).waitFor();
+  assert.match(await page.locator('#rotation-next-step').innerText(), /holder must approve/);
   assert.equal(writes.length, 3); assert.match(await page.locator('#rotation-result').innerText(), /Replacement signer active/);
   inventoryAvailable = false; await page.locator('#certificate-refresh').click(); await idle();
   assert.equal(await page.locator('#certificate-rows tr').count(), 0); assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);

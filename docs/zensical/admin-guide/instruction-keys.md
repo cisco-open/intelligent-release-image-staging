@@ -8,19 +8,20 @@ SPDX-License-Identifier: Apache-2.0
 
 An instruction is the signed message the server sends a device saying which
 images to stage and how. A root key, also called a signing root, is one of the
-two offline keys that certify the online signer and sign revocation lists.
-Use this page to replace both roots, recover a lost root, answer a leaked key, publish a new Guest
-Shell agent bundle, or deliver a first instruction file by hand.
+two keys that approve the server's signing key and sign revocation lists.
+Use this page for root replacement, key recovery, Guest Shell bundle updates
+and manual delivery of a first instruction file.
 
-Run every server command in the shell of your deployment:
+Run server commands in your deployment shell:
 `docker compose -f server/docker-compose.yml exec iris sh`, the split-host
 server equivalent, or `kubectl -n iris exec -it deployment/iris-seed-server -c
 iris -- sh`.
 
 !!! warning
 
-    Keep private root keys on their offline stations. Never put one on the
-    server, in installer arguments, or in device configuration.
+    Keep private root keys in your chosen protected storage. Use separate
+    holders or the installer's guided local setup. Never upload a root private
+    key to the Console or put it in device configuration.
 
 ## In the Console
 
@@ -30,12 +31,13 @@ attested roots; the terms it uses are in the next section.
 
 ## Renew the instruction signing certificate
 
-To change the key itself, use [Rotate the online signer](signer-rotation.md).
+Use **Renew signing certificate** for a new 30-day approval of the existing key.
+To change the key itself, use [Replace signing key](signer-rotation.md).
 
 1. Open **Settings → Certificates & keys**. Check the renewal date and the
-   **Signing stops** deadline, which is seven days before expiry.
+   **New instruction signing stops** deadline, which is seven days before expiry.
 2. Select **Download public renewal request**. Send `iris-online.pub` to the
-   offline key holder, who selects **Approve server request** in
+   root signing key holder, who selects **Approve server request** in
    [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
    To provide the filenames directly:
 
@@ -55,12 +57,11 @@ page clears the selected approval file; it does not cancel a submitted renewal.
 
 Renewal keeps the online key, device trust and instruction counters. It checks
 the configured root, principal, key match and validity before publication.
-Private roots remain with their custodians. Bare public keys have no expiry;
-their certificates and custody records have separate deadlines.
+Private roots remain in the holder's chosen protected storage. Public keys have
+no expiry date; their certificates and signed confirmations have separate deadlines.
 
-The inventory reads server files. Its dates alone do not prove which certificate
-a listener is serving or whether signing custody is healthy. The panel reports
-the existing custody status separately.
+The inventory reads server files, not certificates presented by running services.
+Signing checks are reported separately.
 
 ## What you see
 
@@ -90,7 +91,7 @@ file under `$IRIS_CONFIG/instr/`, check that file first.
 ## Replace the two root keys { #instruction-root-ceremony-and-recovery }
 
 Exactly two distinct public roots belong in `$IRIS_CONFIG/instr/roots.d/`, with
-private keys held by separate custodians at separate sites. The encrypted
+private keys kept in your chosen protected storage. The encrypted
 online key is `$IRIS_CONFIG/instr/signing-key.age`; the runtime plaintext is
 `$IRIS_RUN/instr/signing-key`. For the file inventory, see [Data formats and
 states](../reference/state-and-data.md).
@@ -101,7 +102,7 @@ Use the [Console root attestation procedure](deployment-rotation.md#attest-exist
 for initial and quarterly confirmations by both holders. Renew the online
 certificate separately when due. The commands below are the CLI alternative.
 
-1. Have both custodians confirm they hold their private key at separate sites.
+1. Have both root key holders confirm access to their private keys.
    Compare public fingerprints with the approved inventory by running
    `ssh-keygen -lf root-a.pub` and `ssh-keygen -lf root-b.pub` on public
    copies.

@@ -9,6 +9,7 @@ import {WorkerLifecycleController} from './worker-lifecycle-controller.mjs';
 import {familyLabels, topologyLabels, activeJobs} from './worker-lifecycle-model.mjs';
 import {trustFamilies} from './deployment-trust-model.mjs';
 import {maintenanceAction} from './key-maintenance-model.mjs';
+import {deploymentGuidance, trustState} from './certificate-guidance.mjs';
 
 function WorkerLifecycle({controller: c, roots}) {
   const s = useSyncExternalStore(c.subscribe, c.snapshot), focus = useRef(null), outcomes = useRef({});
@@ -24,14 +25,12 @@ function WorkerLifecycle({controller: c, roots}) {
   const blockers = c.ready('rotation', 'backups') ? activeJobs(s) : [];
   const trustButton = (action, label) => <button className={'btn' + (action === 'cancel' ? ' ghost' : '')} id={'deployment-rotation-' + action} disabled={!c.canTrust(action)} onClick={() => c.performTrust(action)}>{label}</button>;
   const deployment = <div className="card" id="deployment-rotation-workflow" data-worker-group="deployment">
-    <h3>Rotate deployment trust and keys</h3>
-    <p>Plan a maintenance window. The host worker verifies a cold backup before changing credentials. Device trust changes require removing IRIS from affected devices first, then onboarding with the replacement trust.</p>
-    <label className="worker-field">Credential family<select id="deployment-rotation-family" value={s.family} disabled={s.busy} onChange={event => c.field('family', event.target.value)}>{Object.entries(familyLabels).filter(([family]) => family !== 'age-recovery').map(([family, label]) => <option value={family} key={family}>{label}</option>)}</select></label>
+    <h3>Deployment keys</h3>
+    <p>Use the installer's maintenance worker to replace deployment credentials. It stops services and verifies a recoverable backup before changing keys. Keep a host session available during downtime.</p>
+    <label className="worker-field">What needs replacing?<select id="deployment-rotation-family" value={s.family} disabled={s.busy} onChange={event => c.field('family', event.target.value)}>{Object.entries(familyLabels).filter(([family]) => family !== 'age-recovery').map(([family, label]) => <option value={family} key={family}>{label}</option>)}</select></label>
+    <p id="deployment-rotation-purpose"><strong>{deploymentGuidance[s.family]?.[0]}.</strong> {deploymentGuidance[s.family]?.[1]}</p>
     <p id="deployment-rotation-worker" role="status">{s.loading.rotation ? 'Checking deployment maintenance…' : worker ? 'Deployment: ' + topologyLabels[worker.target] + '. ' + worker.note : 'Worker state unavailable. Refresh before starting maintenance.'}</p>
-    <p id="deployment-rotation-state" role="status">{trust ? 'Trust request: ' + state.replaceAll('-', ' ') + '. Publication requires stopped writers and confirmed device removal.'
-      : s.family === 'age-identity' ? 'Replace the server encryption identity and retain the independently held recovery recipient. Existing backups keep their original recovery requirements.'
-        : s.family === 'seeder-announce' ? 'Pause normal writers while an isolated tracker and seeder verify the replacement credential against published torrents.'
-          : 'Replace the internal TLS key and certificate, update Console trust, and verify authenticated connections from every deployed Console.'}</p>
+    {trust && <p id="deployment-rotation-state" role="status">{trustState(state)}.</p>}
     {blockers.length > 0 && <p className="muted">A worker operation is running or requires recovery. Review its history before starting another operation.</p>}
     {s.unknown.backups && <p>Review the uncertain operation in <a href="#settings/backups">Backup &amp; restore</a> before starting maintenance.</p>}
     <div id="deployment-rotation-trust" hidden={!trust}>
@@ -43,13 +42,13 @@ function WorkerLifecycle({controller: c, roots}) {
         <label>Approval method<select id="deployment-rotation-mode" value={s.mode} disabled={!c.canTrust('prepare')} onChange={event => c.field('mode', event.target.value)}><option value="ca">Request approval from my CA</option><option value="self-signed">Create a self-signed certificate (90 days)</option></select></label>
       </div>
       <div id="deployment-rotation-roots" hidden={s.family !== 'instruction-roots'}>
-        <p>Create replacement keys in <strong>IRIS Offline signing</strong> on the key holder's machine. Import only the public root files and keep the existing root names.</p>
+        <p>Each root signing key holder creates a replacement with <code>iris-key-setup</code> wherever they keep that private key. Import only public root files and keep the existing root names.</p>
         <div className="maintenance-form"><label>First existing root name<input id="deployment-rotation-root-a-name" value={s.rootA} disabled={!c.canTrust('prepare')} onChange={event => c.field('rootA', event.target.value)} /></label>
           {files('root-a', 'First replacement public root', 'prepare', '.pub')}
           <label>Second existing root name<input id="deployment-rotation-root-b-name" value={s.rootB} disabled={!c.canTrust('prepare')} onChange={event => c.field('rootB', event.target.value)} /></label>
           {files('root-b', 'Second replacement public root', 'prepare', '.pub')}</div>
         <p>The first root approves the preserved revocation list. Approve the online key with either replacement root.</p>
-        {item?.requires_package_rebuild && <p className="muted">Replacing offline roots requires rebuilt device packages and re-onboarding. The worker verifies package preparation before completing maintenance.</p>}
+        {item?.requires_package_rebuild && <p className="muted">Replacing signing roots requires rebuilt device packages and re-onboarding. The worker verifies package preparation before completing maintenance.</p>}
       </div>
       <p className="worker-actions">{trustButton('prepare', 'Prepare replacement trust')}
         <button className="btn ghost" id="deployment-rotation-download" disabled={!c.available('deployment') || !c.ready('trust') || !(item?.csr || item?.certificate || item?.online_public_key)} onClick={() => c.downloadTrust()}>Download public approval files</button>
@@ -61,12 +60,13 @@ function WorkerLifecycle({controller: c, roots}) {
       </div>
       <p className="machine" id="deployment-rotation-fingerprint">{item?.fingerprint_sha256 ? 'Replacement SHA256: ' + item.fingerprint_sha256 : ''}</p>
       <div id="deployment-rotation-attestation" hidden={!attest}>
-        <h4>Confirm each offline root's custody</h4>
-        <p id="deployment-rotation-attested" role="status">Fresh signed custody evidence: {item?.attested_root_ids.join(', ') || 'none'}. Each root needs its own signed approval.</p>
-        <label className="worker-field">Root to attest<select id="deployment-rotation-attestation-root" value={s.attestRoot} disabled={s.busy || !attest} onChange={event => c.field('attestRoot', event.target.value)}>{Object.keys(item?.roots || {}).map(root => <option key={root}>{root}</option>)}</select></label>
-        <p className="worker-actions">{trustButton('attestation-request', 'Download root attestation request')}</p>
+        <h4>Confirm root key access</h4>
+        <p>Ask each holder to sign a public request with their root key. This confirms recent access to that key without replacing it or stopping services.</p>
+        <p id="deployment-rotation-attested" role="status">Recent signed confirmations: {item?.attested_root_ids.join(', ') || 'none'}. Each root needs its own approval, renewed before 180 days.</p>
+        <label className="worker-field">Root key to confirm<select id="deployment-rotation-attestation-root" value={s.attestRoot} disabled={s.busy || !attest} onChange={event => c.field('attestRoot', event.target.value)}>{Object.keys(item?.roots || {}).map(root => <option key={root}>{root}</option>)}</select></label>
+        <p className="worker-actions">{trustButton('attestation-request', 'Download root confirmation request')}</p>
         {files('attestation-keylist', 'Approved public revocation list', 'attestation-apply')}
-        <p className="worker-actions">{trustButton('attestation-apply', 'Validate root attestation')}</p>
+        <p className="worker-actions">{trustButton('attestation-apply', 'Validate root confirmation')}</p>
       </div>
     </div>
     <p className="worker-actions"><button className="btn" id="deployment-rotation-apply" disabled={!c.canRotate()} onClick={() => c.rotate()}>Back up and rotate during downtime</button>
@@ -77,9 +77,9 @@ function WorkerLifecycle({controller: c, roots}) {
         {row.state === 'recovery-required' && <button className="btn ghost" disabled={!c.canRotate(row.id)} onClick={() => c.rotate(row.id)}>Recover approved operation</button>}</td></tr>)}</tbody></table></div>
   </div>;
   const maintenance = s.valid.maintenance ? s.maintenance : null, draft = s.schedule, editable = c.available('maintenance') && c.ready('maintenance');
-  const actionNames = {reviewed: 'Acknowledge review', 'retire-management': 'Retire previous credential', 'reconcile-management': 'Check credential recovery', retry: 'Retry after custody review'};
+  const actionNames = {reviewed: 'Acknowledge review', 'retire-management': 'Retire previous credential', 'reconcile-management': 'Check credential recovery', retry: 'Retry after key review'};
   const scheduler = <div className="card" id="key-maintenance" data-worker-group="maintenance"><h3>Scheduled key maintenance</h3>
-    <p>Choose a UTC window and an action for each key family. No schedules are enabled initially. Review reminders leave credentials unchanged; signer preparation still needs offline approval.</p>
+    <p>Choose a UTC window for each credential. All schedules start disabled. Some actions prepare or replace keys; others only remind you to review them. Signing-key replacement still needs a root key holder's approval.</p>
     <p id="maintenance-worker" role="status">{s.loading.maintenance ? 'Checking scheduler…' : maintenance ? 'Scheduler: ' + maintenance.worker.replaceAll('-', ' ') + (maintenance.observed_at === null ? '.' : '. Last check ' + new Date(maintenance.observed_at * 1000).toISOString() + '.') : 'Scheduler status unavailable. Refresh before changing a schedule.'}</p>
     <p className="worker-actions"><button className="btn ghost" id="maintenance-refresh" disabled={s.busy || s.loading.maintenance} onClick={() => c.review('maintenance')}>Refresh maintenance</button></p>
     <div className="table-scroll" tabIndex={0} role="region" aria-label="Scheduled maintenance actions"><table className="tbl"><thead><tr>{['Key family', 'Scheduled action', 'Approval or verification'].map(title => <th key={title} scope="col">{title}</th>)}</tr></thead>

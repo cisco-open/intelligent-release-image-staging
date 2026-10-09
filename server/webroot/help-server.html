@@ -156,6 +156,12 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     </ol>
 
     <h2>Device packages and certificate changes</h2>
+    <p>In <strong>Settings → Certificates &amp; keys</strong>, use
+    <strong>Renew signing certificate</strong> to extend validity with the same key.
+    Use <strong>Replace signing key</strong> to prepare a new key, apply a root key
+    holder's approval, and retire the old key. <strong>Deployment keys</strong>
+    explains the separate connection and encryption keys. The browser certificate
+    this Console serves, including its expiry, is in <strong>TLS &amp; trust</strong>.</p>
     <p>For an uncertain instruction certificate renewal, download a fresh public
     renewal request before submitting again. For an uncertain signer rotation,
     select <strong>Refresh rotation</strong> and review the request ID,

@@ -6,9 +6,9 @@ import {CERTIFICATE_LIMIT, KEYLIST_LIMIT, certificateUrl, signerUrl, checkedInve
   checkedRenewal, checkedSignerResult, signerAllows, retirementPayload, approvalBody, publicApproval, requestId, refusedCertificateMessage} from './certificates-model.mjs';
 
 const confirmations = {
-  prepare: 'Prepare a new online signing key for offline approval? The current signer keeps working until you apply approval.',
+  prepare: 'Prepare a new signing key for a root key holder to approve? The current key keeps working until you apply approval.',
   activate: 'Switch to the approved replacement signer? This cannot be cancelled afterward. Device roots and counters stay unchanged.',
-  retire: 'Publish the approved revocation of the previous signer? Devices must fetch current instructions and the new keylist. Verify fleet acceptance afterward.',
+  retire: 'Publish the approved revocation of the previous signing key? Devices must fetch current instructions and the new revocation list. Verify device acceptance afterward.',
   cancel: 'Discard the pending replacement? The current signer will be kept.',
 };
 export class CertificatesController {
@@ -82,7 +82,7 @@ export class CertificatesController {
       }
       if (response.status !== 200 || !checkedRenewalRequest(data)) throw Error();
       this.update({request: data, unknown: {...this.state.unknown, renew: false}});
-      this.download('iris-online.pub', data.public_key, 'renew', 'Send iris-online.pub to your offline custodian. Return the approved public certificate. If you reopen this page, prepare the request again before importing.');
+      this.download('iris-online.pub', data.public_key, 'renew', 'Ask a root signing key holder to approve iris-online.pub with iris-key-setup. Return only the public certificate. If you reopen this page, download a fresh request before importing.');
     } catch {
       this.say('renew', 'Public renewal request unavailable. Check signing status and prepare the request again.');
     } finally {this.update({busy: false}); if (this.visible()) await this.refreshAll();}
@@ -143,15 +143,15 @@ export class CertificatesController {
         if (group === 'renew') {
           this.update({request: null});
           this.say(group, 'Renewal applied. Expires ' + this.services.formatDate(data.expires_at) + '; signing stops ' + this.services.formatDate(data.refuse_at) +
-            '. The signing key and device trust are unchanged.' + (data.status_refreshed ? '' : ' Custody status refresh is pending; check again shortly.'), 'success');
+            '. The signing key and device trust are unchanged.' + (data.status_refreshed ? '' : ' Signing status refresh is pending; check again shortly.'), 'success');
         } else if (action === 'retirement-request') {
           this.say(group, 'Retirement request prepared. Download it again if you left this page before it finished.', 'info');
-          if (context === this.context && this.visible()) this.download('keylist.payload', publicBytes, group, 'Retirement request downloaded. Obtain approval from ' + payload.root_id + ' on its offline station.');
+          if (context === this.context && this.visible()) this.download('keylist.payload', publicBytes, group, 'Retirement request downloaded. Ask the holder of ' + payload.root_id + ' to approve it with iris-key-setup.');
         } else {
           this.pendingId = null; this.update({signer: data});
-          this.say(group, action === 'activate' ? (data.state === 'completed' ? 'Replacement signer active; previous key retirement is published. Verify fleet acceptance.' : 'Replacement signer active. Complete offline retirement approval next.')
+          this.say(group, action === 'activate' ? (data.state === 'completed' ? 'Replacement signer active; previous key retirement is published. Verify fleet acceptance.' : 'Replacement signer active. Ask a root key holder to approve retirement of the previous key next.')
             : action === 'retire' ? 'Retirement approval validated and published. Verify fleet acceptance.'
-              : action === 'cancel' ? 'Pending replacement cancelled; active signer unchanged.' : 'Replacement prepared. Download its public key for offline approval.', 'success');
+              : action === 'cancel' ? 'Pending replacement cancelled; active signer unchanged.' : 'Replacement prepared. Download its public key for a root key holder to approve.', 'success');
         }
       } else {
         this.update({unknown: {...this.state.unknown, [group]: true}, ...(group === 'renew' ? {request: null} : {})});

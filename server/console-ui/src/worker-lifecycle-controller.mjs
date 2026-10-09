@@ -272,13 +272,13 @@ export class WorkerLifecycleController {
           : payload.action === 'reviewed' ? 'Review acknowledged. This is not evidence of credential rotation.' : 'Operation ' + job.id + ': ' + job.state.replaceAll('-', ' ') + '. Review its evidence.', job?.state === 'intervention-required' ? 'error' : 'success');
       } else if (result.request) {
         this.update({attestation: result.request});
-        try {this.services.download('keylist-payload.json', result.request.payload); this.say(group, 'Public attestation request downloaded for ' + result.request.root_id + '. Approve it with that root, then import the signed list.', 'success');}
+        try {this.services.download('keylist-payload.json', result.request.payload); this.say(group, 'Public root confirmation request downloaded for ' + result.request.root_id + '. Its holder approves it with that root key, then returns the signed public list.', 'success');}
         catch {this.say(group, 'Attestation request prepared, but download failed. Refresh, then download the current request again.');}
       } else {
         if (this.state.trust) this.update({trust: {...this.state.trust, items: this.state.trust.items.map(row => row.family === result.state.family ? result.state : row)}});
         this.say(group, payload.action === 'approve' ? 'Public approval validated for request ' + payload.request_id + '. Confirm downtime separately before publication.'
           : payload.action === 'cancel' ? 'Replacement request ' + payload.request_id + ' cancelled. Active trust remains unchanged.'
-            : payload.action === 'attestation-apply' ? 'Signed current-root attestation applied for ' + payload.root_id + ', request ' + payload.request_id + '. Review the other root separately.'
+            : payload.action === 'attestation-apply' ? 'Signed root confirmation applied for ' + payload.root_id + ', request ' + payload.request_id + '. Confirm the other root separately.'
               : 'Replacement prepared: ' + payload.request_id + '. Download public files and complete the required approvals.', 'success');
       }
     } catch (error) {

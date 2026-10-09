@@ -1724,8 +1724,11 @@ def test_docs_phase1_operations_root_and_offline_runbooks():
     operations = _page("admin-guide/instruction-keys.md")
     _assert_section_terms(operations, "Replace the two root keys",
                           ("quarterly two-root ceremony", "two distinct public roots",
-                           "custodians", "sites", "fingerprints"),
+                           "chosen protected storage", "root key holders", "fingerprints"),
                  "quarterly two-root ceremony is incomplete")
+    _assert_unit(operations, ("private root keys", "separate", "guided local setup",
+                             "Never upload", "Console"),
+                 "root key storage must allow the supported setup choices without inviting private-key upload")
     _assert_section_terms(operations, "If one root key is lost",
                           ("surviving offline custodian", "next online certificate",
                            "keylist", "No device trust change"),
