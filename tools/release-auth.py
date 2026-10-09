@@ -31,7 +31,7 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_command(artifact, tag, commit, bundle=None):
+def verify_command(artifact, tag, commit, bundle=None, *, trusted_root=None):
     validate_tag(tag)
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Expected a full source commit SHA")
@@ -43,6 +43,8 @@ def verify_command(artifact, tag, commit, bundle=None):
                "--deny-self-hosted-runners"]
     if bundle is not None:
         command.extend(["--bundle", str(bundle)])
+    if trusted_root is not None:
+        command.extend(["--custom-trusted-root", str(trusted_root)])
     return command
 
 
