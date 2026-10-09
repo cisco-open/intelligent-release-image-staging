@@ -8,6 +8,7 @@ Production roots are always supplied as public keys. This module never creates
 offline private roots or an administrator, and never contacts inventory devices.
 """
 
+from contextlib import ExitStack
 import hashlib
 import ipaddress
 import json
@@ -29,6 +30,8 @@ WAITING_APPROVAL = 20
 OWNER_CLAIM = 21
 PRODUCTION_REVIEW = 22
 BASE_CONFIG_KEYS = {"target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls"}
+NATIVE_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm")
+NATIVE_FILES = frozenset(name + suffix for name in NATIVE_PACKAGES for suffix in ("", ".manifest"))
 
 
 def digest(path):
@@ -37,6 +40,77 @@ def digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             value.update(block)
     return value.hexdigest()
+
+
+def _native_hash(path):
+    """Hash bounded immutable regular output without following links."""
+    from . import device_finalize as f
+    path = f._path(path)
+    maximum = 65536 if path.name.endswith(".manifest") else f.MAX_ARCHIVE
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
+            raise InstallError("Native package must be a bounded nonempty regular file")
+        actual, size = f._copy(stream, None, maximum)
+        if size != before.st_size or f._fingerprint(before) != f._fingerprint(os.fstat(stream.fileno())):
+            raise InstallError("Native package changed during verification")
+    f._unchanged(path, before)
+    return actual
+
+
+def _finalized_package_hashes(directory, receipt, finalization_sha256):
+    """Bind all six wrapper files to the selected finalized runtime."""
+    hashes = {name: _native_hash(directory / name) for name in NATIVE_FILES}
+    for name in NATIVE_PACKAGES:
+        raw = regular_bytes(directory / (name + ".manifest"), 65536)
+        if hashlib.sha256(raw).hexdigest() != hashes[name + ".manifest"]:
+            raise InstallError("Native package provenance changed during verification")
+        try:
+            lines = raw.decode("ascii").splitlines()
+            rows = [line.split("=", 1) for line in lines]
+            values = dict(rows)
+        except (UnicodeError, ValueError):
+            raise InstallError("Native package provenance is invalid") from None
+        expected = {"format": "iris-device-wrapper-v2", "wrapper_kind": "xr-appmgr" if name.endswith(".rpm") else "iox",
+                    "wrapper_file": name, "wrapper_sha256": hashes[name],
+                    "platform": "linux/arm64" if name == "iris-arm64.tar" else "linux/amd64",
+                    "canonical_index_digest": receipt["index_digest"],
+                    "canonical_archive_sha256": receipt["archive_sha256"],
+                    "canonical_neutral_source_sha256": receipt["neutral_source_sha256"],
+                    "canonical_finalization_sha256": finalization_sha256}
+        if len(rows) != len(expected) or values != expected:
+            raise InstallError("Native package provenance differs from the selected finalized runtime")
+    return hashes
+
+
+def _publish_prebuilt_packages(source, destination, hashes):
+    """Finish an interrupted publication without replacing existing artifacts."""
+    from . import device_finalize as f
+    destination = f._path(destination)
+    parent = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        held = os.fstat(parent)
+        for name in sorted(NATIVE_FILES):
+            path = destination / name
+            if path.exists() or path.is_symlink():
+                if _native_hash(path) != hashes[name]:
+                    raise InstallError("An existing native artifact differs; preserve it before resuming")
+                continue
+            with tempfile.TemporaryDirectory(prefix=".iris-native-", dir=Path('/proc/self/fd') / str(parent)) as temporary:
+                snapshot = Path(temporary) / name
+                actual, _, _ = f._snapshot(source / name, snapshot, f.MAX_ARCHIVE)
+                if actual != hashes[name]:
+                    raise InstallError("Native package changed before publication")
+                snapshot.chmod(0o444)
+                with snapshot.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                current = destination.lstat()
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                    raise InstallError("Native artifacts directory changed during publication")
+                f._publish(parent, Path(temporary).name + "/" + name, name)
+    finally:
+        os.close(parent)
 
 
 def clean_env():
@@ -376,11 +450,10 @@ class DockerInstall:
         self.journal.checkpoint("signing", True)
         return True
 
-    def packages(self):
+    def acquire_packages(self):
+        """Acquire local native wrappers; each topology retains runtime checks."""
         if self.prebuilt():
-            # CLI selection remains unavailable until deployment-specific
-            # wrapper finalization is integrated. Never fall back to a build.
-            raise InstallError('Prebuilt device package finalization is not configured; no source build was started')
+            return self._acquire_prebuilt_packages()
         if "packages" not in self.journal.document["completed"]:
             self.command(["bash", self.source / "tools/get-ioxclient.sh", self.base / "bin"])
             for arch in ("arm64", "amd64"):
@@ -390,6 +463,128 @@ class DockerInstall:
             self.journal.checkpoint("packages", {
                 path.name: digest(path) for name in ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm")
                 for path in (self.base / "artifacts" / name, self.base / "artifacts" / (name + ".manifest"))})
+
+    def _acquire_prebuilt_packages(self):
+        from . import device_context as context, device_finalize as f
+        from .prebuilt_device import prepare_runtime
+        from .prebuilt_install import _kit
+        tool = self.journal.document.get("prebuilt_ioxclient")
+        if (not isinstance(tool, str) or not Path(tool).is_absolute()
+                or any(ord(char) < 32 for char in tool)):
+            raise InstallError("Prebuilt packaging requires the explicitly supplied local ioxclient path")
+        from .packaging_inputs import prepare_packaging_inputs
+        kit = _kit(self)
+        completed = self.journal.document["completed"]
+        artifacts = self.base / "artifacts"
+        with ExitStack() as scope:
+            inputs_fd = os.open(self.base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            scope.callback(os.close, inputs_fd)
+            temporary = scope.enter_context(tempfile.TemporaryDirectory(prefix="prebuilt-package-inputs-",
+                dir=Path("/proc/self/fd") / str(inputs_fd)))
+            scratch = Path(temporary).resolve()
+            inputs = prepare_packaging_inputs(kit, scratch / "tools")
+            if inputs.kit_receipt != kit.receipt():
+                raise InstallError("Packaging inputs differ from the selected authenticated kit")
+            runtime, finalization_sha256 = prepare_runtime(self)
+            raw = regular_bytes(runtime / context.RECEIPT, f.MAX_JSON)
+            if hashlib.sha256(raw).hexdigest() != finalization_sha256:
+                raise InstallError("Finalized runtime receipt changed before packaging")
+            receipt = context.validate_receipt(f._load(raw))
+            intent = {"schema": 1, "kit": kit.receipt(), "finalization_sha256": finalization_sha256,
+                      "appmgr_sha256": inputs.appmgr_sha256, "appmgr_revision": inputs.appmgr_revision,
+                      "ioxclient_sha256": inputs.ioxclient_sha256}
+            previous = completed.get("prebuilt-package-intent")
+            if previous is not None and previous != intent:
+                raise InstallError("Recorded native packaging inputs changed; preserve the journal")
+            if previous is None:
+                if ("packages" in completed or "prebuilt-package-generated" in completed
+                        or any((artifacts / name).exists() or (artifacts / name).is_symlink() for name in NATIVE_FILES)):
+                    raise InstallError("Unrecorded native artifacts exist; refusing to replace or adopt them")
+                # Verify the licensed local program before recording build intent.
+                local_tool = context.prepare_ioxclient(tool, scratch / "ioxclient", expected_sha256=inputs.ioxclient_sha256)
+                self.journal.checkpoint("prebuilt-package-intent", intent)
+            else:
+                local_tool = None
+            generated = completed.get("prebuilt-package-generated")
+            if generated is None:
+                if "packages" in completed:
+                    raise InstallError("Recorded native package generation is missing; refusing to rebuild")
+                if local_tool is None:
+                    local_tool = context.prepare_ioxclient(tool, scratch / "ioxclient", expected_sha256=inputs.ioxclient_sha256)
+                environment = dict(self.env, IOXCLIENT=str(local_tool))
+                for key in ("IRIS_INSTRUCTION_ROOTS_DIR", "IOXCLIENT_HOME", "APPMGR_BUILD_CMD"):
+                    environment.pop(key, None)
+                def command(arguments):
+                    return self.runner([str(item) for item in arguments], env=environment)
+                # Pin generated bytes before serving them. An unrecorded
+                # interrupted directory is never adopted: a later attempt
+                # generates fresh bytes in a different private directory.
+                base_fd = os.open(self.base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                anchored_output, retain = None, False
+                try:
+                    held = os.fstat(base_fd)
+                    anchored_output = Path(tempfile.mkdtemp(prefix="prebuilt-native-packages-",
+                        dir=Path("/proc/self/fd") / str(base_fd)))
+                    output = anchored_output.resolve()
+                    finalized = ["--finalized-dir", runtime, "--finalization-sha256", finalization_sha256]
+                    for arch in ("arm64", "amd64"):
+                        command(["bash", self.source / "tools/stage-iox-package.sh", "--arch", arch,
+                                 "--artifacts-dir", output, *finalized, "--ioxclient-sha256", inputs.ioxclient_sha256])
+                    command(["bash", self.source / "tools/build-xr-package.sh", "--out", output, *finalized,
+                             "--appmgr-archive", inputs.appmgr_archive, "--appmgr-sha256", inputs.appmgr_sha256,
+                             "--appmgr-revision", inputs.appmgr_revision])
+                    if set(path.name for path in output.iterdir()) != NATIVE_FILES:
+                        raise InstallError("Generated native package directory contains unexpected files")
+                    hashes = _finalized_package_hashes(output, receipt, finalization_sha256)
+                    for path in output.iterdir():
+                        path.chmod(0o444)
+                        with path.open("rb") as stream:
+                            os.fsync(stream.fileno())
+                    _sync_directory(output)
+                    os.fsync(base_fd)
+                    current = self.base.lstat()
+                    if (self.base.resolve() != self.base
+                            or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)):
+                        raise InstallError("Installation directory changed during native packaging")
+                    generated = {"schema": 1, "directory": output.name, "hashes": hashes}
+                    # A checkpoint can persist and then raise. Preserve its
+                    # input directory in either case; only its journal record
+                    # can authorize reuse on resume.
+                    retain = True
+                    self.journal.checkpoint("prebuilt-package-generated", generated)
+                finally:
+                    if anchored_output is not None and not retain:
+                        shutil.rmtree(anchored_output)
+                    os.close(base_fd)
+            if (not isinstance(generated, dict) or set(generated) != {"schema", "directory", "hashes"}
+                    or type(generated["schema"]) is not int or generated["schema"] != 1
+                    or not isinstance(generated["directory"], str)
+                    or not re.fullmatch(r"prebuilt-native-packages-[a-z0-9_]{8}", generated["directory"])
+                    or not isinstance(generated["hashes"], dict) or set(generated["hashes"]) != NATIVE_FILES
+                    or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                           for value in generated["hashes"].values())):
+                raise InstallError("Recorded native package generation is invalid")
+            cache = self.base / generated["directory"]
+            if not cache.exists() and not cache.is_symlink():
+                raise InstallError("Recorded native package cache is missing; refusing to rebuild")
+            info = cache.lstat()
+            if (cache.resolve() != cache or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700 or set(path.name for path in cache.iterdir()) != NATIVE_FILES):
+                raise InstallError("Native package cache contains unexpected files or permissions")
+            hashes = _finalized_package_hashes(cache, receipt, finalization_sha256)
+            if generated["hashes"] != hashes:
+                raise InstallError("Recorded native package cache changed; refusing to reuse it")
+            if "packages" in completed:
+                if completed["packages"] != hashes or _finalized_package_hashes(artifacts, receipt, finalization_sha256) != hashes:
+                    raise InstallError("Published native package checkpoint changed")
+                return
+            _publish_prebuilt_packages(cache, artifacts, hashes)
+            if _finalized_package_hashes(artifacts, receipt, finalization_sha256) != hashes:
+                raise InstallError("Published native packages changed during verification")
+            self.journal.checkpoint("packages", hashes)
+
+    def packages(self):
+        self.acquire_packages()
         for name, expected in self.journal.document["completed"]["packages"].items():
             if digest(self.base / "artifacts" / name) != expected:
                 raise InstallError("Published package changed; refusing to report installation complete")

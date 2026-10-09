@@ -637,14 +637,7 @@ class KubeInstall(DockerInstall):
         return self.kube("exec", "-i", self._pod("console"), "-c", "console", "--", *args, **kwargs)
 
     def packages(self):
-        if self.prebuilt():
-            raise InstallError('Prebuilt device package finalization is not configured; no source build was started')
-        if "packages" not in self.journal.document["completed"]:
-            self.command(["bash", self.source / "tools/get-ioxclient.sh", self.base / "bin"])
-            for arch in ("arm64", "amd64"):
-                self.command(["bash", self.source / "tools/stage-iox-package.sh", "--arch", arch, "--artifacts-dir", self.base / "artifacts"])
-            self.command(["bash", self.source / "tools/build-xr-package.sh", "--out", self.base / "artifacts"])
-            self.journal.checkpoint("packages", {p.name: digest(p) for name in ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm") for p in (self.base / "artifacts" / name, self.base / "artifacts" / (name + ".manifest"))})
+        self.acquire_packages()
         for name, expected in self.journal.document["completed"]["packages"].items():
             if not re.fullmatch(r"iris-(?:amd64\.tar|arm64\.tar|xr\.rpm)(?:\.manifest)?", name) or not re.fullmatch(r"[0-9a-f]{64}", expected):
                 raise InstallError("Native package checkpoint contains an unsupported artifact")

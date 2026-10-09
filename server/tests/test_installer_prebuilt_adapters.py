@@ -356,9 +356,9 @@ def test_split_remote_provision_request_carries_explicit_prebuilt_mode(adapter):
 
 
 @pytest.mark.parametrize('target', CLASSES)
-def test_unwired_device_finalization_cannot_fall_back_to_download_or_build(adapter, target):
+def test_missing_explicit_packager_cannot_fall_back_to_download_or_build(adapter, target):
     obj = adapter(target)
-    with pytest.raises(InstallError, match='finalization is not configured'):
+    with pytest.raises(InstallError, match='explicitly supplied local ioxclient'):
         obj.packages()
     assert obj.calls == [] and obj.journal.document['completed'] == {}
 
