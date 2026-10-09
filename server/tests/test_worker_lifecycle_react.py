@@ -74,11 +74,17 @@ await c.performTrust('cancel'); assert.equal(c.item().state, 'cancelled');
 c.field('family', 'instruction-roots');
 for (const name of ['root-a', 'root-b']) {
   c.field('attestRoot', name); await c.performTrust('attestation-request');
-  assert.match(c.state.messages.deployment.text, /Public attestation request downloaded/, c.state.messages.deployment.text);
+  const attestationRequest = c.state.attestation;
+  assert.equal(attestationRequest.root_id, name);
+  assert.equal(c.item().attestation_request_id, attestationRequest.request_id);
+  assert.equal(c.state.messages.deployment.text, 'Public root confirmation request downloaded for ' + name + '. Its holder approves it with that root key, then returns the signed public list.');
   const payload = downloads['keylist-payload.json'];
   const signature = execFileSync('ssh-keygen', ['-Y', 'sign', '-f', config.directory + '/old-' + name, '-n', 'iris-keylist-v1'], {input: payload, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']});
   c.file('attestation-keylist', file(payload + Buffer.from(signature).toString('base64') + '\n'));
-  await c.performTrust('attestation-apply'); assert.match(c.state.messages.deployment.text, /Signed current-root attestation applied/, c.state.messages.deployment.text);
+  await c.performTrust('attestation-apply');
+  assert.equal(c.state.messages.deployment.text, 'Signed root confirmation applied for ' + name + ', request ' + attestationRequest.request_id + '. Confirm the other root separately.');
+  assert.equal(c.item().attestation_request_id, attestationRequest.request_id);
+  assert.equal(c.item().attestation_root_id, name);
   assert.ok(c.item().attested_root_ids.includes(name));
   assert.equal(c.item().attestation_applied, undefined, 'GET public status never repeats the POST confirmation');
 }
