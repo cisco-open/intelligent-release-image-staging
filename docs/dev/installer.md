@@ -219,6 +219,12 @@ both committed aria2 architectures and their notices. It is checked before host
 changes. The server image supplies the compiled helpers, and the runtime
 publisher adds the deployment's public roots and checks the served bundle.
 
+Prebuilt backups include the finalized runtime and the recorded native package
+cache. Same-deployment restore can recover a missing cache from a matching
+backup; it preserves and refuses altered or incomplete existing directories.
+A backup without these caches needs the originals to remain intact. Keep the
+release kit, verifier and independent trust files at their recorded locations.
+
 The current publication workflow supplies source-build artifacts. Complete kit
 publication, dependency bootstrap and offline topology qualification remain
 release gates. A local candidate or a successful wrapper build is not proof of

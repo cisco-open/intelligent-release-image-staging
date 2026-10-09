@@ -22,6 +22,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   the selected input mode on resume and check saved package bytes before reuse.
   Keep the default source-build workflow available.
 
+- Check Guest Shell source references and both committed aria2 architectures
+  before prebuilt installation. Support a pinned local Kubernetes client without
+  downloading or replacing an existing client.
+
+- Include finalized runtimes and native package caches in prebuilt backups.
+  Recover missing caches from a matching same-deployment backup while preserving
+  existing altered files for inspection.
+
 - Prepare device runtimes for both CPU architectures before adding deployment
   trust. Keep each runtime to one filesystem layer and generate IOx and XR
   wrappers without rebuilding the image.
