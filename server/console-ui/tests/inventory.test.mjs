@@ -25,12 +25,31 @@ async function fixture(t) {
     '/api/v1/onboard/jobs': {jobs: [{id: 'job', device_id: 'a', state: 'running'}]}, '/api/v1/schedules': {schedules: [{id: 'window'}]}};
   const services = {fetch: async (url, options) => {
     calls.push([url, options]); return response(bodies[url.split('?')[0]]);
-  }, publish: state => published.push(state), report: (...args) => outcomes.push(args),
+  }, publish: state => published.push(state),
   post: async (url, body) => { writes.push([url, body]); return response({ok: true}); },
   confirm: message => { confirmations.push(message); return true; }, headers: extra => ({'X-CSRF-Token': 'fixture-only', ...extra})};
+  let lastOutcome = controller.snapshot().outcome;
+  controller.subscribe(() => {
+    const outcome = controller.snapshot().outcome;
+    if (outcome !== lastOutcome) {outcomes.push([outcome.message, outcome.failed]); lastOutcome = outcome;}
+  });
   controller.connect(services); t.after(() => controller.dispose()); await controller.refresh();
   return {controller, services, bodies, timers, calls, writes, published, outcomes, confirmations};
 }
+
+test('action feedback belongs to observable Inventory state and survives polling and navigation', async t => {
+  const {controller, outcomes} = await fixture(t);
+  assert.deepEqual(controller.snapshot().outcome, {message: '', failed: false});
+  controller.report('edge-1: <script>not connected</script>', true);
+  const outcome = controller.snapshot().outcome;
+  assert.deepEqual(outcome, {message: 'edge-1: <script>not connected</script>', failed: true});
+  await controller.refresh(); controller.hide();
+  assert.equal(controller.snapshot().outcome, outcome);
+  controller.report('Device queued');
+  assert.deepEqual(outcomes.at(-1), ['Device queued', false]);
+  controller.dispose(); controller.report('Late outcome', true);
+  assert.deepEqual(controller.snapshot().outcome, {message: 'Device queued', failed: false});
+});
 
 test('filters preserve exact API names, normalization and encoded operator data', () => {
   const filters = {...emptyFilters(), q: ' EDGE & TEST ', managementType: 'xr-host', platform: 'iox', cred: 'ops/admin',

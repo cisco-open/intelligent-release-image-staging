@@ -9,7 +9,8 @@ export class InventoryController {
     this.state = {ready: false, filters: emptyFilters(), filtersOpen: false, menu: '', offset: 0, total: 0,
       rows: [], now: 0, loading: false, readOk: false, error: '', selected: new Set(), matchQuery: null, matchIds: null,
       images: [], imagesOk: false, credentials: [], credentialsOk: false, policy: null, policyOk: false,
-      jobs: [], schedules: [], rowBusy: new Set(), actionBusy: new Set(), bulkBusy: false, csvBusy: false, roleAvailable: false, activityLabel: 'Activity'};
+      jobs: [], schedules: [], rowBusy: new Set(), actionBusy: new Set(), bulkBusy: false, csvBusy: false, roleAvailable: false,
+      roleCapabilityMessage: '', outcome: {message: '', failed: false}, activityLabel: 'Activity'};
     this.listeners = new Set(); this.generation = 0; this.read = null; this.selectionRead = null;
     this.later = (callback, delay) => later(callback, delay); this.cancel = timer => cancel(timer);
     this.timer = null; this.disposed = false; this.actions = new Map();
@@ -22,7 +23,7 @@ export class InventoryController {
     this.listeners.forEach(listener => listener());
   }
   connect(services) { this.services = services; this.update({ready: true}); }
-  report(message, failed = false) { this.services?.report?.(message, failed); }
+  report(message, failed = false) { this.update({outcome: {message: String(message ?? ''), failed: Boolean(failed)}}); }
   selectedIds() { return [...this.state.selected]; }
   onAction(id, action) { this.actions.set(id, action); }
   async action(id, event) {

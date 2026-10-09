@@ -1,0 +1,79 @@
+/* Copyright 2026 Cisco Systems, Inc. and its affiliates
+ *
+ * SPDX-License-Identifier: Apache-2.0 */
+
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Roboto Mono"; src: url("/fonts/RobotoMono-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+:root { --bg: #0F1214; --panel: #23282E; --line: #373C42; --txt: #E1E4E8; --muted: #889099; --green: #52A62B; --yellow: #CC8604; --peer: #4EA1FF; }
+* { box-sizing: border-box; }
+html, body, #iris-swarm-map-root { min-height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--txt); font: 14px "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+[hidden] { display: none !important; }
+header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; background: var(--bg); }
+h1 { font-size: 17px; margin: 0; }
+.sub, #state { color: var(--muted); font-size: 12px; }
+.spacer { flex: 1; }
+button, select, input, .map-button { max-width: 100%; background: var(--panel); color: var(--txt); border: 1px solid var(--line); border-radius: 6px; padding: 7px; font: inherit; }
+.map-button { text-decoration: none; }
+button { cursor: pointer; }
+button:disabled, select:disabled { cursor: default; opacity: .6; }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--peer); outline-offset: 3px; }
+.map-control { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.control-label { color: var(--muted); font-size: 12px; }
+#peerfind { width: 210px; }
+#imgsel { max-width: 240px; }
+#wrap { position: relative; min-height: calc(100vh - 84px); }
+#svg { width: 100%; height: min(68vh, 720px); display: block; touch-action: none; cursor: grab; }
+#svg.panning { cursor: grabbing; }
+.zoomctl { display: flex; gap: 6px; align-items: center; }
+.zoomctl button { min-width: 34px; font-weight: 700; }
+.sortbtn { background: none; border: 0; color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; padding: 0; }
+.sortbtn:hover, th[aria-sort] .sortbtn { color: var(--txt); }
+th[aria-sort] .sortbtn { color: var(--green); }
+.edge { stroke: #768195; stroke-width: 1.4; opacity: .65; }
+.edge.measured { stroke: var(--green); stroke-width: 2.5; stroke-dasharray: 5 7; animation: flow .9s linear infinite; }
+.node { cursor: pointer; }
+.node:focus { outline: none; }
+.node:focus circle { stroke: #fff; stroke-width: 3; }
+.label { fill: var(--txt); font-size: 11px; text-anchor: middle; }
+.small { fill: var(--muted); font-size: 10px; text-anchor: middle; }
+.edge-rate { fill: var(--green); }
+.edge.peer-transfer { stroke: var(--peer); stroke-width: 2; fill: none; opacity: .85; animation: none; cursor: pointer; }
+.peer-transfer:focus { outline: none; stroke: #fff; stroke-width: 3; }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+.legend { padding: 9px 14px; border-top: 1px solid var(--line); color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; }
+.legend b { color: var(--txt); }
+.legend b.g { color: var(--green); }
+.legend b.p { color: var(--peer); }
+#empty { position: absolute; inset: 150px 0 auto; text-align: center; color: var(--muted); pointer-events: none; }
+#peerwrap { max-height: 38vh; overflow: auto; border-top: 1px solid var(--line); overscroll-behavior: contain; }
+#peertable { width: 100%; border-collapse: collapse; }
+#peertable thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+#peertable th, #peertable td { padding: 8px; text-align: left; border-bottom: 1px solid var(--line); }
+#peertable button { width: 100%; text-align: left; border: 0; background: transparent; }
+#peertable tbody button, #peertable td:nth-child(2), .machine { font-family: "Roboto Mono", ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
+#drawer { position: fixed; inset: 0 0 0 auto; width: min(560px, 100vw); padding: 18px; background: var(--panel); border-left: 1px solid var(--line); overflow: auto; overscroll-behavior: contain; z-index: 6; }
+#drawer h2 { margin-top: 14px; overflow-wrap: anywhere; }
+#drawer h3 { border-bottom: 1px solid var(--line); padding-bottom: 5px; font-size: 14px; }
+#drawer p { overflow-wrap: anywhere; }
+#drawer dl { display: grid; grid-template-columns: minmax(130px, 45%) 1fr; gap: 6px; margin: 0; }
+#drawer dt { color: var(--muted); overflow-wrap: anywhere; }
+#drawer dd { margin: 0; overflow-wrap: anywhere; }
+#drawer table { width: 100%; border-collapse: collapse; }
+#drawer td { vertical-align: top; padding: 6px 4px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.drawer-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.drawer-field { display: flex; flex-direction: column; gap: 6px; }
+.warn { color: var(--yellow); }
+.map-error { padding: 16px; }
+@media (max-width: 600px) {
+  header { gap: 8px; }
+  header > div:first-child { width: 100%; }
+  header .spacer { display: none; }
+  .map-control { flex: 1 1 140px; flex-direction: column; align-items: stretch; }
+  #imgsel, #peerfind { width: 100%; max-width: 100%; }
+  #state { flex-basis: 100%; }
+  #peertable { min-width: 620px; }
+  #drawer { padding: 14px; }
+}
+@media (max-width: 360px) { #drawer dl { grid-template-columns: minmax(100px, 42%) 1fr; } }
+@media (prefers-reduced-motion: reduce) { .edge.measured { animation: none; } }

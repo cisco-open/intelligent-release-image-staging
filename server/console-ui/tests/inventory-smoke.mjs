@@ -70,6 +70,23 @@ try {
   const row = page.locator('#dev-rows tr[data-id="constructor"]');
   const status = text => page.locator('#dev-status').getByText(text, {exact: false}).waitFor();
   await page.goto('http://iris.test/#devices'); await row.waitFor();
+  const feedback = page.locator('#dev-status'), capability = page.locator('#inventory-role-capability-banner');
+  assert.equal(await page.locator('#iris-inventory-status-root > #dev-status').count(), 1);
+  assert.equal(await page.locator('#iris-inventory-capability-root > #inventory-role-capability-banner').count(), 1);
+  for (const region of [feedback, capability]) {
+    assert.equal(await region.getAttribute('role'), 'status'); assert.equal(await region.getAttribute('aria-live'), 'polite');
+  }
+  assert.equal(await capability.isHidden(), true);
+  assert.equal(await page.evaluate(() => {
+    const roots = [...document.getElementById('view-devices').children].map(node => node.id);
+    return roots.indexOf('iris-inventory-capability-root') < roots.indexOf('iris-inventory-root')
+      && roots.indexOf('iris-inventory-status-root') === roots.indexOf('iris-inventory-root') + 1
+      && roots.indexOf('iris-inventory-status-root') < roots.indexOf('iris-inventory-selection-root');
+  }), true, 'Capability warning and action feedback retain their established positions');
+  await page.evaluate(() => window.irisInventory.report('edge-1: <img src=x onerror=alert(1)> unreachable', true));
+  await status('edge-1: <img src=x onerror=alert(1)> unreachable');
+  assert.equal(await feedback.locator('img').count(), 0); assert.match(await feedback.getAttribute('class'), /\berr\b/);
+  await refresh(); assert.match(await feedback.innerText(), /edge-1: <img/);
   assert.equal(await row.locator('script,img').count(), 0);
   assert.match(await row.innerText(), /<rejected>.*<script>evil\(\)<\/script>/s);
   assert.match(await row.innerText(), /TLS required/); assert.doesNotMatch(await row.innerText(), /TLS required \(stale\)/);
@@ -83,10 +100,12 @@ try {
   await row.locator('.cred').focus(); await refresh();
   assert.equal(await row.locator('.cred').evaluate(el => el === document.activeElement), true, 'Polling preserves select focus');
   await row.locator('.cred').selectOption('other'); await status('Credential updated');
+  assert.match(await feedback.getAttribute('class'), /\bmuted\b/); assert.doesNotMatch(await feedback.getAttribute('class'), /\berr\b/);
   assert.deepEqual(writes.at(-1).body, {credential_profile_id: 'other'});
   await page.waitForFunction(() => document.querySelector('#dev-rows .cred').value === 'other');
   assert.equal(await row.getAttribute('aria-selected'), 'true', 'Inline controls do not toggle row selection');
   writeMode = 'refused'; await row.locator('.platform').selectOption('router'); await status('update refused');
+  assert.match(await feedback.getAttribute('class'), /\berr\b/); assert.doesNotMatch(await feedback.getAttribute('class'), /\bmuted\b/);
   await page.waitForFunction(() => !document.querySelector('#dev-rows .platform').disabled);
   assert.equal(await row.locator('.platform').inputValue(), 'iox');
   for (const mode of ['lost', 'malformed']) {
@@ -103,9 +122,15 @@ try {
   await row.locator('.peer-intent').getByText('Quarantined intent', {exact: true}).waitFor();
   assert.equal(await row.locator('.peer-quarantine').getAttribute('aria-label'), 'Release constructor');
   credentialFailure = true; policyFailure = true; await refresh();
+  await capability.waitFor({state: 'visible'}); assert.match(await capability.innerText(), /unavailable/i);
+  assert.equal(await page.locator('#set-role-selected').isDisabled(), true);
   assert.equal(await row.locator('.cred').isDisabled(), true); assert.equal(await row.locator('.cred').inputValue(), 'other');
   assert.equal(await row.locator('.peer-quarantine').isDisabled(), true); assert.match(await row.innerText(), /Policy unavailable/);
   credentialFailure = false; policyFailure = false; await refresh();
+  await capability.waitFor({state: 'hidden'}); assert.equal(await page.locator('#set-role-selected').isEnabled(), true);
+  policy.roles_supported = false; await refresh(); await capability.waitFor({state: 'visible'});
+  assert.equal(await page.locator('#set-role-selected').isDisabled(), true);
+  policy.roles_supported = true; await refresh(); await capability.waitFor({state: 'hidden'});
   await page.locator('#csv-menu-btn').click(); await page.keyboard.press('Escape');
   assert.equal(await page.locator('#csv-menu').isVisible(), false);
   assert.equal(await page.locator('#csv-menu-btn').evaluate(el => el === document.activeElement), true);

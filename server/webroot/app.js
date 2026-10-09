@@ -477,8 +477,8 @@
 
   // Focus trap for a modal/drawer overlay (Task 6): Tab/Shift+Tab cycle
   // within the container's own focusable elements instead of escaping to
-  // the page behind it. Modeled on server/swarmmap.html's #drawer keydown
-  // handler, ported to this file's ES5 style. Attaching the listener
+  // the page behind it, matching the map React drawer's keyboard behavior.
+  // Attaching the listener
   // directly on the container (rather than document) is what makes this
   // safe to call once at setup time for every dialog: while the container
   // carries [hidden] nothing inside it is focusable, so no keydown ever
@@ -573,7 +573,6 @@
   });
 
   // ---- Devices ----
-  var devStatus = document.getElementById('dev-status');
   var imageIds = [];
   // Whether imageIds/imageFilenames came from a SUCCESSFUL /api/v1/images read.
   // A failed fetch substitutes an empty list, which is indistinguishable from
@@ -647,11 +646,6 @@
       renderPeerPolicyPanel();
     },
     selectionChanged: updateSelBar,
-    report: function (message, failed) {
-      devStatus.textContent = message;
-      devStatus.classList.toggle('err', failed);
-      devStatus.classList.toggle('muted', !failed);
-    },
     statusOptions: DEVICE_STATUS_OPTIONS,
     statusLevel: function (key) { return STATUS_LEVELS[key] || 'inactive'; },
     status: deviceStatusPresentation, assignedIds: rowAssignedIds,
@@ -709,11 +703,7 @@
     reportCount: function (count, error) {
       inventory.update({activityLabel: 'Activity' + (error ? ' (unavailable)' : count ? ' (' + count + ')' : '')});
     },
-    outcome: function (message, failed) {
-      devStatus.textContent = message;
-      devStatus.classList.toggle('err', failed);
-      devStatus.classList.toggle('muted', !failed);
-    }
+    outcome: function (message, failed) { inventory.report(message, failed); }
   }});
   onInventoryAction('dev-activity', function () { activityCommand('open'); });
   window.addEventListener('hashchange', function () { closeActivity(false); });
@@ -819,13 +809,12 @@
   // with Inventory without writing into the Policies root.
   function roleCapabilityMessage() { return policies.capability(peerPolicy, peerPolicyReadOk); }
   function syncRoleActionAvailability() {
-    inventory.update({roleAvailable: !roleCapabilityMessage(), policy: peerPolicy, policyOk: peerPolicyReadOk});
+    var message = roleCapabilityMessage();
+    inventory.update({roleAvailable: !message, roleCapabilityMessage: message, policy: peerPolicy, policyOk: peerPolicyReadOk});
   }
   function renderPeerPolicyPanel() {
     syncRoleActionAvailability();
     policies.policy(peerPolicy, peerPolicyReadOk);
-    var banner = document.getElementById('inventory-role-capability-banner');
-    banner.textContent = roleCapabilityMessage(); banner.hidden = !banner.textContent;
   }
   policies.connect({
     fetch: fetch, headers: csrfHdr, formatDate: fmtDate,
@@ -1017,9 +1006,13 @@
     // /api/v1/overview is the PRIMARY fetch -- Fleet Totals and Rollout need
     // nothing else, so its own failure is still a hard bail (matches the
     // pre-existing behavior: no data, nothing to render).
-    var or_;
+    var or_, ov;
     try {
       or_ = await fetch('/api/v1/overview', { signal: signal });
+      if (!or_.ok || mine !== overviewRefreshGeneration) return;
+      // Cancellation can arrive after the headers while JSON is still being
+      // read. The body belongs to this same guarded primary request.
+      ov = await or_.json();
     } catch (e) {
       // Superseding a refresh is expected (a newer refreshOverview() call
       // already owns the render) and must not be treated as a real
@@ -1028,8 +1021,6 @@
       if (e && e.name === 'AbortError') return;
       return;
     }
-    if (!or_.ok || mine !== overviewRefreshGeneration) return;
-    var ov = await or_.json();
     if (mine !== overviewRefreshGeneration) return;
 
     // /api/v1/devices and /api/v1/images are SECONDARY -- only the attention band

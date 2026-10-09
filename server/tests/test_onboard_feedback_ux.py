@@ -5,12 +5,12 @@
 """Source guards for the onboard submit-time rejection UX (operator report:
 "can we put like a 'can't reach the device' or something, not just go quiet").
 When the onboard/undeploy batch endpoint refuses a device (router preflight
-failure, busy-device conflict, an unreachable device, ...), app.js must paint
+failure, busy-device conflict, an unreachable device, ...), Inventory must paint
 it as prominent red text -- not a silent no-op -- listing "<device_id>:
 <reason>" for each refusal, using the page's existing .err error idiom
 (see styles.css). Client-side rendering only -- no server endpoint of its
-own -- so these assert the markup/wiring stays intact, mirroring the
-open-the-webroot-file idiom in test_tls_page_ux.py / test_gui_server.py."""
+own -- so these assert React owns the markup and the adapter passes outcomes
+without writing workflow DOM."""
 import os
 from pathlib import Path
 
@@ -27,21 +27,33 @@ def _react(name):
 
 
 def test_dev_status_area_present_for_rejection_rendering():
-    """The devices status area app.js paints refusals into must exist and be
-    reachable by its id -- if this id ever moves/renames, the rendering hook
-    below would silently target nothing."""
+    """The status live region remains at its established position via a portal."""
     html = _read("index.html")
-    assert 'id="dev-status"' in html
+    assert 'id="iris-inventory-status-root"' in html
+    assert 'id="dev-status"' not in html
+    jsx = _react("inventory.jsx")
+    assert 'id="dev-status" role="status" aria-live="polite"' in jsx
+    assert "{state.outcome.message}</div>, statusRoot)" in jsx
 
 
 def test_app_js_defines_onboard_outcome_render_hook():
-    """The React adapter toggles the page's standard .err class on refusal
-    rather than leaving errors in the muted status line."""
+    """Activity publishes state; React renders the standard refusal styling."""
     js = _read("app.js")
-    hook = js.split("outcome: function (message, failed) {", 1)[1].split("\n    }", 1)[0]
-    assert "classList.toggle('err'" in hook
-    assert "classList.toggle('muted'" in hook
-    assert "devStatus.textContent" in hook
+    assert "outcome: function (message, failed) { inventory.report(message, failed); }" in js
+    assert "state.outcome.failed ? 'err' : 'muted'" in _react("inventory.jsx")
+    assert "this.update({outcome:" in _react("inventory-controller.mjs")
+
+
+def test_adapter_cannot_write_operational_text_or_markup():
+    """Only the bootstrap failure fallback may paint before React is ready."""
+    import re
+
+    js = _read("app.js")
+    assignments = re.findall(r"\b\w+\.(?:textContent|innerHTML|outerHTML|innerText)\s*=.*", js)
+    assert len(assignments) == 1
+    assert assignments[0].startswith("notice.textContent = 'Console initialization failed: '")
+    assert "insertAdjacentHTML" not in js
+    assert "devStatus" not in js
 
 
 def test_app_js_startbatch_uses_the_render_hook_and_device_reason_format():

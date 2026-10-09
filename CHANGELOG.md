@@ -17,6 +17,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Complete the React workflow migration with the standalone Swarm map and
+  remaining Inventory messages. Preserve filters, keyboard focus, sourced
+  transfer arrows and device controls. Expire measured arrows while paused,
+  reject malformed observations and ignore obsolete session failures. Build
+  the map inside the server image with its existing nonce-based browser policy.
+  Handle Overview cancellation while reading a response body so navigation
+  cannot leave an unhandled browser error.
+
 - Move setup, package readiness, image verification and the Swarm summary into
   React. Validate native responses, clear unavailable readiness evidence, keep
   verification writes serialized through navigation, and require explicit review

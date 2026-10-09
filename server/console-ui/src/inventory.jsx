@@ -28,7 +28,7 @@ function Badge({value}) { return <span className={value.cls ? 'badge ' + value.c
 function Caret() { return <svg className="caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.5 8 10l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
 function action(controller, id) { return event => controller.action(id, event); }
 
-function Inventory({controller, selectionRoot, tableRoot}) {
+function Inventory({controller, selectionRoot, tableRoot, capabilityRoot, statusRoot}) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot), summary = useRef(null);
   const scope = selectionScope(state), services = controller.services || {};
   const options = spec => {
@@ -175,16 +175,20 @@ function Inventory({controller, selectionRoot, tableRoot}) {
         disabled={state.actionBusy.has(id) || (id === 'import-csv' && (state.csvBusy || state.bulkBusy || state.rowBusy.size > 0))} onClick={action(controller, id)}>{label}</button>)}</div>
     </div>
     {[['manage-creds', 'Manage credentials'], ['manage-schedules', 'Schedules'], ['add-dev', 'Add device']].map(([id, label]) => <button key={id} className={id === 'add-dev' ? 'btn' : 'btn ghost'} type="button" id={id} onClick={action(controller, id)}>{label}</button>)}
-  </div></div>{createPortal(selection, selectionRoot)}{createPortal(table, tableRoot)}</>;
+  </div></div>
+    {createPortal(<p className="policy-warning" id="inventory-role-capability-banner" role="status" aria-live="polite" hidden={!state.roleCapabilityMessage}>{state.roleCapabilityMessage}</p>, capabilityRoot)}
+    {createPortal(<div className={'dev-status-line ' + (state.outcome.failed ? 'err' : 'muted')} id="dev-status" role="status" aria-live="polite">{state.outcome.message}</div>, statusRoot)}
+    {createPortal(selection, selectionRoot)}{createPortal(table, tableRoot)}</>;
 }
 
 export function mountInventory() {
   const root = document.getElementById('iris-inventory-root'), selectionRoot = document.getElementById('iris-inventory-selection-root'), tableRoot = document.getElementById('iris-inventory-table-root');
-  if (!root || !selectionRoot || !tableRoot) throw new Error('Inventory mount points are missing');
+  const capabilityRoot = document.getElementById('iris-inventory-capability-root'), statusRoot = document.getElementById('iris-inventory-status-root');
+  if (!root || !selectionRoot || !tableRoot || !capabilityRoot || !statusRoot) throw new Error('Inventory mount points are missing');
   const controller = new InventoryController();
   // Synchronous getters keep existing dialogs bound to the same selected-ID
   // model during their migration; the adapter never writes into these roots.
   window.irisInventory = controller;
   window.addEventListener('pagehide', event => { if (!event.persisted) controller.dispose(); });
-  createRoot(root).render(<Inventory controller={controller} selectionRoot={selectionRoot} tableRoot={tableRoot} />);
+  createRoot(root).render(<Inventory controller={controller} selectionRoot={selectionRoot} tableRoot={tableRoot} capabilityRoot={capabilityRoot} statusRoot={statusRoot} />);
 }

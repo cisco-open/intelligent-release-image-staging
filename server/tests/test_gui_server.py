@@ -265,7 +265,7 @@ def test_no_orphaned_control_ids():
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
     # The adapter shrinks as views move to React. Pin actual cross-owner
     # references rather than demanding an arbitrary number of legacy IDs.
-    assert {'dev-status', 'view-swarm', 'view-devices', 'settings-pane-certificates'} <= ids
+    assert {'view-swarm', 'view-devices', 'settings-pane-certificates'} <= ids
     missing = sorted(i for i in ids if ('id="%s"' % i) not in html)
     assert not missing, \
         "app.js references ids missing from index.html: %s" % missing
@@ -4870,10 +4870,8 @@ def test_swarmmap_injects_cfg_nonce_and_csp(tmp_path, monkeypatch):
 
 
 def test_swarmmap_serves_real_file_with_nonced_csp(tmp_path):
-    # Against the checked-in server/swarmmap.html (single-source file). Only
-    # the nonce/CSP mechanics are asserted here — the CFG substitution is
-    # covered by the fixture test above, so this stays green whether or not
-    # the swarmmap.html client-side task has landed yet.
+    # Serve the real generated React map with the native nonce/CSP boundary.
+    # Run npm ci && npm run build in server/console-ui before Python tests.
     host, port, _cat, stop = _serve_reports(tmp_path)
     try:
         ck, _csrf = _auth(host, port)
@@ -4881,6 +4879,7 @@ def test_swarmmap_serves_real_file_with_nonced_csp(tmp_path):
         assert st == 200 and "text/html" in hd.get("Content-Type", "")
         assert "script-src 'nonce-" in hd.get("Content-Security-Policy", "")
         assert b'<script nonce="' in b and b'<style nonce="' in b
+        assert b'iris-swarm-map-root' in b
     finally:
         stop()
 
@@ -9653,7 +9652,7 @@ def test_console_declares_responsive_and_a11y_foundations():
     assert 'id="iris-menu-toggle"' in _react_shell()
     assert "@media" in css and "prefers-reduced-motion" in css
     assert 'className="table-scroll"' in _react_shell('setup-packages.jsx')
-    assert 'aria-live' in html
+    assert 'aria-live="polite"' in _react_shell('inventory.jsx')
 
 
 def test_off_canvas_nav_toggle_wired():
@@ -9828,7 +9827,7 @@ def test_error_and_status_regions_carry_live_roles():
     form = _react_shell('device-forms.jsx')
     for eid in ('df-err', 'cf-err'):
         assert 'role="alert"' in form.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
-    for source, sid in ((html, 'dev-status'), (_react_shell('setup-packages.jsx'), 'wz-progress'),
+    for source, sid in ((_react_shell('inventory.jsx'), 'dev-status'), (_react_shell('setup-packages.jsx'), 'wz-progress'),
                         (_react_shell('swarm-view.jsx'), 'swarm-summary')):
         tag = source.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
         assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
@@ -10806,11 +10805,11 @@ def test_telemetry_filter_has_unknown_bucket():
 def test_swarm_map_treats_error_body_as_failed_poll():
     """Source guard (IRIS-08-005): the proxy's 200-with-error shape is a
     failed poll in the map, and its poll is marked as background."""
-    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "swarmmap.html")) as f:
-        html = f.read()
-    assert 'if(!validSnapshot(data))throw Error(' in html
-    assert 'data.error' in html.split('function validSnapshot(data){', 1)[1].split('function ', 1)[0]
-    assert '"X-IRIS-Poll":"1"' in html
+    model = _react_shell('swarm-map-model.mjs')
+    controller = _react_shell('swarm-map-controller.mjs')
+    assert 'if (!validSnapshot(data)) throw Error(' in controller
+    assert 'data.error' in model.split('function validSnapshot(data)', 1)[1].split('export ', 1)[0]
+    assert "'X-IRIS-Poll': '1'" in controller
 
 
 def test_login_page_distinguishes_throttling_and_network_errors():

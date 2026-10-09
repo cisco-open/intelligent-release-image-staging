@@ -89,7 +89,7 @@ import tier_auth
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
 SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "swarmmap.html")
+                            "console-ui", "dist", "swarmmap.html")
 _IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
 # heartbeat freshness horizon (s): a device whose last_seen is older than
 # this is what the UI badges "offline" (app.js uses the same 600), so the
@@ -101,9 +101,9 @@ _HEARTBEAT_FRESH = 600
 # errored_image_ids alongside genuinely dead ones, which is why the precise
 # tier below cannot read that list alone.
 _RETRYABLE_STAGE_STATES = ("flash_full", "flash_full_seeding_only")
-# GET /swarmmap swaps this exact placeholder line in the single-source
-# server/swarmmap.html for the console config line (the file on disk keeps
-# working standalone; only the served copy is rewritten):
+# GET /swarmmap swaps this exact placeholder in the generated self-contained
+# map for its authenticated Console config (the file on disk keeps its
+# read-only standalone default; only the served copy is rewritten):
 _MAP_PLACEHOLDER = "window.IRIS_MAP_CFG = null;"
 # eventsUrlTemplate: operator-configured deep link ({ip}/{device_id}
 # placeholders) rendered by the swarm-map drawer; unset -> no button (the map
@@ -4488,7 +4488,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _serve_swarmmap(self):
             """Serve the swarm-map page (session gate happens in do_GET) from
-            server/swarmmap.html, read fresh per request. Sends its own headers
+            the generated React document, read fresh per request. Sends its own headers
             instead of _send(): the global _SECURITY_HEADERS CSP has no
             script-src, so its default-src 'self' would block the page's
             nonce'd inline <script>, and X-Frame-Options: DENY would break the
@@ -4496,8 +4496,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             try:
                 with open(SWARMMAP_PATH, encoding="utf-8") as f:
                     html = f.read()
-            except OSError:
-                self._send(404, "text/plain", b"not found")
+                # A partial or incompatible build cannot be safely configured
+                # or nonced. Fail clearly instead of serving a blank map.
+                if (html.count(_MAP_PLACEHOLDER) != 1
+                        or any(html.count("<%s>" % tag) != 1
+                               or len(re.findall(r"<%s\b" % tag, html, re.I)) != 1
+                               or len(re.findall(r"</%s\s*>" % tag, html, re.I)) != 1
+                               for tag in ("script", "style"))):
+                    raise ValueError("invalid map build")
+            except (OSError, UnicodeError, ValueError):
+                api_problem.send(self, 503, "swarm-map-unavailable",
+                                 "Swarm map unavailable",
+                                 detail="Rebuild the server image.")
                 return
             nonce = secrets.token_urlsafe(16)
             html = html.replace(_MAP_PLACEHOLDER, _map_cfg_line())

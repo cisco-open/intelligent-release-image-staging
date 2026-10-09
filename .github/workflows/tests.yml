@@ -80,6 +80,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends age bats mktorrent
 
+      - name: Set up map build dependencies
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: server/console-ui/package-lock.json
+
+      - name: Build the authenticated map used by Python serving tests
+        working-directory: server/console-ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:map
+
       - name: Build native instruction AEAD helper
         run: IRIS_CRYPTO_ARCHES=amd64 bash tools/build-instruction-crypto.sh
 

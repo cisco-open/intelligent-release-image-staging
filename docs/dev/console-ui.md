@@ -8,12 +8,12 @@ SPDX-License-Identifier: Apache-2.0
 
 This page is for a contributor changing `server/console-ui/`, the Console's
 React frontend, or the vendored API explorer it ships next to it. It covers
-how the frontend is built, which parts of the Console are React and which are
-not yet, and the browser rules the build has to keep. It does not cover the
+how the frontend is built, how its controllers share state, and the browser
+rules the build has to keep. It does not cover the
 Console as an operator sees it; see [Find your way around the
 Console](../zensical/user-guide/console.md) for that.
 
-## The shell and the legacy app
+## Views and shared adapters
 
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, General, TLS/trust, Telemetry, Audit export, certificate inventory,
@@ -26,8 +26,9 @@ and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
 device-details and Activity drawers
 with React.
-The standalone `server/swarmmap.html` still owns its graph, drawer and operational
-controls. This is a partial migration, not a full rewrite.
+The standalone map also uses React for its graph, filters, table, details and
+device actions. `server/webroot/app.js` retains shared transport, routing and
+cross-view adapters; it does not render operational views.
 
 The React entry point mounts before the older application loads. The controller
 publishes `iris:shell-state` and listens for React's `iris:logout` action.
@@ -105,8 +106,18 @@ Review reloads current evidence without proving a lost request's outcome.
 Counts are image-peer entries, not unique devices. Reads are latest-wins and
 malformed or partial snapshots clear counts. The frame loads on first visit;
 route, tab and late frame-load events synchronize host visibility. Polling does
-not resume the user's manual pause. Standalone map workflow migration remains
-separate from this wrapper and its isolated SVG renderer.
+not resume the user's manual pause.
+
+`swarm-map.jsx` and its controller/model own the standalone map, including its
+declarative SVG. Exact image and participant keys preserve selection and focus.
+Device interval changes retain the reviewed revision and confirmation token.
+Report completion requires the accepted request ID; completing an older request
+cannot clear a newer pending one. Unknown outcomes need explicit review. Hidden
+reads and unsent interval changes stop; submitted writes keep their locks.
+Measured arrows expire even while manually paused. Native API tests use a real
+temporary telemetry producer and catalog; browser tests check the generated
+page, filters, focus, mobile layout and nonce CSP with intercepted APIs. Neither
+test proves live device application or transfer performance.
 
 Images owns its catalog, upload and import jobs, and quarantine drawer in
 `images-controller.mjs` and `images.jsx`. The `iris:images-command` adapter
@@ -124,8 +135,8 @@ authenticated reads and the existing visible-view timer.
 
 Inventory's table uses `inventory-controller.mjs`, `inventory-model.mjs` and
 `inventory.jsx`. React owns filter debounce, paging, selection and row edits.
-Three mount roots keep the existing inline forms between the controls and the
-table. The `irisInventory` adapter supplies authenticated transport and lets
+Explicit roots and portals keep the existing inline forms and status messages
+between the controls and the table. The `irisInventory` adapter supplies authenticated transport and lets
 the remaining dialogs read selected IDs and register actions; it never writes
 into those roots. All response bodies are checked before one current-generation
 snapshot is published. Hidden views cancel reads, and keyed rows keep keyboard
@@ -328,23 +339,27 @@ verifies management HTTPS with the fixture CA; its local browser hop uses HTTP.
 
 ## Building the browser assets
 
-The Console's Dockerfile builds the frontend in its own Node build stage,
-then copies the two files it produces, `console.js` and `console.css`, into
-the Python runtime image's `webroot/assets/`. Node and `node_modules` are not
-part of that runtime image. A normal Docker build does this for you.
+Both Dockerfiles build browser assets in disposable Node stages. The Console
+image copies `console.js` and `console.css` into `webroot/assets/`. The server
+image copies the self-contained `dist/swarmmap.html` into
+`server/console-ui/dist/`. Node and `node_modules` stay out of both runtimes.
+A normal Docker build handles this; map changes require a server image rebuild.
 
 To preview the built Console from a plain Python run, without Docker, build
 the frontend from the repository root and copy the output into place by
 hand:
 
 ```bash
+npm --prefix server/console-ui ci
 npm --prefix server/console-ui run build
 mkdir -p server/webroot/assets
 cp server/console-ui/dist/console.js server/console-ui/dist/console.css server/webroot/assets/
 ```
 
 The browser then loads `/assets/console.js` and `/assets/console.css`. Both
-files are generated and git-ignored; do not commit them.
+files and `dist/swarmmap.html` are generated and git-ignored; do not commit them.
+Build before running the Python serving tests too. A missing or malformed map
+build returns an authenticated 503 with a rebuild instruction.
 
 ## Content Security Policy
 
@@ -357,6 +372,11 @@ migration does not change what the backend itself protects; see
 [Security model and trust boundaries](../zensical/architecture/security-model.md).
 The public documentation site stays separate from the Console and needs no
 external dependency of its own.
+
+The map uses a separate, nonce-based policy. Its build assembles one script and
+one stylesheet into its HTML. The management API supplies a fresh nonce and
+same-origin configuration when serving it through the Console. Keep it
+self-contained: no runtime imports, CDN, `unsafe-inline` or extra asset routes.
 
 ## Theme and fonts
 

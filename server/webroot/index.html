@@ -127,12 +127,12 @@
         <div class="page-header">
           <h2 class="page-title">Devices</h2>
         </div>
-        <p class="policy-warning" id="inventory-role-capability-banner" role="status" aria-live="polite" hidden></p>
+        <div id="iris-inventory-capability-root" data-inventory-react></div>
         <div id="iris-inventory-root" data-inventory-react></div>
         <!-- Job/action feedback gets its own line under the controls instead of
              competing for width inside them (Magnetic Filter bar: elements
              sharing the bar's row reduce the space its filters get). -->
-        <div class="dev-status-line muted" id="dev-status" role="status" aria-live="polite"></div>
+        <div id="iris-inventory-status-root" data-inventory-react></div>
         <div id="iris-csv-root" data-inventory-actions-react></div>
         <div id="iris-inventory-selection-root" data-inventory-react></div>
         <div id="iris-device-forms-root" data-device-forms-react></div>

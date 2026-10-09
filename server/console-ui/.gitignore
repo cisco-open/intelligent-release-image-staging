@@ -3,4 +3,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 node_modules/
+# Console assets and the generated, self-contained swarm map.
 dist/

@@ -59,6 +59,18 @@ COPY tools/licenses/musl-COPYRIGHT /src/musl-COPYRIGHT
 ADD --checksum=sha256:7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/LICENSE.txt /src/openssl-LICENSE
 RUN sh /src/build.sh
 
+# The authenticated map is a self-contained React document served by Python.
+# Node and the build dependencies remain in this disposable stage.
+FROM node:24-bookworm-slim AS swarm-map-build
+WORKDIR /build/console-ui
+COPY server/console-ui/package.json server/console-ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY server/console-ui/vite.config.js ./
+COPY server/console-ui/src/ ./src/
+COPY server/console-ui/scripts/ ./scripts/
+COPY server/console-ui/templates/ ./templates/
+RUN npm run build:map
+
 FROM python:3.12-slim-trixie
 
 
@@ -120,6 +132,7 @@ RUN set -eux; \
 
 WORKDIR /opt/iris
 COPY server/ /opt/iris/server/
+COPY --from=swarm-map-build /build/console-ui/dist/swarmmap.html /opt/iris/server/console-ui/dist/swarmmap.html
 COPY device/ /opt/iris/device/
 COPY lab/ /opt/iris/lab/
 COPY VERSION /opt/iris/VERSION

@@ -115,6 +115,7 @@ def patterns():
 MUST_EXCLUDE = [
     "server/console-ui/node_modules/react/index.js",
     "server/console-ui/dist/console.js",
+    "server/console-ui/dist/swarmmap.html",
     "server/console-ui/tests/build.test.mjs",
     "server/.env",
     "server/lab.env",
@@ -157,6 +158,9 @@ MUST_INCLUDE = [
     "server/console-ui/package-lock.json",
     "server/console-ui/vite.config.js",
     "server/console-ui/src/main.jsx",
+    "server/console-ui/src/swarm-map.jsx",
+    "server/console-ui/scripts/build-map.mjs",
+    "server/console-ui/templates/swarmmap.html",
     "bin/aria2c",
     "tools/aria2c.sha256",
     "VERSION",

@@ -37,7 +37,7 @@ def test_policy_definitions_and_editor_belong_to_the_policies_page():
     parser = ViewOwnership()
     parser.feed((WEBROOT / "index.html").read_text())
     assert parser.owners["iris-policies-root"] == ("view-policies",)
-    for element in ("inventory-role-capability-banner", "iris-inventory-root",
+    for element in ("iris-inventory-capability-root", "iris-inventory-root",
                     "iris-role-actions-root", "iris-inventory-selection-root"):
         assert "view-devices" in parser.owners[element], element
     assert parser.owners["iris-settings-navigation-root"] == ("view-settings",)
@@ -74,7 +74,11 @@ def test_editor_preserves_draft_and_blocks_writes_until_matching_definitions():
 def test_inventory_retains_the_same_fail_closed_warning():
     js = (WEBROOT / "app.js").read_text()
     assert "return policies.capability(peerPolicy, peerPolicyReadOk)" in js
-    assert "inventory-role-capability-banner" in js
+    assert "roleCapabilityMessage: message" in js
+    assert "inventory-role-capability-banner" not in js
+    jsx = (SOURCE / "inventory.jsx").read_text()
+    assert 'id="inventory-role-capability-banner" role="status" aria-live="polite"' in jsx
+    assert "hidden={!state.roleCapabilityMessage}>{state.roleCapabilityMessage}</p>, capabilityRoot)" in jsx
     _run_policies_node("capability warnings")
 
 

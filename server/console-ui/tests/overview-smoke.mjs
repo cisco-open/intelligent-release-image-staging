@@ -29,10 +29,27 @@ try {
       name: 'iris', host: 'fixture-host', state: 'running', os: 'Debian', architecture: 'arm64'}]},
     '/api/v1/telemetry/health': {otlp_export: {state: 'ok', signals: {logs: {state: 'ok', queued: 2}, metrics: {state: 'ok'}}}},
   };
-  page.on('pageerror', error => errors.push(error.message));
+  page.on('pageerror', error => errors.push({name: error.name, message: error.message, stack: error.stack}));
   await page.addInitScript(() => {
     window.testCspViolations = [];
     window.addEventListener('securitypolicyviolation', event => window.testCspViolations.push(event.violatedDirective));
+    // Deterministically deliver Overview headers before its body. A newer
+    // refresh aborts this real Response.json() stream, reproducing the browser
+    // race without weakening the pageerror/unhandled-rejection assertion.
+    const nativeFetch = window.fetch.bind(window);
+    window.testHoldOverviewBody = false; window.testOverviewBodyHeld = false; window.testOverviewBodyAborts = 0;
+    window.fetch = async (url, options) => {
+      const response = await nativeFetch(url, options);
+      if (String(url) !== '/api/v1/overview' || !window.testHoldOverviewBody) return response;
+      window.testHoldOverviewBody = false;
+      const stream = new ReadableStream({start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'));
+        const abort = () => {window.testOverviewBodyAborts++; controller.error(options.signal.reason);};
+        if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, {once: true});
+        window.testOverviewBodyHeld = true;
+      }});
+      return new Response(stream, {status: response.status, headers: response.headers});
+    };
   });
   await page.route('**/*', async route => {
     const url = new URL(route.request().url());
@@ -71,6 +88,18 @@ try {
   await refresh();
   await page.waitForFunction(() => document.querySelector('#ov-cards').textContent.includes('Staged2of 3 assigned'));
   assert.equal(await page.evaluate(() => document.activeElement.dataset.attn), 'devices');
+  // Cancellation after HTTP headers is just as expected as cancellation of
+  // fetch itself. The old body must resolve harmlessly without replacing the
+  // newer cards, nor report an unhandled AbortError to the page.
+  await page.evaluate(() => {window.testHoldOverviewBody = true;});
+  await refresh();
+  await page.waitForFunction(() => window.testOverviewBodyHeld);
+  fixtures['/api/v1/overview'].staged = 3;
+  await refresh();
+  await page.waitForFunction(() => document.querySelector('#ov-cards').textContent.includes('Staged3of 3 assigned'));
+  assert.equal(await page.evaluate(() => window.testOverviewBodyAborts), 1);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.deepEqual(errors, [], 'Superseded body reads must be handled, not leaked as page errors');
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => location.hash === '#devices' && document.querySelector('#dev-filter-status').value === '__attention');
   await page.goto('http://iris.test/#overview');

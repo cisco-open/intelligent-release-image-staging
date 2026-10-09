@@ -1082,15 +1082,15 @@ def test_peer_interval_roundtrip_over_both_authenticated_tiers(policy_tiers, tie
         assert status == 200 and saved["requested_interval_s"] == interval
         # Check the shipped map's validators against actual authenticated
         # server replies, not a hand-invented browser fixture.
-        map_source = (Path(__file__).parents[1] / "swarmmap.html").read_text()
-        validator = next(line for line in map_source.splitlines()
-                         if line.startswith("function intervalReply("))
-        script = validator + "\n" + (
-            "const assert=require('node:assert/strict');"
-            "const x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));"
+        model = (Path(__file__).resolve().parents[1] /
+                 "console-ui/src/swarm-map-model.mjs").as_uri()
+        script = f"import {{intervalReply}} from {json.dumps(model)};\n" + (
+            "import assert from 'node:assert/strict';"
+            "import {readFileSync} from 'node:fs';"
+            "const x=JSON.parse(readFileSync(0,'utf8'));"
             "assert.equal(intervalReply(x.preview,{device_id:'d1'},x.interval,x.revision,true),true);"
             "assert.equal(intervalReply(x.saved,{device_id:'d1'},x.interval,x.revision,false),true);")
-        subprocess.run(["node", "-e", script], input=json.dumps({
+        subprocess.run(["node", "--input-type=module", "-e", script], input=json.dumps({
             "preview": preview, "saved": saved, "interval": interval,
             "revision": revision}), text=True, check=True, capture_output=True)
         status, _, effective = request(tier, "GET", "/devices/d1/effective-qos")

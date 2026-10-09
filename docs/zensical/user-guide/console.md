@@ -57,7 +57,8 @@ status is on [Assign images and check staging status](assignments.md).
 
 On the Swarm Map, green arrows show server-to-device traffic. Blue arrows show
 device-to-device traffic reported by an agent. Select a device for direction,
-speed and report age. Gray spokes show participation. Old observations expire;
+speed and report age. Gray spokes show participation. Old observations expire,
+even when the map is paused;
 connections with no unique device match remain unattributed.
 
 The summary counts image-peer entries: one device can appear under several
