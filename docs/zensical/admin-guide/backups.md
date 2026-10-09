@@ -133,6 +133,10 @@ device ownership, account data, image quarantine decisions and external trust.
 A refusal before replacement resumes the original services. Original data remains
 available in protected directories beside restored storage after publication.
 
+Restores keep the current **Policies → Distribution access** settings and safety
+records for shared IP addresses. The server verifies application again after
+restarting. Check its status before relying on enforcement.
+
 !!! warning
 
     An old backup cannot prove current revocations or instruction counters.

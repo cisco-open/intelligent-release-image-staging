@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep current distribution-access approvals and shared-address safety history
+  when restoring an older deployment backup. Preserve uncertain apply attempts,
+  refuse missing or conflicting authority, and require fresh application proof
+  after restart across Docker and Kubernetes layouts.
+
 - Close an interrupted Console response without appending a second HTTP error
   to its body. Failures before a response starts still return the documented
   unavailable response, without retrying the operation.

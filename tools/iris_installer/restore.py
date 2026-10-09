@@ -20,6 +20,7 @@ import re
 import shutil
 import stat
 import tempfile
+import sys
 import time
 import uuid
 
@@ -217,12 +218,81 @@ def _kubernetes_resources(path):
     return resources
 
 
+def _origin_authority(current, archived):
+    """Overlay current reviewed origin authority into a stopped candidate.
+
+    Use the installer's shipped runtime schema, as the key helpers do. This
+    requires neither a running service nor an import from the backup's source.
+    Only candidate files change; the stopped current generation stays intact.
+    """
+    package = Path(__file__).resolve().parents[1] / 'source/server'
+    source = package if package.is_dir() else Path(__file__).resolve().parents[2] / 'server'
+    sys.path.insert(0, str(source))
+    import origin_enforcement as origin
+
+    try:
+        generations = []
+        for root in (current, archived):
+            paths = tuple(Path(path) for path in origin.paths(root))
+            custody = {}
+            for path, limit in zip(paths, (origin.MAX_BYTES, origin.MAX_APPLICATION_BYTES,
+                                          origin.MAX_BYTES)):
+                if path.exists() or path.is_symlink():
+                    details = path.lstat()
+                    if not stat.S_ISREG(details.st_mode) or details.st_size > limit:
+                        raise InstallError('Distribution access state is not a bounded regular file')
+                    records = storage.inventory(path)
+                    if records[0]['type'] != 'file' or records[0]['size'] > limit:
+                        raise InstallError('Distribution access state is not a bounded regular file')
+                    custody[path.name] = records
+            control = origin.load_control(paths[0])
+            application = origin.load_application_for(control, paths[1])
+            generations.append((paths, control, application, custody))
+    except (origin.OriginError, InstallError, OSError, ValueError) as exc:
+        raise InstallError('Current or archived distribution access authority is unavailable') from exc
+    live_paths, live, application, custody = generations[0]
+    old_paths, old, prior, _ = generations[1]
+    if (live['revision'] < old['revision'] or
+            live['revision'] == old['revision'] and live != old):
+        raise InstallError('Current distribution access review does not dominate this backup')
+    if (application['shared_revision'] < prior['shared_revision'] or
+            application['shared_revision'] == prior['shared_revision'] and
+            not set(prior['shared_ips']) <= set(application['shared_ips'])):
+        raise InstallError('Current distribution shared-address safety history is missing')
+    previous_ack, current_ack = prior['last_applied'], application['last_applied']
+    if previous_ack is not None and (current_ack is None or
+            current_ack['revision'] < previous_ack['revision']):
+        raise InstallError('Current distribution application history is missing')
+    previous_intent, current_intent = prior['intent'], application['intent']
+    if previous_intent is not None:
+        floor = current_intent or current_ack
+        if floor is None or floor['revision'] < previous_intent['revision']:
+            raise InstallError('Current distribution application intent is missing')
+        # A cleared uncertain attempt requires the matching acknowledgement
+        # or a later reviewed generation, not an older same-review success.
+        if current_intent is None and floor['revision'] == previous_intent['revision']:
+            fields = ('control_hash', 'policy_hash', 'ips', 'bindings')
+            if any(floor[field] != previous_intent[field] for field in fields):
+                raise InstallError('Current distribution application intent is unresolved')
+    for live_path, old_path in zip(live_paths[:2], old_paths[:2]):
+        if live_path.name in custody:
+            shutil.copy2(live_path, old_path)
+            storage.apply_metadata(old_path, custody[live_path.name])
+        elif old_path.exists():
+            old_path.unlink()
+    # Neither the backup's nor the stopped process's recent timestamp proves
+    # application in the restarted aria session. The tracker must verify anew.
+    if old_paths[2].exists():
+        old_paths[2].unlink()
+
+
 def state_authority(current, archived):
     """Keep policy, ownership and external trust in the approved generation.
 
     Execution and disclosure records are monotonic authority, while descriptive
     inventory, assignments, job history and content remain backup-authoritative.
     """
+    _origin_authority(current, archived)
     unchanged = ('peer-policy', 'deployment_records', 'ca-trust-settings',
                  'audit-export-', 'telemetry-destination', 'instance-id', 'schedules.')
     preserved = ('peer-handouts', 'schedule-progress', 'schedule-retired',
