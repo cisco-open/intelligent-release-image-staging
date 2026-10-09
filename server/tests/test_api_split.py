@@ -57,6 +57,24 @@ def _thread(server):
     return thread
 
 
+def _fixture_server(server, request):
+    """Register cleanup before startup, including partial fixture failures."""
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+
+    def stop():
+        try:
+            if thread.is_alive():
+                server.shutdown()
+        finally:
+            server.server_close()
+            if thread.ident is not None:
+                thread.join(timeout=3)
+
+    request.addfinalizer(stop)
+    thread.start()
+    return thread
+
+
 def _request(port, path, method="GET", headers=None, body=None, https=False):
     cls = http.client.HTTPSConnection if https else http.client.HTTPConnection
     kwargs = ({"context": ssl._create_unverified_context()} if https else {})
@@ -355,6 +373,76 @@ def test_bff_rejects_ambiguous_framing_and_forwards_one_validated_length(
         backend.server_close()
 
 
+@pytest.mark.parametrize("failure", [
+    "before-headers", "malformed-chunk", "truncated-chunk", "none",
+])
+def test_proxy_stream_failure_emits_one_response_without_replay(
+        tmp_path, request, failure):
+    """Real TLS on both hops: never append an error to an existing response."""
+    cert, key = _certificate(tmp_path, "stream-management")
+    combined = tmp_path / "stream-console.pem"
+    combined.write_bytes(cert.read_bytes() + key.read_bytes())
+    combined.chmod(0o600)
+    token = tmp_path / "stream-token"
+    _write_secret(token, "s" * 64)
+    requests = []
+    prefix = b"synthetic-prefix\n"
+
+    class Backend(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.command, self.path))
+            if failure == "before-headers":
+                self.close_connection = True
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if failure == "truncated-chunk":
+                # Declare more bytes than arrive: HTTPResponse.read1 raises
+                # IncompleteRead after forwarding the available prefix.
+                self.wfile.write(b"40\r\n" + prefix)
+            else:
+                self.wfile.write(("%x\r\n" % len(prefix)).encode() + prefix + b"\r\n")
+                self.wfile.write(b"invalid-size\r\n" if failure == "malformed-chunk"
+                                 else b"0\r\n\r\n")
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *_args):
+            pass
+
+    backend = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(cert), str(key))
+    backend.socket = context.wrap_socket(backend.socket, server_side=True)
+    _fixture_server(backend, request)
+    console = gui_server.make_server(
+        "127.0.0.1", 0,
+        "https://localhost:%d" % backend.server_address[1],
+        str(token), str(cert), certfile=str(combined))
+    _fixture_server(console, request)
+    client_context = ssl.create_default_context(cafile=str(cert))
+    with socket.create_connection(console.server_address, timeout=3) as raw:
+        with client_context.wrap_socket(raw, server_hostname="localhost") as tls:
+            tls.sendall(b"GET /api/v1/session HTTP/1.1\r\n"
+                        b"Host: localhost\r\nConnection: close\r\n\r\n")
+            chunks = []
+            while chunk := tls.recv(4096):
+                chunks.append(chunk)
+    wire = b"".join(chunks)
+    headers, body = wire.split(b"\r\n\r\n", 1)
+    assert wire.count(b"HTTP/1.0 ") == 1
+    assert requests == [("GET", "/internal/v1/session")]
+    if failure == "before-headers":
+        assert headers.startswith(b"HTTP/1.0 503 ")
+        assert json.loads(body)["code"] == "management-api-unavailable"
+    else:
+        assert headers.startswith(b"HTTP/1.0 200 ")
+        assert body == prefix
+        assert b"503" not in wire
+
+
 def test_split_login_cookie_follows_public_bff_scheme_not_tls_backend(
         tmp_path, monkeypatch):
     cert, key = _certificate(tmp_path, "cookie-management")
@@ -577,7 +665,8 @@ def test_console_transport_failure_diagnostics_observe_native_failures(
 
 @pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
 def test_remote_console_reports_and_reloads_its_own_certificate(
-        tmp_path, monkeypatch, projection_order, console_transport_failures):
+        tmp_path, monkeypatch, projection_order, console_transport_failures,
+        request):
     def accepted_by_settings(action, result):
         """Validate the actual proxy reply with the shipped browser model."""
         model = Path(__file__).parents[1] / "console-ui/src/settings-model.mjs"
@@ -620,7 +709,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         "127.0.0.1", 0, app, certfile=str(management_cert),
         keyfile=str(management_key), management_token_file=str(server_token),
         management_previous_token_file=str(server_previous))
-    _thread(management)
+    _fixture_server(management, request)
     backend = "https://localhost:%d" % management.server_address[1]
     runtime = tmp_path / "console-runtime.pem"
     gui_server.fetch_console_certificate(
@@ -631,7 +720,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         "127.0.0.1", 0, backend, str(token), str(management_cert),
         certfile=str(runtime), default_certfile=str(default_cert),
         default_keyfile=str(default_key), previous_token_file=str(console_previous))
-    _thread(console)
+    _fixture_server(console, request)
     port = console.server_address[1]
 
     def fingerprint(cert):
@@ -711,6 +800,62 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         console.server_close()
         management.shutdown()
         management.server_close()
+
+
+@pytest.mark.parametrize("failure", [
+    "certificate-fetch", "console-construction", "console-start", "first-get",
+])
+def test_certificate_overlap_setup_failure_closes_owned_servers(
+        tmp_path, monkeypatch, console_transport_failures, failure):
+    """Injected failures prove cleanup, not the historical first-GET cause."""
+    finalizers = []
+    servers = []
+    threads = []
+
+    class FixtureRequest:
+        addfinalizer = staticmethod(finalizers.append)
+
+    original_fixture_server = _fixture_server
+    original_thread_start = threading.Thread.start
+
+    def record_server(server, request):
+        servers.append(server)
+        return original_fixture_server(server, request)
+
+    def start_thread(thread):
+        server = getattr(thread._target, "__self__", None)
+        if server in servers:
+            threads.append(thread)
+            if failure == "console-start" and isinstance(
+                    server, gui_server._ConsoleServer):
+                raise RuntimeError("synthetic Console thread startup failure")
+        return original_thread_start(thread)
+
+    def startup_failure(*_args, **_kwargs):
+        raise RuntimeError("synthetic certificate fixture startup failure")
+
+    monkeypatch.setitem(globals(), "_fixture_server", record_server)
+    monkeypatch.setattr(threading.Thread, "start", start_thread)
+    if failure == "certificate-fetch":
+        monkeypatch.setattr(gui_server, "fetch_console_certificate", startup_failure)
+    elif failure == "console-construction":
+        monkeypatch.setattr(gui_server, "make_server", startup_failure)
+    elif failure == "first-get":
+        problem = {"type": api_problem.TYPE_BASE + "management-api-unavailable"}
+        monkeypatch.setitem(globals(), "_request", lambda *_args, **_kwargs:
+                            (503, {}, json.dumps(problem).encode()))
+    try:
+        with pytest.raises(AssertionError if failure == "first-get" else RuntimeError):
+            test_remote_console_reports_and_reloads_its_own_certificate(
+                tmp_path, monkeypatch, "console-first", console_transport_failures,
+                FixtureRequest())
+        assert len(finalizers) == (1 if failure in (
+            "certificate-fetch", "console-construction") else 2)
+    finally:
+        for finalize in reversed(finalizers):
+            finalize()
+    assert all(server.socket.fileno() == -1 for server in servers)
+    assert all(not thread.is_alive() for thread in threads)
 
 
 def test_console_certificate_does_not_mask_authenticated_bad_response(

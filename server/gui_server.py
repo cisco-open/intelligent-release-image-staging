@@ -602,6 +602,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 self.close_connection = True
                 return
             conn = None
+            response_started = False
             try:
                 context = _tls_client_context(ca_file)
                 buffered = b""
@@ -686,6 +687,11 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                     if refresh or local_settings:
                         payload["gui_cert"] = dict(srv.certificate_info)
                     body = json.dumps(payload, separators=(",", ":")).encode()
+                # Once response emission starts, a failed upstream read or
+                # browser write must only close this response. end_headers()
+                # clears _headers_buffer, so that buffer cannot prove that
+                # sending a fresh error response is still safe.
+                response_started = True
                 self.send_response(response.status, response.reason)
                 has_cache = False
                 for name, value in response.getheaders():
@@ -726,7 +732,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             except (OSError, ssl.SSLError, http.client.HTTPException,
                     tier_auth.CredentialUnavailable,
                     ConsoleConfigurationError):
-                if not getattr(self, "_headers_buffer", None):
+                if not response_started:
                     api_problem.send(self, 503, "management-api-unavailable",
                                      "Management API unavailable",
                                      headers=(("Retry-After", "1"),))
