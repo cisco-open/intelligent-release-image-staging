@@ -30,6 +30,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   Recover missing caches from a matching same-deployment backup while preserving
   existing altered files for inspection.
 
+- Record accepted offline Ubuntu dependency changes before applying them.
+  Resume interrupted work without adopting a different package plan, and allow
+  normal security updates after dependency installation has completed. Give the
+  split Console host its own recorded plan and keep ownership checks read-only.
+
 - Prepare device runtimes for both CPU architectures before adding deployment
   trust. Keep each runtime to one filesystem layer and generate IOx and XR
   wrappers without rebuilding the image.

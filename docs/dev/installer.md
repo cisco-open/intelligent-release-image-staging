@@ -199,6 +199,19 @@ package hashes and the complete dependency set. Its apply step checks the
 approved package plan again while apt holds its mutation lock. This module's
 disconnected package tests do not establish complete deployment qualification.
 
+The installer records the accepted dependency plan before applying it. Resume
+can retry an unchanged host or recognise that the exact plan finished before
+its completion was recorded. Partial apt operations and unexpected changes
+stop for inspection with the plan retained. Once complete, ordinary Ubuntu
+security updates are allowed when the required dependencies remain available;
+resume does not silently install a new dependency plan.
+
+Split Docker uses a separate accepted plan for the selected Console host. It
+checks the SSH identity, host identity and Ubuntu signatures there, then installs
+only Docker, Compose, OpenSSL and their required dependencies. Ownership checks
+remain read-only. The remote host needs Python, SSH, sudo and Ubuntu's package
+tools and archive keyring before this step.
+
 Core image imports use installation-owned tags and record intent before changes.
 Resume checks the authenticated kit, matching installed controller and source,
 image configuration digest and Docker image ID. These two image identities can
