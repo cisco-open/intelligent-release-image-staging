@@ -475,11 +475,11 @@ try {
   assert.deepEqual(settingsWrites.at(-1).body, {mode: 'off', hour_utc: 0});
   settingsFailure = '';
   await settingsTab('Certificates & keys');
-  await page.locator('#browser-tls-state').getByText('Browser certificate: idle.', {exact: true}).waitFor();
+  await page.locator('#browser-tls-state').getByText('No replacement in progress.', {exact: true}).waitFor();
   await page.locator('#browser-tls-names').fill('console.example.com, 192.0.2.10');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#browser-tls-prepare').click();
-  await page.locator('#browser-tls-state').getByText('Browser certificate: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#browser-tls-state').getByText('Waiting for your certificate authority.', {exact: true}).waitFor();
   const csrDownload = page.waitForEvent('download');
   await page.locator('#browser-tls-csr').click();
   assert.equal((await csrDownload).suggestedFilename(), 'iris-console.csr');
@@ -490,7 +490,7 @@ try {
   assert.equal(settingsWrites.length, beforeTlsPrivate);
   await page.locator('#browser-tls-approved').setInputFiles({name: 'cert.pem', mimeType: 'text/plain', buffer: Buffer.from(publicCertificate)});
   await page.locator('#browser-tls-approve').click();
-  await page.locator('#browser-tls-state').getByText('Browser certificate: approved.', {exact: true}).waitFor();
+  await page.locator('#browser-tls-state').getByText('Approved certificate ready to apply.', {exact: true}).waitFor();
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#browser-tls-apply').click();
   await page.locator('#browser-tls-result').getByText(/this Console listener reloaded/).waitFor();
@@ -502,7 +502,7 @@ try {
   assert.equal((await tokenDownload).suggestedFilename(), 'iris-metrics-token');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-replace').click();
-  await page.locator('#service-credential-state').getByText(/awaiting verification/).waitFor();
+  await page.locator('#service-credential-state').getByText(/Replacement saved; confirm all consumers have moved/).waitFor();
   assert.equal(await page.locator('#service-credential-token').inputValue(), '', 'Clear the browser secret after successful publication');
   assert.equal(await page.locator('#service-credential-retire').isDisabled(), true, 'No proof, no retirement');
   serviceCredentialFixture.items[0].observed_at = 1790230000;
@@ -524,7 +524,7 @@ try {
   await page.locator('#service-credential-headers button').last().click();
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-replace').click();
-  await page.locator('#service-credential-state').getByText(/awaiting verification/).waitFor();
+  await page.locator('#service-credential-state').getByText(/Replacement saved; confirm all consumers have moved/).waitFor();
   assert.equal(settingsWrites.at(-1).body.endpoint, 'https://collector.example:4318');
   assert.equal(await page.locator('#service-credential-headers [data-field=value]').inputValue(), '');
   assert.equal(await page.locator('#service-credential-retire').isDisabled(), true);
@@ -606,8 +606,8 @@ try {
     await page.setViewportSize({width: 1440, height: 1100});
     await page.locator('#key-maintenance').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'key-maintenance-desktop.png')});
   }
-  await page.locator('#certificate-rows').getByText('renewal due', {exact: true}).waitFor();
-  await page.locator('#certificate-rows').getByText('No expiry', {exact: true}).waitFor();
+  await page.locator('#certificate-rows').getByText('Renewal due', {exact: true}).waitFor();
+  await page.locator('#certificate-rows').getByText('No expiry date', {exact: true}).waitFor();
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
   const download = page.waitForEvent('download');
   await page.locator('#certificate-request').click();
@@ -616,7 +616,7 @@ try {
   const beforePrivate = settingsWrites.length;
   await page.locator('#certificate-approved').setInputFiles({name: 'wrong.pub', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN OPENSSH PRIVATE KEY-----')});
   await page.locator('#certificate-renew').click();
-  await page.locator('#certificate-renew-result').getByText('Choose the public certificate returned by your custodian, not a private key.', {exact: true}).waitFor();
+  await page.locator('#certificate-renew-result').getByText('Choose the public certificate returned by the root key holder, not a private key.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforePrivate, 'Private key must not be uploaded');
   await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   await page.locator('#certificate-renew').click();
@@ -637,14 +637,14 @@ try {
   certificateAvailable = true;
   await page.locator('#certificate-refresh').click();
   await page.locator('#certificate-rows tr').first().waitFor();
-  await page.locator('#rotation-state').getByText('Rotation: idle.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('No replacement in progress.', {exact: true}).waitFor();
   const beforeRotation = settingsWrites.length;
   page.once('dialog', dialog => dialog.dismiss());
   await page.locator('#rotation-prepare').click();
   assert.equal(settingsWrites.length, beforeRotation);
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-prepare').click();
-  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false,
     JSON.stringify(await page.evaluate(() => Array.from(document.querySelectorAll('body *'))
@@ -664,18 +664,20 @@ try {
   await page.locator('#rotation-result').getByText('Upload the public approval, never a private key.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforeRotationPrivate);
   await page.locator('#rotation-refresh').click();
-  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor();
   await page.locator('#rotation-certificate').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-activate').click();
-  await page.locator('#rotation-state').getByText('Rotation: retirement pending.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('New key active; old key retirement needed.', {exact: true}).waitFor();
   const retirementDownload = page.waitForEvent('download');
   await page.locator('#rotation-retirement-request').click();
   assert.equal((await retirementDownload).suggestedFilename(), 'keylist.payload');
   await page.locator('#rotation-keylist').setInputFiles({name: 'keylist.envelope', mimeType: 'text/plain', buffer: Buffer.from('IRIS-KEYLIST/1\npublic fixture')});
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-retire').click();
-  await page.locator('#rotation-state').getByText(/Previous key revoked at keylist sequence 8/).waitFor();
+  await page.locator('#rotation-state').getByText('Replacement published.', {exact: true}).waitFor();
+  await page.locator('#signer-rotation details > summary').click();
+  await page.locator('#signer-rotation').getByText('Published revocation list sequence: 8.', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   if (process.env.IRIS_UI_SCREENSHOTS) {
