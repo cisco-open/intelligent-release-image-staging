@@ -25,7 +25,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   installer/source inventories and isolated output. Keep publisher authentication,
   corresponding-source notices and redistribution approval as separate release gates.
   Carry the pinned aria2 source companion for both architectures. Verify Ubuntu
-  source/notices and Debian image sources independently, and inventory every
+  source/notices, Debian and Alpine image sources, and core Python/pip sources
+  independently. Preserve original notices and inventory every
   distributed image layer before completing publication checks.
 
 - Bound local packaging-source reads by their original timeout, including silent
