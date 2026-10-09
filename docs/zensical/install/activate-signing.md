@@ -18,9 +18,9 @@ health before retrying.
 - The server runs in the layout you chose: [Install on one Docker
   host](one-docker-host.md), [Install on separate Docker
   hosts](separate-docker-hosts.md) or [Install on Kubernetes](kubernetes.md).
-- The two offline root keys exist, each with a passphrase. A root key is one of
-  the two offline keys that sign every instruction key. See
-  [Create the two offline signing keys](signing-roots.md).
+- The two root keys exist, each with a passphrase. Keep them with separate
+  holders or in your chosen protected local storage. See
+  [Create keys and approve signing requests](offline-approval.md).
 - The person who holds root key A can run one command. That private key and its
   passphrase stay with that person.
 - The server has no signing key yet: check with `docker exec iris
@@ -32,10 +32,11 @@ health before retrying.
 The steps are the same in every layout. Only the way you reach the container
 changes.
 
-For each offline approval below, the key holder can use
+For each approval below, the key holder can use
 [iris-key-setup](offline-approval.md#approve-a-public-request) instead of
-the `ssh-keygen` command. Choose **Online signing certificate**, select
-`iris-online.pub`, and save the public approval as `iris-online-cert.pub`.
+the `ssh-keygen` command. Choose **Approve server request**, then **Server signing
+key**. Select `iris-online.pub` and save the public approval as `iris-online-cert.pub`.
+For keys kept on the deployment host, run `iris-key-setup --local`.
 
 !!! warning
     Copy the public half of the signing key out of the config volume, never from

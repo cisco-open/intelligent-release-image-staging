@@ -106,7 +106,7 @@ link to its definition.
 | park | stop sharing an unassigned image and clean its staging copy; retained files depend on the platform and who supplied them |
 | verifier_missing | the device would check the signature but the tool to do so is not installed |
 | Bulk Hash | the checksum Cisco publishes for an image |
-| root key, signing root | one of the two offline keys that sign every instruction key |
+| root key, signing root | one of two protected keys used to approve online instruction-signing keys and sign the key-retirement list |
 
 The glossary line for "scheduled outcome" is the only place a user page writes
 "receipt" outside an API route or field name; every such line needs a narrow

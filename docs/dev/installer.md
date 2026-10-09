@@ -101,8 +101,10 @@ The installer does not complete those approvals automatically. See
 and [backup controls](../zensical/admin-guide/backups.md#console-backup-controls).
 Neither status is a production READY declaration.
 
-The packaged `iris-key-setup` script guides offline key holders through creating
-protected keys, approving public requests and copying only public files. See
+The packaged `iris-key-setup` script guides separate key holders through creating
+protected keys, approving public requests and copying only public files. Owners
+keeping keys on the deployment host use `iris-key-setup --local` for later
+approvals. See
 [offline approval](../zensical/install/offline-approval.md).
 
 The installer also has explicit `docker-split` and `kubernetes` targets; see the

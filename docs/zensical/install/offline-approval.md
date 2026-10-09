@@ -60,8 +60,9 @@ signing machines offline; use a transfer machine or removable storage instead.
 
 1. Get the public request from the installer or Console. Obtain its
    SHA256 value independently from the person requesting approval.
-2. Choose **Approve server request**. Select the request, your private signing
-   key and a new output file. Choose signing approval or a retirement list.
+2. Choose **Approve server request**, then **Server signing key** or **Key
+   retirement list**. Select the request, your private signing key and a new
+   output file.
 3. Compare the displayed SHA256 value with the independent record. Confirm
    the full value when asked, then enter your private key's passphrase.
 4. Use **Copy public file** to return only the saved public approval. Apply it

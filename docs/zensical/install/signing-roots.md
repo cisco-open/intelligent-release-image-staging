@@ -9,9 +9,10 @@ SPDX-License-Identifier: Apache-2.0
 For guided key creation on the deployment host instead, use
 [local setup](managed-package.md#guided-local-setup). The steps here use separate holders.
 
-Two offline keys, the signing roots, sign every instruction the server sends a
-device. Create both, keep the private halves offline, and put the two public
-halves where the package build reads them. The
+The two signing roots approve the server's online instruction-signing key and
+sign its key-retirement list. The online key signs the instructions sent to
+devices. In this separate-holder workflow, keep the private roots offline and
+put their public halves where the package build reads them. The
 [Glossary](../reference/glossary.md) defines root key and instruction.
 
 Skip this page if your organization already has an approved pair: ask the
@@ -70,9 +71,10 @@ The listing prints `root-a.pub` and `root-b.pub`, and nothing else.
 
 !!! warning
 
-    Never copy a private half to the server host, to a device, into an
-    installer argument or into a message, and never generate roots inside a
-    Kubernetes pod. If an unexpected file turns up in the roots directory, ask
+    In this workflow, private roots stay on their holders' machines. Never put
+    them in public import folders, device packages, containers or messages.
+    For owner-selected local storage, use the guided local setup linked above.
+    If an unexpected file turns up in the roots directory, ask
     the key holders about it rather than deleting it.
 
 ## Put the public halves where the build reads them

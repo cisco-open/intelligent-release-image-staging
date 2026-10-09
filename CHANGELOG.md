@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Align the contributor deployment runbook and installation signing guidance
+  with managed setup, committed aria2c clients and owner-selected key storage.
+  Distinguish root approvals, online instruction signatures and native IOx signing.
+
 - Support an explicit local-key mode in `iris-key-setup` for approvals and key
   maintenance on the deployment host. Keep separate-holder checks as the default,
   require local custody confirmation, and retain protected-key and public-file

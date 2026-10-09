@@ -16,7 +16,7 @@ opt-in adapters. Browser TLS and telemetry credentials have operator-driven UI
 workflows; their schedules remain review reminders. Installer-owned Docker,
 split Docker and Kubernetes
 deployments also have planned maintenance adapters for management/device TLS,
-peer CA, offline roots, service age identity and seeder credentials. The host UI
+peer CA, instruction roots, service age identity and seeder credentials. The host UI
 also changes the independent recovery recipient without sending a private
 identity through the browser. Device
 consumer rollout remains an explicit remove/re-onboard/verify procedure.
@@ -30,7 +30,9 @@ Renewal follows the existing OpenSSH validation and custody lock. It compares
 the exported key/certificate hashes, permits an identical safe retry, requires
 expiry extension and more than seven days remaining, and never initializes the
 producer or replaces a key. An expired certificate can be renewed with the same
-key. The root private key stays offline; only the public approval is uploaded.
+key. Root private keys stay in the owner's chosen protected storage; only the
+public approval is uploaded. The terminal helper supports separate holders and
+explicit `iris-key-setup --local` approvals on the deployment host.
 
 Browser TLS now also has the public request/approval workflow below.
 Management/device-facing trust changes use the scoped host-worker workflow below.

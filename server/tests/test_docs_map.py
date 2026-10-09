@@ -1993,3 +1993,38 @@ def test_managed_installer_offers_local_and_separate_holder_workflows():
     for phrase in ("local setup", "iris-key-setup --local", "LOCAL KEY HOLDER",
                    "only public approval files", "separate-holder"):
         assert phrase in approval, phrase
+
+
+def test_contributor_deployment_runbook_matches_managed_setup():
+    runbook = " ".join(Path(REPO, "docs/dev/ai-assisted-deployment.md").read_text().split())
+    for phrase in ("managed package procedure", "both IOx architectures",
+                   "Infrastructure-only checks", "clients are committed",
+                   "bin/aria2c", "deliverables/aria2c-aarch64",
+                   "does not fetch or compile replacement clients",
+                   "irisctl setup", "iris-key-setup --local", "LOCAL KEY HOLDER",
+                   "Private-key operations are refused inside containers",
+                   "do not claim the account or sign in unless asked",
+                   "a SHA512 manifest is not a native signature",
+                   "source-build installer needs network access"):
+        assert phrase in runbook, phrase
+    for stale in ("Fetch the verified aria2c release", "only you create them",
+                  "whatever the device types you chose", "proof of concept only"):
+        assert stale not in runbook, stale
+
+
+def test_signing_guides_distinguish_root_approval_from_instruction_signing():
+    roots = " ".join(_page("install/signing-roots.md").split())
+    glossary = " ".join(_section(_page("reference/glossary.md"), "root key, signing root").split())
+    assert "online instruction-signing key" in roots
+    assert "The online key signs the instructions" in roots
+    assert "key-retirement list" in roots and "key-retirement list" in glossary
+    assert "The online key signs device instructions" in glossary
+    assert "chosen protected local storage" in _page("install/activate-signing.md")
+    assert "iris-key-setup --local" in _page("install/activate-signing.md")
+    signing = " ".join(_page("install/activate-signing.md").split())
+    helper = Path(REPO, "tools/iris_installer/key_setup.py").read_text()
+    for label in ("Approve server request", "Server signing key"):
+        assert label in signing and label in helper, label
+    assert "Online signing certificate" not in signing
+    assert "owner-selected local storage" in roots
+    assert "sign every instruction the server sends" not in roots

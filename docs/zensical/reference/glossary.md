@@ -106,5 +106,6 @@ The checksum Cisco publishes for an image. See
 
 ## root key, signing root
 
-One of the two offline keys that sign every instruction key. See
+One of two protected keys used to approve online instruction-signing keys and
+sign the key-retirement list. The online key signs device instructions. See
 [Create the signing keys](../install/signing-roots.md).
