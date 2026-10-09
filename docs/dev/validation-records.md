@@ -39,6 +39,39 @@ recorded, and remove only the files and catalog entries the test created.
 Undeploying a device does not remove images staged for real use, and a
 cleanup should not either.
 
+## Guest Shell, XR and reviewed origin access - 2026-10-09
+
+An independent single-host Docker deployment used source `f7c7f72`, freshly
+built device packages, its own signing roots and required peer TLS. An already
+BUNDLE-booted Catalyst 9300 on IOS-XE 17.18.04 and two Cisco 8000 routers on
+IOS-XR 25.4.2 each staged a synthetic 128 MiB file. Device-native hashes matched;
+signed heartbeats and TLS observations were checked separately.
+
+- Guest Shell public trust files remained readable by the agent after a native
+  IOS file read changed their ownership. Only the verified public files used
+  mode `0644`; the agent source retained mode `0600`.
+- Real Console actions changed peer reporting from 60 to 10 seconds and back.
+  Adjacent active reports were 9.992 seconds apart. Device-to-device arrows
+  appeared during actual transfer; pausing the map stopped its polling.
+- A reviewed one-device, one-address origin restriction disconnected the
+  origin while the receiving XR still held its earlier instruction. An allowed
+  Guest Shell peer continued delivery. Reviewed rollback and a server restart
+  left no owned blocked addresses or pending application, with proof from the
+  current transfer-service session.
+- After the server restart, all three devices recovered fresh signed reports
+  without forced polling or agent restarts. The browser required a fresh login.
+- Normal unassignment and recorded undeploy completed. Device configuration
+  and running software matched the baselines; boot settings were unchanged.
+  Only the test's synthetic files and configuration were removed.
+
+The new SHA512 IOx wrapper did **not** pass the IE admission check. On the
+tested IOS-XE 17.15.04 / CAF 2.12.0.3 device, architecture and descriptor
+validation succeeded, then manifest parsing rejected the first SHA512 entry.
+Native signing compatibility remains unresolved. The available Catalyst 8000V
+devices retained native verification; no unsigned onboarding was attempted.
+These results do not qualify either IOx architecture for native signature
+acceptance, or measure an isolated bandwidth cost for ten-second reporting.
+
 ## Native security acceptance — 2026-09-20
 
 The current ten-patch aria2c client and installed instruction verifier were
