@@ -46,18 +46,20 @@ export function OriginEnforcement({controller}) {
           <span className="field-label">{label}</span><input id={'origin-' + key} inputMode="numeric" value={form[key]} autoComplete="off"
             disabled={committing} onChange={event => controller.field(key, event.target.value)} aria-describedby="origin-limit-help" /></label>)}
       </div>
-      <p className="muted" id="origin-limit-help">Maximum new blocks you will approve in this change, from 0 to 1000. The preview also includes previously approved blocks.</p>
+      <p className="muted" id="origin-limit-help">{form.mode === 'enforce'
+        ? 'Maximum new blocks you will approve in this change, from 0 to 1000. The preview also includes previously approved blocks.'
+        : 'New-block limits apply only when enforcing reviewed blocks.'}</p>
       {preview && <div className="origin-enforcement-preview" id="origin-preview" role="region" aria-label="Distribution access preview">
-        <h4>{preview.request.mode === 'enforce' ? 'Proposed blocks' : 'Proposed release of reviewed blocks'}</h4>
+        <h4>{preview.request.mode === 'enforce' ? 'Proposed blocks' : 'Withdraw approval for reviewed blocks'}</h4>
         <p className="muted">{originModeLabel(preview.request.mode)}. This is a preview, not a saved change.</p>
-        <dl className="policy-counts">
+        {preview.request.mode === 'enforce' && <dl className="policy-counts">
           <div><dt>New devices to block</dt><dd>{number(preview.body.new_device_count)}</dd></div>
           <div><dt>New addresses to block</dt><dd>{number(preview.body.new_ip_count)}</dd></div>
           <div><dt>Address blocks to keep</dt><dd>{number(preview.body.retained_ip_count)}</dd></div>
           <div><dt>Total devices to block</dt><dd>{number(preview.body.proposed_device_count)}</dd></div>
           <div><dt>Total addresses to block</dt><dd>{number(preview.body.proposed_ip_count)}</dd></div>
-        </dl>
-        <p>{preview.request.mode === 'enforce' ? 'Applying can disconnect existing distribution transfers from these addresses.' : 'Applying releases these reviewed distribution blocks. Quarantine and other sharing restrictions remain.'}</p>
+        </dl>}
+        <p>{preview.request.mode === 'enforce' ? 'Applying can disconnect existing distribution transfers from these addresses.' : 'Applying withdraws approval for the reviewed distribution blocks and asks the transfer service to remove them. No new blocks are approved. Quarantine and other sharing restrictions remain.'}</p>
         {!!preview.body.blockers.length && <ul aria-label="Checks to resolve">{preview.body.blockers.map((code, index) => <li key={code + index}>{originReasons[code]}</li>)}</ul>}
       </div>}
       {warning && <p className="policy-warning">{warning}</p>}

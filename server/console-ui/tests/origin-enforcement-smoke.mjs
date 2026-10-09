@@ -20,6 +20,10 @@ try {
   let mode = 'ok', held, reached;
   const response = body => ({json: body, headers: {ETag: `"origin-enforcement-${body.revision}"`}});
   const preview = body => ({...value, mode: body.mode, max_new_ips: body.max_new_ips, max_new_devices: body.max_new_devices,
+    // Native release previews describe an empty proposed set, not a count of
+    // removed blocks. Current saved approval/effect remains separate.
+    ...(body.mode === 'preflight' ? {new_ip_count: 0, new_device_count: 0, retained_ip_count: 0,
+      proposed_ip_count: 0, proposed_device_count: 0} : {}),
     dry_run: true, requires_confirmation: true, confirm_token: token});
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => {window.csp = []; window.addEventListener('securitypolicyviolation', event => window.csp.push(event.violatedDirective));});
@@ -101,6 +105,21 @@ try {
   await refresh(); assert.equal(await page.locator('#origin-application-state').innerText(), 'Blocks confirmed');
   assert.equal(await page.locator('#origin-confirmed-counts').innerText(), '3 devices · 2 addresses');
   await snapshot('distribution-confirmed');
+  const releaseBefore = writes.length;
+  await page.locator('#origin-mode').selectOption('preflight'); await apply();
+  assert.equal(writes.length, releaseBefore + 1);
+  assert.equal(writes.at(-1).body.mode, 'preflight'); assert.equal(writes.at(-1).body.dry_run, true);
+  assert.match(await page.locator('#origin-preview').innerText(), /Withdraw approval for reviewed blocks/);
+  assert.match(await page.locator('#origin-preview').innerText(), /asks the transfer service to remove them/);
+  assert.match(await page.locator('#origin-preview').innerText(), /No new blocks are approved/);
+  assert.match(await page.locator('#origin-preview').innerText(), /Quarantine and other sharing restrictions remain/);
+  assert.equal(await page.locator('#origin-preview .policy-counts').count(), 0, 'Release previews must not reinterpret prospective counts as blocks added or released');
+  assert.equal(await page.locator('#origin-saved-mode').innerText(), 'Enforce reviewed blocks');
+  assert.equal(await page.locator('#origin-approved-counts').innerText(), '3 devices · 2 addresses');
+  assert.equal(await page.locator('#origin-confirmed-counts').innerText(), '3 devices · 2 addresses');
+  await snapshot('distribution-release-preview');
+  await page.getByRole('button', {name: 'Cancel review', exact: true}).click();
+  assert.equal(writes.length, releaseBefore + 1, 'Canceling a release preview sends no commit');
   value = {...value, state: 'pending', reason: 'session_changed', applied_ip_count: null, applied_device_count: null, last_verified_at: null};
   await refresh(); assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
   assert.equal(await page.locator('#origin-application-state').innerText(), 'Waiting for confirmation', 'Restarted transfer service needs current-session proof');

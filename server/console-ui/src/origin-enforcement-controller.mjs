@@ -101,7 +101,7 @@ export class OriginEnforcementController {
       } else {
         const checked = checkedOriginPreview(body, response.headers.get('ETag'), request, revision);
         this.update({preview: {request: structuredClone(request), revision, body: checked},
-          message: checked.blockers.length ? 'Resolve these checks, then refresh and preview again.' : 'Review the counts, then apply or cancel. No change has been made.'});
+          message: checked.blockers.length ? 'Resolve these checks, then refresh and preview again.' : 'Review this change, then apply or cancel. No change has been made.'});
         keepLock = !checked.blockers.length;
       }
     } catch (error) {
