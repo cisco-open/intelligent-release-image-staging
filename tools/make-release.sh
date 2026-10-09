@@ -76,7 +76,7 @@ SHIP=(
   tools/irisctl tools/iris_installer tools/iris-key-setup
   tools/release-auth.py tools/release-stage.py
   tools/build-installer-package.py tools/finalize-device-image.py
-  tools/build-release-kit.py tools/build-release-candidate.py tools/complete-release-candidate.py tools/inspect-image-components.py tools/build-alpine-sources.py
+  tools/build-release-kit.py tools/build-release-candidate.py tools/complete-release-candidate.py tools/prepare-prebuilt-release.py tools/inspect-image-components.py tools/build-alpine-sources.py
   tools/build-packaging-inputs.py tools/build-offline-dependencies.py tools/build-guest-inputs.py
   tools/bootstrap-offline.py
   tools/build-offline-sources.py tools/build-debian-sources.py tools/build-core-python-sources.py tools/build-runtime-sources.py tools/build-image-source-notices.py
