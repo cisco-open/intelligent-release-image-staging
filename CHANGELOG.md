@@ -26,7 +26,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   corresponding-source notices and redistribution approval as separate release gates.
   Carry the pinned aria2 source companion for both architectures. Verify Ubuntu
   source/notices, Debian and Alpine image sources, and core Python/pip sources
-  independently. Preserve original notices and inventory every
+  independently. Include neutral Python/XML and static helper sources for both
+  device architectures. Preserve original notices and inventory every
   distributed image layer before completing publication checks.
   Allow explicit integrity checks of retained Debian source archives after
   repository metadata expires, while keeping fresh-build checks unchanged.
