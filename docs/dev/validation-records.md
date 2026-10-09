@@ -166,6 +166,76 @@ mixed workload, capacity or higher admission limits. See
 [the API test harness](api-exercise.md) for the current read behavior and test
 method.
 
+## Sustained mixed API workload - 2026-10-09
+
+The [sustained runner](api-soak.md) passed its four two-minute steps at 2, 5,
+10 and 15 Console operations per second, then 30 minutes at 15. The source was
+`f7c7f723cd4b40048b32d20589c583a7d0ca0c0a`, using these immutable image IDs:
+
+```text
+server  sha256:a5e4a813bb8b9cdf091497bf4a0785967263b57e1850497576de7a76b00e956f
+Console sha256:b4bf187a94a696d28056dad531e57ca69d6c2115a8b90dc7f056bb5689793f4a
+```
+
+The local Docker host had 18 logical CPUs, 47 GiB RAM, Ubuntu 24.04.4,
+kernel 6.8.0-138-generic and Docker 29.8.2. Docker used overlayfs on ext4;
+its data and the evidence directory shared a filesystem. The server had
+4 CPUs/4 GiB, the Console 2 CPUs/2 GiB, and the driver one pinned logical CPU.
+TLS verification remained enabled on the isolated internal bridge.
+
+The fleet had 1,000 synthetic devices provisioned offline. Four authenticated
+sessions generated an 80:20 mix of paged reads and metadata writes. Each device
+sent one heartbeat per minute. One small terminal report arrived per second;
+one real 16 MiB synthetic upload ran through publication each minute.
+
+| Operation during the 30-minute soak | Count | p95 | p99 |
+| --- | ---: | ---: | ---: |
+| Console read | 21,598 | 194 ms | 234 ms |
+| Metadata write | 5,400 | 50 ms | 57 ms |
+| Heartbeat | 30,000 | 17 ms | 19 ms |
+| Terminal report | 1,800 | 18 ms | 21 ms |
+| Upload and publication HTTP requests | 138 | 183 ms | 215 ms |
+| Complete upload through publication | 30 | 492 ms | 496 ms |
+
+The last row measures complete operations, not extra HTTP requests. All normal
+responses were 200 with valid expected content. The driver delivered 26,998 of
+27,000 scheduled Console starts, all 30,000 heartbeats and all 1,800 reports.
+Every latency, delivery and resource objective in the method passed unchanged.
+
+Across 402 resource samples, server CPU peaked at 35.2% of its quota and total
+cgroup memory at 851.2 MiB (20.8%). Anonymous memory peaked at 174.8 MiB and file
+cache at 631.4 MiB; these separate maxima need not coincide. Console CPU peaked
+at 15.1% of quota and memory at 65.7 MiB (3.2%). Host CPU peaked at 23.2%, with
+at least 41.2 GiB available RAM and 2.86 TB free on both checked paths.
+
+Clean restart preserved four writers' last accepted metadata, all 1,000 latest
+reports and 39 published images. Rehashing all 39 files matched their digests.
+The recovery workload published a fortieth image. Stopping only the server
+returned the expected 503 with `Retry-After: 1`; restart and fresh login restored
+access and confirmed durable state. A shared 12-per-second admission budget
+then accepted 309 Console requests and returned 38 bounded 429 responses across
+four sessions. The driver waited before new work without replaying mutations;
+the aggregate budget and final durable state passed. All nine service stops
+exited zero without OOM kills. Exact owned resources and driver credentials
+were removed; independent label queries found none remaining.
+
+This was a shared-host measurement. Seven monitoring containers and regression
+tests pinned to another CPU remained present. A separate device-test deployment
+had limits of 2 CPUs/2 GiB plus 1 CPU/1 GiB. Its intermittent work included
+three 128 MiB transfers, onboarding attempts, a clean restart and cleanup from
+17:24 to 17:55 UTC. One transfer overlapped the soak; the other two preceded it.
+All builds finished before the measured run. This is not a clean performance
+comparison with the earlier baseline or qualification of those device jobs.
+
+The highest qualified rate was 15 Console operations per second, not a capacity
+ceiling. For this recorded mix, an 80% starting budget is 12 total, split into
+9.6 reads and 2.4 writes per second. No deployment default or owner setting was
+changed. Retest for another fleet, traffic mix, cadence, image size, runtime,
+storage or topology. This run excludes signed instructions, maximum-sized peer
+reports, multi-GiB files, Cisco authenticity, device onboarding, tracker or
+BitTorrent capacity, WAN, Kubernetes, separate hosts and abrupt power loss.
+Future image builds require their own source and image provenance review.
+
 ## Telemetry WAN cost and peer-sampling coverage
 
 [Limitations](../zensical/architecture/limitations.md) and

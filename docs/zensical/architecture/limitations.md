@@ -80,10 +80,12 @@ landed, so it is a floor rather than a census.
 
 ## What the capacity tests do not prove
 
-The capacity harness measures how the cost of each operation moves as a
-synthetic fleet grows. It does not establish production capacity, and neither
-do the live API checks against a running server. See
-[Manual checks and the test-file map](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/TESTING.md).
+The scaling harness measures how operation cost changes as a synthetic fleet
+grows. Short live API checks establish function, not capacity. A passing run of the
+[sustained API workload](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/api-soak.md)
+qualifies only its recorded fleet, traffic mix, resources and runtime. See the
+[measured envelope and exclusions](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/validation-records.md)
+before choosing a request budget. Retest when those conditions change.
 
 ## Related
 

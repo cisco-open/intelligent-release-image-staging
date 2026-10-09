@@ -73,6 +73,7 @@ not checked. They are not Cisco software or proof of Cisco hash verification.
 | --- | --- | --- |
 | Console read | 500 ms | 2 seconds |
 | Metadata write, heartbeat or terminal report | 1 second | 3 seconds |
+| Upload HTTP request | 1 second | 3 seconds |
 | Upload through completed publication | 30 seconds | 30 seconds |
 
 Every normal response must be HTTP 200. Partial responses, malformed JSON,
