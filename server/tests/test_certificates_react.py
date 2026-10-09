@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Shipped certificate controller, native custody and bounded authenticated APIs."""
+import http.client
 import json
 from pathlib import Path
 import subprocess
@@ -88,10 +89,34 @@ def test_signing_approval_transport_cap_is_scoped_authenticated_and_bounded(poli
     # Keep domain validation in its real tests; here capture the exact bytes
     # through both authenticated HTTP tiers, including base64-sized approvals.
     body = {"action": "retire", "artifact": "a" * (176 * 1024)}
-    assert request(tier, "POST", endpoint, body, authorized=False, match=False)[0] == 401
+    raw = json.dumps(body).encode()
+    request_line = ("POST " + ("/internal/v1" if tier == "management" else "/api/v1")
+                    + endpoint + " HTTP/1.1").encode()
+    sent = []
+    endheaders = http.client.HTTPConnection.endheaders
+
+    def capture_endheaders(conn, message_body=None, *, encode_chunked=False):
+        # Observe this client's real HTTP serialization, excluding the
+        # Console's separate management authorization/forwarding requests.
+        if conn._buffer[0] == request_line:
+            length = next(value for value in conn._buffer
+                          if value.startswith(b"Content-Length: "))
+            sent.append((length, message_body))
+        return endheaders(conn, message_body, encode_chunked=encode_chunked)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "endheaders", capture_endheaders)
+    # The server rejects absent session credentials before reading the body.
+    # Sending a large body concurrently races its legitimate TLS close and
+    # can fail in SSL.write before this client gets to read the 401 response.
+    # Announce the complete payload, withhold its bytes, and require a reply.
+    assert request(tier, "POST", endpoint, authorized=False,
+                   declared_length=len(raw), match=False)[0] == 401
+    assert sent == [(b"Content-Length: " + str(len(raw)).encode(), None)]
     assert not calls
-    status, _, result = request(tier, "POST", endpoint, body, match=False)
+    status, _, result = request(tier, "POST", endpoint, raw, match=False)
     assert status == 200 and result["transport_probe"] and calls == [body]
+    assert sent == [(b"Content-Length: " + str(len(raw)).encode(), None),
+                    (b"Content-Length: " + str(len(raw)).encode(), raw)]
     assert request(tier, "POST", endpoint, declared_length=192 * 1024 + 1, match=False)[0] == 413
     assert len(calls) == 1
     assert request(tier, "POST", "/settings/certificates/instruction/request", declared_length=64 * 1024 + 1, match=False)[0] == 413
