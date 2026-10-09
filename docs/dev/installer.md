@@ -372,6 +372,30 @@ evidence still needs source and redistribution review, release authentication
 and live qualification. See the [release checklist](release-checklist.md) for
 the separate authentication and publication steps.
 
+### Prepare prebuilt authentication inputs
+
+Use `tools/prepare-prebuilt-release.py --check` with `--completed-dir` and its
+independently recorded `--evidence-sha256`. Select a clean local checkout with
+`--repository`, its exact `--tag` and full `--commit`. Supply the independent
+`--debian-keyring` and `--pip-sdist-sha256` used for that candidate.
+This repeats the source checks and verifies every shipped source file against
+Git without building or executing candidate code.
+
+For unsigned release output, replace `--check` with `--output-dir` naming a new
+protected output path. Also supply `--source-review` with `--review-sha256`,
+and `--stage-record` with `--stage-sha256`, using independently recorded hashes.
+The review must identify its reviewer and cover the exact payload and companions.
+The run record must name the selected tag, commit, workflow run and attempt.
+The helper preserves both records and the original candidate, copies the public
+verification helper and clients from checked source, and writes the release
+inventory and checksums.
+It checks the original source manifest rather than replacing it.
+
+These inputs remain unsigned until the authorized hosted workflow authenticates
+them. The helper checks the review's file bindings, not the reviewer's authority.
+The current workflows still use the source-only path; prebuilt upload and
+authentication require their separately approved integration.
+
 ## Bootstrap the installer offline
 
 This developer route needs an authenticated `ubuntu-dependencies` kit and its

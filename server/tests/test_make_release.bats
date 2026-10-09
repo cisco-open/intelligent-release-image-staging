@@ -86,6 +86,7 @@
     iris/tools/build-runtime-sources.py \
     iris/tools/build-image-source-notices.py \
     iris/tools/complete-release-candidate.py \
+    iris/tools/prepare-prebuilt-release.py \
     iris/tools/inspect-image-components.py \
     iris/tools/build-guest-inputs.py \
     iris/tools/bootstrap-offline.py \
@@ -165,7 +166,7 @@ _make_release_fixture() {
            bootstrap-offline.py inspect-image-components.py build-debian-sources.py \
            build-alpine-sources.py build-core-python-sources.py \
            build-runtime-sources.py build-image-source-notices.py \
-           complete-release-candidate.py release-stage.py \
+           complete-release-candidate.py prepare-prebuilt-release.py release-stage.py \
            build-ssh-verifier.sh build-ssh-verifiers.sh \
            iris-aead.c build-instruction-crypto.sh build-instruction-crypto-inner.sh \
            build-instruction-crypto.Dockerfile \

@@ -95,6 +95,10 @@ _TRIPWIRE_TEST_ANCHORS = (
 # allowlisted when it contains one of its file's anchors. Keep anchors narrow
 # enough that they could not accidentally cover a NEW violation.
 ALLOWLIST = [
+    ("tools/release-stage.py",
+     ("image_components.MAX_RECEIPT",),
+     "reuses the existing bounded build-evidence inventory reader constant; "
+     "not deployment or peer terminology"),
     ("tools/iris_installer/restore.py",
      ("'schedule-occurrences', 'schedule-receipts', 'report_ledger',",
       'outcomes=schedules.ReceiptStore(q.state_dir)'),

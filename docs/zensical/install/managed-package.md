@@ -57,7 +57,7 @@ Use an Ubuntu host with a synchronized clock and network access for builds and
 dependencies. Install the authenticated package:
 
 ```bash
-sudo apt install ./iris-download/iris-installer_<version>_amd64.deb
+sudo apt install ./iris-download/iris-installer_*_amd64.deb
 ```
 
 ### Guided local setup

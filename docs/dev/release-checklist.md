@@ -40,6 +40,13 @@ The `iris-release-qualification-v1` JSON record binds each passed check's eviden
 hash to the stage, every asset and the reviewer. It is a reviewer's statement,
 not a claim that the publication helper ran those tests.
 
+For the separately prepared prebuilt route, the local helper accepts an explicit
+`--profile prepared-host` or `--profile ubuntu-dependencies`. Publication requires a
+`iris-release-qualification-v2` record that also binds the kit, image identities,
+source review and preparation evidence. The source-review check must name the
+exact staged review file's hash. This helper support does not enable prebuilt
+upload or authentication in the current workflows; they remain source-only.
+
 An authorized repository contributor can then manually run
 `.github/workflows/publish-release.yml` from `main`. Supply the same stage
 identities, the literal qualification JSON and its SHA-256, and the confirmation

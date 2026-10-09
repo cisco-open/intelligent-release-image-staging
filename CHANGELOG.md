@@ -37,6 +37,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Separate release authentication from publication. A tag exports authenticated
   files for qualification; a later manual workflow checks the exact files and
   reviewer approval before publishing them without a rebuild.
+  Add local prebuilt preparation with independent source checks, an exact-file
+  review record and explicit run metadata. Keep hosted prebuilt delivery closed
+  until its approved integration is available.
 
 - Bound local packaging-source reads by their original timeout, including silent
   Git processes, and isolate them from unrelated Git configuration.
