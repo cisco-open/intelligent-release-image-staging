@@ -239,7 +239,7 @@ def _summary(files):
                             'availability': 'regular-file' if record['type'] == 'file' and 'sha256' in record else 'link-target-not-assessed'})
         if _component(name) and record['type'] == 'file':
             copied.append(_public_file(name, record))
-        if '_data' in record and name not in DATABASES:
+        if '_data' in record and name not in DATABASES and not record.get('_extra_metadata', False):
             value = {'path': name, 'sha256': record['sha256'], 'source_attribution': 'unresolved'}
             if name.endswith('/patchlevel.h'):
                 match = re.search(r'^#define\s+PY_VERSION\s+"([0-9.]+)"\s*$', _text(record['_data']), re.M)
@@ -262,7 +262,8 @@ def _summary(files):
             'unknown_executables': [row['path'] for row in executables if 'observed_component_path' not in row]}
 
 
-def _layer(path, filesystem):
+def _layer(path, filesystem, *, retain_metadata=None):
+    """Inspect a layer; optional bounded inert metadata stays out of public rows."""
     entries, whiteouts, metadata_size = {}, [], 0
     with tarfile.open(path, 'r:', tarinfo=f._TarInfo) as archive:
         expanded = 0
@@ -291,17 +292,23 @@ def _layer(path, filesystem):
                           'target': _link(name, member.linkname, symbolic=member.issym())}
             elif member.isfile():
                 record = {'type': 'file', 'mode': member.mode, 'size': member.size}
-                selected = bool(member.mode & 0o111) or _notice(name) or _metadata(name) or _component(name)
+                retain = _metadata(name) or retain_metadata is not None and retain_metadata(name)
+                originally_selected = bool(member.mode & 0o111) or _notice(name) or _metadata(name) or _component(name)
+                selected = originally_selected or retain
                 if selected:
                     stream = archive.extractfile(member)
-                    if _metadata(name):
+                    if retain:
                         if member.size > MAX_FILE_METADATA:
                             fail('individual metadata file exceeds limit')
                         record['_data'] = stream.read(MAX_FILE_METADATA + 1)
+                        if not _metadata(name):
+                            record['_extra_metadata'] = True
                         metadata_size += len(record['_data'])
                         if metadata_size > MAX_METADATA or len(record['_data']) != member.size:
                             fail('layer metadata exceeds limits')
                         record['sha256'] = hashlib.sha256(record['_data']).hexdigest()
+                        if not originally_selected:
+                            record['_retained_sha256'] = record.pop('sha256')
                     else:
                         record['sha256'], size = f._copy(stream, None, kit.MAX_ASSET)
                         if size != member.size:
