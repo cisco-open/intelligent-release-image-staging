@@ -14,12 +14,13 @@ the certificate without changing its key, use
 The guided workflow keeps the two device-trusted roots, producer epoch and
 instruction counters. It applies to the shared verifier in Guest Shell, both
 IOx architectures and IOS-XR. It does not change TLS certificates, device
-encryption keys, the server's age identity or offline roots.
+encryption keys, the server's age identity or root signing keys.
 
 ## Before starting
 
 - Have a root signing key holder available for two public approvals. Use
-  `iris-key-setup` wherever that key is held; never upload it to the Console.
+  `iris-key-setup` on that holder's machine, or `iris-key-setup --local` for keys
+  kept on the deployment host. Never upload private keys to the Console.
 - Check signing health, the current revocation list and synchronized time. Keep the age
   recovery recipient and a protected backup available.
 - Arrange a staging check on representative devices. Server completion alone
@@ -37,7 +38,8 @@ an attacker-held key unusable until devices receive its signed revocation.
    key holder through an independently trusted channel.
 2. The key holder uses
    [iris-key-setup](../install/offline-approval.md#approve-a-public-request)
-   and choose **Approve server request**. To provide the filenames directly:
+   and chooses **Approve server request**. To provide the filenames directly,
+   use this command; add `--local` before `approve` for host-held keys:
 
    ```bash
    iris-key-setup approve --request iris-replacement.pub \

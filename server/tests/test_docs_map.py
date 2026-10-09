@@ -1730,7 +1730,7 @@ def test_docs_phase1_operations_root_and_offline_runbooks():
                              "Never upload", "Console"),
                  "root key storage must allow the supported setup choices without inviting private-key upload")
     _assert_section_terms(operations, "If one root key is lost",
-                          ("surviving offline custodian", "next online certificate",
+                          ("surviving root key holder", "next online certificate",
                            "keylist", "No device trust change"),
                           "one-root failover must leave device trust unchanged")
     break_glass = _section(operations, "If both root keys are lost")
@@ -1989,4 +1989,7 @@ def test_managed_installer_offers_local_and_separate_holder_workflows():
                    "--key-directory", "all three layouts", "independent copy",
                    "does not include these private setup keys"):
         assert phrase in managed, phrase
-    assert "local setup" in _page("install/offline-approval.md")
+    approval = _page("install/offline-approval.md")
+    for phrase in ("local setup", "iris-key-setup --local", "LOCAL KEY HOLDER",
+                   "only public approval files", "separate-holder"):
+        assert phrase in approval, phrase

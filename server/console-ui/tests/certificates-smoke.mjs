@@ -48,6 +48,7 @@ try {
   const idle = () => page.waitForFunction(() => window.irisCertificates && !window.irisCertificates.state.busy && !Object.values(window.irisCertificates.state.loading).some(Boolean));
   await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor(); await idle();
   assert.equal(await page.locator('#certificate-rows img').count(), 0);
+  assert.equal(await page.locator('#iris-certificates-inventory code').filter({hasText: /^iris-key-setup --local$/}).count(), 1);
   assert.match(await page.locator('#certificate-rows').innerText(), /Root signing key: <img src=x/);
   assert.doesNotMatch(await page.locator('#certificate-rows').innerText(), /Offline root ignored/);
   assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);

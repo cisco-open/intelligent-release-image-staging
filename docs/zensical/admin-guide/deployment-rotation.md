@@ -91,10 +91,10 @@ XR packages are deployment-neutral for catalog TLS; this change does not by
 itself require rebuilding them. Signing-root replacement does require rebuilding
 all native packages.
 
-## Replace the offline signing roots
+## Replace the root signing keys { #replace-the-offline-signing-roots }
 
-1. Each root holder uses `iris-key-setup` where they keep their private key
-   to create a replacement. Use [separate key holders](../install/offline-approval.md)
+1. Each root holder uses `iris-key-setup` to create a replacement. For keys on
+   the deployment host, use `iris-key-setup --local`. Use [separate key holders](../install/offline-approval.md)
    or your chosen [local setup](../install/managed-package.md#guided-local-setup).
    Return only public keys and approvals to the Console.
 2. Select **Root signing keys** in the Console. Keep the
@@ -127,8 +127,8 @@ Complete or cancel any pending trust replacement first.
 
 1. Select **Root signing keys**. Under **Confirm root key access**,
    select the first root and **Download root confirmation request**.
-2. Its holder runs `iris-key-setup` where they keep that private key,
-   chooses **Approve server request**, and approves that retirement-list request with the matching
+2. Its holder runs `iris-key-setup`, or `iris-key-setup --local` for host-held keys,
+   chooses **Approve server request**, and approves the retirement-list request with the matching
    private root. Follow the fingerprint checks in
    [offline approval](../install/offline-approval.md).
 3. Return only the signed public file. Choose it under **Approved public

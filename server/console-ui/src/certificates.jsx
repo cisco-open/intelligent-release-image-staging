@@ -24,6 +24,7 @@ function Certificates({controller: c, roots}) {
   const file = (action, id, label, disabled, accept) => <><label htmlFor={id}>{label}</label><input key={s.fileEpoch + action} id={id} type="file" accept={accept} disabled={disabled} onChange={event => c.file(action, event.target.files[0])} /></>;
   const inventory = <div className="card" data-certificate-group="inventory"><h3>Certificates at a glance</h3>
     <p>Certificates protect different connections. Renew a signing certificate to extend its validity; replace a key when you need a new signing identity.</p>
+    <details><summary>Where to approve instruction signing requests</summary><p>Run <code>iris-key-setup</code> on a separate key holder's machine. If you keep the keys on the deployment host, use <code>iris-key-setup --local</code> there and confirm your choice. Return only the public approval files to the Console.</p></details>
     <p className="muted">These dates come from public files on the server, in your browser's timezone. They do not confirm which certificate a running service presents.</p>
     <div className="table-scroll" role="region" aria-label="Certificate deadlines" tabIndex={0}><table className="tbl"><thead><tr>{['Certificate or key', 'Status', 'Renew from', 'Expires', 'Your next step'].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
       <tbody id="certificate-rows">{(s.valid.inventory ? s.inventory.items : []).map(row => {const guide = certificateGuidance(row); return <tr key={row.id}>

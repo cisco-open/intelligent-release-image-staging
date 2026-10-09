@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Create keys and approve signing requests
 
-This page covers separate key holders. For guided key creation and approval on
-the deployment host, use [local setup](managed-package.md#guided-local-setup).
+Choose separate key holders or protected local storage. For initial key creation
+and installation on the deployment host, use [local setup](managed-package.md#guided-local-setup).
 
 Run `iris-key-setup` in a terminal on the private key holder's machine.
 It asks for the files it needs, checks them and tells you what to transfer.
@@ -22,10 +22,25 @@ Choose a task from the menu. You can run the same script again to continue.
 On the server, `irisctl install` creates the deployment's online keys and
 certificates. The steps below handle the keys that stay with their holders.
 
+## Use keys kept on the deployment host
+
+For renewal, replacement or root confirmation with locally held keys, run:
+
+```bash
+iris-key-setup --local
+```
+
+Choose a task, then confirm **LOCAL KEY HOLDER** when asked. If you provide command
+arguments, put `--local` before the task, such as `iris-key-setup --local approve`.
+Keep each root in its own protected folder. Private keys stay on that host;
+only public approval files return to the Console. A compromised deployment host
+can also expose locally stored keys. The normal command keeps the separate-holder
+checks. Private-key operations are refused inside containers in both modes.
+
 ## Create your root
 
 1. Choose **Create my signing key**. Enter `root-a` or `root-b` and a private
-   folder. Each holder uses a separate offline machine.
+   folder. With separate holders, each uses a separate offline machine.
 2. Enter a passphrase when asked, then repeat it. Store it safely, separate
    from the private key.
 3. Record the public fingerprint. Choose **Copy public file** to copy the

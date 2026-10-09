@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Support an explicit local-key mode in `iris-key-setup` for approvals and key
+  maintenance on the deployment host. Keep separate-holder checks as the default,
+  require local custody confirmation, and retain protected-key and public-file
+  checks. Explain both choices in certificate Settings and the guides.
+
 - Clarify Policies around device sharing, saved distribution permissions and
   confirmed blocking. Describe approval withdrawal without presenting diagnostic
   counts as new blocks.

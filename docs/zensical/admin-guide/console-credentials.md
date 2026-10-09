@@ -130,7 +130,7 @@ See [Schedule key maintenance](key-maintenance.md).
 
 These workflows use server-owned encrypted configuration and the authenticated
 Console connection. They do not modify host bind mounts or Kubernetes Secrets.
-For management and device TLS, peer issuing CA, offline signing roots, service
+For management and device TLS, peer issuing CA, root signing keys, service
 encryption identity and seeder credentials, use
 [deployment maintenance](deployment-rotation.md). That host-worker workflow has
 a narrower deployment boundary and requires verified recovery access.

@@ -18,7 +18,7 @@ The management service checks due work every 30 seconds.
 | Device instruction encryption key | Replace one enrolled device's key and publish fresh instructions | Confirm that the device accepts the new instructions. |
 | Console management credential | Replace the credential and retain the previous value | Verify every Console, then retire the previous credential. |
 | Browser, management and device TLS | Create a review reminder | Follow [Rotate credentials and certificates](rotations.md). |
-| Private swarm issuing CA and offline signing roots | Create a review reminder | Plan the trust rollout before replacing any root. |
+| Private swarm issuing CA and root signing keys | Create a review reminder | Plan the trust rollout before replacing any root. |
 | Encryption-at-rest identity and recipients | Create a review reminder | Back up, stop writers and follow the [recipient procedure](rotations.md#rotate-the-age-recipients). |
 | Seeder, metrics and outbound telemetry credentials | Create a review reminder | Follow the credential's [rotation procedure](rotations.md). |
 

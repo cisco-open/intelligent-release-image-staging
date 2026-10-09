@@ -20,8 +20,8 @@ iris -- sh`.
 !!! warning
 
     Keep private root keys in your chosen protected storage. Use separate
-    holders or the installer's guided local setup. Never upload a root private
-    key to the Console or put it in device configuration.
+    holders or guided local setup. Use `iris-key-setup --local` for host-held keys.
+    Never upload a root private key to the Console or put it in device configuration.
 
 ## In the Console
 
@@ -39,7 +39,7 @@ To change the key itself, use [Replace signing key](signer-rotation.md).
 2. Select **Download public renewal request**. Send `iris-online.pub` to the
    root signing key holder, who selects **Approve server request** in
    [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
-   To provide the filenames directly:
+   To provide filenames directly, use this command; add `--local` before `approve` for host-held keys:
 
    ```bash
    iris-key-setup approve --request iris-online.pub \
@@ -100,7 +100,7 @@ states](../reference/state-and-data.md).
 
 Use the [Console root attestation procedure](deployment-rotation.md#attest-existing-signing-roots)
 for initial and quarterly confirmations by both holders. Renew the online
-certificate separately when due. The commands below are the CLI alternative.
+certificate separately when due. The CLI example below uses separately held offline keys.
 
 1. Have both root key holders confirm access to their private keys.
    Compare public fingerprints with the approved inventory by running
@@ -173,7 +173,7 @@ certificate follows the shorter renewal window in steps 3 and 4.
 ## If one root key is lost
 
 1. Keep both public root files and the existing device trust bytes.
-2. Identify the surviving offline custodian.
+2. Identify the surviving root key holder.
 3. Repeat the export, issue and import steps above with the surviving root for
    the next online certificate and keylist. No device trust change is required.
 4. Record the quorum as degraded until a replacement root and a new signed
@@ -186,9 +186,9 @@ certificate follows the shorter renewal window in steps 3 and 4.
 1. Declare the outage. Keep the public keys, the state evidence, and the
    server's tracker and origin controls. Devices fall back to the last policy
    they accepted, then to the documented stale behavior.
-2. At two separate offline sites, create two new independent roots with
-   passphrase protection: `ssh-keygen -t ed25519 -f /offline/root-a`, and the
-   matching root-b command at its site. Record their public fingerprints.
+2. Use `iris-key-setup` to create two new independent roots with passphrase
+   protection in your chosen protected storage. Use separate holders or guided
+   local setup. Record their public fingerprints.
 3. Reconcile root configuration, keylist and revocation state, and the sequence
    under a reviewed maintenance procedure, then provision the new
    online certificate/keylist. Single commands do not recover a fleet in place.
@@ -294,7 +294,7 @@ stays pending or unavailable.
 ## Related
 
 - [Turn on instruction signing](../install/activate-signing.md)
-- [Create the two offline signing keys](../install/signing-roots.md)
+- [Create the two root signing keys](../install/signing-roots.md)
 - [How instructions are signed and trusted](../architecture/security-model.md)
 - [Find your way around the Console](../user-guide/console.md)
 - [Rotate credentials and certificates](rotations.md)
