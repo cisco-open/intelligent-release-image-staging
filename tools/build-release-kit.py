@@ -5,8 +5,9 @@
 
 """Inventory explicit prebuilt inputs; this neither builds nor signs a release.
 
-Inputs are already-produced local archives. Only the prepared-host profile is
-supported. The release workflow must build them from its selected commit and
+Inputs are already-produced local archives. The prepared-host profile can add
+an explicit Ubuntu dependency closure as the ubuntu-dependencies profile.
+The release workflow must build them from its selected commit and
 then authenticate every output using its normal release inventory/attestation.
 """
 
@@ -22,6 +23,7 @@ import tempfile
 
 from iris_installer import release_kit as kit
 from iris_installer.device_finalize import inspect_neutral
+from iris_installer.offline_inputs import inspect_dependency_archive
 from iris_installer.state import InstallError
 
 
@@ -33,6 +35,7 @@ NAMES = {
     "packaging-tools": "iris-packaging-tools.tar.gz",
     "source": "iris.tgz",
 }
+DEPENDENCY_NAME = "iris-ubuntu-dependencies.tar.gz"
 
 
 def docker_config(path, commit):
@@ -147,7 +150,7 @@ def neutral_provenance(path, archive_sha256, inspection):
     return kit._sha(records["source_sha256"])
 
 
-def assemble(inputs, output, *, tag, commit, neutral_receipt):
+def assemble(inputs, output, *, tag, commit, neutral_receipt, ubuntu_dependencies=None):
     """Validate all payloads before exclusive publication; no payload is run."""
     auth = kit._auth()
     auth.validate_tag(tag)
@@ -155,6 +158,13 @@ def assemble(inputs, output, *, tag, commit, neutral_receipt):
         raise InstallError("An exact source commit is required")
     if not isinstance(inputs, dict) or set(inputs) != kit.ROLES:
         raise InstallError("Supply exactly the six prepared-host release payloads")
+    inputs = dict(inputs)
+    names = dict(NAMES)
+    profile = "prepared-host"
+    if ubuntu_dependencies is not None:
+        inputs["ubuntu-dependencies"] = ubuntu_dependencies
+        names["ubuntu-dependencies"] = DEPENDENCY_NAME
+        profile = "ubuntu-dependencies"
     output = kit._path(output)
     directory = kit._protected_directory(output)
     published = []
@@ -162,7 +172,7 @@ def assemble(inputs, output, *, tag, commit, neutral_receipt):
         info = os.fstat(directory)
         if info.st_uid != os.geteuid() or info.st_mode & 0o022:
             raise InstallError("Release output must be caller-owned and protected from other writers")
-        for name in (*NAMES.values(), "release-kit.json"):
+        for name in (*names.values(), "release-kit.json"):
             try:
                 os.stat(name, dir_fd=directory, follow_symlinks=False)
             except FileNotFoundError:
@@ -173,8 +183,8 @@ def assemble(inputs, output, *, tag, commit, neutral_receipt):
             receipt = work / "neutral-builder.manifest"
             kit._snapshot(kit._path(neutral_receipt), receipt, 4096)
             records, inventory, total = {}, {}, 0
-            for role in sorted(kit.ROLES):
-                name = NAMES[role]
+            for role in sorted(inputs):
+                name = names[role]
                 target = work / name
                 checksum = kit._snapshot(kit._path(inputs[role]), target, kit.MAX_ASSET)
                 size = target.stat().st_size
@@ -200,11 +210,14 @@ def assemble(inputs, output, *, tag, commit, neutral_receipt):
                                   neutral_source_sha256=neutral_provenance(receipt, checksum, inspected))
                 elif image:
                     record.update(platforms=["linux/amd64"], image_digest=docker_config(target, commit))
+                elif role == "ubuntu-dependencies":
+                    inspected = inspect_dependency_archive(target)
+                    record["dependency_manifest_sha256"] = inspected["manifest_sha256"]
                 records[role] = record
                 inventory[name] = {"size": size, "sha256": checksum}
             manifest = {"schema": kit.SCHEMA, "repository": auth.REPOSITORY,
                         "workflow": auth.WORKFLOW, "tag": tag, "commit": commit,
-                        "host": dict(kit.HOST), "profile": "prepared-host", "assets": records}
+                        "host": dict(kit.HOST), "profile": profile, "assets": records}
             # The consumer schema is the final authority; no producer-only role
             # or metadata alias can silently diverge from installation checks.
             kit._kit_manifest(manifest, auth, tag, commit, inventory)
@@ -216,7 +229,7 @@ def assemble(inputs, output, *, tag, commit, neutral_receipt):
                 staged = Path(stage)
                 staging_fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
-                    for name in (*NAMES.values(), "release-kit.json"):
+                    for name in (*names.values(), "release-kit.json"):
                         checksum = kit._snapshot(work / name, staged / name, kit.MAX_ASSET)
                         if name in inventory and checksum != inventory[name]["sha256"]:
                             raise InstallError("Release input changed before publication")
@@ -225,7 +238,7 @@ def assemble(inputs, output, *, tag, commit, neutral_receipt):
                             os.fsync(stream.fileno())
                     # Manifest last: a partial directory has no complete kit.
                     # Failure cleanup removes only our exact owned inodes.
-                    for name in (*NAMES.values(), "release-kit.json"):
+                    for name in (*names.values(), "release-kit.json"):
                         _parent_current(output, directory)
                         os.link(name, name, src_dir_fd=staging_fd, dst_dir_fd=directory,
                                 follow_symlinks=False)
@@ -257,12 +270,15 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, required=True, help="Existing owned release-assets directory")
     parser.add_argument("--device-runtime-receipt", type=Path, required=True,
                         help="Exact neutral builder .manifest sidecar, not a rooted package receipt")
+    parser.add_argument("--ubuntu-dependencies", type=Path,
+                        help="Already-produced complete Ubuntu dependency archive; selects its authenticated profile")
     for role in sorted(kit.ROLES):
         parser.add_argument("--" + role, type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         assemble({role: getattr(args, role.replace("-", "_")) for role in kit.ROLES},
-                 args.out, tag=args.tag, commit=args.commit, neutral_receipt=args.device_runtime_receipt)
+                 args.out, tag=args.tag, commit=args.commit, neutral_receipt=args.device_runtime_receipt,
+                 ubuntu_dependencies=args.ubuntu_dependencies)
     except (InstallError, OSError, ValueError, tarfile.TarError, EOFError):
         parser.exit(1, "Release-kit preparation failed; existing assets were not replaced.\n")
     print("Prepared local, unauthenticated release-kit inputs. Authenticate all assets before distribution.")

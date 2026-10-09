@@ -4,7 +4,8 @@
 
 """Authenticate prebuilt inputs; never install, extract, execute or grant custody.
 
-The initial prepared-host profile does not include a host dependency closure.
+The prepared-host profile uses installed tools; ubuntu-dependencies includes
+an authenticated Ubuntu closure for the separate package validation/apply seam.
 The caller supplies its independently trusted verifier and optional trust root;
 neither may be selected by the kit. Consumers must use copy_asset(), not a path
 from the download directory, and independently check imported image identities.
@@ -34,6 +35,7 @@ MAX_ASSET = 16 * 1024 ** 3
 MAX_TOTAL = 64 * 1024 ** 3
 CHUNK = 1024 * 1024
 ROLES = frozenset(("server-image", "console-image", "device-runtime", "guest-inputs", "packaging-tools", "source"))
+PROFILES = {"prepared-host": ROLES, "ubuntu-dependencies": ROLES | {"ubuntu-dependencies"}}
 IMAGES = frozenset(("server-image", "console-image", "device-runtime"))
 HOST = {"os": "ubuntu", "version": "24.04", "architecture": "amd64"}
 
@@ -269,6 +271,7 @@ class Asset:
     platforms: tuple = ()
     image_digest: str = ""
     neutral_source_sha256: str = ""
+    dependency_manifest_sha256: str = ""
 
     @property
     def config_digest(self):
@@ -289,6 +292,7 @@ class VerifiedKit:
     trusted_root_sha256: str | None
     offline: bool
     assets: tuple
+    profile: str = "prepared-host"
 
     def asset(self, role):
         for asset in self.assets:
@@ -297,7 +301,7 @@ class VerifiedKit:
         raise InstallError("Release kit has no supported asset for this role")
 
     def receipt(self):
-        return {"schema": SCHEMA, "profile": "prepared-host", "tag": self.tag,
+        return {"schema": SCHEMA, "profile": self.profile, "tag": self.tag,
                 "commit": self.commit, "manifest_sha256": self.manifest_sha256,
                 "inventory_sha256": self.inventory_sha256,
                 "verifier_sha256": self.verifier_sha256,
@@ -345,12 +349,10 @@ def _kit_manifest(value, auth, tag, commit, inventory):
     if (value["schema"] != SCHEMA or value["repository"] != auth.REPOSITORY
             or value["workflow"] != auth.WORKFLOW or value["tag"] != tag
             or value["commit"] != commit or value["host"] != HOST
-            or value["profile"] != "prepared-host"):
+            or not isinstance(value["profile"], str) or value["profile"] not in PROFILES):
         raise InstallError("Release kit identity or host profile is unsupported")
     entries = value["assets"]
-    if isinstance(entries, dict) and "ubuntu-dependencies" in entries:
-        raise InstallError("Offline Ubuntu dependency closure is not supported by this kit profile")
-    _keys(entries, ROLES)
+    _keys(entries, PROFILES[value["profile"]])
     result, names = [], set()
     for role in sorted(entries):
         entry = entries[role]
@@ -359,6 +361,8 @@ def _kit_manifest(value, auth, tag, commit, inventory):
             fields.update(("platforms", "image_digest"))
         if role == "device-runtime":
             fields.add("neutral_source_sha256")
+        if role == "ubuntu-dependencies":
+            fields.add("dependency_manifest_sha256")
         _keys(entry, fields)
         name = _name(entry["name"])
         if name in names or name not in inventory or inventory[name] != {key: entry[key] for key in ("size", "sha256")}:
@@ -373,7 +377,8 @@ def _kit_manifest(value, auth, tag, commit, inventory):
         result.append(Asset(role, name, entry["size"], entry["sha256"], entry["format"],
                             platforms if role in IMAGES else (),
                             _sha(entry["image_digest"], "sha256:") if role in IMAGES else "",
-                            _sha(entry["neutral_source_sha256"]) if role == "device-runtime" else ""))
+                            _sha(entry["neutral_source_sha256"]) if role == "device-runtime" else "",
+                            _sha(entry["dependency_manifest_sha256"]) if role == "ubuntu-dependencies" else ""))
     return tuple(result)
 
 
@@ -448,7 +453,8 @@ def verify_kit(directory, *, tag, commit, verifier, trusted_root=None, offline=F
             if records["release-kit.json"] != {"size": (work / "release-kit.json").stat().st_size, "sha256": kit_hash}:
                 raise InstallError("Release kit metadata differs from authenticated inventory")
             authenticate(work / "release-kit.json")
-            assets = _kit_manifest(_json((work / "release-kit.json").read_bytes()), auth, tag, commit, records)
+            metadata = _json((work / "release-kit.json").read_bytes())
+            assets = _kit_manifest(metadata, auth, tag, commit, records)
             archive_formats = {asset.name: asset.format for asset in assets}
             for name in sorted(set(records) | {"SHA256SUMS"}):
                 if name == "release-kit.json":
@@ -469,7 +475,7 @@ def verify_kit(directory, *, tag, commit, verifier, trusted_root=None, offline=F
             if _verifier(verifier, directory)[1] != verifier_hash:
                 raise InstallError("Release verifier changed during authentication")
             return VerifiedKit(directory, tag, commit, kit_hash, inventory_hash,
-                               verifier_hash, root_hash, offline, assets)
+                               verifier_hash, root_hash, offline, assets, metadata["profile"])
     except (OSError, ValueError, subprocess.SubprocessError):
         raise InstallError("Release kit verification failed; no payload was installed") from None
 
@@ -500,7 +506,8 @@ def assert_resume_selection(recorded, current):
             receipt = value["kit"]
             _keys(receipt, ("schema", "profile", "tag", "commit", "manifest_sha256", "inventory_sha256",
                             "verifier_sha256", "trusted_root_sha256", "offline"))
-            if (receipt["schema"] != SCHEMA or receipt["profile"] != "prepared-host"
+            if (receipt["schema"] != SCHEMA or not isinstance(receipt["profile"], str)
+                    or receipt["profile"] not in PROFILES
                     or not isinstance(receipt["tag"], str) or not re.fullmatch(r"v20\d{2}\.\d{2}\.\d{2}(?:\.\d+)?", receipt["tag"])
                     or not isinstance(receipt["commit"], str) or not re.fullmatch(r"[a-f0-9]{40}", receipt["commit"])
                     or type(receipt["offline"]) is not bool
