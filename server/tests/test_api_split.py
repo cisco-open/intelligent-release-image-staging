@@ -630,6 +630,7 @@ def test_certificate_http_diagnostic_retains_only_public_contract_text():
 ])
 def test_console_transport_failure_diagnostics_observe_native_failures(
         tmp_path, monkeypatch, console_transport_failures, capsys, fault, expected):
+    expected = dict(expected, operation="browser-request")
     cert, _ = _certificate(tmp_path, "transport-diagnostic")
     token = tmp_path / "token"
     _write_secret(token, "synthetic-private-token-" + "s" * 48)
@@ -661,6 +662,129 @@ def test_console_transport_failure_diagnostics_observe_native_failures(
     # Even exception text supplied by an untrusted peer is never included.
     assert _console_transport_failure(OSError("synthetic-private-error")) == {
         "exception": "OSError", "stage": "proxy"}
+
+
+def test_swallowed_startup_transport_failure_remains_in_later_safe_assertion(
+        tmp_path, monkeypatch, console_transport_failures, capsys):
+    cert, key = _certificate(tmp_path, "startup-diagnostic")
+    token = tmp_path / "token"
+    _write_secret(token, "synthetic-private-token-" + "s" * 48)
+    output = tmp_path / "runtime.pem"
+    failures = []
+    original_connect = http.client.HTTPSConnection.connect
+
+    def fail_with_private_context(connection):
+        try:
+            return original_connect(connection)
+        except OSError as error:
+            error.args = ("synthetic-private-error-token-cookie-key",)
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", fail_with_private_context)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        backend = "https://127.0.0.1:%d" % unavailable.getsockname()[1]
+        source = gui_server.fetch_console_certificate(
+            backend, str(token), str(cert), str(output), timeout=1,
+            default_certfile=str(cert), default_keyfile=str(key))
+        assert source == "default" and b"PRIVATE KEY" in output.read_bytes()
+        expected = {"operation": "startup-certificate",
+                    "exception": "ConnectionRefusedError", "stage": "connect"}
+        assert list(console_transport_failures) == [expected]
+        assert len(failures) == 1
+        console = gui_server.make_server(
+            "127.0.0.1", 0, backend, str(token), str(cert))
+        thread = _thread(console)
+        try:
+            status, _, body = _request(console.server_address[1], "/api/v1/settings")
+            assert status == 503
+            assert len(failures) == 2, "observation must not retry either failed request"
+            diagnostic = _certificate_http_diagnostic(status, body, console_transport_failures)
+            assert diagnostic["transport"] == [expected, dict(expected, operation="browser-request")]
+            with pytest.raises(AssertionError) as later:
+                assert status == 401, json.dumps(diagnostic)
+            assert "startup-certificate" in str(later.value)
+            assert "browser-request" in str(later.value)
+            assert "synthetic-private" not in str(later.value)
+        finally:
+            console.shutdown()
+            console.server_close()
+            thread.join(timeout=3)
+    captured = capsys.readouterr()
+    assert "synthetic-private" not in json.dumps(diagnostic) + captured.out + captured.err
+
+
+def test_startup_transport_observer_preserves_successful_default_response(
+        tmp_path, monkeypatch, console_transport_failures):
+    cert, key = _certificate(tmp_path, "startup-default")
+    token = tmp_path / "token"
+    _write_secret(token, "t" * 64)
+    output = tmp_path / "runtime.pem"
+    calls, closed = [], []
+
+    class DefaultResponse:
+        status = 204
+
+        def read(self, size):
+            assert size == 1024 * 1024 + 1
+            return b""
+
+        def getheader(self, name, default=""):
+            assert name == "X-IRIS-Certificate-Source"
+            return "default"
+
+    response = DefaultResponse()
+
+    class Connection:
+        def __init__(self, host, port, *, context, timeout):
+            assert (host, port, timeout) == ("localhost", 9443, 7)
+            assert context.verify_mode == ssl.CERT_REQUIRED
+
+        def request(self, method, path, *, body, headers):
+            calls.append((method, path, body, headers))
+
+        def getresponse(self):
+            return response
+
+        def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+    assert gui_server.fetch_console_certificate(
+        "https://localhost:9443", str(token), str(cert), str(output), timeout=7,
+        default_certfile=str(cert), default_keyfile=str(key)) == "default"
+    assert calls == [("GET", "/internal/v1/console-certificate", None, {
+        "Accept": "application/x-pem-file", "X-IRIS-Default-Certificate": "available",
+        "Authorization": "Bearer " + "t" * 64})]
+    assert len(closed) == 1 and not console_transport_failures
+    assert output.read_bytes() == cert.read_bytes() + b"\n" + key.read_bytes()
+
+
+def test_startup_transport_observer_reraises_same_exception_without_replay(
+        monkeypatch, console_transport_failures):
+    failure = ssl.SSLError("synthetic-private-error")
+    attempts, closed = [], []
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            attempts.append(self)
+            raise failure
+
+        def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+    with pytest.raises(ssl.SSLError) as caught:
+        gui_server._management_request("localhost", 9443, None, "GET", "/internal/v1/settings",
+                                       {}, ("current", "previous"), timeout=7)
+    assert caught.value is failure
+    assert len(attempts) == 1 and closed == attempts
+    assert not console_transport_failures, "outside startup, the 503 observer owns the diagnostic"
 
 
 @pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
@@ -738,17 +862,17 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
 
     try:
         status, _, body = request("/api/v1/settings")
-        assert status == 401, _certificate_http_diagnostic(status, body, console_transport_failures)
+        assert status == 401, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         status, login_headers, body = request(
             "/api/v1/login", "POST",
             json.dumps({"username": "admin", "password": "password-for-test"}),
             {"Content-Type": "application/json"})
-        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         auth = {"Cookie": login_headers["Set-Cookie"].split(";", 1)[0],
                 "X-CSRF-Token": json.loads(body)["csrf"],
                 "Content-Type": "application/json"}
         status, headers, body = request("/api/v1/settings", headers=auth)
-        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         assert int(headers["Content-Length"]) == len(body)
         settings = json.loads(body)
         assert settings["gui_cert"]["source"] == "built-in"
@@ -760,7 +884,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         result = json.loads(body)
         assert result["applied"] is True and result["note"] is None
         assert result["gui_cert"]["source"] == "custom"
@@ -768,7 +892,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         assert served_fingerprint() == fingerprint(custom_cert)
         accepted_by_settings("cert", result)
         status, _, body = request("/api/v1/settings/gui-cert", "DELETE", headers=auth)
-        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         result = json.loads(body)
         assert result["applied"] is True
         assert result["gui_cert"]["source"] == "built-in"
@@ -788,7 +912,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         result = json.loads(body)
         assert result["applied"] is False and "restart" in result["note"]
         accepted_by_settings("cert", result)
@@ -1346,8 +1470,8 @@ def policy_tiers(tmp_path, monkeypatch, request, console_transport_failures):
         return result
     status, response_headers, login = request("console", "POST", "/login",
         {"username": "admin", "password": "pw"})
-    assert status == 200, _certificate_http_diagnostic(
-        status, json.dumps(login).encode(), console_transport_failures)
+    assert status == 200, json.dumps(_certificate_http_diagnostic(
+        status, json.dumps(login).encode(), console_transport_failures))
     headers.update(Cookie=response_headers["Set-Cookie"].split(";", 1)[0])
     headers["X-CSRF-Token"] = login["csrf"]
     yield request, fleet, store
