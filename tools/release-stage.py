@@ -335,15 +335,15 @@ def _verify_signature(path, bundle, selected, parent_fd, deadline, config):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment)
 
 
-def _source_assets(tag):
-    package = "iris-installer_" + tag[1:] + "_amd64.deb"
+def _source_assets(tag, commit):
+    package = "iris-installer_" + tag[1:] + "+installer.0.g" + commit[:12] + "_amd64.deb"
     return {"iris.tgz", "iris.tgz.sha256", "MANIFEST.txt", "release-auth.py", "release-stage.json",
             "aria2c-x86_64", "aria2c-aarch64", "aria2c.sha256", "aria2c-2.5.6-p10-source.tar.gz",
             "aria2c-2.5.6-p10-source.tar.gz.sha256", package, package + ".sha256", package + ".source.json"}
 
 
 def _verify_assets(directory, files, selected, parent_fd, config):
-    expected_names = _source_assets(selected["tag"]) | {"release.json", "SHA256SUMS", "attestations.jsonl"}
+    expected_names = _source_assets(selected["tag"], selected["commit"]) | {"release.json", "SHA256SUMS", "attestations.jsonl"}
     if set(files) != expected_names:
         fail("source-only stage has missing or unsupported assets; prebuilt publication remains disabled")
     for name, maximum in (("release.json", MAX_JSON), ("release-stage.json", MAX_JSON),
@@ -358,7 +358,7 @@ def _verify_assets(directory, files, selected, parent_fd, config):
             or manifest["repository"] != REPOSITORY or manifest["workflow"] != WORKFLOW
             or manifest["tag"] != selected["tag"] or manifest["commit"] != selected["commit"]):
         fail("authenticated release inventory does not match the selected identity")
-    expected = {name: files[name] for name in _source_assets(selected["tag"])}
+    expected = {name: files[name] for name in _source_assets(selected["tag"], selected["commit"])}
     if _canonical(manifest["assets"]) != _canonical(expected):
         fail("authenticated inventory differs from the exact extracted files")
     for name in sorted(expected):

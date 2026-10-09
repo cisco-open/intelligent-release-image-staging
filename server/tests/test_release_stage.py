@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import struct
 import subprocess
@@ -44,7 +45,7 @@ def inventory(files):
 
 @pytest.fixture
 def stage(tmp_path, monkeypatch):
-    files = {name: ("fixture bytes for " + name).encode() for name in STAGE._source_assets(TAG)}
+    files = {name: ("fixture bytes for " + name).encode() for name in STAGE._source_assets(TAG, COMMIT)}
     files["release-stage.json"] = STAGE._canonical(STAGE._stage_record(TAG, COMMIT, 31, 2))
     manifest = {"schema": 1, "repository": STAGE.REPOSITORY, "workflow": STAGE.WORKFLOW,
                 "tag": TAG, "commit": COMMIT, "assets": inventory(files)}
@@ -122,6 +123,54 @@ def test_acquisition_preserves_exact_flat_files_and_never_executes_them(stage):
     assert set(signatures) == set(stage["files"]) - {"attestations.jsonl"}
     assert stage["calls"][:2] == [("/actions/runs/31/attempts/2", "test-token"),
                                   ("/actions/artifacts/47", "test-token")]
+
+
+def test_source_stage_matches_actual_installer_builder_and_release_prepare(stage, tmp_path):
+    if shutil.which("dpkg-deb") is None:
+        pytest.skip("actual lightweight installer writer needs dpkg-deb")
+    repo, output = tmp_path / "writer-repo", tmp_path / "writer-assets"
+    repo.mkdir()
+    output.mkdir()
+    sources = {"VERSION": TAG[1:] + "\n", "LICENSE": "Fixture license\n",
+               "docs/dev/installer.md": "Fixture installer documentation\n",
+               "tools/iris_installer/__init__.py": "# Fixture package\n",
+               "tools/irisctl": "#!/usr/bin/env python3\n",
+               "tools/iris-key-setup": "#!/usr/bin/env python3\n",
+               "tools/release-auth.py": "# Fixture shipped helper, never executed\n",
+               "release/iris.tgz": "fixture source archive",
+               "release/iris.tgz.sha256": "fixture source sidecar",
+               "release/MANIFEST.txt": "fixture source manifest"}
+    aria_source = b"fixture pinned corresponding aria source"
+    sources["tools/aria2c-source/source.sha256"] = sha(aria_source) + "  aria2c-2.5.6-p10-source.tar.gz\n"
+    sources["tools/aria2c.sha256"] = "".join(sha(arch.encode()) + "  " + arch + "\n" for arch in ("x86_64", "aarch64"))
+    for arch in ("x86_64", "aarch64"):
+        sources["deliverables/aria2c-" + arch] = arch
+    for name, text in sources.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    for command in (["init", "-q"], ["add", "."],
+                    ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Writer fixture"],
+                    ["tag", TAG]):
+        subprocess.run(["git", "-C", str(repo), *command], check=True)
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    spec = importlib.util.spec_from_file_location("actual_installer_writer", ROOT / "tools/build-installer-package.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    builder.build(repo, output)
+    packages = list(output.glob("*.deb"))
+    assert [path.name for path in packages] == ["iris-installer_" + TAG[1:] + "+installer.0.g" + commit[:12] + "_amd64.deb"]
+    (output / "aria2c-2.5.6-p10-source.tar.gz").write_bytes(aria_source)
+    STAGE.create_stage_record(output / "release-stage.json", TAG, commit, 31, 2)
+    STAGE._auth().prepare(repo, output, TAG)
+    (output / "attestations.jsonl").write_bytes(stage["files"]["attestations.jsonl"])
+    files = {path.name: path.read_bytes() for path in output.iterdir()}
+    replace_files(stage, files)
+    stage["selected"]["commit"] = commit
+    stage["run"]["head_sha"] = commit
+    stage["artifact"]["workflow_run"]["head_sha"] = commit
+    record = STAGE.acquire_stage(stage["selected"], stage["output"])
+    assert record["files"] == inventory(files)
 
 
 def test_publication_snapshot_keeps_qualification_outside_signed_asset_set(stage):
@@ -271,7 +320,7 @@ def test_invalid_signature_precedes_parsing_release_and_qualification(stage, mon
     assert not stage["output"].exists()
 
 
-@pytest.mark.parametrize("change", ["bytes", "schema-bool", "size-float", "stage-attempt", "checksums", "unknown", "prebuilt", "missing"])
+@pytest.mark.parametrize("change", ["bytes", "schema-bool", "size-float", "stage-attempt", "checksums", "unknown", "prebuilt", "missing", "plain-package", "other-commit-package"])
 def test_closed_signed_asset_set_is_exact_and_source_only(stage, change):
     files = dict(stage["files"])
     if change == "bytes":
@@ -294,6 +343,12 @@ def test_closed_signed_asset_set_is_exact_and_source_only(stage, change):
         files["SHA256SUMS"] += b"0" * 64 + b"  unknown\n"
     elif change in ("unknown", "prebuilt"):
         files["release-kit.json" if change == "prebuilt" else "unexpected.txt"] = b"{}"
+    elif change in ("plain-package", "other-commit-package"):
+        suffix = "+installer.0.g" + COMMIT[:12]
+        replacement = "" if change == "plain-package" else "+installer.0.g" + "b" * 12
+        for name in list(files):
+            if suffix in name:
+                files[name.replace(suffix, replacement)] = files.pop(name)
     else:
         del files["iris.tgz"]
     replace_files(stage, files)
