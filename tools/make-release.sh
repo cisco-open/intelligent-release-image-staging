@@ -79,7 +79,7 @@ SHIP=(
   tools/build-release-kit.py tools/build-release-candidate.py tools/inspect-image-components.py tools/build-alpine-sources.py
   tools/build-packaging-inputs.py tools/build-offline-dependencies.py tools/build-guest-inputs.py
   tools/bootstrap-offline.py
-  tools/build-offline-sources.py tools/build-debian-sources.py
+  tools/build-offline-sources.py tools/build-debian-sources.py tools/build-core-python-sources.py
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
