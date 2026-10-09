@@ -292,6 +292,11 @@ _device_builder() {
   grep -q 'rm /opt/iris/agent/iris-signers.allowed_signers /opt/iris/agent/iris-root.allowed_signers' "$dockerfile"
   [ "$(grep -c '^FROM scratch$' "$dockerfile")" -eq 1 ]
   grep -qx 'COPY --from=runtime-files / /' "$dockerfile"
+  # BuildKit creates a second (empty) layer for WORKDIR, even if COPY already
+  # supplied the directory. CAF and offline trust finalization require one.
+  ! sed -n '/^FROM scratch$/,$p' "$dockerfile" | grep -Eq '^(WORKDIR|RUN|ADD) '
+  [ "$(sed -n '/^FROM scratch$/,$p' "$dockerfile" | grep -c '^COPY ')" -eq 1 ]
+  grep -qx '  cd /opt/iris || fatal "cannot enter the device runtime directory"' "$ENTRYPOINT"
 }
 
 @test "missing and unknown platform values fail before any config write" {

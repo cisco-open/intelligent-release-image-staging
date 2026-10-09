@@ -171,6 +171,8 @@ if [ "${IRIS_CONTAINER_TESTING:-0}" != 1 ]; then
   [ -z "${IRIS_AGENT_CONF:-}" ] || fatal "IRIS_AGENT_CONF is test-only in a device container"
   [ -z "${IRIS_AGENT_STATE:-}" ] || fatal "IRIS_AGENT_STATE is test-only in a device container"
   [ -z "${IRIS_CATALOG_CA:-}" ] || fatal "IRIS_CATALOG_CA is test-only; the trust anchor derives from IRIS_DEVICE_PLATFORM"
+  # Keep the runtime working directory without a Dockerfile WORKDIR layer.
+  cd /opt/iris || fatal "cannot enter the device runtime directory"
 fi
 
 case "$DEVICE_PLATFORM" in

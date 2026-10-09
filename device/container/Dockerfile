@@ -103,6 +103,7 @@ ENV PATH="/opt/iris/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:
     IRIS_TELEMETRY="on" \
     IRIS_LOG="off"
 
-WORKDIR /opt/iris
+# WORKDIR adds an empty filesystem layer with BuildKit even when this directory
+# exists. The entrypoint sets its own working directory to preserve one layer.
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/entrypoint.sh"]
