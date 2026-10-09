@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import time
 
 import pytest
 
@@ -317,6 +318,46 @@ def test_partial_git_clone_cannot_fetch_missing_source_objects(tmp_path, reposit
         p.build_packaging_inputs(partial, tmp_path / 'output')
     assert {path.name: sha(path.read_bytes()) for path in (partial / 'objects/pack').iterdir()} == packs
     assert not (tmp_path / 'output').exists()
+
+
+@pytest.mark.parametrize('kind', ['silent', 'overflow', 'closed-stdout'])
+def test_git_read_and_wait_share_one_bounded_deadline(tmp_path, monkeypatch, kind):
+    original = subprocess.Popen
+    processes = []
+    code = ('import time; time.sleep(30)' if kind == 'silent' else
+            'import sys,time; sys.stdout.write("x"*4096); sys.stdout.flush(); time.sleep(30)'
+            if kind == 'overflow' else
+            'import os,time; os.close(1); time.sleep(30)')
+    def child(_command, **kwargs):
+        process = original([sys.executable, '-c', code], **kwargs)
+        processes.append(process)
+        return process
+    monkeypatch.setattr(p.subprocess, 'Popen', child)
+    monkeypatch.setattr(p, 'GIT_SECONDS', 0.5)
+    started = time.monotonic()
+    with pytest.raises(InstallError, match='size limit' if kind == 'overflow' else 'deadline'):
+        p._git(tmp_path, ['irrelevant'], 1024)
+    assert time.monotonic() - started < 3
+    assert len(processes) == 1 and processes[0].poll() is not None
+
+
+def test_git_source_read_ignores_ambient_configuration(tmp_path, repository, monkeypatch):
+    source, git = repository
+    original = p.subprocess.Popen
+    observed = []
+    def run(command, **kwargs):
+        observed.append(kwargs['env'])
+        return original(command, **kwargs)
+    monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+    monkeypatch.setenv('GIT_CONFIG_KEY_0', 'protocol.file.allow')
+    monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'always')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', '/not/an/input')
+    monkeypatch.setattr(p.subprocess, 'Popen', run)
+    assert p._git(source, ['rev-parse', p.APPMGR_REVISION], 128).decode().strip() == p.APPMGR_REVISION
+    assert len(observed) == 1
+    assert observed[0]['GIT_ALLOW_PROTOCOL'] == ''
+    assert observed[0]['GIT_CONFIG_GLOBAL'] == '/dev/null'
+    assert 'GIT_CONFIG_COUNT' not in observed[0]
 
 
 def test_source_pin_is_exact_and_installed_layout_takes_precedence(tmp_path, monkeypatch):

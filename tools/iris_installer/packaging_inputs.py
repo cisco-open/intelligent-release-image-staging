@@ -18,11 +18,14 @@ import io
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import zlib
 
 from . import device_finalize as f, release_kit
@@ -46,6 +49,7 @@ EXECUTABLES = frozenset(('appmgr_build', 'build_rpm.sh'))
 MAX_ARCHIVE = 16 * 1024**2
 MAX_SOURCE_FILE = 1024**2
 MAX_METADATA = 16384
+GIT_SECONDS = 30
 
 
 def fail(message):
@@ -195,24 +199,44 @@ def _source_entries(entries, *, metadata):
 
 
 def _git(repository, arguments, maximum):
-    command = ['git', '--no-replace-objects', '-c', 'tar.umask=0022', '-C', str(repository), *arguments]
+    command = ['git', '--no-replace-objects', '-c', 'tar.umask=0022',
+               '-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-C', str(repository), *arguments]
     # Partial clones must fail on missing objects instead of acquiring them.
     # The protocol allowlist also enforces this on older Git versions that do
     # not recognize GIT_NO_LAZY_FETCH, regardless of per-remote configuration.
-    environment = dict(os.environ, GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='')
+    environment = {key: os.environ[key] for key in ('PATH',) if key in os.environ}
+    environment.update(LC_ALL='C', GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='',
+                       GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                       GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0')
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          env=environment) as process:
+                          env=environment, start_new_session=True) as process:
         try:
-            result = process.stdout.read(maximum + 1)
-            if len(result) > maximum:
-                fail('pinned Git output exceeds its size limit')
-            if process.wait(timeout=30):
+            deadline, result = time.monotonic() + GIT_SECONDS, bytearray()
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                while ready.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        fail('pinned Git operation exceeded its deadline')
+                    for key, _ in ready.select(remaining):
+                        data = os.read(key.fileobj.fileno(), min(65536, maximum + 1 - len(result)))
+                        if not data:
+                            ready.unregister(key.fileobj)
+                        result.extend(data)
+                        if len(result) > maximum:
+                            fail('pinned Git output exceeds its size limit')
+            if process.wait(timeout=max(0.001, deadline - time.monotonic())):
                 fail('pinned XR source could not be read from the local repository')
-            return result
+            return bytes(result)
+        except subprocess.TimeoutExpired:
+            fail('pinned Git operation exceeded its deadline')
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
+            # A subprocess retaining stdout belongs to this isolated group too.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
 
 
 def _committed_source(repository):
