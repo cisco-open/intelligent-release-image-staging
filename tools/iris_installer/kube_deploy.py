@@ -637,6 +637,8 @@ class KubeInstall(DockerInstall):
         return self.kube("exec", "-i", self._pod("console"), "-c", "console", "--", *args, **kwargs)
 
     def packages(self):
+        if self.prebuilt():
+            raise InstallError('Prebuilt device package finalization is not configured; no source build was started')
         if "packages" not in self.journal.document["completed"]:
             self.command(["bash", self.source / "tools/get-ioxclient.sh", self.base / "bin"])
             for arch in ("arm64", "amd64"):
@@ -778,8 +780,9 @@ except Exception:
                 raise InstallError("Recover the approved credential operation before resuming installation")
         self.verify_inputs()
         from . import ubuntu
-        ubuntu.provision(self.command)
-        ubuntu.provision_kubernetes_client(self.command)
+        self.provision_host()
+        if not self.prebuilt():
+            ubuntu.provision_kubernetes_client(self.command)
         self.verify_resource_ownership()
         self.command(["bash", self.source / "tools/check-host-time.sh"], timeout=30)
         self.prepare()

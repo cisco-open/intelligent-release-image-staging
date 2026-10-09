@@ -195,6 +195,11 @@ elif action=='provision':
   raise RuntimeError('Console requires Ubuntu 24.04 amd64')
  packages=[]
  import shutil
+ if r.get('prebuilt'):
+  if not shutil.which('docker') or not shutil.which('openssl'):
+   raise RuntimeError('Prebuilt Console requires Docker, Compose and OpenSSL already installed')
+  run(['docker','info']); run(['docker','compose','version']); owned()
+  sys.exit(0)
  if not shutil.which('openssl'): packages.append('openssl')
  if not shutil.which('docker'): packages+=['docker.io','docker-compose-v2']
  elif subprocess.run(['docker','compose','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
@@ -291,6 +296,8 @@ class SplitDockerInstall(DockerInstall):
             raise InstallError('Pinned SSH transport custody changed; remote operation refused')
         payload = dict(action=action, root=self.config['console_state_dir'],
                        identity=self.journal.document['id'], project=self.config['instance'], **values)
+        if action == 'provision':
+            payload['prebuilt'] = self.prebuilt()
         command = 'sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive python3 -I -B -c ' + shlex.quote(REMOTE_PROGRAM)
         return self.command(self.ssh_command(command), input=json.dumps(payload).encode(), capture=True, timeout=timeout)
 
@@ -473,6 +480,13 @@ class SplitDockerInstall(DockerInstall):
         super().build()
         saved = self.journal.document['completed'].get('console-image')
         image = json.loads(regular_bytes(self.console_build_file))['services']['console']['image']
+        if self.prebuilt():
+            from .prebuilt_install import acquire_images
+            imported = acquire_images(self, json.loads(regular_bytes(self.console_build_file))['services'])
+            if saved is not None and saved != imported[image]:
+                raise InstallError('Recorded remote Console differs from the authenticated image')
+            saved = imported[image]
+            self.journal.checkpoint('console-image', saved)
         if not saved:
             self.command(['docker', 'compose', '-p', self.config['instance'], '-f', self.console_build_file, 'build', '--pull'])
             saved = self.command(['docker', 'image', 'inspect', image, '--format', '{{.Id}}'], capture=True).decode().strip()

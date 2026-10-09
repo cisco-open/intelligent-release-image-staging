@@ -186,6 +186,16 @@ class DockerInstall:
         code = "import sys; sys.path.insert(0,'/opt/iris/server'); " + code
         return self.execute("python3", "-I", "-B", "-c", code, *args, capture=True)
 
+    def prebuilt(self):
+        from .prebuilt_install import selected
+        return selected(self.journal.document)
+
+    def provision_host(self):
+        if self.prebuilt():
+            ubuntu.preflight_prebuilt(self.config['target'])
+        else:
+            ubuntu.provision(self.command)
+
     def verify_inputs(self):
         manifest = self.journal.document["source_manifest"]
         actual = {}
@@ -201,6 +211,10 @@ class DockerInstall:
                   for name, data in read_roots(self.base / "roots").items()}
         if actual != expected:
             raise InstallError("Deployment root fingerprints changed; refusing to resume")
+        from .prebuilt_install import bind_source, verify_selected
+        self._verified_kit = verify_selected(self.journal)
+        if self._verified_kit is not None:
+            bind_source(self._verified_kit, manifest, self.base)
 
     def prepare(self):
         from .image_storage import image_root
@@ -264,6 +278,11 @@ class DockerInstall:
                 IRIS_RUNTIME_LAYOUT=self.config["target"],
                 IRIS_RUNTIME_NAME=spec["container_name"], IRIS_RUNTIME_HOST=self.config["host"])
             spec["image"] = "iris-installer/" + self.config["instance"] + "-" + suffix + ":" + self.journal.document["id"]
+            if self.prebuilt():
+                from .prebuilt_install import image_tag
+                spec['image'] = image_tag(self, service)
+                spec.pop('build', None)
+                spec['pull_policy'] = 'never'
             spec.setdefault("labels", {})["com.cisco.iris.installer"] = self.journal.document["id"]
             for port in spec.get("ports", []):
                 port["host_ip"] = self.config["host"] if service == "iris" else self.config["console_bind"]
@@ -287,6 +306,10 @@ class DockerInstall:
                         raise InstallError("Existing resource is not owned by this installation; refusing adoption")
 
     def build(self):
+        if self.prebuilt():
+            from .prebuilt_install import acquire_images
+            acquire_images(self, json.loads(regular_bytes(self.compose_file))['services'])
+            return
         saved = self.journal.document["completed"].get("images")
         if saved:
             for image, expected in saved.items():
@@ -351,6 +374,10 @@ class DockerInstall:
         return True
 
     def packages(self):
+        if self.prebuilt():
+            # CLI selection remains unavailable until deployment-specific
+            # wrapper finalization is integrated. Never fall back to a build.
+            raise InstallError('Prebuilt device package finalization is not configured; no source build was started')
         if "packages" not in self.journal.document["completed"]:
             self.command(["bash", self.source / "tools/get-ioxclient.sh", self.base / "bin"])
             for arch in ("arm64", "amd64"):
@@ -419,7 +446,7 @@ class DockerInstall:
                     or authority.get('instance_id') != self.journal.document['id']):
                 raise InstallError('Recover the approved credential operation before resuming installation.' + recovery_hint)
         self.verify_inputs()
-        ubuntu.provision(self.command)
+        self.provision_host()
         self.verify_resource_ownership()
         self.command(["bash", self.source / "tools/check-host-time.sh"], timeout=30)
         self.prepare()

@@ -170,6 +170,30 @@ The existing Docker freshness helper still performs its separate live versus
 distributed certificate comparison. Errors from transport clients are not
 echoed because they can contain authentication material.
 
+## Prebuilt input implementation
+
+The prebuilt acquisition modules are being integrated. The install command still
+uses source builds; there is no public offline installation option yet.
+
+`release_kit.py` authenticates the release inventory and every payload using an
+independently installed GitHub verifier. Offline verification also requires
+independently supplied trust material. A kit cannot provide its own authority.
+The prepared-host profile checks existing tools without downloading dependencies.
+It is separate from the complete Ubuntu dependency bundle still required for
+installation on an unprepared, disconnected host.
+
+Core image imports use installation-owned tags and record intent before changes.
+Resume checks the authenticated kit, matching installed controller and source,
+image configuration digest and Docker image ID. These two image identities can
+differ. The adapters retain their existing remote-transfer and Kubernetes digest
+checks; prebuilt image acquisition disables source builds and image pulls.
+
+The neutral device finalizer validates both architectures, preserves runtime
+content and adds the selected public instruction roots. Its receipt records
+those exact inputs and outputs. This is distinct from native IOx package signing.
+Device wrapper integration and complete offline topology qualification remain
+required before exposing the prebuilt installation option.
+
 ## Delivery and qualification contract
 
 Production is the design target. Release qualification covers
