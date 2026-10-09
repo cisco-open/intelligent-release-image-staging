@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-name: Authenticated release
+name: Authenticate release stage
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     env:
@@ -47,22 +47,29 @@ jobs:
           gh release download aria2c-2.5.6-p10 \
             --repo cisco-open/intelligent-release-image-staging \
             --pattern aria2c-2.5.6-p10-source.tar.gz --dir release-assets
+          python3 tools/release-stage.py record --output release-assets/release-stage.json \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
           python3 tools/release-auth.py prepare --out release-assets --tag "$RELEASE_TAG"
           (cd release-assets && sha256sum --check SHA256SUMS && sha256sum --check aria2c.sha256)
-      - name: Attest every publication asset
+      - name: Attest every staged asset
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: release-assets/*
-      - name: Verify the signed assets before publication
+      - name: Verify the signed assets before export
         env:
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: |
           cp "$BUNDLE_PATH" release-assets/attestations.jsonl
           python3 tools/release-auth.py verify --directory release-assets \
             --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
-      - name: Publish the complete authenticated release
-        run: |
-          gh release create "$RELEASE_TAG" release-assets/* \
-            --repo cisco-open/intelligent-release-image-staging --verify-tag \
-            --title "IRIS $RELEASE_TAG" --generate-notes
+      - name: Export the exact authenticated stage for qualification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: iris-authenticated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+          overwrite: false

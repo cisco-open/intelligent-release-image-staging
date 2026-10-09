@@ -1,0 +1,104 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Publish a qualified release stage
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact authenticated release tag
+        required: true
+        type: string
+      commit:
+        description: Full authenticated source commit
+        required: true
+        type: string
+      stage_run_id:
+        description: Completed release.yml run ID
+        required: true
+        type: string
+      stage_run_attempt:
+        description: Exact successful run attempt
+        required: true
+        type: string
+      artifact_id:
+        description: Immutable authenticated stage artifact ID
+        required: true
+        type: string
+      artifact_sha256:
+        description: SHA256 of the exact raw artifact ZIP used for qualification
+        required: true
+        type: string
+      qualification_json:
+        description: Literal public qualification JSON, no secrets or URLs
+        required: true
+        type: string
+      qualification_sha256:
+        description: SHA256 of the exact UTF-8 qualification JSON bytes
+        required: true
+        type: string
+      confirmation:
+        description: "publish <tag> <release.json SHA256>"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'cisco-open/intelligent-release-image-staging' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_COMMIT: ${{ inputs.commit }}
+      STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+      STAGE_RUN_ATTEMPT: ${{ inputs.stage_run_attempt }}
+      STAGE_ARTIFACT_ID: ${{ inputs.artifact_id }}
+      STAGE_ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+      IRIS_QUALIFICATION_JSON: ${{ inputs.qualification_json }}
+      QUALIFICATION_SHA256: ${{ inputs.qualification_sha256 }}
+      PUBLICATION_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Check out trusted publication controls from this main commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the exact qualified snapshot and publish it without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          snapshot="$RUNNER_TEMP/iris-publish-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3 tools/release-stage.py prepare-publication --output-dir "$snapshot" \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            --run-id "$STAGE_RUN_ID" --run-attempt "$STAGE_RUN_ATTEMPT" \
+            --artifact-id "$STAGE_ARTIFACT_ID" --artifact-sha256 "$STAGE_ARTIFACT_SHA256" \
+            --qualification-env --qualification-sha256 "$QUALIFICATION_SHA256" \
+            --confirmation "$PUBLICATION_CONFIRMATION" --actor "$GITHUB_ACTOR" \
+            --actor-id "$GITHUB_ACTOR_ID" --triggering-actor "$GITHUB_TRIGGERING_ACTOR"
+          gh release create "$RELEASE_TAG" "$snapshot"/assets/* \
+            --repo cisco-open/intelligent-release-image-staging --verify-tag \
+            --title "IRIS $RELEASE_TAG" --generate-notes
+      - name: Retain the separate qualification and publication binding
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: iris-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/iris-publish-${{ github.run_id }}-${{ github.run_attempt }}/qualification.json
+            ${{ runner.temp }}/iris-publish-${{ github.run_id }}-${{ github.run_attempt }}/publication.json
+          if-no-files-found: ignore
+          retention-days: 90
+          overwrite: false

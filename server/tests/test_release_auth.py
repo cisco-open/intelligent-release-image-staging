@@ -92,14 +92,23 @@ def test_rejects_tampered_or_mismatched_downloads(release, monkeypatch, change):
         AUTH.verify(directory, TAG, COMMIT)
 
 
-def test_workflow_attests_before_publishing_and_pins_actions():
+def test_workflows_separate_authentication_from_manual_publication_and_pin_actions():
     text = (ROOT / ".github/workflows/release.yml").read_text()
-    assert text.index("tools/release-auth.py verify") < text.index("gh release create")
+    publish = (ROOT / ".github/workflows/publish-release.yml").read_text()
+    assert text.index("tools/release-auth.py verify") < text.index("actions/upload-artifact@")
+    assert "gh release create" not in text and "contents: write" not in text
     assert "id-token: write" in text and "attestations: write" in text
     assert "subject-path: release-assets/*" in text
-    assert "--clobber" not in text
+    assert "workflow_dispatch:" in publish and "push:" not in publish and "workflow_run:" not in publish
+    assert "github.ref == 'refs/heads/main'" in publish
+    assert publish.index("tools/release-stage.py prepare-publication") < publish.index("gh release create")
+    assert '"$snapshot"/assets/*' in publish and "--verify-tag" in publish
+    assert "id-token:" not in publish and "attestations:" not in publish
+    assert "build-installer" not in publish and "make-release" not in publish
+    assert "environment:" not in publish
+    assert "--clobber" not in text + publish
     import re
-    for action in re.findall(r"uses: (\S+)", text):
+    for action in re.findall(r"uses: (\S+)", text + publish):
         assert re.fullmatch(r"actions/[\w-]+@[a-f0-9]{40}", action)
 
 
