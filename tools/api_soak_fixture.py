@@ -107,7 +107,7 @@ def main():
     elif sys.argv[1] == "resources":
         # cgroup v2 counters, process/FD/thread totals; no command lines or env.
         result = {}
-        for name in ("cpu.stat", "memory.current", "memory.peak", "memory.events",
+        for name in ("cpu.stat", "memory.current", "memory.peak", "memory.events", "memory.stat",
                      "pids.current", "cpu.pressure", "memory.pressure", "io.pressure"):
             path = Path("/sys/fs/cgroup") / name
             result[name] = path.read_text() if path.is_file() else None

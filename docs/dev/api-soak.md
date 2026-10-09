@@ -35,6 +35,8 @@ available memory and 5 GiB free on both filesystems. It stops if those floors ar
 host CPU use exceeds 85%, or either service exceeds 80% of its CPU or memory
 allocation at a sample. Samples are taken about every five seconds and include
 cgroup CPU, memory, pressure, process, thread and file-descriptor counters.
+Raw `memory.stat` counters distinguish anonymous memory from file cache;
+the safety gate still uses total cgroup memory, including both.
 
 ## Workload and objectives
 

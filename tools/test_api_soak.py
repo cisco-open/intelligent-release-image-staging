@@ -249,7 +249,12 @@ def test_console_resource_probe_needs_no_server_modules():
                             env={"IRIS_SOAK_FIXTURE": "synthetic-isolated-v1"},
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0
-    assert set(("processes", "fds", "threads", "memory.current")) <= json.loads(result.stdout).keys()
+    counters = json.loads(result.stdout)
+    assert set(counters) == {"processes", "fds", "threads", "cpu.stat", "memory.current",
+                             "memory.peak", "memory.events", "memory.stat", "pids.current",
+                             "cpu.pressure", "memory.pressure", "io.pressure"}
+    memory = dict(line.split() for line in counters["memory.stat"].splitlines())
+    assert int(memory["anon"]) >= 0 and int(memory["file"]) >= 0
 
 
 def test_fixture_credentials_are_not_in_console_shared_volume():
