@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Production installer development
 
-The Ubuntu 24.04 amd64 `.deb` contains the source-build installation engine,
+The Ubuntu 24.04 amd64 `.deb` contains the deployment engine,
 managed maintenance service, terminal key and recovery tools, and runtime
 diagnostics. It supports single-host Docker, split Docker and Kubernetes.
 
@@ -172,15 +172,25 @@ echoed because they can contain authentication material.
 
 ## Prebuilt input implementation
 
-The prebuilt acquisition modules are being integrated. The install command still
-uses source builds; there is no public offline installation option yet.
+The default install uses source builds. `install --release-kit` selects local
+prebuilt inputs; `setup` accepts the same options. Supply the independently
+selected `--release-tag` and full `--release-commit`, plus a licensed local
+`--ioxclient` matching the committed checksum. The installer checks these inputs
+before changing the host. A rejected kit never falls back to source builds.
 
 `release_kit.py` authenticates the release inventory and every payload using an
 independently installed GitHub verifier. Offline verification also requires
 independently supplied trust material. A kit cannot provide its own authority.
-The prepared-host profile checks existing tools without downloading dependencies.
-It is separate from the complete Ubuntu dependency bundle still required for
-installation on an unprepared, disconnected host.
+Use `--release-verifier` for the independently installed, root-owned GitHub CLI;
+the default is `/usr/bin/gh`. `--offline` requires `--release-trusted-root` and
+keeps release verification local. Retain the release directory and verifier at
+their recorded paths so `resume` can authenticate the same inputs again.
+
+The prepared-host profile checks existing dependencies without installing them.
+The separate Ubuntu dependency producer verifies official signed indexes, exact
+package hashes and the complete dependency set. Its apply step checks the
+approved package plan again while apt holds its mutation lock. This module's
+disconnected package tests do not establish complete deployment qualification.
 
 Core image imports use installation-owned tags and record intent before changes.
 Resume checks the authenticated kit, matching installed controller and source,
@@ -191,8 +201,16 @@ checks; prebuilt image acquisition disables source builds and image pulls.
 The neutral device finalizer validates both architectures, preserves runtime
 content and adds the selected public instruction roots. Its receipt records
 those exact inputs and outputs. This is distinct from native IOx package signing.
-Device wrapper integration and complete offline topology qualification remain
-required before exposing the prebuilt installation option.
+Native wrappers use the finalized image and pinned local packaging tools.
+Completed package bytes are recorded before publication and checked on resume.
+The public packaging-tools archive contains the selected XR builder source and
+its license, not Cisco's ioxclient executable. Source builds keep their existing
+wrapper path and provenance format; finalized wrappers use a distinct format.
+
+The current publication workflow supplies source-build artifacts. Complete kit
+publication, dependency bootstrap and offline topology qualification remain
+release gates. A local candidate or a successful wrapper build is not proof of
+publisher authentication or native Cisco signature acceptance.
 
 ## Delivery and qualification contract
 

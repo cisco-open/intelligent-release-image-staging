@@ -211,10 +211,13 @@ class DockerInstall:
                   for name, data in read_roots(self.base / "roots").items()}
         if actual != expected:
             raise InstallError("Deployment root fingerprints changed; refusing to resume")
-        from .prebuilt_install import bind_source, verify_selected
+        from .prebuilt_install import bind_source, validate_packaging_tool, verify_selected
         self._verified_kit = verify_selected(self.journal)
         if self._verified_kit is not None:
             bind_source(self._verified_kit, manifest, self.base)
+            if 'prebuilt-package-generated' not in self.journal.document['completed']:
+                validate_packaging_tool(self._verified_kit,
+                                        self.journal.document.get('prebuilt_ioxclient'), self.base)
 
     def prepare(self):
         from .image_storage import image_root
@@ -659,13 +662,21 @@ def start(args):
             raise InstallError("An installation journal exists; use irisctl resume, not install")
         if any(p.name != "lock" for p in journal.directory.iterdir()):
             raise InstallError("State directory is not empty; refusing to adopt or overwrite it")
-        ubuntu.provision(run)
+        from .prebuilt_install import prepare_selection, selected
+        manifest = source_inventory(args.source)
+        inputs = prepare_selection(args, manifest, journal.directory)
+        prebuilt = selected(inputs)
+        if prebuilt:
+            ubuntu.preflight_prebuilt(config['target'])
+        else:
+            ubuntu.provision(run)
         if config['target'] == 'docker-split':
             from .split_deploy import preflight
             preflight(config, runner=run)
         elif config['target'] == 'kubernetes':
             from .kube_deploy import preflight
-            ubuntu.provision_kubernetes_client(run)
+            if not prebuilt:
+                ubuntu.provision_kubernetes_client(run)
             preflight(config, runner=run)
         else:
             port_preflight(config)
@@ -677,13 +688,13 @@ def start(args):
             matches = run([*command, "--filter", "label=com.docker.compose.project=" + config["instance"]], capture=True)
             if matches.strip():
                 raise InstallError("Compose instance already has resources; adoption is not implemented")
-        manifest = source_inventory(args.source)
         # Validate the captured public bytes, not a path that could change
         # between validation and recording the immutable initialization intent.
         for data in roots.values():
             run(['ssh-keygen', '-lf', '-'], input=data, capture=True)
         import uuid
         journal.document = {"schema": 1, "id": str(uuid.uuid4()), "config": config,
+                            **inputs,
                             "source_manifest": manifest,
                             "root_digests": {name: hashlib.sha256(data).hexdigest() for name, data in roots.items()},
                             "completed": {}, "state": "INITIALIZING",
@@ -703,5 +714,10 @@ def resume(args):
         from .restore import assert_no_pending_restore
         assert_no_pending_restore(journal)
         validate_config(journal.document['config'])
+        if journal.document.get('state') == 'INITIALIZING':
+            from .prebuilt_install import bind_source, verify_selected
+            kit = verify_selected(journal)
+            if kit is not None:
+                bind_source(kit, journal.document['source_manifest'], journal.directory)
         complete_initialization(journal)
         return installation(journal).resume(args.certificate)

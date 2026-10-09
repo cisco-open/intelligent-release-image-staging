@@ -148,11 +148,14 @@ def test_local_input_custody_precedes_kit_authentication_and_source_binding(adap
         (roots / name).write_bytes(value)
     manifest = {'code': hashlib.sha256(b'unchanged source').hexdigest()}
     obj.journal.document.update(source_manifest=manifest,
-        root_digests={name: hashlib.sha256(value).hexdigest() for name, value in values.items()})
+        root_digests={name: hashlib.sha256(value).hexdigest() for name, value in values.items()},
+        prebuilt_ioxclient='/licensed/ioxclient')
     events = []
     monkeypatch.setattr(prebuilt_install, 'verify_selected', lambda journal: events.append('authenticate') or obj._verified_kit)
     monkeypatch.setattr(prebuilt_install, 'bind_source', lambda kit, inventory, workspace:
                         events.append(('bind', kit, inventory, workspace)))
+    monkeypatch.setattr(prebuilt_install, 'validate_packaging_tool', lambda kit, tool, workspace:
+                        events.append(('tool', kit, tool, workspace)))
     if changed == 'source':
         (obj.source / 'code').write_bytes(b'changed source')
     elif changed == 'roots':
@@ -163,7 +166,51 @@ def test_local_input_custody_precedes_kit_authentication_and_source_binding(adap
         assert events == []
     else:
         obj.verify_inputs()
-        assert events == ['authenticate', ('bind', obj._verified_kit, manifest, obj.base)]
+        assert events == ['authenticate', ('bind', obj._verified_kit, manifest, obj.base),
+                          ('tool', obj._verified_kit, '/licensed/ioxclient', obj.base)]
+    assert obj.calls == []
+
+
+@pytest.mark.parametrize('target', CLASSES)
+@pytest.mark.parametrize('change', ['missing', 'changed'])
+def test_resume_rechecks_licensed_tool_before_any_host_preparation(adapter, monkeypatch, target, change):
+    from iris_installer import packaging_inputs
+    obj = adapter(target)
+    tool = obj.base / 'licensed-ioxclient'
+    original = b'bounded executable fixture'
+    tool.write_bytes(original)
+    tool.chmod(0o700)
+    if change == 'missing':
+        tool.unlink()
+    else:
+        tool.write_bytes(b'changed executable')
+    obj.journal.document.update(source_manifest={}, root_digests={}, prebuilt_ioxclient=str(tool))
+    events = []
+    monkeypatch.setattr(deploy, 'read_roots', lambda path: {})
+    monkeypatch.setattr(prebuilt_install, 'verify_selected', lambda journal: obj._verified_kit)
+    monkeypatch.setattr(prebuilt_install, 'bind_source', lambda *a: None)
+    monkeypatch.setattr(packaging_inputs, 'prepare_packaging_inputs',
+                        lambda *a: events.append('authenticated-packaging') or
+                        SimpleNamespace(ioxclient_sha256=hashlib.sha256(original).hexdigest()))
+    for name in ('provision_host', 'verify_resource_ownership', 'prepare', 'build', 'bootstrap'):
+        monkeypatch.setattr(obj, name, lambda *a: pytest.fail('Tool must pass before host changes'))
+    with pytest.raises((InstallError, FileNotFoundError)):
+        obj.resume()
+    assert events == ['authenticated-packaging'] and obj.calls == []
+    assert not list(obj.base.glob('prebuilt-tool-check-*'))
+
+
+@pytest.mark.parametrize('generated', [None, {}, {'schema': 1, 'directory': 'recorded-private-stage'}])
+def test_existing_generation_defers_cache_validation_without_requiring_original_tool(adapter, monkeypatch, generated):
+    obj = adapter()
+    obj.journal.document.update(source_manifest={}, root_digests={}, prebuilt_ioxclient='/missing/ioxclient')
+    obj.journal.document['completed']['prebuilt-package-generated'] = generated
+    monkeypatch.setattr(deploy, 'read_roots', lambda path: {})
+    monkeypatch.setattr(prebuilt_install, 'verify_selected', lambda journal: obj._verified_kit)
+    monkeypatch.setattr(prebuilt_install, 'bind_source', lambda *a: None)
+    monkeypatch.setattr(prebuilt_install, 'validate_packaging_tool',
+                        lambda *a: pytest.fail('Recorded generation is validated by the package adapter'))
+    obj.verify_inputs()
     assert obj.calls == []
 
 

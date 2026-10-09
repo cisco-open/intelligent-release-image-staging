@@ -17,6 +17,15 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add authenticated prebuilt inputs for the installer, with explicit release
+  selection, offline verification and pinned local packaging tools. Preserve
+  the selected input mode on resume and check saved package bytes before reuse.
+  Keep the default source-build workflow available.
+
+- Prepare device runtimes for both CPU architectures before adding deployment
+  trust. Keep each runtime to one filesystem layer and generate IOx and XR
+  wrappers without rebuilding the image.
+
 - Align the contributor deployment runbook and installation signing guidance
   with managed setup, committed aria2c clients and owner-selected key storage.
   Distinguish root approvals, online instruction signatures and native IOx signing.

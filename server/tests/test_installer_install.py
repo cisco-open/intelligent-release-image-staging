@@ -495,6 +495,21 @@ def test_package_allowlist_excludes_agent_notes_and_credentials():
     assert module.selected("tools/iris_installer/deploy.py")
 
 
+def test_release_source_contains_every_committed_installer_input():
+    spec = importlib.util.spec_from_file_location("installer_package", REPO / "tools/build-installer-package.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recipe = (REPO / 'tools/make-release.sh').read_text()
+    allowlist = shlex.split(recipe.split('SHIP=(', 1)[1].split('\n)', 1)[0], comments=True)
+    tracked = subprocess.check_output(['git', '-C', str(REPO), 'ls-files', '-z']).decode().split('\0')
+    shipped = set(subprocess.check_output(
+        ['git', '-C', str(REPO), 'ls-files', '-z', '--', *allowlist]).decode().split('\0'))
+    required = {name for name in tracked if name and module.selected(name)}
+    # The release recipe recreates this empty marker explicitly.
+    assert subprocess.check_output(['git', '-C', str(REPO), 'cat-file', '-s', 'HEAD:bin/.gitkeep']).strip() == b'0'
+    assert required - shipped <= {'bin/.gitkeep'}
+
+
 def test_finish_exports_public_browser_certificate_and_leaves_owner_unclaimed(installation):
     (installation.base / "requests").mkdir()
     commands = []

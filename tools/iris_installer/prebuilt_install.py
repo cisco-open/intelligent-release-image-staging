@@ -9,6 +9,7 @@ verification and account-claim responsibilities. No kit code is imported here.
 """
 
 import hashlib
+import os
 from pathlib import Path, PurePosixPath
 import tarfile
 import tempfile
@@ -21,23 +22,122 @@ from .state import InstallError
 SERVICE_ROLES = {'iris': 'server-image', 'console': 'console-image'}
 
 
+def prepare_selection(args, manifest, workspace):
+    """Authenticate inputs and check the licensed tool before any host changes.
+
+    Only the receipt and public input locations go into the protected journal.
+    The source route never silently consumes prebuilt-only options.
+    """
+    directory = getattr(args, 'release_kit', None)
+    names = ('release_tag', 'release_commit', 'release_verifier',
+             'release_trusted_root', 'ioxclient')
+    if directory is None:
+        if (any(getattr(args, name, None) is not None for name in names)
+                or getattr(args, 'offline', False)):
+            raise InstallError('Prebuilt release options require --release-kit')
+        return {'input_selection': release_kit.selection()}
+    if not all(getattr(args, name, None) for name in ('release_tag', 'release_commit', 'ioxclient')):
+        raise InstallError('A prebuilt install requires --release-tag, --release-commit and --ioxclient')
+    locator = {
+        'directory': str(Path(directory).absolute()),
+        'verifier': str(Path(getattr(args, 'release_verifier', None) or '/usr/bin/gh').absolute()),
+        'trusted_root': (str(Path(args.release_trusted_root).absolute())
+                         if getattr(args, 'release_trusted_root', None) else None),
+    }
+    kit = release_kit.verify_kit(
+        locator['directory'], tag=args.release_tag, commit=args.release_commit,
+        verifier=locator['verifier'], trusted_root=locator['trusted_root'],
+        offline=bool(getattr(args, 'offline', False)))
+    bind_source(kit, manifest, workspace)
+    tool = Path(args.ioxclient).absolute()
+    validate_packaging_tool(kit, tool, workspace)
+    return {'input_selection': release_kit.selection('prebuilt', kit=kit, offline=kit.offline),
+            'release_kit': locator, 'prebuilt_ioxclient': str(tool)}
+
+
+def validate_packaging_tool(kit, tool, workspace):
+    """Check bounded authenticated inputs and snapshot the tool without running it."""
+    from .device_context import prepare_ioxclient
+    from .packaging_inputs import prepare_packaging_inputs
+    if not _public_path(str(tool)):
+        raise InstallError('Recorded licensed ioxclient location is invalid')
+    descriptor = release_kit._protected_directory(workspace)
+    try:
+        # Cleanup follows the held directory even if its visible parent moves.
+        with tempfile.TemporaryDirectory(prefix='prebuilt-tool-check-',
+                                         dir=Path('/proc/self/fd') / str(descriptor)) as directory:
+            scratch = Path(directory).resolve()
+            inputs = prepare_packaging_inputs(kit, scratch / 'inputs')
+            prepare_ioxclient(tool, scratch / 'ioxclient', expected_sha256=inputs.ioxclient_sha256)
+    finally:
+        os.close(descriptor)
+
+
 def selected(document):
     """Old journals remain source builds; malformed new selections never do."""
     value = document.get('input_selection', release_kit.selection())
     release_kit.assert_resume_selection(value, value)
-    if value['mode'] == 'source' and 'release_kit' in document:
+    if value['mode'] == 'source' and any(name in document for name in ('release_kit', 'prebuilt_ioxclient')):
         raise InstallError('Source-build journal contains a conflicting release kit')
     return value['mode'] == 'prebuilt'
+
+
+def _public_path(value):
+    return (isinstance(value, str) and 0 < len(value) <= 4096
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+            and Path(value).is_absolute())
+
+
+def _recorded_locator(document):
+    locator = document.get('release_kit')
+    if (not isinstance(locator, dict) or set(locator) != {'directory', 'verifier', 'trusted_root'}
+            or any(not _public_path(locator[key]) for key in ('directory', 'verifier'))
+            or (locator['trusted_root'] is not None and not _public_path(locator['trusted_root']))):
+        raise InstallError('Recorded release kit location or verifier is invalid')
+    return dict(locator)
+
+
+def public_selection(document):
+    """Project validated public acquisition fields, never arbitrary journal data."""
+    if not selected(document):
+        return {'input_selection': release_kit.selection()}
+    value = document['input_selection']
+    tool = document.get('prebuilt_ioxclient')
+    if not _public_path(tool):
+        raise InstallError('Recorded licensed ioxclient location is invalid')
+    return {'input_selection': {**value, 'kit': dict(value['kit'])},
+            'release_kit': _recorded_locator(document), 'prebuilt_ioxclient': tool}
+
+
+def assert_setup_selection(args, status):
+    """Explicit setup options constrain resume; omitted options keep the journal."""
+    recorded = public_selection(status)
+    value = recorded['input_selection']
+    paths = {'release_kit': 'directory', 'release_verifier': 'verifier',
+             'release_trusted_root': 'trusted_root', 'ioxclient': None}
+    options = (*paths, 'release_tag', 'release_commit')
+    supplied = {name: getattr(args, name, None) for name in options
+                if getattr(args, name, None) is not None}
+    offline = getattr(args, 'offline', False)
+    if value['mode'] == 'source':
+        if supplied or offline:
+            raise InstallError('Recorded installation uses source builds; prebuilt and offline options cannot resume it')
+        return
+    expected = {'release_tag': value['kit']['tag'], 'release_commit': value['kit']['commit'],
+                'ioxclient': recorded['prebuilt_ioxclient']}
+    expected.update({name: recorded['release_kit'][field] for name, field in paths.items() if field})
+    for name, supplied_value in supplied.items():
+        actual = str(Path(supplied_value).absolute()) if name in paths else supplied_value
+        if actual != expected[name]:
+            raise InstallError('--' + name.replace('_', '-') + ' differs from the recorded installation; keep its original inputs')
+    if offline and not value['kit']['offline']:
+        raise InstallError('--offline differs from the recorded installation; keep its original inputs')
 
 
 def verify_selected(journal):
     if not selected(journal.document):
         return None
-    locator = journal.document.get('release_kit')
-    if (not isinstance(locator, dict) or set(locator) != {'directory', 'verifier', 'trusted_root'}
-            or any(not isinstance(locator[key], str) for key in ('directory', 'verifier'))
-            or (locator['trusted_root'] is not None and not isinstance(locator['trusted_root'], str))):
-        raise InstallError('Recorded release kit location or verifier is invalid')
+    locator = _recorded_locator(journal.document)
     previous = journal.document['input_selection']
     receipt = previous['kit']
     kit = release_kit.verify_kit(

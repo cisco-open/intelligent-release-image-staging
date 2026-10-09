@@ -258,7 +258,7 @@ def test_public_status_allowlists_data_and_binds_public_roots(tmp_path, keys):
                                        "peer_tls": "required", "recovery_recipient": "age1" + "q" * 58}}
         journal.save()
     result = setup.public_status(state)
-    assert set(result) == {"present", "id", "state", "config", "roots", "request"}
+    assert set(result) == {"present", "id", "state", "config", "input_selection", "roots", "request"}
     assert "PRIVATE" not in json.dumps(result)
     assert "recovery_recipient" not in result["config"]
     assert len(result["request"].split()) == 2

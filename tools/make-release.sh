@@ -71,10 +71,13 @@ SHIP=(
   tools/apply-assignments.sh tools/get-ioxclient.sh tools/ioxclient.sha256
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-device-image.sh tools/build-xr-package.sh
+  tools/prepare-device-context.py tools/prepare-docker-hosts.py
   tools/check-package-freshness.sh
   tools/irisctl tools/iris_installer tools/iris-key-setup
   tools/release-auth.py
-  tools/build-installer-package.py
+  tools/build-installer-package.py tools/finalize-device-image.py
+  tools/build-release-kit.py
+  tools/build-packaging-inputs.py tools/build-offline-dependencies.py
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py

@@ -42,6 +42,14 @@ def parser():
     install.add_argument("--target", choices=("docker", "docker-split", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
                          default=Path(__file__).resolve().parent.parent / "source")
+    kit = install.add_argument_group('Prebuilt release: authenticated local files')
+    kit.add_argument('--release-kit', type=Path, help='complete downloaded release directory; avoids source builds')
+    kit.add_argument('--release-tag', help='independently selected release tag, including v')
+    kit.add_argument('--release-commit', help='full source commit for the selected release')
+    kit.add_argument('--release-verifier', type=Path, help='independently installed, root-owned GitHub CLI; defaults to /usr/bin/gh')
+    kit.add_argument('--release-trusted-root', type=Path, help='independently obtained Sigstore trusted root for offline verification')
+    kit.add_argument('--offline', action='store_true', help='verify the release without network access; requires a trusted root')
+    kit.add_argument('--ioxclient', type=Path, help='licensed local ioxclient executable matching the release pin')
     install.add_argument("--state-dir", type=Path)
     install.add_argument("--instance", default="iris")
     install.add_argument("--host", help="device-facing IPv4 address on this host")
@@ -75,7 +83,7 @@ def parser():
     kube.add_argument('--kube-image-import', choices=('registry', 'k3s'), default='registry')
     kube.add_argument('--kube-node', default='', help='exact local single-node k3s node for explicit image import')
     kube.add_argument('--lifecycle-url', help='verified HTTPS endpoint of this deployment host worker')
-    install.add_argument("--accept-changes", action="store_true", help="approve Ubuntu dependency installation, source builds and new services")
+    install.add_argument("--accept-changes", action="store_true", help="approve required dependencies, package preparation and new services")
     resume = commands.add_parser("resume", help="resume without regenerating identity or resetting state")
     resume.add_argument("--state-dir", type=Path, required=True)
     resume.add_argument("--certificate", type=Path)
@@ -154,7 +162,7 @@ def install_questions(args, command_parser):
     if missing and not sys.stdin.isatty():
         command_parser.error("interactive installation needs a terminal; otherwise supply --host, --roots-dir and --recovery-recipient")
     if missing:
-        print("This will install the required tools, build IRIS and set up a new deployment.")
+        print("This will prepare IRIS and set up a new deployment.")
         print("Keep private signing keys off this server. Check the package's release signature first.")
         args.host = args.host or input("Server IPv4 address that devices can reach: ").strip()
         args.roots_dir = args.roots_dir or Path(input("Folder with the two public signing keys (root-a.pub and root-b.pub): ").strip())
@@ -172,7 +180,7 @@ def install_questions(args, command_parser):
     if not args.accept_changes and sys.stdin.isatty():
         print("Deployment: " + args.instance + "; settings folder: " + str(args.state_dir))
         print("Peer TLS: " + args.peer_tls + "; Console: " + args.console_bind + ":" + str(args.console_port))
-        args.accept_changes = input("Install the required tools, build IRIS and start its services? Type INSTALL: ") == "INSTALL"
+        args.accept_changes = input("Prepare IRIS and start its services? Type INSTALL: ") == "INSTALL"
     return args
 
 

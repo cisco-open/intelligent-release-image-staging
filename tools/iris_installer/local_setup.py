@@ -37,10 +37,12 @@ def public_status(directory):
         doc = journal.document
         config = doc["config"]
         from .deploy import validate_config
+        from .prebuilt_install import public_selection
         validate_config(config)
         result = {"present": True, "id": doc["id"], "state": doc["state"],
                   "config": {key: config[key] for key in
-                             ("target", "instance", "host", "console_bind", "console_port")}}
+                             ("target", "instance", "host", "console_bind", "console_port")},
+                  **public_selection(doc)}
         if config.get("image_root"):
             result["config"]["image_root"] = config["image_root"]
         if doc["state"] == "WAITING_FOR_SIGNING_APPROVAL":
@@ -182,6 +184,8 @@ def run_setup(args):
         status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
         folder = None
         if status["present"]:
+            from .prebuilt_install import assert_setup_selection
+            assert_setup_selection(args, status)
             print("Resuming " + status["id"] + "; recorded deployment settings are kept.")
             # Default key location follows the recorded instance, not a CLI guess.
             args.instance = status["config"]["instance"]
@@ -195,7 +199,7 @@ def run_setup(args):
             folder = choose_key_folder(args)
             args.roots_dir, args.recovery_recipient = prepare_keys(folder)
             print("Console: https://" + args.console_bind + ":" + str(args.console_port) + "/")
-            if not confirm("Install dependencies, build packages and start this deployment?"):
+            if not confirm("Prepare IRIS packages and start this deployment?"):
                 print("Keys saved. Run the same setup command when ready.")
                 return 0
             args.accept_changes = True
