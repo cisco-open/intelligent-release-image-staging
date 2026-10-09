@@ -113,7 +113,8 @@ def test_certificate_ownership_and_proxy_limits():
     for suffix in ("rotation", "renew"):
         assert gui_server._body_limit("/internal/v1/settings/certificates/instruction/" + suffix) == 192 * 1024
     assert gui_server._body_limit("/internal/v1/settings/certificates/instruction/request") == 64 * 1024
-    assert gui_server._body_limit("/internal/v1/settings/certificates/browser/rotation") == 64 * 1024
+    assert gui_server._body_limit("/internal/v1/settings/certificates/browser/rotation") == 128 * 1024
+    assert gui_server._body_limit("/internal/v1/settings/service-credentials") == 64 * 1024
 
 
 def test_shipped_certificate_controller_regressions():

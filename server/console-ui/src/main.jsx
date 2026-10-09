@@ -9,6 +9,7 @@ import { mountSettingsNavigation } from './settings-navigation.jsx';
 import { mountPolicies } from './policies.jsx';
 import { mountSettings } from './settings.jsx';
 import { mountCertificates } from './certificates.jsx';
+import { mountSecurityLifecycle } from './security-lifecycle.jsx';
 import { mountOverview } from './overview.jsx';
 import { mountImages } from './images.jsx';
 import { mountMonitoring } from './monitoring.jsx';
@@ -208,6 +209,7 @@ export function mountConsoleShell() {
     mountPolicies();
     mountSettings();
     mountCertificates();
+    mountSecurityLifecycle();
     mountOverview();
     mountImages();
     mountMonitoring();

@@ -74,6 +74,39 @@ def test_ca_workflow_public_only_and_retry(environment):
     assert Path(gui_tls.combined_path()).stat().st_mode & 0o777 == 0o600
 
 
+def test_normalized_public_chain_cannot_exceed_journal_limit(environment):
+    record = prepare()
+    approve_ca(record, environment)
+    extension = environment / 'large-public.ext'
+    extension.write_text('1.2.3.4=ASN1:UTF8String:' + 'a' * 25000 + '\n')
+    leaf = subprocess.check_output(['openssl', 'x509', '-req', '-in', str(environment / 'request.pem'),
+        '-CA', str(environment / 'ca.pem'), '-CAkey', str(environment / 'ca.key'), '-set_serial', '18',
+        '-days', '90', '-copy_extensions', 'copyall', '-extfile', str(extension)], stderr=subprocess.DEVNULL).decode()
+    lines = leaf.strip().splitlines()
+    body = ''.join(lines[1:-1])
+    # Valid PEM input exactly at the limit, with no final newline. Normalizing
+    # it adds one byte; accepting it would save a journal the next read rejects.
+    count = 65536 - len(lines[0]) - len(lines[-1]) - len(body) - 1
+    doubles = len(body) - count
+    assert 0 <= doubles <= count
+    chunks = [body[i:i + 2] for i in range(0, doubles * 2, 2)] + list(body[doubles * 2:])
+    public = lines[0] + '\n' + '\n'.join(chunks) + '\n' + lines[-1]
+    assert len(public) == 65536
+    # Independently prove the fixture is a real parsable certificate.
+    subprocess.run(['openssl', 'x509', '-noout'], input=public.encode(), check=True, capture_output=True)
+    before = rotation.journal_path().read_bytes()
+    with pytest.raises(rotation.RotationError, match='bounded'):
+        action(record, 'approve', certificate=public)
+    assert rotation.journal_path().read_bytes() == before
+    assert rotation.status()['state'] == 'awaiting-approval'
+    # One fewer internal newline still represents the same certificate and
+    # normalizes to exactly 64 KiB. It must remain readable after approval.
+    boundary = lines[0] + '\n' + ''.join(chunks[:2]) + '\n' + '\n'.join(chunks[2:]) + '\n' + lines[-1]
+    approved = action(record, 'approve', certificate=boundary)
+    assert len(approved['certificate']) == 65536
+    assert rotation.status() == approved
+
+
 def test_explicit_self_signed_and_parameter_bound_id(environment):
     record = prepare('self-signed')
     assert record['state'] == 'approved'
@@ -231,7 +264,7 @@ def test_real_split_console_tls_reload_and_retry(environment, monkeypatch):
             return json.loads(body)
         original = fingerprint()
         record = post(dict(action='prepare', request_id=str(uuid.uuid4()), names=['console.example', '127.0.0.1'], mode='ca'))
-        post(dict(action='approve', request_id=record['request_id'], certificate=approve_ca(record, environment)))
+        approved = post(dict(action='approve', request_id=record['request_id'], certificate=approve_ca(record, environment)))
         send = http.client.HTTPSConnection.request
         def unavailable(self, method, url, *args, **kwargs):
             if url.endswith('/internal/v1/console-certificate'):
@@ -242,10 +275,20 @@ def test_real_split_console_tls_reload_and_retry(environment, monkeypatch):
         published = post(payload)
         assert published['state'] == 'published' and published['applied'] is False
         assert fingerprint() == original
+        delayed = published
         monkeypatch.setattr(http.client.HTTPSConnection, 'request', send)
         published = post(payload)
         assert published['applied'] is True and fingerprint() == published['fingerprint_sha256']
         assert fingerprint() != original
+        # The shipped browser validator must distinguish the saved journal
+        # from the identity observed on the actual Console TLS listener.
+        module = Path(__file__).parents[1] / 'console-ui/src/security-lifecycle-model.mjs'
+        program = "import assert from 'node:assert/strict'; import {checkedTlsResult} from " + json.dumps(module.as_uri()) + ";\n"
+        program += "const [payload, before, delayed, loaded] = " + json.dumps([payload, approved, delayed, published]) + ";\n"
+        program += "assert.equal(checkedTlsResult(payload, before, delayed)?.reloaded, false);\n"
+        program += "assert.equal(checkedTlsResult(payload, before, loaded)?.reloaded, true);\n"
+        result = subprocess.run(['node', '--input-type=module'], input=program, text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stdout + result.stderr
     finally:
         console.shutdown()
         console.server_close()

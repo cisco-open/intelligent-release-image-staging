@@ -167,6 +167,8 @@ def _validate_certificate(record, certificate, private, *, admission=True):
     if not blocks or len(blocks) > 8:
         raise RotationError('Import a bounded PEM certificate chain, leaf first')
     normalized = '\n'.join(blocks) + '\n'
+    if len(normalized) > 65536:
+        raise RotationError('Import a bounded PEM certificate chain, leaf first')
     if gui_tls.validate_pair(normalized, private.read_text()) is not None:
         raise RotationError('Certificate does not match this replacement key')
     with _runtime() as directory:

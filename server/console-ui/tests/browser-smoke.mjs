@@ -37,8 +37,10 @@ try {
   let certificateAvailable = true, renewalAccepted = false;
   let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b'], previous_public_key: null, public_key: null,
     previous_sha256: null, replacement_sha256: null, created_at: null, activated_at: null, retired_keylist_seq: null};
-  let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null};
-  let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null}))};
+  const publicCsr = '-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n';
+  const publicCertificate = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n';
+  let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null, created_at: null};
+  let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null, started_at: null, endpoint: null, previous_retained: false}))};
   let maintenanceFixture = {schema: 1, revision: 0, observed_at: null, worker: 'not-observed', policies: [], jobs: [], families: [
     {id: 'online-signer', label: 'Online instruction signer', action: 'prepare', requirement: 'Offline approval'},
     {id: 'device-instruction', label: 'Device instruction encryption key', action: 'rotate', requirement: 'Verify device acceptance'},
@@ -102,9 +104,9 @@ try {
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
         if (url.pathname === '/api/v1/settings/certificates/browser/rotation') {
           if (body.action === 'prepare') browserTlsFixture = {...browserTlsFixture, request_id: body.request_id,
-            names: body.names, mode: body.mode, state: 'awaiting-approval', csr: 'PUBLIC CSR FIXTURE'};
+            names: body.names, mode: body.mode, state: 'awaiting-approval', csr: publicCsr, created_at: 1790160000};
           if (body.action === 'approve') browserTlsFixture = {...browserTlsFixture, state: 'approved', certificate: body.certificate, fingerprint_sha256: 'ab'.repeat(32)};
-          if (body.action === 'apply') browserTlsFixture = {...browserTlsFixture, state: 'published', applied: true};
+          if (body.action === 'apply') browserTlsFixture = {...browserTlsFixture, state: 'published', applied: true, gui_cert: {source: 'custom', fingerprint_sha256: browserTlsFixture.fingerprint_sha256}};
           if (body.action === 'cancel') browserTlsFixture = {...browserTlsFixture, state: 'cancelled'};
           return route.fulfill({json: browserTlsFixture});
         }
@@ -113,6 +115,9 @@ try {
           const row = serviceCredentialFixture.items.find(item => item.family === body.family);
           row.request_id = body.request_id;
           row.state = body.action === 'replace' ? 'awaiting-verification' : body.action === 'revert' ? 'reverted' : 'completed';
+          if (body.action === 'replace') Object.assign(row, {started_at: 1790160000, endpoint: body.endpoint || null, previous_retained: body.family === 'metrics-token'});
+          else row.previous_retained = false;
+          if (body.action === 'revert') Object.assign(row, {observed_at: null, endpoint: null});
           return route.fulfill({json: serviceCredentialFixture});
         }
         if (url.pathname === '/api/v1/settings/trust-rotation') {
@@ -476,7 +481,7 @@ try {
   await page.locator('#browser-tls-approve').click();
   await page.locator('#browser-tls-result').getByText('Upload the public certificate chain, never a private key.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforeTlsPrivate);
-  await page.locator('#browser-tls-approved').setInputFiles({name: 'cert.pem', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\npublic fixture')});
+  await page.locator('#browser-tls-approved').setInputFiles({name: 'cert.pem', mimeType: 'text/plain', buffer: Buffer.from(publicCertificate)});
   await page.locator('#browser-tls-approve').click();
   await page.locator('#browser-tls-state').getByText('Browser certificate: approved.', {exact: true}).waitFor();
   page.once('dialog', dialog => dialog.accept());
@@ -507,7 +512,7 @@ try {
   await page.locator('#service-credential-headers [data-field=value]').last().fill('duplicate');
   const beforeDuplicate = settingsWrites.length;
   await page.locator('#service-credential-replace').click();
-  await page.locator('#service-credential-result').getByText('Provide distinct authentication header names.', {exact: true}).waitFor();
+  await page.locator('#service-credential-result').getByText('Provide distinct authentication header names and nonempty printable values.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforeDuplicate);
   await page.locator('#service-credential-headers button').last().click();
   page.once('dialog', dialog => dialog.accept());

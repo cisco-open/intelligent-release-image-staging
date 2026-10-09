@@ -159,6 +159,11 @@
 .iris-react-shell .rotation-identities .machine { overflow-wrap: anywhere; white-space: normal; }
 .iris-react-shell [data-certificate-group] .certificate-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .iris-react-shell [data-certificate-group] .btn { height: auto; min-height: 32px; white-space: normal; text-align: center; }
+.iris-react-shell [data-security-group] .security-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.iris-react-shell [data-security-group] .btn { height: auto; min-height: 32px; white-space: normal; text-align: center; }
+.iris-react-shell [data-security-group] .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell [data-security-group] .security-field { display: grid; gap: 8px; max-width: 460px; min-width: 0; }
+.iris-react-shell [data-security-group] .security-field > :is(input, select) { width: 100%; max-width: 100%; min-width: 0; }
 .iris-react-shell #browser-tls-identity { overflow-wrap: anywhere; white-space: normal; }
 .iris-react-shell #browser-tls-approved { max-width: 100%; min-width: 0; }
 .iris-react-shell .maintenance-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,240px),1fr)); gap: 16px; margin-block: 24px; align-items: end; }

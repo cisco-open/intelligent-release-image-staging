@@ -17,7 +17,8 @@ Console](../zensical/user-guide/console.md) for that.
 
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, General, TLS/trust, Telemetry, Audit export, certificate inventory,
-instruction certificate renewal, online signer rotation, Policies,
+instruction certificate renewal, online signer rotation, browser certificate
+replacement, telemetry credential rotation, Policies,
 the full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
@@ -57,7 +58,20 @@ fresh evidence; automatic reads and navigation do not clear that gate. The
 `irisCertificates` adapter supplies transport, visibility and public downloads.
 The rotation and renewal endpoints allow 192 KiB JSON bodies, enough for a
 128 KiB retirement envelope after base64 encoding; domain limits still apply.
-Ordinary JSON endpoints retain their 64 KiB limit. Other Settings lifecycle,
+Ordinary JSON endpoints retain their 64 KiB limit.
+
+Browser certificate and telemetry credential replacement use
+`security-lifecycle-controller.mjs` and `security-lifecycle.jsx`. The
+`irisSecurityLifecycle` adapter supplies transport, visibility, confirmation,
+public downloads and explicit private token downloads. Success requires the
+expected request, parameters and transition. Browser publication and verified
+local listener reload are distinct; a GET status never proves reload. Credential
+retirement requires observed use and operator confirmation about all consumers.
+The controller clears entered secrets on dispatch, family change and hide;
+pending operations retain IDs, never credential payloads. Unknown writes need
+explicit fresh evidence for the affected family and are never replayed. Browser
+approval alone allows 128 KiB JSON for the bounded 64 KiB public PEM chain.
+Other Settings lifecycle,
 image-verification and package workflows remain in the older application.
 
 Images owns its catalog, upload and import jobs, and quarantine drawer in
@@ -255,6 +269,15 @@ authentication. Browser tests cover uncertain responses, navigation during a
 write, focus, public-file clearing and small screens; their APIs are mocked.
 Browser checks cover empty success replies, secret clearing, shared setup fields,
 job pause/resume, persistent labels, keyboard focus and narrow layouts.
+`server/tests/test_security_lifecycle_react.py` runs the shipped controller
+against authenticated temporary APIs with real age/OpenSSL, metrics scrapes
+and trusted HTTPS collector delivery through the IRIS OTLP transport. It checks
+overlap, retirement, revert and unchanged deployment files. The real split-TLS
+test in `test_tls_rotation.py` checks the shipped result validator against both
+delayed reload and the certificate presented on a new connection.
+`security-lifecycle-smoke.mjs` covers request identity, explicit review, secret
+clearing, pending navigation, focus, labels, small screens and CSP with mocked
+APIs. These local tests are separate from live-deployment qualification.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console

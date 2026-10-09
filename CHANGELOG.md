@@ -17,6 +17,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move browser certificate replacement and telemetry credential rotation into
+  React. Check request identity and outcomes before reporting success, distinguish
+  publication from listener reload, and require observed use before retirement.
+  Clear submitted or hidden secrets and require explicit review after uncertain
+  results. Browser approval HTTP limits now fit supported public PEM chains.
+  Reject chains that exceed the stored limit after normalization, preserving
+  the pending request for a corrected approval.
+
 - Move certificate inventory, instruction certificate renewal and online signer
   rotation into React. Match replies to the intended request and transition,
   serialize approval reads, and require fresh evidence after uncertain results.

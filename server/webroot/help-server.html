@@ -154,6 +154,13 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     select <strong>Refresh rotation</strong> and review the request ID,
     fingerprints and state. Leaving the page clears selected approval files
     but does not cancel a submitted request.</p>
+    <p>For browser certificate replacement, <strong>Refresh request</strong>
+    shows the current request and publication state. Check the apply result for
+    listener reload, then verify a new trusted browser connection. For telemetry
+    credentials, <strong>Refresh evidence</strong> shows replacement use; confirm
+    every consumer before finishing. Unknown or refused results need an explicit
+    refresh and review. Submitted or hidden forms clear entered credentials;
+    returning to the page does not repeat a request.</p>
     <p>IOx and IOS-XR use the same device-agent image, packaged as
     <code>iris-arm64.tar</code>, <code>iris-amd64.tar</code>, and
     <code>iris-xr.rpm</code>. Guest Shell receives the shared agent in a
