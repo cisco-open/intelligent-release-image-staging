@@ -84,6 +84,7 @@ _HANDSHAKE_TIMEOUT = 30
 _MAX_BODY = 64 * 1024
 _MAX_SIGNING_APPROVAL = 192 * 1024  # 128 KiB public keylist, base64 + JSON
 _MAX_BROWSER_APPROVAL = 128 * 1024  # 64 KiB public PEM plus escaped JSON
+_MAX_TRUST_APPROVAL = 256 * 1024  # public certificate and signed keylist together
 _MAX_CSV = 8 * 1024 * 1024
 _MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024
 _MAX_OFFLINE_TAR = 256 * 1024 * 1024
@@ -110,6 +111,8 @@ def _body_limit(target):
         return _MAX_SIGNING_APPROVAL
     if path == "/internal/v1/settings/certificates/browser/rotation":
         return _MAX_BROWSER_APPROVAL
+    if path == "/internal/v1/settings/trust-rotation":
+        return _MAX_TRUST_APPROVAL
     return _MAX_BODY
 
 

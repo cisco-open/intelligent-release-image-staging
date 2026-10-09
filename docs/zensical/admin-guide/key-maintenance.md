@@ -47,8 +47,11 @@ the deployment supports up to 32 schedules.
 
 Select an existing schedule to change it or clear **Enable schedule**.
 You can disable an active schedule; finish its operation before other edits.
-Disabling leaves an active transition available for recovery. Saving with an
-outdated revision is rejected; refresh and review the current settings.
+Disabling leaves an active transition available for recovery. A saved schedule
+shows its revision. If settings change while you edit, your draft stays visible.
+Choose **Reload saved schedule**, review the UTC window, then save again.
+For an uncertain save, use **Refresh maintenance** and check the saved schedule
+before retrying. Returning to the page does not repeat the request.
 
 ## Complete the operation
 

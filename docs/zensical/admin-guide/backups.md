@@ -14,6 +14,10 @@ worker. For installer-owned Docker, split Docker and Kubernetes deployments,
 stops the server and Console, captures encrypted data and a separate identity
 recovery set, then starts the services that were running. Confirm the downtime
 before proceeding. The host worker continues while the Console is unavailable.
+An accepted request shows an operation ID, not a completed backup.
+After reconnecting, select **Refresh backup history** and check that operation.
+If its outcome is uncertain, review the history before starting another request.
+Returning to this page does not repeat a backup or restore.
 Backups include Console uploads and the host image folder recorded by the
 managed Docker installer. A restore puts both back as they were in the backup;
 keep the host folder dedicated to IRIS and avoid editing it during maintenance.
@@ -136,8 +140,9 @@ available in protected directories beside restored storage after publication.
     deleting journals, resetting counters or choosing a later timestamp.
     Recovery onto a replacement host or cluster requires separate security review.
 
-If publication or restart fails, use **Recover approved operation** with the same
-operation ID with the [host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
+If publication or restart fails, select **Resume this interrupted restore** beside
+the matching operation. If the Console is offline, use the same operation ID
+with the [host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
 The worker keeps affected services stopped and resumes its approved publication.
 It preserves newer data written after a restart attempt.
 

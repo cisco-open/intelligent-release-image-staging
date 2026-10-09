@@ -5,6 +5,7 @@
 // Run after npm run build. Supply PLAYWRIGHT_MODULE when Playwright is installed
 // outside this package. This test uses mocked APIs and never contacts a device.
 import assert from 'node:assert/strict';
+import {maintenance, trust, backups, prepared} from './worker-fixtures.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,15 +42,11 @@ try {
   const publicCertificate = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n';
   let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null, created_at: null};
   let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null, started_at: null, endpoint: null, previous_retained: false}))};
-  let maintenanceFixture = {schema: 1, revision: 0, observed_at: null, worker: 'not-observed', policies: [], jobs: [], families: [
-    {id: 'online-signer', label: 'Online instruction signer', action: 'prepare', requirement: 'Offline approval'},
-    {id: 'device-instruction', label: 'Device instruction encryption key', action: 'rotate', requirement: 'Verify device acceptance'},
-    {id: 'browser-tls', label: 'Console browser TLS', action: 'review', requirement: 'Operator certificate approval'}]};
-  let backupFixture = {available: false, target: 'unavailable', can_verify: false, can_extract: false,
+  let maintenanceFixture = maintenance();
+  let backupFixture = {...backups(), available: false, target: 'unavailable', can_verify: false, can_extract: false, can_restore: false,
     jobs: [], note: 'Configure the lifecycle worker on the installer host.'};
   let deploymentFixture = {available: false, target: 'unavailable', can_rotate: false, families: [], jobs: [], note: 'Configure independent recovery access.'};
-  let trustFixture = {items: ['device-tls', 'peer-ca', 'instruction-roots'].map(family => ({family, state: 'idle', request_id: null})),
-    drain: {ready: true, blocked_device_ids: [], removed_device_ids: []}};
+  let trustFixture = trust();
   const backupId = '11111111-1111-1111-1111-111111111111';
   await page.addInitScript(() => {
     window.testStreams = [];
@@ -124,13 +121,13 @@ try {
           assert.equal(body.family, 'peer-ca');
           assert.equal(body.action, 'prepare');
           const item = trustFixture.items.find(item => item.family === body.family);
-          Object.assign(item, {request_id: body.request_id, state: 'approved', certificate: 'PUBLIC CERTIFICATE', fingerprint_sha256: 'cd'.repeat(32)});
+          Object.assign(item, prepared('peer-ca'), {request_id: body.request_id});
           return route.fulfill({json: item});
         }
         if (url.pathname === '/api/v1/settings/deployment-rotation') {
           assert.equal(body.action, 'rotate');
           assert.equal(body.allow_downtime, true);
-          deploymentFixture.jobs.push({id: body.request_id, family: body.family, state: 'running', detail: 'Preparing verified backup', proof: null});
+          deploymentFixture.jobs.push({id: body.request_id, action: 'rotate', started_at: 1790160000, family: body.family, state: 'running', detail: 'Preparing verified backup', proof: null});
           return route.fulfill({json: {job_id: body.request_id}});
         }
         if (url.pathname === '/api/v1/settings/key-maintenance') {
@@ -162,9 +159,9 @@ try {
           json: renewalAccepted ? {applied: true, expires_at: 1793360000, refuse_at: 1792755200, status_refreshed: true}
             : {error: 'online certificate changed; prepare renewal again'}});
         if (url.pathname === '/api/v1/settings/backups') {
-          backupFixture = {...backupFixture, jobs: [{id: 'job-fixture', action: body.action,
+          backupFixture = {...backupFixture, jobs: [{id: body.request_id, action: body.action === 'recover-restore' ? 'restore' : body.action,
             backup_id: backupId, started_at: 1790160000, state: 'running', detail: ''}]};
-          return route.fulfill({json: {job_id: 'job-fixture'}});
+          return route.fulfill({json: {job_id: body.request_id}});
         }
         if (url.pathname === '/api/v1/settings/peer-tls') {
           assert.equal(body.expected_mode, peerTlsState.mode);
@@ -554,7 +551,7 @@ try {
   const trustOperation = settingsWrites.at(-1).body.request_id;
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#deployment-rotation-apply').click();
-  await page.locator('#deployment-rotation-result').getByText(/acceptance is not completion/).waitFor();
+  await page.locator('#deployment-rotation-result').getByText(/Accepted operation.*Refresh history for the worker result/).waitFor();
   assert.equal(settingsWrites.at(-1).body.request_id, trustOperation);
   assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
   if (process.env.IRIS_UI_SCREENSHOTS) {
@@ -567,7 +564,7 @@ try {
   }
   await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
   assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
-  await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).waitFor();
+  await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).first().waitFor();
   await page.locator('#maintenance-family').selectOption('device-instruction');
   assert.equal(await page.locator('#maintenance-target').isEnabled(), true);
   assert.equal(await page.locator('#maintenance-interval').getAttribute('min'), '8');
@@ -579,15 +576,15 @@ try {
   page.once('dialog', dialog => dialog.dismiss());
   await page.locator('#maintenance-save').click();
   assert.equal(settingsWrites.length, beforeSchedule, 'Cancelled enable leaves policy unchanged');
-  page.once('dialog', dialog => { assert.match(dialog.message(), /review reminders/); dialog.accept(); });
+  page.once('dialog', dialog => { assert.match(dialog.message(), /Operator certificate approval/); dialog.accept(); });
   await page.locator('#maintenance-save').click();
-  await page.locator('#maintenance-result').getByText('Schedule saved.', {exact: true}).waitFor();
+  await page.locator('#maintenance-result').getByText('Schedule saved at revision 1.', {exact: true}).waitFor();
   assert.equal(settingsWrites.at(-1).body.policy.next_at, Date.parse('2027-01-01T03:00Z') / 1000);
   assert.equal(settingsWrites.at(-1).body.policy.target, 'deployment');
   settingsFailure = 'invalid-success';
   await page.locator('#maintenance-enabled').uncheck();
   await page.locator('#maintenance-save').click();
-  await page.locator('#maintenance-result').getByText(/Refresh maintenance before continuing/).waitFor();
+  await page.locator('#maintenance-result').getByText(/Refresh and review the exact operation before continuing/).waitFor();
   assert.equal(await page.locator('#maintenance-save').isDisabled(), true);
   settingsFailure = '';
   await page.locator('#maintenance-refresh').click();
@@ -683,6 +680,7 @@ try {
   await settingsTab('Backup & restore');
   assert.equal(await page.locator('#backup-create').isDisabled(), true);
   backupFixture = {...backupFixture, available: true, target: 'single-docker', note: 'Keep encrypted copies off this host.'};
+  deploymentFixture.jobs[0].state = 'rotated';
   await page.locator('#backup-refresh').click();
   await page.waitForFunction(() => !document.getElementById('backup-create').disabled);
   const beforeCancelled = settingsWrites.length;

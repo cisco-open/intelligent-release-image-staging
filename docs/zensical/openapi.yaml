@@ -35015,6 +35015,10 @@
                           "items": {
                             "type": "string"
                           }
+                        },
+                        "attestation_applied": {
+                          "const": true,
+                          "description": "Present only after the signed current-root attestation was installed and verified."
                         }
                       },
                       "required": [
@@ -73892,6 +73896,10 @@
                           "items": {
                             "type": "string"
                           }
+                        },
+                        "attestation_applied": {
+                          "const": true,
+                          "description": "Present only after the signed current-root attestation was installed and verified."
                         }
                       },
                       "required": [

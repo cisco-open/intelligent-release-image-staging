@@ -161,6 +161,15 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     every consumer before finishing. Unknown or refused results need an explicit
     refresh and review. Submitted or hidden forms clear entered credentials;
     returning to the page does not repeat a request.</p>
+    <p>For deployment rotation, use <strong>Refresh maintenance evidence</strong>
+    after reconnecting. For backups, use <strong>Refresh backup history</strong>.
+    Match the operation ID and check its result; acceptance is not completion.
+    An uncertain response needs a refresh and review before another request.
+    Running or interrupted worker operations block new maintenance.</p>
+    <p>Scheduled key maintenance keeps your draft if saved settings change.
+    Choose <strong>Reload saved schedule</strong> and review the UTC window
+    before saving again. For an uncertain save, <strong>Refresh maintenance</strong>
+    and check the saved schedule first. Returning to a page never resubmits work.</p>
     <p>IOx and IOS-XR use the same device-agent image, packaged as
     <code>iris-arm64.tar</code>, <code>iris-amd64.tar</code>, and
     <code>iris-xr.rpm</code>. Guest Shell receives the shared agent in a

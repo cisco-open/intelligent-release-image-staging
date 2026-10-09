@@ -333,7 +333,8 @@ def test_import_from_disk_panel_wired():
     assert "this.services.post('/api/v1/images/import', {path})" in controller
     assert "this.pollJob(body.job_id" in controller
     assert 'post: jpost' in js  # shared authenticated/CSRF transport
-    assert "headers: csrfHdr({'Content-Type': 'application/json'})" in js
+    shared_post = js.split('async function jpost(url, body)', 1)[1].split('\n  }', 1)[0]
+    assert "headers: csrfHdr({ 'Content-Type': 'application/json' })" in shared_post
     assert 'else await this.refreshLists();' in controller
     assert "Promise.all([this.refresh(), this.refresh('importable')])" in controller
 

@@ -204,7 +204,7 @@ class Worker:
                     'can_rotate': self.identity is not None and bool(self.rotation_families),
                     'families': list(self.rotation_families),
                     'jobs': json.loads(json.dumps([job for job in self.jobs if job['action'] == 'rotate'])),
-                    'note': 'Rotation stops this deployment after a verified cold backup. Trust changes also require device removal and package rebuilds.'}
+                    'note': 'Rotation stops this deployment after a verified cold backup. Device trust changes require device removal. Offline root changes also rebuild device packages.'}
 
     def transport_status(self):
         if self.target != 'kubernetes':

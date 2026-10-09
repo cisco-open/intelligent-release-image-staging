@@ -18,7 +18,8 @@ Console](../zensical/user-guide/console.md) for that.
 `server/console-ui/` renders the header, primary navigation, Settings section
 navigation, General, TLS/trust, Telemetry, Audit export, certificate inventory,
 instruction certificate renewal, online signer rotation, browser certificate
-replacement, telemetry credential rotation, Policies,
+replacement, telemetry credential rotation, deployment trust and worker rotation,
+scheduled key maintenance, backup and restore, Policies,
 the full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
@@ -71,8 +72,20 @@ The controller clears entered secrets on dispatch, family change and hide;
 pending operations retain IDs, never credential payloads. Unknown writes need
 explicit fresh evidence for the affected family and are never replayed. Browser
 approval alone allows 128 KiB JSON for the bounded 64 KiB public PEM chain.
-Other Settings lifecycle,
-image-verification and package workflows remain in the older application.
+Deployment trust, scheduled key maintenance and backup/restore use
+`worker-lifecycle-controller.mjs` and `worker-lifecycle.jsx`, with the
+`irisWorkerLifecycle` transport and visibility adapter. Three portals preserve
+the existing Settings layout. Exact trust requests and approvals, saved policy
+fields/revisions and worker job IDs are checked before reporting success.
+Attestation application has a POST-only confirmation after native signature and
+installed-file verification; GET status is not that confirmation. Trust approval
+alone allows 256 KiB JSON for its bounded public certificate and raw signed list.
+Dirty schedule drafts retain their reviewed revision until explicitly reloaded.
+Unknown outcomes require fresh explicit review; requests are never replayed by
+navigation. Worker controls check backup and rotation blockers together and
+recover the original job ID and intent. Accepted jobs remain distinct from
+finished maintenance. Selected public files clear on dispatch, family change
+and hide. Image-verification and package workflows remain in the older application.
 
 Images owns its catalog, upload and import jobs, and quarantine drawer in
 `images-controller.mjs` and `images.jsx`. The `iris:images-command` adapter
@@ -278,6 +291,15 @@ delayed reload and the certificate presented on a new connection.
 `security-lifecycle-smoke.mjs` covers request identity, explicit review, secret
 clearing, pending navigation, focus, labels, small screens and CSP with mocked
 APIs. These local tests are separate from live-deployment qualification.
+`server/tests/test_worker_lifecycle_react.py` runs the shipped worker controller
+against authenticated temporary APIs with real age, OpenSSH and OpenSSL trust
+approvals, independent root attestations and durable policy revision checks.
+It also checks backup admission, exact IDs and idempotency through a real Unix
+worker socket, with the capture implementation stubbed to avoid deployment changes.
+Transport tests check authentication and the scoped approval limit at both APIs.
+`worker-lifecycle-smoke.mjs` covers mismatched approvals, revisions and job IDs,
+explicit review, interrupted recovery, focus, labels, responsive layout and CSP.
+Its intercepted responses do not qualify live rotation, backup or restoration.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through
 temporary Console and management servers for all five management types. It
 checks sessions, CSRF, saved fields and public credential responses. The Console

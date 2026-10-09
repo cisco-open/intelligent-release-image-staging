@@ -2948,6 +2948,9 @@ def _success(route):
             'attestation_request_id': {'type': ['string', 'null'], 'format': 'uuid'},
             'attestation_root_id': {'type': ['string', 'null']},
             'attested_root_ids': {'type': 'array', 'items': {'type': 'string'}}})
+        if route.method == 'POST':
+            item['properties']['attestation_applied'] = {'const': True,
+                'description': 'Present only after the signed current-root attestation was installed and verified.'}
         schema = _schedule_object({'items': {'type': 'array', 'minItems': 3, 'maxItems': 3, 'items': item},
             'drain': _schedule_object({'ready': {'type': 'boolean'}, 'blocked_device_ids': {'type': 'array', 'items': {'type': 'string'}},
                 'removed_device_ids': {'type': 'array', 'items': {'type': 'string'}}})}) if route.method == 'GET' else {'oneOf': [item,

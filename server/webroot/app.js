@@ -1823,402 +1823,21 @@
     visible: function () { return certificates.visible(); }
   });
 
-  var deploymentRotation = null, deploymentTrust = null, deploymentBusy = false, deploymentRead = 0, deploymentPending = null;
-  var deploymentRotationUrl = '/api/v1/settings/deployment-rotation', deploymentTrustUrl = '/api/v1/settings/trust-rotation';
-  function deploymentField(name) { return document.getElementById('deployment-rotation-' + name); }
-  function deploymentTrustItem() {
-    return deploymentTrust && deploymentTrust.items.find(function (item) { return item.family === deploymentField('family').value; });
-  }
-  function renderDeploymentRotation() {
-    var family = deploymentField('family').value, trust = ['device-tls', 'peer-ca', 'instruction-roots'].includes(family);
-    var item = deploymentTrustItem(), state = item ? item.state : 'unavailable';
-    var busyJob = deploymentRotation && deploymentRotation.jobs.some(function (job) { return ['running', 'recovery-required'].includes(job.state); });
-    var topologyLabels = {'single-docker': 'Docker on one host', 'split-docker': 'Docker on separate hosts', 'kubernetes': 'Kubernetes'};
-    deploymentField('worker').textContent = deploymentRotation ?
-      (topologyLabels[deploymentRotation.target] ? 'Deployment: ' + topologyLabels[deploymentRotation.target] + '. ' : '') + deploymentRotation.note :
-      'Worker state unavailable. Refresh before starting maintenance.';
-    deploymentField('state').textContent = trust ? 'Trust request: ' + state.replaceAll('-', ' ') + '. Publication requires stopped writers and confirmed device removal.' :
-      family === 'age-identity' ? 'Replace the server encryption identity and retain the independently held recovery recipient. Existing backups keep their original recovery requirements.' :
-      family === 'seeder-announce' ? 'Pause normal writers while an isolated tracker and seeder verify the replacement credential against published torrents.' :
-      'Replace the internal TLS key and certificate, update Console trust, and verify authenticated connections from every deployed Console.';
-    deploymentField('trust').hidden = !trust;
-    deploymentField('tls').hidden = family !== 'device-tls';
-    deploymentField('roots').hidden = family !== 'instruction-roots';
-    deploymentField('approval').hidden = !item || !['awaiting-approval', 'approved'].includes(state) || family === 'peer-ca' || item.mode === 'self-signed';
-    deploymentField('keylist-label').hidden = family !== 'instruction-roots';
-    var attest = family === 'instruction-roots' && ['idle', 'cancelled', 'published'].includes(state) && Object.keys(item.roots || {}).length === 2;
-    deploymentField('attestation').hidden = !attest;
-    var rootSelect = deploymentField('attestation-root'), selectedRoot = rootSelect.value;
-    rootSelect.replaceChildren();
-    if (attest) {
-      Object.keys(item.roots).forEach(function (name) { var option = document.createElement('option'); option.value = name; option.textContent = name; rootSelect.appendChild(option); });
-      if (Object.hasOwn(item.roots, selectedRoot)) rootSelect.value = selectedRoot;
-      else if (item.attestation_root_id && Object.hasOwn(item.roots, item.attestation_root_id)) rootSelect.value = item.attestation_root_id;
-      deploymentField('attested').textContent = 'Fresh signed custody evidence: ' + ((item.attested_root_ids || []).join(', ') || 'none') + '. Each root requires its own signed approval.';
+  // React owns deployment trust, scheduled keys and backup/recovery jobs.
+  var workerLifecycle = window.irisWorkerLifecycle;
+  workerLifecycle.connect({
+    fetch: fetch, headers: csrfHdr, formatDate: fmtDate, uuid: maintenanceRequestId,
+    download: rotationDownload, now: function () { return Date.now(); },
+    confirm: function (message) { return confirm(message); },
+    visible: function (pane) {
+      return !document.hidden && !document.getElementById('view-settings').hidden &&
+        !document.getElementById('settings-pane-' + pane).hidden;
+    },
+    openSigner: function () {
+      refreshRotation();
+      document.getElementById('signer-rotation').scrollIntoView({block: 'start'});
     }
-    ['attestation-request', 'attestation-apply'].forEach(function (name) { deploymentField(name).disabled = deploymentBusy || !attest || busyJob; });
-    deploymentField('fingerprint').textContent = item && item.fingerprint_sha256 ? 'Replacement SHA256: ' + item.fingerprint_sha256 : '';
-    if (trust && deploymentTrust && deploymentTrust.drain) deploymentField('state').textContent += deploymentTrust.drain.ready ?
-      ' Recorded deployments are removed; the worker will check again after stopping writers.' :
-      ' Removal required: ' + deploymentTrust.drain.blocked_device_ids.join(', ') + '.';
-    document.querySelectorAll('#deployment-rotation-workflow input,#deployment-rotation-workflow select').forEach(function (el) { el.disabled = deploymentBusy; });
-    deploymentField('prepare').disabled = deploymentBusy || !item || !['idle', 'published', 'cancelled'].includes(state) || busyJob;
-    deploymentField('approve').disabled = deploymentBusy || !item || !['awaiting-approval', 'approved'].includes(state) || busyJob;
-    deploymentField('cancel').disabled = deploymentBusy || !item || !['awaiting-approval', 'approved'].includes(state) || busyJob;
-    deploymentField('download').disabled = deploymentBusy || !item || !(item.csr || item.certificate || item.online_public_key);
-    deploymentField('apply').disabled = deploymentBusy || !deploymentRotation || !deploymentRotation.can_rotate || busyJob ||
-      !deploymentRotation.families.includes(family) || (trust && (state !== 'approved' || !deploymentTrust.drain || !deploymentTrust.drain.ready));
-    deploymentField('refresh').disabled = deploymentBusy;
-    deploymentField('jobs').replaceChildren();
-    if (deploymentRotation) deploymentRotation.jobs.slice().reverse().forEach(function (job) {
-      var row = document.createElement('tr');
-      [job.family + ' / ' + job.id, job.state.replaceAll('-', ' '), job.detail + (job.proof ? ' ' + JSON.stringify(job.proof) : '')].forEach(function (value) {
-        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
-      });
-      if (job.state === 'recovery-required') {
-        var recover = document.createElement('button'); recover.className = 'btn ghost'; recover.textContent = 'Recover approved operation';
-        recover.disabled = deploymentBusy || !deploymentRotation.can_rotate;
-        recover.addEventListener('click', function () { recoverDeploymentRotation(job); });
-        row.lastChild.appendChild(recover);
-      }
-      deploymentField('jobs').appendChild(row);
-    });
-  }
-  async function refreshDeploymentRotation() {
-    if (deploymentBusy) return;
-    var generation = ++deploymentRead;
-    deploymentRotation = null; deploymentTrust = null; renderDeploymentRotation();
-    try {
-      var results = await Promise.all([deploymentRotationUrl, deploymentTrustUrl].map(async function (url) {
-        try {
-        var response = await fetch(url), data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Maintenance status unavailable.');
-        return data;
-        } catch (error) { return {unavailable: error.message}; }
-      }));
-      if (generation !== deploymentRead) return;
-      if (!Array.isArray(results[0].jobs) || !Array.isArray(results[0].families) || typeof results[0].can_rotate !== 'boolean') throw new Error(results[0].unavailable || 'Maintenance response invalid; no changes enabled.');
-      deploymentRotation = results[0];
-      if (Array.isArray(results[1].items) && results[1].items.length === 3) deploymentTrust = results[1];
-      else deploymentField('result').textContent = results[1].unavailable || 'Trust requests unavailable. Independent credential operations remain available.';
-      renderDeploymentRotation();
-    } catch (error) { if (generation === deploymentRead) deploymentField('result').textContent = error.message; }
-  }
-  async function deploymentPublicFile(name, limit) {
-    var file = deploymentField(name).files[0];
-    if (!file || file.size > limit) throw new Error('Choose the required bounded public approval file.');
-    var value = await file.text();
-    if (/PRIVATE KEY|AGE-SECRET-KEY/i.test(value)) throw new Error('Private keys must stay with their custodian; upload only public material.');
-    return value;
-  }
-  async function recoverDeploymentRotation(job) {
-    if (deploymentBusy || !confirm('Resume only this previously approved operation? IRIS will recheck its backup and custody, stop writers and verify the replacement before restarting.')) return;
-    deploymentBusy = true; ++deploymentRead; renderDeploymentRotation();
-    try {
-      var response = await fetch(deploymentRotationUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}),
-        body: JSON.stringify({action: 'recover-rotation', family: job.family, request_id: job.id, allow_downtime: true})});
-      var data = await response.json();
-      if (!response.ok || data.job_id !== job.id) throw new Error(data.error || 'Recovery outcome unknown. Refresh the same operation.');
-      deploymentField('result').textContent = 'Recovery accepted for ' + job.id + '. Reconnect after downtime and check evidence.';
-    } catch (error) { deploymentField('result').textContent = error.message; }
-    finally { deploymentBusy = false; await refreshDeploymentRotation(); }
-  }
-  async function deploymentAction(action) {
-    if (deploymentBusy || !deploymentRotation) return;
-    var family = deploymentField('family').value, item = deploymentTrustItem();
-    if (['device-tls', 'peer-ca', 'instruction-roots'].includes(family) && !item) return;
-    var payload = {action: action, family: family, request_id: item && item.request_id}, endpoint = deploymentTrustUrl;
-    try {
-      if (action === 'prepare') {
-        if (family === 'device-tls') {
-          payload.names = deploymentField('names').value.split(',').map(function (value) { return value.trim(); });
-          payload.mode = deploymentField('mode').value;
-        } else if (family === 'instruction-roots') {
-          var first = deploymentField('root-a-name').value.trim(), second = deploymentField('root-b-name').value.trim();
-          if (!first || first === second) throw new Error('Provide two distinct existing root names.');
-          payload.roots = Object.create(null);
-          payload.roots[first] = await deploymentPublicFile('root-a', 4096);
-          payload.roots[second] = await deploymentPublicFile('root-b', 4096);
-          payload.keylist_signer = first;
-        }
-        if (!confirm('Prepare replacement trust? Active credentials remain unchanged until a separately confirmed maintenance operation.')) return;
-        payload.request_id = null;
-        var parameters = JSON.stringify(payload);
-        if (!deploymentPending || deploymentPending.parameters !== parameters) deploymentPending = {parameters: parameters, id: maintenanceRequestId()};
-        payload.request_id = deploymentPending.id;
-      } else if (action === 'attestation-request' || action === 'attestation-apply') {
-        payload.root_id = deploymentField('attestation-root').value;
-        if (action === 'attestation-apply') {
-          if (!item.attestation_request_id || item.attestation_root_id !== payload.root_id) throw new Error('Download and approve a request for the selected root first.');
-          payload.request_id = item.attestation_request_id;
-          payload.keylist = await deploymentPublicFile('attestation-keylist', 174764);
-        } else {
-          var attestationParameters = 'attestation:' + payload.root_id;
-          if (!deploymentPending || deploymentPending.parameters !== attestationParameters) deploymentPending = {parameters: attestationParameters, id: maintenanceRequestId()};
-          payload.request_id = deploymentPending.id;
-        }
-      } else if (action === 'approve') {
-        payload.certificate = await deploymentPublicFile('certificate', 65536);
-        if (family === 'instruction-roots') payload.keylist = await deploymentPublicFile('keylist', 174764);
-      } else if (action === 'rotate') {
-        if (!confirm('Stop this IRIS deployment, verify a cold backup, and rotate this credential? Trust changes require confirmed IRIS removal from devices. Wait for the recorded result and verify consumers before resuming use.')) return;
-        endpoint = deploymentRotationUrl;
-        if (!item) {
-          var key = 'rotate:' + family;
-          if (!deploymentPending || deploymentPending.parameters !== key) deploymentPending = {parameters: key, id: maintenanceRequestId()};
-          payload.request_id = deploymentPending.id;
-        }
-        payload.allow_downtime = true;
-      } else if (action === 'cancel' && !confirm('Discard this uncommitted trust request? Active trust will remain unchanged.')) return;
-      deploymentBusy = true; ++deploymentRead; renderDeploymentRotation();
-      var response = await fetch(endpoint, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
-      var data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
-      deploymentPending = null;
-      if (action === 'attestation-request') rotationDownload('keylist-payload.json', data.payload);
-      deploymentField('result').textContent = action === 'attestation-request' ? 'Public request downloaded. Approve it with the selected root in IRIS Offline signing, then import the signed revocation list here.' :
-        action === 'attestation-apply' ? 'Signed root attestation validated. Review each root’s fresh evidence.' :
-        action === 'rotate' ? 'Maintenance request accepted: ' + data.job_id + '. The Console will disconnect during downtime. Reconnect and refresh evidence; acceptance is not completion.' :
-        action === 'approve' ? 'Public approval validated. Schedule downtime before applying it.' : action === 'cancel' ? 'Replacement request cancelled.' : 'Replacement prepared. Download public files and complete required approvals.';
-    } catch (error) { deploymentField('result').textContent = error.message; }
-    finally { deploymentBusy = false; renderDeploymentRotation(); await refreshDeploymentRotation(); }
-  }
-  deploymentField('family').addEventListener('change', renderDeploymentRotation);
-  deploymentField('refresh').addEventListener('click', refreshDeploymentRotation);
-  ['prepare', 'approve', 'cancel', 'attestation-request', 'attestation-apply'].forEach(function (action) { deploymentField(action).addEventListener('click', function () { deploymentAction(action); }); });
-  deploymentField('apply').addEventListener('click', function () { deploymentAction('rotate'); });
-  deploymentField('download').addEventListener('click', function () {
-    var item = deploymentTrustItem();
-    if (!item || deploymentBusy) return;
-    [['csr', 'iris-device.csr'], ['certificate', 'iris-approved-certificate.pem'], ['online_public_key', 'online.pub'], ['keylist_payload', 'keylist-payload.json']].forEach(function (field) {
-      if (item[field[0]]) rotationDownload(field[1], item[field[0]]);
-    });
-    deploymentField('result').textContent = 'Public files downloaded. For signing roots, use IRIS Offline signing to approve the online key and preserved revocation list, then import both approvals here.';
   });
-
-  var maintenanceState = null, maintenanceBusy = false, maintenanceRead = 0;
-  var maintenanceUrl = '/api/v1/settings/key-maintenance';
-  function maintenanceField(name) { return document.getElementById('maintenance-' + name); }
-  function validMaintenance(data) {
-    return data && Number.isInteger(data.revision) && Array.isArray(data.policies) &&
-      Array.isArray(data.jobs) && Array.isArray(data.families) && typeof data.worker === 'string';
-  }
-  function maintenanceControls() {
-    document.querySelectorAll('#maintenance-form input,#maintenance-form select,#maintenance-form button,#maintenance-jobs button').forEach(function (el) {
-      el.disabled = maintenanceBusy || !maintenanceState;
-    });
-    var device = maintenanceField('family').value === 'device-instruction';
-    maintenanceField('target').disabled = maintenanceBusy || !maintenanceState || !device;
-    maintenanceField('target').required = device;
-    maintenanceField('interval').min = device ? '8' : '1';
-    maintenanceField('interval').max = device ? '21' : '365';
-  }
-  function maintenanceEdit() {
-    var policy = maintenanceState && maintenanceState.policies.find(function (p) { return p.id === maintenanceField('policy').value; });
-    maintenanceField('family').value = policy ? policy.family : 'online-signer';
-    maintenanceField('target').value = policy && policy.target !== 'deployment' ? policy.target : '';
-    maintenanceField('next').value = new Date(policy ? policy.next_at * 1000 : Date.now() + 3600000).toISOString().slice(0, 19);
-    maintenanceField('interval').value = policy ? policy.interval_days : 14;
-    maintenanceField('window').value = policy ? policy.window_minutes : 30;
-    maintenanceField('enabled').checked = Boolean(policy && policy.enabled);
-    maintenanceControls();
-  }
-  function renderMaintenance() {
-    maintenanceControls();
-    if (!maintenanceState) { maintenanceField('worker').textContent = 'Scheduler status unavailable. Refresh before changing a schedule.'; return; }
-    var data = maintenanceState;
-    maintenanceField('worker').textContent = 'Scheduler: ' + data.worker.replaceAll('-', ' ') +
-      (data.observed_at === null ? '.' : '. Last check ' + new Date(data.observed_at * 1000).toISOString() + '.');
-    var familySelect = maintenanceField('family'), selectedFamily = familySelect.value;
-    familySelect.replaceChildren(); maintenanceField('families').replaceChildren();
-    data.families.forEach(function (family) {
-      var option = document.createElement('option'); option.value = family.id; option.textContent = family.label; familySelect.appendChild(option);
-      var row = document.createElement('tr');
-      [family.label, {prepare: 'Prepare for approval', rotate: 'Rotate credential', review: 'Review reminder'}[family.action], family.requirement].forEach(function (value) {
-        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
-      });
-      maintenanceField('families').appendChild(row);
-    });
-    if (selectedFamily) familySelect.value = selectedFamily;
-    var chosen = maintenanceField('policy').value;
-    maintenanceField('policy').replaceChildren(new Option('New schedule', ''));
-    data.policies.forEach(function (p) {
-      maintenanceField('policy').appendChild(new Option(p.family + ' / ' + p.target + (p.enabled ? ' — enabled' : ' — disabled'), p.id));
-    });
-    maintenanceField('policy').value = chosen;
-    maintenanceField('jobs').replaceChildren();
-    data.jobs.slice().reverse().forEach(function (job) {
-      var row = document.createElement('tr');
-      [job.family + ' / ' + job.target, new Date(job.due_at * 1000).toISOString(), job.state.replaceAll('-', ' ') + ': ' + job.detail].forEach(function (value) {
-        var cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
-      });
-      var actions = document.createElement('td'); row.appendChild(actions);
-      var action = job.state === 'review-required' ? 'reviewed' :
-        job.state === 'verification-required' && job.family === 'management-token' ? 'retire-management' :
-        job.state === 'intervention-required' && job.family === 'management-token' ? 'reconcile-management' :
-        job.state === 'intervention-required' && ['online-signer', 'device-instruction'].includes(job.family) ? 'retry' : null;
-      if (action) {
-        var button = document.createElement('button'); button.className = 'btn ghost';
-        button.textContent = {reviewed: 'Acknowledge review', 'retire-management': 'Retire previous credential', 'reconcile-management': 'Check credential recovery', retry: 'Retry after custody review'}[action];
-        button.addEventListener('click', function () { maintenanceAction(action, job.id); }); actions.appendChild(button);
-      } else if (job.state === 'approval-required') {
-        var link = document.createElement('a'); link.href = '#signer-rotation'; link.textContent = 'Complete signer approval above';
-        link.addEventListener('click', function (event) { event.preventDefault(); document.getElementById('signer-rotation').scrollIntoView(); refreshRotation(); });
-        actions.appendChild(link);
-      }
-      maintenanceField('jobs').appendChild(row);
-    });
-    if (!data.jobs.length) {
-      var empty = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 4;
-      cell.textContent = 'No maintenance operations yet.'; empty.appendChild(cell); maintenanceField('jobs').appendChild(empty);
-    }
-    maintenanceControls();
-  }
-  async function refreshMaintenance() {
-    if (maintenanceBusy) return;
-    var generation = ++maintenanceRead;
-    maintenanceState = null; renderMaintenance();
-    try {
-      var response = await fetch(maintenanceUrl), data = await response.json();
-      if (generation !== maintenanceRead) return;
-      if (!response.ok || !validMaintenance(data)) throw new Error(data.error || 'Maintenance status unavailable.');
-      maintenanceState = data; renderMaintenance(); maintenanceEdit();
-      maintenanceField('result').textContent = 'Maintenance status refreshed.';
-    } catch (error) { if (generation === maintenanceRead) maintenanceField('result').textContent = error.message; }
-  }
-  async function sendMaintenance(payload) {
-    if (maintenanceBusy || !maintenanceState) return;
-    maintenanceBusy = true; ++maintenanceRead; maintenanceControls();
-    try {
-      var response = await fetch(maintenanceUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
-      var data = await response.json();
-      if (!response.ok || !validMaintenance(data)) throw new Error(data.error || 'Outcome unknown. Refresh before retrying.');
-      maintenanceState = data;
-      renderMaintenance();
-      if (payload.action === 'save-policy') { maintenanceField('policy').value = payload.policy.id; maintenanceEdit(); }
-      maintenanceField('result').textContent = payload.action === 'save-policy' ? 'Schedule saved.' : 'Operation state updated; check the evidence below.';
-    } catch (error) {
-      maintenanceState = null; maintenanceField('result').textContent = error.message + ' Refresh maintenance before continuing.';
-    } finally { maintenanceBusy = false; renderMaintenance(); }
-  }
-  async function maintenanceAction(action, jobId) {
-    var message = action === 'retire-management' ? 'Have you updated and verified every Console instance with the replacement credential? Retire the previous credential now?' :
-      action === 'reviewed' ? 'Acknowledge that you reviewed the documented custody procedure? This does not record a completed rotation.' :
-      action === 'retry' ? 'Have you reviewed custody and the interrupted operation? Retry this operation now?' :
-      'Check the credential files against the interrupted operation? This does not retire either credential.';
-    if (confirm(message)) await sendMaintenance({action: action, job_id: jobId, confirm: true});
-  }
-  maintenanceField('refresh').addEventListener('click', refreshMaintenance);
-  maintenanceField('policy').addEventListener('change', maintenanceEdit);
-  maintenanceField('family').addEventListener('change', maintenanceControls);
-  maintenanceField('form').addEventListener('submit', async function (event) {
-    event.preventDefault();
-    if (!maintenanceState || maintenanceBusy) return;
-    var family = maintenanceField('family').value, enabled = maintenanceField('enabled').checked;
-    var next = Date.parse(maintenanceField('next').value + 'Z');
-    if (!Number.isFinite(next)) { maintenanceField('result').textContent = 'Choose a valid UTC start time.'; return; }
-    var capability = maintenanceState.families.find(function (item) { return item.id === family; });
-    if (enabled && !confirm('Enable ' + (capability.action === 'review' ? 'review reminders' : capability.action === 'prepare' ? 'signer preparation for offline approval' : 'credential rotation') + ' for this UTC schedule? ' + capability.requirement + '.')) return;
-    await sendMaintenance({action: 'save-policy', revision: maintenanceState.revision, policy: {
-      id: maintenanceField('policy').value || maintenanceRequestId(), family: family,
-      target: family === 'device-instruction' ? maintenanceField('target').value.trim() : 'deployment',
-      enabled: enabled, next_at: Math.floor(next / 1000), interval_days: Number(maintenanceField('interval').value),
-      window_minutes: Number(maintenanceField('window').value)
-    }});
-  });
-  // ---- End key maintenance ----
-
-  // ---- Deployment backup workflow ----
-  var backupStatus = null, backupBusy = false, backupRead = 0, backupPending = null;
-  function backupControls() {
-    var active = backupStatus && backupStatus.available;
-    var blocked = !active || backupBusy || backupStatus.jobs.some(function (job) {
-      return job.state === 'running' || job.state === 'recovery-required';
-    });
-    document.getElementById('backup-create').disabled = blocked;
-    document.getElementById('backup-selected').disabled = blocked;
-    var chosen = Boolean(document.getElementById('backup-selected').value);
-    document.getElementById('backup-verify').disabled = blocked || !chosen || !backupStatus.can_verify;
-    document.getElementById('backup-extract').disabled = blocked || !chosen || !backupStatus.can_extract;
-    document.getElementById('backup-restore').disabled = blocked || !chosen || !backupStatus.can_restore;
-    document.getElementById('backup-recover').disabled = !active || backupBusy || !backupStatus.jobs.some(function (job) {
-      return job.action === 'restore' && job.state === 'recovery-required';
-    });
-  }
-  async function refreshBackups() {
-    var generation = ++backupRead;
-    backupStatus = null; backupControls();
-    var note = document.getElementById('backup-worker-note');
-    try {
-      var r = await fetch('/api/v1/settings/backups');
-      if (!r.ok) throw new Error('Backup worker status unavailable. During capture the Console may be temporarily offline; refresh after it returns.');
-      var data = await r.json();
-      if (generation !== backupRead) return;
-      if (!Array.isArray(data.jobs) || typeof data.available !== 'boolean') throw new Error('Backup worker response is incomplete.');
-      backupStatus = data;
-      note.textContent = data.note;
-      document.getElementById('backup-job-rows').innerHTML = data.jobs.slice().reverse().map(function (job) {
-        return '<tr><td>' + esc(fmtDate(job.started_at)) + '</td><td>' + esc(job.action) +
-          '</td><td class="machine">' + esc(job.backup_id) + '</td><td>' + esc(job.state) +
-          '<br><small>' + esc(job.detail) + '</small></td></tr>';
-      }).join('');
-      var select = document.getElementById('backup-selected'), previous = select.value;
-      select.innerHTML = '<option value="">Choose a backup</option>' + data.jobs.filter(function (job) {
-        return job.action === 'backup' && job.state === 'captured';
-      }).map(function (job) { return '<option value="' + esc(job.backup_id) + '">' + esc(fmtDate(job.started_at) + ' · ' + job.backup_id) + '</option>'; }).join('');
-      select.value = previous;
-    } catch (error) {
-      if (generation !== backupRead) return;
-      backupStatus = null;
-      document.getElementById('backup-job-rows').textContent = '';
-      note.textContent = error.message || 'Backup status unavailable.';
-    }
-    backupControls();
-  }
-  async function requestBackupAction(action) {
-    if (backupBusy || !backupStatus || !backupStatus.available) return;
-    if (action === 'backup' && !confirm('Stop IRIS and the Console briefly to capture a consistent encrypted backup? Active transfers and management requests will be interrupted.')) return;
-    if (action === 'extract' && !confirm('Extract both sets into a new protected recovery directory? This includes secret recovery material. No services will be started.')) return;
-    if ((action === 'restore' || action === 'recover-restore') && !confirm('Restore this deployment from the selected backup? IRIS and the Console will stop. Saved content replaces current content only after security checks pass. The worker preserves current instruction counters and retains the previous files for recovery.')) return;
-    var selectedBackup = document.getElementById('backup-selected').value;
-    if (!backupPending || backupPending.action !== action || (action !== 'backup' && backupPending.backup_id !== selectedBackup)) {
-      var requestId = maintenanceRequestId();
-      backupPending = action === 'backup' ? {action: action, allow_downtime: true, request_id: requestId}
-        : {action: action, backup_id: selectedBackup, request_id: requestId};
-      if (action === 'restore' || action === 'recover-restore') {
-        backupPending.allow_downtime = true;
-        backupPending.confirm_restore = true;
-        if (action === 'recover-restore') {
-          var interrupted = backupStatus.jobs.find(function (job) { return job.action === 'restore' && job.state === 'recovery-required'; });
-          if (!interrupted) { backupPending = null; return; }
-          backupPending.request_id = interrupted.id;
-          backupPending.backup_id = interrupted.backup_id;
-        }
-      }
-    }
-    backupBusy = true; backupControls();
-    var result = document.getElementById('backup-operation-result');
-    result.textContent = 'Submitting maintenance request…';
-    try {
-      var r = await fetch('/api/v1/settings/backups', {
-        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(backupPending)
-      });
-      var data = await r.json();
-      if (!r.ok || typeof data.job_id !== 'string') throw new Error(data.error || data.detail || 'Request was not confirmed. Refresh history before retrying.');
-      backupPending = null;
-      result.textContent = 'Accepted. Refresh history to check the result. Backup and restore temporarily take the Console offline; the host worker continues running.';
-      await refreshBackups();
-    } catch (error) { result.textContent = error.message || 'Request was not confirmed. Refresh history before retrying.'; }
-    finally { backupBusy = false; backupControls(); }
-  }
-  document.getElementById('backup-refresh').addEventListener('click', refreshBackups);
-  document.getElementById('backup-selected').addEventListener('change', backupControls);
-  ['create', 'verify', 'extract', 'restore', 'recover'].forEach(function (name) {
-    document.getElementById('backup-' + name).addEventListener('click', function () {
-      requestBackupAction(name === 'create' ? 'backup' : name === 'recover' ? 'recover-restore' : name);
-    });
-  });
-  // ---- End deployment backup workflow ----
 
   // ---- Settings section routes (React renders the tab navigation) ----
   // refreshSettings() above always populates all panes' ids regardless of
@@ -2251,8 +1870,8 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
-    if (sub === 'certificates') { certificates.refreshAll(); securityLifecycle.refreshAll(); refreshMaintenance(); refreshDeploymentRotation(); }
-    if (sub === 'backups') refreshBackups();
+    if (sub === 'certificates') { certificates.refreshAll(); securityLifecycle.refreshAll(); }
+    workerLifecycle.select(sub);
     refreshSettings();
   }
   // React owns both Monitoring panes. Share authenticated reads and the
@@ -2349,6 +1968,8 @@
     else if (certificates.visible()) certificates.refreshAll();
     if (document.hidden) securityLifecycle.hide();
     else if (securityLifecycle.visible()) securityLifecycle.refreshAll();
+    if (document.hidden) workerLifecycle.hide();
+    else if (workerLifecycle.visible()) workerLifecycle.refreshAll();
     if (!document.hidden && viewPollFn) {
       try { viewPollFn(); } catch (e) { /* ignore */ }
     }
@@ -2362,7 +1983,7 @@
     view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
     if (view !== 'settings' && view !== 'setup') settings.hide();
-    if (view !== 'settings') { certificates.hide(); securityLifecycle.hide(); }
+    if (view !== 'settings') { certificates.hide(); securityLifecycle.hide(); workerLifecycle.select(null); }
     if (view !== 'policies') {
       cancelPolicyReads();
     }

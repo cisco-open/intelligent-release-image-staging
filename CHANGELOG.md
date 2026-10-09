@@ -17,6 +17,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move deployment trust, worker rotations, scheduled key maintenance and
+  backup/restore into React. Check exact approvals, saved policy revisions and
+  accepted job IDs before reporting success. Preserve drafts and uncertain
+  request IDs, require explicit review, and recover only the original operation.
+  Check rotation and backup blockers together. Public trust approval limits now
+  fit the supported certificate and signed list; root attestation confirms
+  native verification and installation separately from a status read.
+
 - Move browser certificate replacement and telemetry credential rotation into
   React. Check request identity and outcomes before reporting success, distinguish
   publication from listener reload, and require observed use before retirement.

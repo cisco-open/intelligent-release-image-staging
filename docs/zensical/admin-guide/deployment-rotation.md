@@ -32,6 +32,10 @@ the recovery identity separately from the server identity.
 Schedule downtime. The Console disconnects while its server is stopped; a
 request being accepted does not mean rotation finished. Keep a host session
 available for recovery. Do not delete an operation journal to clear an error.
+The Console shows the accepted operation ID. If a response is lost or refused,
+select **Refresh maintenance evidence** and review that operation before continuing.
+Returning to the page does not resubmit it. Backup and rotation history both
+block new maintenance while an operation is running or needs recovery.
 
 | Family | What changes | Required follow-through |
 | --- | --- | --- |
