@@ -11,11 +11,24 @@ export const setupSteps = [
 ];
 const packageNames = ['iris-amd64.tar', 'iris-arm64.tar', 'iris-xr.rpm', 'iris-agent.tgz'];
 const rank = {ok: 0, absent: 1, unknown: 2, stale: 3};
-const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const sha = value => typeof value === 'string' && value.length === 64 && /^[a-f0-9]{64}$/.test(value);
 const fingerprint = value => value === null || typeof value === 'string' && /^(?:[A-F0-9]{2}:){31}[A-F0-9]{2}$/.test(value);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = (value, max = 4096) => typeof value === 'string' && value.length <= max;
 const timestamp = value => value === null || Number.isSafeInteger(value) && value >= 0 && value <= 8640000000000;
+function wrapperProvenance(value) {
+  if (!object(value) || typeof value.canonical_index_digest !== 'string' || value.canonical_index_digest.length !== 71 || !/^sha256:[a-f0-9]{64}$/.test(value.canonical_index_digest) || !sha(value.canonical_archive_sha256)) return null;
+  const fields = ['canonical_index_digest', 'canonical_archive_sha256'];
+  if (value.format === 'iris-device-wrapper-v2') {
+    if (!sha(value.canonical_neutral_source_sha256) || !sha(value.canonical_finalization_sha256)) return null;
+    fields.push('format', 'canonical_neutral_source_sha256', 'canonical_finalization_sha256');
+  } else {
+    if (Object.hasOwn(value, 'format') || !sha(value.canonical_source_sha256)) return null;
+    fields.push('canonical_source_sha256');
+  }
+  if (Object.keys(value).length !== fields.length || fields.some(field => !Object.hasOwn(value, field))) return null;
+  return Object.fromEntries(fields.map(field => [field, value[field]]));
+}
 export const packageReasons = {
   'served-vs-distributed-mismatch': "The certificate served by this server differs from the copy sent during onboarding. Fix the certificate copies before onboarding; rebuilding packages alone will not resolve this.",
   'distributed-cert-unavailable': 'The certificate copy sent during onboarding could not be read. Onboarding readiness cannot be confirmed.',
@@ -25,9 +38,8 @@ function packageItem(row) {
   if (!object(row) || !packageNames.includes(row.name) || !Object.hasOwn(rank, row.state) || row.fingerprint !== null || !timestamp(row.built_at) || !text(row.remedy, 1024) || !row.remedy || !(row.reason === undefined || text(row.reason, 128)) || !(row.detail === undefined || text(row.detail))) return null;
   let provenance = null;
   if (row.provenance !== null) {
-    const value = row.provenance;
-    if (!object(value) || typeof value.canonical_index_digest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.canonical_index_digest) || !sha(value.canonical_archive_sha256) || !sha(value.canonical_source_sha256)) return null;
-    provenance = {canonical_index_digest: value.canonical_index_digest, canonical_archive_sha256: value.canonical_archive_sha256, canonical_source_sha256: value.canonical_source_sha256};
+    provenance = wrapperProvenance(row.provenance);
+    if (!provenance) return null;
   }
   if (row.state === 'ok' && (row.built_at === null || !row.detail || (row.name === 'iris-agent.tgz' ? provenance !== null || row.reason !== 'ready' : !provenance))) return null;
   if (row.state !== 'ok' && provenance !== null) return null;

@@ -3153,7 +3153,32 @@ def _success(route):
         item["properties"]["fingerprint"]["description"] = (
             "Null for deployment-neutral packages; runtime "
             "trust is reported by packages.reference_fingerprint.")
-        item["properties"]["provenance"]["type"] = ["object", "null"]
+        common_provenance = {
+            "canonical_index_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+                                       "minLength": 71, "maxLength": 71},
+            "canonical_archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                         "minLength": 64, "maxLength": 64},
+        }
+        rooted_provenance = dict(common_provenance, canonical_source_sha256={
+            "type": "string", "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64, "maxLength": 64,
+            "description": "Version 1 rooted build-context digest."})
+        finalized_provenance = dict(common_provenance,
+            format={"type": "string", "const": "iris-device-wrapper-v2"},
+            canonical_neutral_source_sha256={"type": "string", "pattern": "^[0-9a-f]{64}$",
+                "minLength": 64, "maxLength": 64,
+                "description": "Neutral build-context digest, not the version 1 rooted source digest."},
+            canonical_finalization_sha256={"type": "string", "pattern": "^[0-9a-f]{64}$",
+                "minLength": 64, "maxLength": 64,
+                "description": "Digest of the deployment-specific trust finalization receipt."})
+        item["properties"]["provenance"] = {
+            "type": ["object", "null"],
+            "description": "Adjacent sidecar metadata bound to readable wrapper bytes. "
+                "This check does not authenticate the sidecar or verify native signatures.",
+            "oneOf": [{"type": "null"}, *[
+                {"type": "object", "additionalProperties": False,
+                 "properties": fields, "required": list(fields)}
+                for fields in (rooted_provenance, finalized_provenance)]]}
         item["properties"]["reason"] = {"type": "string"}
         item["required"] = [
             "name", "state", "fingerprint", "built_at", "remedy",

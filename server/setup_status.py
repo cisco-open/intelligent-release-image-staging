@@ -38,14 +38,17 @@ _PACKAGE_SPECS = (
     ("iris-arm64.tar", "iox", "linux/arm64", REMEDY),
     (XR_PACKAGE, "xr-appmgr", "linux/amd64", REMEDY_XR),
 )
-_PROVENANCE_FORMAT = "iris-device-wrapper-v1"
 _PROVENANCE_MAX_BYTES = 64 * 1024
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _OCI_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-_REQUIRED_PROVENANCE = {
+_COMMON_PROVENANCE = {
     "format", "wrapper_kind", "wrapper_file", "wrapper_sha256", "platform",
     "canonical_index_digest", "canonical_archive_sha256",
-    "canonical_source_sha256",
+}
+_PROVENANCE_SOURCES = {
+    "iris-device-wrapper-v1": ("canonical_source_sha256",),
+    "iris-device-wrapper-v2": ("canonical_neutral_source_sha256",
+                               "canonical_finalization_sha256"),
 }
 _READY_DETAIL = (
     "Readable package bytes match the adjacent build-provenance manifest; "
@@ -136,7 +139,8 @@ def _parse_provenance(path):
         if not key or not value or key in values:
             return None, "provenance-invalid"
         values[key] = value
-    if not _REQUIRED_PROVENANCE.issubset(values):
+    sources = _PROVENANCE_SOURCES.get(values.get("format"))
+    if sources is None or set(values) != _COMMON_PROVENANCE | set(sources):
         return None, "provenance-invalid"
     return values, ""
 
@@ -180,14 +184,14 @@ def package_readiness(path, name, kind, platform, remedy):
         entry.update(state="unknown", reason=reason,
                      detail=_REASON_DETAIL[reason])
         return entry
-    if (values["format"] != _PROVENANCE_FORMAT
-            or values["wrapper_kind"] != kind
+    source_fields = _PROVENANCE_SOURCES[values["format"]]
+    if (values["wrapper_kind"] != kind
             or values["wrapper_file"] != name
             or values["platform"] != platform
             or not _HEX_SHA256.fullmatch(values["wrapper_sha256"])
             or not _OCI_SHA256.fullmatch(values["canonical_index_digest"])
             or not _HEX_SHA256.fullmatch(values["canonical_archive_sha256"])
-            or not _HEX_SHA256.fullmatch(values["canonical_source_sha256"])):
+            or any(not _HEX_SHA256.fullmatch(values[field]) for field in source_fields)):
         entry.update(state="unknown", reason="provenance-invalid",
                      detail=_REASON_DETAIL["provenance-invalid"])
         return entry
@@ -201,8 +205,12 @@ def package_readiness(path, name, kind, platform, remedy):
     entry["provenance"] = {
         "canonical_index_digest": values["canonical_index_digest"],
         "canonical_archive_sha256": values["canonical_archive_sha256"],
-        "canonical_source_sha256": values["canonical_source_sha256"],
+        **{field: values[field] for field in source_fields},
     }
+    if values["format"] == "iris-device-wrapper-v2":
+        # A neutral build-input digest and deployment finalization receipt are
+        # distinct evidence, never aliases for v1's rooted source digest.
+        entry["provenance"]["format"] = values["format"]
     return entry
 
 

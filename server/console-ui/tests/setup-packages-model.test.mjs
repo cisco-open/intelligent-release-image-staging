@@ -14,6 +14,48 @@ test('setup projection is complete, bounded and does not copy extra fields', () 
   const status = setupStatus(raw); assert.ok(status); assert.equal(JSON.stringify(status).includes('must-not-render'), false);
   assert.equal(status.packages.items[0].built_at, 1790000000); assert.equal(firstIncomplete(status), 2); assert.equal(incompleteCount(status), 0);
 });
+function finalizedProvenance() {
+  return {format: 'iris-device-wrapper-v2', canonical_index_digest: 'sha256:' + '1'.repeat(64),
+    canonical_archive_sha256: '2'.repeat(64), canonical_neutral_source_sha256: '3'.repeat(64),
+    canonical_finalization_sha256: '4'.repeat(64)};
+}
+test('v2 finalization evidence is explicit and never aliases the v1 source digest', () => {
+  const raw = setupFixture(); raw.packages.items[0].provenance = finalizedProvenance();
+  const status = setupStatus(raw); assert.ok(status);
+  assert.deepEqual(status.packages.items[0].provenance, finalizedProvenance());
+  assert.equal(Object.hasOwn(status.packages.items[0].provenance, 'canonical_source_sha256'), false);
+  assert.deepEqual(status.packages.items[1].provenance, raw.packages.items[1].provenance);
+});
+for (const [name, change] of [
+  ['unknown format', value => {value.format = 'unknown';}],
+  ['coerced format', value => {value.format = ['iris-device-wrapper-v2'];}],
+  ['missing format', value => {delete value.format;}],
+  ['mixed source digest', value => {value.canonical_source_sha256 = '5'.repeat(64);}],
+  ['missing neutral digest', value => {delete value.canonical_neutral_source_sha256;}],
+  ['missing receipt digest', value => {delete value.canonical_finalization_sha256;}],
+  ['coerced neutral digest', value => {value.canonical_neutral_source_sha256 = ['3'.repeat(64)];}],
+  ['invalid receipt digest', value => {value.canonical_finalization_sha256 = 'bad';}],
+  ['unknown field', value => {value.extra = true;}],
+]) test('reject v2 ' + name, () => {
+  const raw = setupFixture(); raw.packages.items[0].provenance = finalizedProvenance();
+  change(raw.packages.items[0].provenance); assert.equal(setupStatus(raw), null);
+});
+test('v1 projection refuses mixed finalization fields or an unknown format', () => {
+  for (const extra of [{format: 'unknown'}, {format: 'iris-device-wrapper-v1'},
+    {canonical_neutral_source_sha256: '3'.repeat(64)}, {canonical_finalization_sha256: '4'.repeat(64)}]) {
+    const raw = setupFixture(); Object.assign(raw.packages.items[0].provenance, extra);
+    assert.equal(setupStatus(raw), null);
+  }
+});
+test('provenance digests require exact lengths in both versions', () => {
+  for (const provenance of [setupFixture().packages.items[0].provenance, finalizedProvenance()]) {
+    for (const field of Object.keys(provenance).filter(field => field.startsWith('canonical_'))) {
+      const raw = setupFixture();
+      raw.packages.items[0].provenance = {...provenance, [field]: provenance[field] + '\n'};
+      assert.equal(setupStatus(raw), null, field);
+    }
+  }
+});
 const invalid = [
   ['missing account', value => {delete value.admin;}],
   ['unknown account shown done', value => {value.admin.username = '';}],
@@ -99,11 +141,24 @@ with tempfile.TemporaryDirectory(prefix='iris-setup-contract-') as directory:
     for name, data in embedded.items(): record[name] = hashlib.sha256(data).hexdigest()
     provision.write_text(json.dumps(record))
     cases += [status(), status(distributed=other), status(provision_startup_state='failed')]
+    for name, kind, platform, remedy in native._PACKAGE_SPECS:
+        path = root / (name + '.manifest')
+        values = dict(line.split('=', 1) for line in path.read_text().splitlines())
+        values.pop('canonical_source_sha256')
+        values.update(format='iris-device-wrapper-v2', canonical_neutral_source_sha256='d' * 64, canonical_finalization_sha256='e' * 64)
+        path.write_text(''.join(key + '=' + value + '\\n' for key, value in values.items()))
+    cases.append(status())
+    with (root / 'iris-arm64.tar.manifest').open('a') as output:
+        output.write('canonical_source_sha256=' + 'c' * 64 + '\\n')
+    cases.append(status())
     (root / 'iris-amd64.tar').write_bytes(b'changed')
     cases.append(status())
     print(json.dumps(cases))
 `;
   const result = spawnSync('python3', ['-c', script, fileURLToPath(new URL('../../', import.meta.url))], {encoding: 'utf8'});
-  assert.equal(result.status, 0, result.stderr); const cases = JSON.parse(result.stdout); assert.equal(cases.length, 6);
+  assert.equal(result.status, 0, result.stderr); const cases = JSON.parse(result.stdout); assert.equal(cases.length, 8);
   cases.forEach((row, index) => assert.ok(setupStatus(row), 'native fixture ' + index));
+  assert.equal(cases[5].packages.items[0].provenance.format, 'iris-device-wrapper-v2');
+  assert.equal(Object.hasOwn(cases[5].packages.items[0].provenance, 'canonical_source_sha256'), false);
+  assert.equal(cases[6].packages.items.find(row => row.name === 'iris-arm64.tar').reason, 'provenance-invalid');
 });
