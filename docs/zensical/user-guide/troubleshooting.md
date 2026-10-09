@@ -83,7 +83,7 @@ series routers. On switches with app-hosting storage, use the IOx app instead.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| Guest Shell reports `bundle rejected (trust-unreadable)` | The guest user could not read a trust file | IRIS rolls back to the previous bundle. Redeploy the current bundle, then check file access from Guest Shell. |
+| Guest Shell reports `bundle rejected (trust-unreadable)` | The guest user could not read a trust file | IRIS rolls back to the previous bundle. Remove the IRIS app through **Devices**, then onboard it with the current bundle. Check file access from Guest Shell. |
 | Guest Shell stages files but instructions report `verifier_missing` | The agent package is outdated or damaged: its bundled signature verifier did not install or pass its runtime probe | The Guest Shell agent bundle carries its own signature verifier, so every device checks instruction signatures once the current package is deployed. Redeploy the current bootstrap and an architecture-matched bundle. See [Upgrade to a new release](../admin-guide/upgrade.md). |
 
 Inspect Guest Shell files from Guest Shell. Native IOS `more`, `verify` and
