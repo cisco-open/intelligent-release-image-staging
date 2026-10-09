@@ -84,7 +84,7 @@ The scaling harness measures how operation cost changes as a synthetic fleet
 grows. Short live API checks establish function, not capacity. A passing run of the
 [sustained API workload](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/api-soak.md)
 qualifies only its recorded fleet, traffic mix, resources and runtime. See the
-[measured envelope and exclusions](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/validation-records.md)
+[measured envelope and exclusions](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/validation-records.md#sustained-mixed-api-workload---2026-10-09)
 before choosing a request budget. Retest when those conditions change.
 
 ## Related

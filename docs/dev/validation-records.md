@@ -224,7 +224,7 @@ tests pinned to another CPU remained present. A separate device-test deployment
 had limits of 2 CPUs/2 GiB plus 1 CPU/1 GiB. Its intermittent work included
 three 128 MiB transfers, onboarding attempts, a clean restart and cleanup from
 17:24 to 17:55 UTC. One transfer overlapped the soak; the other two preceded it.
-All builds finished before the measured run. This is not a clean performance
+Docker and device-package builds finished before the measured run. This is not a clean performance
 comparison with the earlier baseline or qualification of those device jobs.
 
 The highest qualified rate was 15 Console operations per second, not a capacity
