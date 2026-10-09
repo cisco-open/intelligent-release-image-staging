@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+from collections import deque
 import hashlib
 import http.client
 import http.server
@@ -12,6 +13,7 @@ from pathlib import Path
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 
@@ -435,13 +437,63 @@ def test_management_does_not_fall_back_to_device_certificate(tmp_path, monkeypat
             management_token_file=str(token))
 
 
-def _certificate_http_diagnostic(status, body):
+def _console_transport_failure(error):
+    """Classify a swallowed transport exception without copying its text/locals."""
+    kinds = {"OSError", "FileNotFoundError", "PermissionError", "TimeoutError", "gaierror",
+             "ConnectionRefusedError", "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError",
+             "SSLError", "SSLCertVerificationError", "SSLEOFError",
+             "RemoteDisconnected", "BadStatusLine", "IncompleteRead",
+             "ConsoleConfigurationError", "CredentialUnavailable"}
+    kind = type(error).__name__
+    result = {"exception": kind if kind in kinds else "other", "stage": "proxy"}
+    stages = {
+        ("gui_server", "_tls_client_context"): "tls-context",
+        ("gui_server", "_token_pair"): "credential-read",
+        ("gui_server", "_authorize_mutation"): "authorization",
+        ("gui_server", "_management_request"): "management-request",
+        ("http.client", "connect"): "connect",
+        ("socket", "create_connection"): "connect",
+        ("ssl", "do_handshake"): "tls-handshake",
+        ("http.client", "send"): "request-write",
+        ("http.client", "getresponse"): "response-headers",
+        ("http.client", "_read_status"): "response-status",
+        ("http.client", "read"): "response-body",
+        ("http.client", "read1"): "response-body",
+    }
+    trace = error.__traceback__ if error is not None else None
+    while trace is not None:
+        stage = stages.get((trace.tb_frame.f_globals.get("__name__"),
+                            trace.tb_frame.f_code.co_name))
+        if stage is not None:
+            result["stage"] = stage
+        trace = trace.tb_next
+    return result
+
+
+@pytest.fixture
+def console_transport_failures(monkeypatch):
+    """Observe the existing 503 boundary; do not intercept or retry requests."""
+    failures = deque(maxlen=8)
+    original = api_problem.send
+
+    def observe(handler, status, code, *args, **kwargs):
+        if status == 503 and code == "management-api-unavailable":
+            failures.append(_console_transport_failure(sys.exc_info()[1]))
+        return original(handler, status, code, *args, **kwargs)
+
+    monkeypatch.setattr(api_problem, "send", observe)
+    return failures
+
+
+def _certificate_http_diagnostic(status, body, transport_failures=()):
     """Keep failure context without trusting a response to redact secrets.
 
     Only exact public contract phrases are echoed. Unknown fields, arbitrary
     text, cookies, tokens, and PEM bodies never enter the assertion message.
     """
     result = {"status": status, "body_bytes": len(body)}
+    if transport_failures:
+        result["transport"] = list(transport_failures)
     if len(body) > 64 * 1024:
         return dict(result, problem="oversized body omitted")
     try:
@@ -499,9 +551,49 @@ def test_certificate_http_diagnostic_retains_only_public_contract_text():
             "status": 503, "body_bytes": len(untrusted), "problem": explanation}
 
 
+@pytest.mark.parametrize("fault,expected", [
+    ("connect", {"exception": "ConnectionRefusedError", "stage": "connect"}),
+    ("tls-context", {"exception": "ConsoleConfigurationError", "stage": "tls-context"}),
+    ("credential-read", {"exception": "CredentialUnavailable", "stage": "credential-read"}),
+])
+def test_console_transport_failure_diagnostics_observe_native_failures(
+        tmp_path, monkeypatch, console_transport_failures, capsys, fault, expected):
+    cert, _ = _certificate(tmp_path, "transport-diagnostic")
+    token = tmp_path / "token"
+    _write_secret(token, "synthetic-private-token-" + "s" * 48)
+    if fault == "tls-context":
+        cert.write_text("synthetic-private-invalid-CA")
+    elif fault == "credential-read":
+        token.chmod(0o644)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    # Keep the destination bound but not listening: no unrelated process can
+    # claim it between selection and the real refused TCP connection.
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        console = gui_server.make_server(
+            "127.0.0.1", 0, "https://127.0.0.1:%d" % unavailable.getsockname()[1],
+            str(token), str(cert))
+        thread = _thread(console)
+        try:
+            status, _, body = _request(console.server_address[1], "/api/v1/settings")
+            assert status == 503
+            assert list(console_transport_failures) == [expected]
+            diagnostic = _certificate_http_diagnostic(status, body, console_transport_failures)
+            assert diagnostic["transport"] == [expected]
+        finally:
+            console.shutdown()
+            console.server_close()
+            thread.join(timeout=3)
+    captured = capsys.readouterr()
+    assert "synthetic-private" not in json.dumps(diagnostic) + captured.out + captured.err
+    # Even exception text supplied by an untrusted peer is never included.
+    assert _console_transport_failure(OSError("synthetic-private-error")) == {
+        "exception": "OSError", "stage": "proxy"}
+
+
 @pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
 def test_remote_console_reports_and_reloads_its_own_certificate(
-        tmp_path, monkeypatch, projection_order):
+        tmp_path, monkeypatch, projection_order, console_transport_failures):
     def accepted_by_settings(action, result):
         """Validate the actual proxy reply with the shipped browser model."""
         model = Path(__file__).parents[1] / "console-ui/src/settings-model.mjs"
@@ -573,17 +665,17 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
 
     try:
         status, _, body = request("/api/v1/settings")
-        assert status == 401, _certificate_http_diagnostic(status, body)
+        assert status == 401, _certificate_http_diagnostic(status, body, console_transport_failures)
         status, login_headers, body = request(
             "/api/v1/login", "POST",
             json.dumps({"username": "admin", "password": "password-for-test"}),
             {"Content-Type": "application/json"})
-        assert status == 200, _certificate_http_diagnostic(status, body)
+        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
         auth = {"Cookie": login_headers["Set-Cookie"].split(";", 1)[0],
                 "X-CSRF-Token": json.loads(body)["csrf"],
                 "Content-Type": "application/json"}
         status, headers, body = request("/api/v1/settings", headers=auth)
-        assert status == 200, _certificate_http_diagnostic(status, body)
+        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
         assert int(headers["Content-Length"]) == len(body)
         settings = json.loads(body)
         assert settings["gui_cert"]["source"] == "built-in"
@@ -595,7 +687,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200, _certificate_http_diagnostic(status, body)
+        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
         result = json.loads(body)
         assert result["applied"] is True and result["note"] is None
         assert result["gui_cert"]["source"] == "custom"
@@ -603,7 +695,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         assert served_fingerprint() == fingerprint(custom_cert)
         accepted_by_settings("cert", result)
         status, _, body = request("/api/v1/settings/gui-cert", "DELETE", headers=auth)
-        assert status == 200, _certificate_http_diagnostic(status, body)
+        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
         result = json.loads(body)
         assert result["applied"] is True
         assert result["gui_cert"]["source"] == "built-in"
@@ -623,7 +715,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200, _certificate_http_diagnostic(status, body)
+        assert status == 200, _certificate_http_diagnostic(status, body, console_transport_failures)
         result = json.loads(body)
         assert result["applied"] is False and "restart" in result["note"]
         accepted_by_settings("cert", result)
@@ -1060,7 +1152,7 @@ def test_role_qos_routes_map_both_tiers(method, suffix):
 
 
 @pytest.fixture
-def policy_tiers(tmp_path, monkeypatch, request):
+def policy_tiers(tmp_path, monkeypatch, request, console_transport_failures):
     import gui_app
     import gui_fleet
     import peer_policy
@@ -1125,7 +1217,8 @@ def policy_tiers(tmp_path, monkeypatch, request):
         return result
     status, response_headers, login = request("console", "POST", "/login",
         {"username": "admin", "password": "pw"})
-    assert status == 200, {"status": status, "problem": login}
+    assert status == 200, _certificate_http_diagnostic(
+        status, json.dumps(login).encode(), console_transport_failures)
     headers.update(Cookie=response_headers["Set-Cookie"].split(";", 1)[0])
     headers["X-CSRF-Token"] = login["csrf"]
     yield request, fleet, store
@@ -1165,7 +1258,7 @@ def test_peer_interval_roundtrip_over_both_authenticated_tiers(policy_tiers, tie
 
 @pytest.mark.parametrize("failure", ["console-construction", "login-upstream"])
 def test_policy_tiers_setup_failure_closes_started_servers(
-        tmp_path, monkeypatch, failure):
+        tmp_path, monkeypatch, failure, console_transport_failures):
     """Setup failures retain their diagnosis without leaking listener threads."""
     finalizers = []
     started = []
@@ -1193,7 +1286,8 @@ def test_policy_tiers_setup_failure_closes_started_servers(
         monkeypatch.setattr(gui_server, "_management_request", unavailable_upstream)
         expected = AssertionError
         message = "management-api-unavailable"
-    fixture = policy_tiers.__wrapped__(tmp_path, monkeypatch, FixtureRequest())
+    fixture = policy_tiers.__wrapped__(
+        tmp_path, monkeypatch, FixtureRequest(), console_transport_failures)
     try:
         with pytest.raises(expected, match=message):
             next(fixture)
