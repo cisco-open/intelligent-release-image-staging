@@ -147,6 +147,53 @@ def test_prepares_complete_publishable_inventory(prepared_inputs):
     subprocess.run(["sha256sum", "--check", "aria2c.sha256"], cwd=output, check=True)
 
 
+def test_prepare_preserves_exact_prebuilt_source_asset(prepared_inputs):
+    repo, output = prepared_inputs
+    target = output / "iris.tgz"
+    target.write_bytes((repo / "release/iris.tgz").read_bytes())
+    original = target.stat()
+    AUTH.prepare(repo, output, TAG)
+    current = target.stat()
+    assert (current.st_ino, current.st_mtime_ns) == (original.st_ino, original.st_mtime_ns)
+    assert json.loads((output / "release.json").read_text())["assets"]["iris.tgz"]["sha256"] == AUTH.digest(target)
+
+
+@pytest.mark.parametrize("change", ["different", "symlink", "hardlink"])
+def test_prepare_refuses_replacing_existing_prebuilt_source(prepared_inputs, change):
+    import os
+    repo, output = prepared_inputs
+    target = output / "iris.tgz"
+    original = repo / "release/iris.tgz"
+    if change == "different":
+        target.write_bytes(b"other source archive")
+    elif change == "symlink":
+        target.symlink_to(original)
+    else:
+        os.link(original, target)
+    before = target.lstat()
+    with pytest.raises(ValueError):
+        AUTH.prepare(repo, output, TAG)
+    after = target.lstat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (
+        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    assert not (output / "release.json").exists()
+    assert original.read_bytes() == b"fixture iris.tgz"
+
+
+def test_source_copy_does_not_replace_a_concurrently_created_output(tmp_path, monkeypatch):
+    source, target = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"selected source")
+    original = AUTH.os.link
+    def race(candidate, destination, **kwargs):
+        target.write_bytes(b"concurrent owner file")
+        return original(candidate, destination, **kwargs)
+    monkeypatch.setattr(AUTH.os, "link", race)
+    with pytest.raises(FileExistsError):
+        AUTH._copy_or_match_source(source, target)
+    assert target.read_bytes() == b"concurrent owner file"
+    assert set(path.name for path in tmp_path.iterdir()) == {"source", "destination"}
+
+
 @pytest.mark.parametrize("change", ["tag", "dirty", "source", "inventory"])
 def test_preparation_refuses_unpublishable_inputs(prepared_inputs, change):
     repo, output = prepared_inputs

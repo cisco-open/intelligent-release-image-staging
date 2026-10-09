@@ -8,11 +8,14 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 
 
 REPOSITORY = "cisco-open/intelligent-release-image-staging"
@@ -29,6 +32,47 @@ def validate_tag(tag):
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _source_identity(path):
+    """Inspect the held regular file; never follow an existing output symlink."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise ValueError("Release source must be an available regular file") from None
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 16 * 1024**3:
+            raise ValueError("Release source must be a bounded regular file without aliases")
+        checksum, size = hashlib.sha256(), 0
+        while block := stream.read(1024 * 1024):
+            size += len(block)
+            if size > before.st_size:
+                raise ValueError("Release source grew during inspection")
+            checksum.update(block)
+        after = os.fstat(stream.fileno())
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError("Release source changed during inspection")
+        return before.st_size, checksum.hexdigest()
+
+
+def _copy_or_match_source(source, destination):
+    """Preserve a kit producer's exact source asset; never silently replace it."""
+    expected = _source_identity(source)
+    if destination.exists() or destination.is_symlink():
+        if _source_identity(destination) != expected:
+            raise ValueError("Existing release source differs from the selected source archive")
+        return
+    with tempfile.TemporaryDirectory(prefix=".iris-source-", dir=destination.parent) as temporary:
+        candidate = Path(temporary) / "iris.tgz"
+        shutil.copyfile(source, candidate, follow_symlinks=False)
+        if _source_identity(candidate) != expected:
+            raise ValueError("Release source changed while being copied")
+        with candidate.open("rb") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            os.fsync(stream.fileno())
+        os.link(candidate, destination, follow_symlinks=False)
 
 
 def verify_command(artifact, tag, commit, bundle=None, *, trusted_root=None):
@@ -79,7 +123,10 @@ def prepare(repo, output, tag):
         binary_checksums.append(binary_pins[arch] + "  " + name + "\n")
     (output / "aria2c.sha256").write_text("".join(binary_checksums))
     for name in ("iris.tgz", "iris.tgz.sha256", "MANIFEST.txt"):
-        shutil.copy2(repo / "release" / name, output / name)
+        if name == "iris.tgz":
+            _copy_or_match_source(repo / "release" / name, output / name)
+        else:
+            shutil.copy2(repo / "release" / name, output / name)
     packages = list(output.glob("iris-installer_*.deb"))
     if len(packages) != 1:
         raise ValueError("Expected exactly one Ubuntu installer package")
