@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
-from iris_installer import cli, device_context, local_setup, prebuilt_install, release_kit
+from iris_installer import cli, device_context, guest_inputs, local_setup, prebuilt_install, release_kit
 from iris_installer.state import InstallError
 from test_installer_initialization import setup
 
@@ -92,6 +92,10 @@ def test_selection_binds_source_and_pinned_tool_before_returning_journal_fields(
         return kit
     monkeypatch.setattr(release_kit, 'verify_kit', verify)
     monkeypatch.setattr(prebuilt_install, 'bind_source', lambda *a: events.append('source'))
+    def guest(value, source, manifest):
+        assert value is kit and source == args.source and manifest == {'source': '0' * 64}
+        events.append('guest')
+    monkeypatch.setattr(guest_inputs, 'verify_guest_inputs', guest)
     monkeypatch.setattr(packaging_inputs, 'prepare_packaging_inputs',
                         lambda value, path: events.append('packaging') or SimpleNamespace(ioxclient_sha256='f' * 64))
     def tool(path, output, **kwargs):
@@ -100,11 +104,25 @@ def test_selection_binds_source_and_pinned_tool_before_returning_journal_fields(
         events.append('licensed-tool')
     monkeypatch.setattr(device_context, 'prepare_ioxclient', tool)
     selected = prebuilt_install.prepare_selection(args, {'source': '0' * 64}, tmp_path)
-    assert events == ['authenticate', 'source', 'packaging', 'licensed-tool']
+    assert events == ['authenticate', 'source', 'guest', 'packaging', 'licensed-tool']
     assert selected['input_selection'] == release_kit.selection('prebuilt', kit=kit, offline=True)
     assert selected['prebuilt_ioxclient'] == '/licensed/ioxclient'
     assert selected['release_kit'] == {'directory': '/release', 'verifier': '/usr/bin/gh',
                                        'trusted_root': '/etc/iris/trusted-root.json'}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_guest_input_failure_stops_before_licensed_tool_access(tmp_path, monkeypatch, kit):
+    args = cli.parser().parse_args(['install', *OPTIONS])
+    monkeypatch.setattr(release_kit, 'verify_kit', lambda *a, **kw: kit)
+    monkeypatch.setattr(prebuilt_install, 'bind_source', lambda *a: None)
+    def refuse(*args):
+        raise InstallError('Guest inputs do not match')
+    monkeypatch.setattr(guest_inputs, 'verify_guest_inputs', refuse)
+    monkeypatch.setattr(prebuilt_install, 'validate_packaging_tool',
+                        lambda *a: pytest.fail('Guest references must match first'))
+    with pytest.raises(InstallError, match='Guest inputs'):
+        prebuilt_install.prepare_selection(args, {}, tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 

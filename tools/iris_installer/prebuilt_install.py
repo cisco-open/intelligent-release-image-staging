@@ -49,6 +49,8 @@ def prepare_selection(args, manifest, workspace):
         verifier=locator['verifier'], trusted_root=locator['trusted_root'],
         offline=bool(getattr(args, 'offline', False)))
     bind_source(kit, manifest, workspace)
+    from .guest_inputs import verify_guest_inputs
+    verify_guest_inputs(kit, args.source, manifest)
     tool = Path(args.ioxclient).absolute()
     validate_packaging_tool(kit, tool, workspace)
     return {'input_selection': release_kit.selection('prebuilt', kit=kit, offline=kit.offline),

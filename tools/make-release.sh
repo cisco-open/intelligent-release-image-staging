@@ -77,7 +77,7 @@ SHIP=(
   tools/release-auth.py
   tools/build-installer-package.py tools/finalize-device-image.py
   tools/build-release-kit.py
-  tools/build-packaging-inputs.py tools/build-offline-dependencies.py
+  tools/build-packaging-inputs.py tools/build-offline-dependencies.py tools/build-guest-inputs.py
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py

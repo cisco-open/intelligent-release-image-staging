@@ -187,6 +187,8 @@ keeps release verification local. Retain the release directory and verifier at
 their recorded paths so `resume` can authenticate the same inputs again.
 
 The prepared-host profile checks existing dependencies without installing them.
+The `ubuntu-dependencies` profile additionally binds the local Ubuntu package
+archive and its inner manifest to the authenticated release inventory.
 The separate Ubuntu dependency producer verifies official signed indexes, exact
 package hashes and the complete dependency set. Its apply step checks the
 approved package plan again while apt holds its mutation lock. This module's
@@ -206,6 +208,11 @@ Completed package bytes are recorded before publication and checked on resume.
 The public packaging-tools archive contains the selected XR builder source and
 its license, not Cisco's ioxclient executable. Source builds keep their existing
 wrapper path and provenance format; finalized wrappers use a distinct format.
+
+The Guest Shell input archive references the matching installer source files,
+both committed aria2 architectures and their notices. It is checked before host
+changes. The server image supplies the compiled helpers, and the runtime
+publisher adds the deployment's public roots and checks the served bundle.
 
 The current publication workflow supplies source-build artifacts. Complete kit
 publication, dependency bootstrap and offline topology qualification remain
