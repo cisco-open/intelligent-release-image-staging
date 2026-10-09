@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Move certificate inventory, instruction certificate renewal and online signer
+  rotation into React. Match replies to the intended request and transition,
+  serialize approval reads, and require fresh evidence after uncertain results.
+  Signing-approval HTTP limits now accommodate the supported public files.
+
 - Move General, TLS/trust, Telemetry and Audit export into React. Check save
   replies before reporting success, preserve ordinary drafts, clear submitted
   or hidden private material, and require review after uncertain saves. Resume

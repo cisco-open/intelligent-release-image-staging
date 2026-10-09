@@ -1759,8 +1759,8 @@
 
   // Wires a focusable drop-zone div to: click/Enter/Space -> hidden file
   // input; dragover/dragleave -> 'drag' class for the dashed-border hover
-  // state; and a drop/file-pick callback receiving a FileList. Shared by
-  // both TLS drop zones below.
+  // state; and a drop/file-pick callback receiving a FileList. Image
+  // verification still uses this helper; TLS file controls belong to React.
   function wireDropzone(zone, input, onFiles) {
     zone.addEventListener('click', function () { input.click(); });
     zone.addEventListener('keydown', function (e) {
@@ -1785,193 +1785,29 @@
   }
 
 
-  // ---- Certificate lifecycle ----
-  var certificateRequest = null, certificateBusy = false, certificateRead = 0;
-  function certificateControls() {
-    document.getElementById('certificate-request').disabled = certificateBusy;
-    document.getElementById('certificate-approved').disabled = certificateBusy || !certificateRequest;
-    document.getElementById('certificate-renew').disabled = certificateBusy || !certificateRequest;
-  }
-  async function refreshCertificates() {
-    var generation = ++certificateRead;
-    var rows = document.getElementById('certificate-rows');
-    var observed = document.getElementById('certificate-observed');
-    rows.textContent = '';
-    observed.textContent = 'Checking certificate files…';
-    try {
-      var r = await fetch('/api/v1/settings/certificates');
-      if (!r.ok) throw new Error('Certificate inventory unavailable. Retry after checking the server connection.');
-      var data = await r.json();
-      if (generation !== certificateRead) return;
-      if (!Array.isArray(data.items)) throw new Error('Certificate inventory is incomplete.');
-      rows.innerHTML = data.items.map(function (item) {
-        function date(value) { return value == null ? 'Unknown' : fmtDate(value); }
-        return '<tr><td>' + esc(item.label) + '<br><small class="machine">' +
-          esc(item.fingerprint_sha256 || 'Fingerprint unavailable') + '</small></td><td>' +
-          esc(item.state.replaceAll('-', ' ')) + '</td><td>' + esc(item.kind === 'public-key' ? 'Policy / custody review' : date(item.renew_at)) + '</td><td>' +
-          esc(item.kind === 'public-key' ? 'No expiry' : date(item.expires_at)) + '</td><td>' + esc(item.impact) +
-          (item.refuse_at == null ? '' : '<br>Signing stops: ' + esc(date(item.refuse_at))) + '</td></tr>';
-      }).join('');
-      observed.textContent = 'Observed ' + fmtDate(data.observed_at) +
-        '. Signing custody: ' + (data.custody ? data.custody.state : 'unknown; status evidence unavailable') + '.';
-    } catch (error) {
-      if (generation !== certificateRead) return;
-      rows.textContent = '';
-      observed.textContent = error.message || 'Certificate inventory unavailable.';
-    }
-  }
-  document.getElementById('certificate-refresh').addEventListener('click', refreshCertificates);
-  document.getElementById('certificate-request').addEventListener('click', async function () {
-    if (certificateBusy) return;
-    certificateBusy = true; certificateRequest = null; certificateControls();
-    var result = document.getElementById('certificate-renew-result');
-    document.getElementById('certificate-approved').value = '';
-    result.textContent = 'Preparing public renewal request…';
-    try {
-      var r = await fetch('/api/v1/settings/certificates/instruction/request', {
-        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: '{}'
-      });
-      var data = await r.json();
-      if (!r.ok) throw new Error(data.error || data.detail || 'Could not prepare renewal.');
-      if (typeof data.public_key !== 'string' || !data.public_key.startsWith('ssh-ed25519 ') ||
-          !/^[0-9a-f]{64}$/.test(data.public_key_sha256) || !/^[0-9a-f]{64}$/.test(data.certificate_sha256)) {
-        throw new Error('Public renewal request is incomplete.');
-      }
-      certificateRequest = data;
-      var url = URL.createObjectURL(new Blob([data.public_key], {type: 'text/plain'}));
-      var link = document.createElement('a');
-      link.href = url; link.download = 'iris-online.pub'; link.click();
-      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-      result.textContent = 'Send iris-online.pub to your offline custodian. Return the approved certificate, never the private root key. If you reopen this page, prepare the request again before importing.';
-    } catch (error) { certificateRequest = null; result.textContent = error.message || 'Could not prepare renewal.'; }
-    finally { certificateBusy = false; certificateControls(); }
-  });
-  document.getElementById('certificate-renew-form').addEventListener('submit', async function (event) {
-    event.preventDefault();
-    if (certificateBusy || !certificateRequest) return;
-    var file = document.getElementById('certificate-approved').files[0];
-    var result = document.getElementById('certificate-renew-result');
-    if (!file || file.size > 16384) { result.textContent = 'Choose a public OpenSSH certificate smaller than 16 KiB.'; return; }
-    certificateBusy = true; certificateControls();
-    result.textContent = 'Validating and applying the approved certificate…';
-    try {
-      var certificate = await file.text();
-      if (!certificate.startsWith('ssh-ed25519-cert-v01@openssh.com ') || certificate.includes('PRIVATE KEY')) {
-        throw new Error('Choose the public certificate returned by your custodian, not a private key.');
-      }
-      var r = await fetch('/api/v1/settings/certificates/instruction/renew', {
-        method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}),
-        body: JSON.stringify({certificate: certificate,
-          public_key_sha256: certificateRequest.public_key_sha256,
-          certificate_sha256: certificateRequest.certificate_sha256})
-      });
-      var data = await r.json();
-      if (!r.ok || !data.applied) throw new Error(data.error || data.detail || 'Renewal was not confirmed. Refresh before retrying.');
-      result.textContent = 'Renewal applied. Expires ' + fmtDate(data.expires_at) +
-        '; signing stops ' + fmtDate(data.refuse_at) + '. The signing key and device trust are unchanged.' +
-        (data.status_refreshed ? '' : ' Custody status refresh is pending; check again shortly.');
-      certificateRequest = null;
-      document.getElementById('certificate-approved').value = '';
-      await refreshCertificates();
-    } catch (error) { result.textContent = error.message || 'Renewal was not confirmed. Refresh before retrying.'; }
-    finally { certificateBusy = false; certificateControls(); }
-  });
-  // ---- End certificate lifecycle ----
-
-  // ---- Journalled online signer rotation ----
+  // React owns certificate inventory, same-key renewal and signer rotation.
   function maintenanceRequestId() {
     var bytes = crypto.getRandomValues(new Uint8Array(16));
     bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
     var hex = Array.from(bytes).map(function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
     return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
   }
-  var rotationStatus = null, rotationBusy = false, rotationNonce = null, rotationRead = 0;
-  var rotationUrl = '/api/v1/settings/certificates/instruction/rotation';
-  function validRotationStatus(data) {
-    return data && ['idle', 'awaiting-approval', 'committing', 'retirement-pending', 'retiring', 'completed', 'cancelled'].includes(data.state) &&
-      Array.isArray(data.root_ids) && data.root_ids.every(function (id) { return typeof id === 'string'; });
-  }
-  function renderRotation() {
-    var state = rotationStatus ? rotationStatus.state : 'unknown';
-    document.getElementById('rotation-state').textContent = 'Rotation: ' + state.replaceAll('-', ' ') +
-      (state === 'completed' ? '. Previous key revoked at keylist sequence ' + rotationStatus.retired_keylist_seq + '.' : '.');
-    document.getElementById('rotation-previous').textContent = rotationStatus && rotationStatus.previous_sha256 || 'No rotation evidence';
-    document.getElementById('rotation-replacement').textContent = rotationStatus && rotationStatus.replacement_sha256 || 'No rotation evidence';
-    document.getElementById('rotation-prepare').disabled = rotationBusy || !['idle', 'completed', 'cancelled'].includes(state);
-    document.getElementById('rotation-approval').hidden = state !== 'awaiting-approval';
-    document.getElementById('rotation-retirement').hidden = !['retirement-pending', 'retiring'].includes(state);
-    document.querySelectorAll('#rotation-approval button,#rotation-approval input,#rotation-retirement button,#rotation-retirement input,#rotation-retirement select').forEach(function (el) { el.disabled = rotationBusy || !rotationStatus; });
-    var root = document.getElementById('rotation-root'), selected = root.value;
-    root.replaceChildren();
-    (rotationStatus && rotationStatus.root_ids || []).forEach(function (id) {
-      var option = document.createElement('option'); option.value = id; option.textContent = id; root.appendChild(option);
-    });
-    if (Array.from(root.options).some(function (option) { return option.value === selected; })) root.value = selected;
-  }
   function rotationDownload(name, bytes) {
     var url = URL.createObjectURL(new Blob([bytes], {type: 'application/octet-stream'}));
     var link = document.createElement('a'); link.href = url; link.download = name; link.click();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
-  async function refreshRotation() {
-    if (rotationBusy) return;
-    var generation = ++rotationRead;
-    rotationStatus = null; renderRotation();
-    try {
-      var response = await fetch(rotationUrl), data = await response.json();
-      if (generation !== rotationRead) return;
-      if (!response.ok || !validRotationStatus(data)) throw new Error(data.error || 'Rotation status unavailable. Check custody before retrying.');
-      rotationStatus = data; renderRotation();
-    } catch (error) {
-      if (generation !== rotationRead) return;
-      rotationStatus = null; renderRotation();
-      document.getElementById('rotation-result').textContent = error.message;
+  var certificates = window.irisCertificates;
+  certificates.connect({
+    fetch: fetch, headers: csrfHdr, formatDate: fmtDate, uuid: maintenanceRequestId,
+    download: rotationDownload, confirm: function (message) { return confirm(message); },
+    visible: function () {
+      return !document.hidden && !document.getElementById('view-settings').hidden &&
+        !document.getElementById('settings-pane-certificates').hidden;
     }
-  }
-  async function rotateSigner(action) {
-    if (rotationBusy || !rotationStatus) return;
-    var result = document.getElementById('rotation-result');
-    var payload = {action: action, request_id: rotationStatus.request_id};
-    try {
-      if (action === 'prepare') {
-        if (!confirm('Prepare a new online signing key for offline approval? The current signer keeps working until you apply approval.')) return;
-        rotationNonce = rotationNonce || maintenanceRequestId(); payload.request_id = rotationNonce;
-      } else if (action === 'activate' || action === 'retire') {
-        var file = document.getElementById(action === 'activate' ? 'rotation-certificate' : 'rotation-keylist').files[0];
-        if (!file || file.size > (action === 'activate' ? 65536 : 131072)) throw new Error('Choose the bounded public approval file returned by your custodian.');
-        var raw = await file.text();
-        if (raw.includes('PRIVATE KEY') || !raw.startsWith(action === 'activate' ? 'ssh-ed25519-cert-v01@openssh.com ' : 'IRIS-KEYLIST/1\n')) throw new Error('Upload the public approval, never a private key.');
-        if (!confirm(action === 'activate' ? 'Switch to the approved replacement signer? This cannot be cancelled afterward. Device roots and counters stay unchanged.' : 'Publish the approved revocation of the previous signer? Devices must fetch current instructions and the new keylist. Verify fleet acceptance afterward.')) return;
-        payload.confirm = true;
-        if (action === 'activate') payload.certificate = raw;
-        else payload.artifact = btoa(raw);
-      } else if (action === 'retirement-request') payload.root_id = document.getElementById('rotation-root').value;
-      else if (action === 'cancel' && !confirm('Discard the pending replacement? The current signer will be kept.')) return;
-      rotationBusy = true; ++rotationRead; renderRotation(); result.textContent = 'Validating rotation request…';
-      var response = await fetch(rotationUrl, {method: 'POST', headers: csrfHdr({'Content-Type': 'application/json'}), body: JSON.stringify(payload)});
-      var data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Rotation outcome unknown. Refresh and retry the same request.');
-      if (action === 'retirement-request') {
-        rotationDownload('keylist.payload', Uint8Array.from(atob(data.payload), function (c) { return c.charCodeAt(0); }));
-        result.textContent = 'Retirement request downloaded. Obtain approval from ' + data.root_id + ' on its offline station.';
-      } else {
-        if (!validRotationStatus(data)) throw new Error('Rotation outcome unknown. Refresh before continuing.');
-        rotationStatus = data; rotationNonce = null;
-        result.textContent = action === 'activate' ? 'Replacement signer active. Complete offline retirement approval next.' :
-          action === 'retire' ? 'Retirement approval validated and published.' :
-          action === 'cancel' ? 'Pending replacement cancelled; active signer unchanged.' : 'Replacement prepared. Download its public key for offline approval.';
-      }
-    } catch (error) { result.textContent = error.message || 'Rotation outcome unknown. Refresh and retry the same request.'; }
-    finally { rotationBusy = false; renderRotation(); }
-  }
-  document.getElementById('rotation-refresh').addEventListener('click', refreshRotation);
-  document.getElementById('rotation-download').addEventListener('click', function () {
-    if (rotationStatus && rotationStatus.public_key) rotationDownload('iris-replacement.pub', rotationStatus.public_key);
   });
-  ['prepare', 'activate', 'cancel', 'retirement-request', 'retire'].forEach(function (action) {
-    document.getElementById('rotation-' + action).addEventListener('click', function () { rotateSigner(action); });
-  });
-  // ---- End signer rotation ----
+  // Scheduled maintenance can direct the operator back to this public workflow.
+  function refreshRotation() { return certificates.refresh('signer'); }
 
   // ---- Browser TLS public request and approval ----
   var browserTls = null, browserTlsBusy = false, browserTlsRead = 0, browserTlsPending = null;
@@ -2569,6 +2405,7 @@
   SETTINGS_SUBS.push('backups');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
+    if (sub !== 'certificates') certificates.hide();
     settings.select(sub, 'td-mount');
     SETTINGS_SUBS.forEach(function (t) {
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
@@ -2577,7 +2414,7 @@
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     if (sub === 'packages') refreshDevicePackages();
-    if (sub === 'certificates') { refreshCertificates(); refreshRotation(); refreshMaintenance(); refreshBrowserTls(); refreshServiceCredential(); refreshDeploymentRotation(); }
+    if (sub === 'certificates') { certificates.refreshAll(); refreshMaintenance(); refreshBrowserTls(); refreshServiceCredential(); refreshDeploymentRotation(); }
     if (sub === 'backups') refreshBackups();
     refreshSettings();
   }
@@ -2671,6 +2508,8 @@
     // while waiting out the rest of an interval.
     if (document.hidden) settings.hide();
     else if (settings.visible()) settings.refresh();
+    if (document.hidden) certificates.hide();
+    else if (certificates.visible()) certificates.refreshAll();
     if (!document.hidden && viewPollFn) {
       try { viewPollFn(); } catch (e) { /* ignore */ }
     }
@@ -2684,6 +2523,7 @@
     view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
     if (view !== 'settings' && view !== 'setup') settings.hide();
+    if (view !== 'settings') certificates.hide();
     if (view !== 'policies') {
       cancelPolicyReads();
     }

@@ -258,6 +258,9 @@ def test_no_orphaned_control_ids():
     html += _react_shell("activity.jsx")
     assert 'id="iris-inventory-root"' in html
     html += _react_shell("inventory.jsx")
+    assert 'id="iris-certificates-root"' in html
+    assert 'mountCertificates();' in _react_shell("main.jsx")
+    html += _react_shell("certificates.jsx")
     ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
     assert len(ids) > 30, "id extraction matched too little — patterns drifted"

@@ -82,6 +82,7 @@ _HOP_HEADERS = {
 _RESPONSE_DROP = _HOP_HEADERS | {"server", "date"}
 _HANDSHAKE_TIMEOUT = 30
 _MAX_BODY = 64 * 1024
+_MAX_SIGNING_APPROVAL = 192 * 1024  # 128 KiB public keylist, base64 + JSON
 _MAX_CSV = 8 * 1024 * 1024
 _MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024
 _MAX_OFFLINE_TAR = 256 * 1024 * 1024
@@ -103,6 +104,9 @@ def _body_limit(target):
     if path in ("/internal/v1/devices/bulk-credential",
                 "/internal/v1/devices/bulk-role"):
         return _MAX_BULK_DEVICE_IDS
+    if path in ("/internal/v1/settings/certificates/instruction/rotation",
+                "/internal/v1/settings/certificates/instruction/renew"):
+        return _MAX_SIGNING_APPROVAL
     return _MAX_BODY
 
 

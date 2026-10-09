@@ -84,11 +84,13 @@ or replay state into an active deployment to undo a rotation.
 
 ## If a response is lost
 
-Select **Refresh rotation**. The server records the operation durably; a page
-reload does not create another key. Retry the same approval if the outcome is
-uncertain. An interrupted keylist publication is repaired by the identical
-approved envelope. If another administrator changed the keylist, download and
-approve a fresh retirement request instead.
+Select **Refresh rotation** and review the request ID, fingerprints and state.
+The Console requires this check before another action after an uncertain response.
+Leaving the page clears selected files but does not cancel a submitted request.
+If the state still needs approval, select the same public approval file again.
+An interrupted keylist publication is repaired by the identical approved envelope.
+If another administrator changed the keylist, download and approve a fresh
+retirement request instead.
 
 Do not delete the rotation journal, reset the producer or copy private keys
 into place. A refusal about changed authority requires reviewing custody first.

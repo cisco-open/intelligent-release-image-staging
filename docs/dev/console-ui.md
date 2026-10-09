@@ -16,7 +16,8 @@ Console](../zensical/user-guide/console.md) for that.
 ## The shell and the legacy app
 
 `server/console-ui/` renders the header, primary navigation, Settings section
-navigation, General, TLS/trust, Telemetry, Audit export, Policies,
+navigation, General, TLS/trust, Telemetry, Audit export, certificate inventory,
+instruction certificate renewal, online signer rotation, Policies,
 the full Overview dashboard, Images, Monitoring
 and Inventory's table, filters, selection, Add Device and credential forms,
 image and bulk credential dialogs, CSV and basic device actions, schedules,
@@ -45,8 +46,19 @@ material. Writes validate endpoint-specific replies and retain an uncertain
 result until explicit review, without automatic replay. Peer TLS retains the
 original expected mode. Confirmed CA-download and audit-export job handles pause
 their reads on hide and resume on return. Certificate application is distinct
-from durable storage. Other Settings lifecycle, image-verification and package
-workflows remain in the older application.
+from durable storage.
+
+Certificate inventory, same-key renewal and signer rotation use
+`certificates-controller.mjs` and `certificates.jsx`. Their public approval
+responses are bound to the reviewed request and expected state transition.
+The controller locks before reading an approval file, discards unsent work on
+hide, and lets an already-submitted write finish. Unknown results need explicit
+fresh evidence; automatic reads and navigation do not clear that gate. The
+`irisCertificates` adapter supplies transport, visibility and public downloads.
+The rotation and renewal endpoints allow 192 KiB JSON bodies, enough for a
+128 KiB retirement envelope after base64 encoding; domain limits still apply.
+Ordinary JSON endpoints retain their 64 KiB limit. Other Settings lifecycle,
+image-verification and package workflows remain in the older application.
 
 Images owns its catalog, upload and import jobs, and quarantine drawer in
 `images-controller.mjs` and `images.jsx`. The `iris:images-command` adapter
@@ -234,6 +246,13 @@ against temporary authenticated stores. It covers password/session changes,
 telemetry, audit destination secrets, CA configuration and trust, and certificate
 storage. `test_api_split.py` also validates actual TLS-proxy certificate replies
 with the shipped model and verifies the certificate presented on a new connection.
+
+`server/tests/test_certificates_react.py` runs the shipped lifecycle controller
+against an authenticated temporary API with real age/OpenSSH custody. It renews,
+prepares, approves, activates and retires an online signer while preserving replay
+authority. Separate real Console/management requests check approval body caps and
+authentication. Browser tests cover uncertain responses, navigation during a
+write, focus, public-file clearing and small screens; their APIs are mocked.
 Browser checks cover empty success replies, secret clearing, shared setup fields,
 job pause/resume, persistent labels, keyboard focus and narrow layouts.
 `server/tests/test_device_forms_api.py` also runs the shipped serializers through

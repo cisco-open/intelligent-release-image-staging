@@ -152,6 +152,7 @@ _CONTENT_TYPES = {
     ".woff2": "font/woff2",
 }
 _MAX_BODY = 64 * 1024  # cap request bodies (esp. the pre-auth /api/login POST) — DoS guard
+_MAX_SIGNING_APPROVAL = 192 * 1024  # bounded public approval plus base64/JSON
 _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
                   # (queue-wait and new output both reset it — a deep-queued job
                   # behind the onboard pool legitimately waits >10 min)
@@ -6363,6 +6364,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             elif path in ("/api/devices/bulk-credential",
                            "/api/devices/bulk-role"):
                 cap = _MAX_BULK_DEVICE_IDS
+            elif path in ("/api/settings/certificates/instruction/rotation",
+                          "/api/settings/certificates/instruction/renew"):
+                cap = _MAX_SIGNING_APPROVAL
             else:
                 cap = _MAX_BODY
             if length > cap:

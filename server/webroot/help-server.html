@@ -149,6 +149,11 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     </ol>
 
     <h2>Device packages and certificate changes</h2>
+    <p>For an uncertain instruction certificate renewal, download a fresh public
+    renewal request before submitting again. For an uncertain signer rotation,
+    select <strong>Refresh rotation</strong> and review the request ID,
+    fingerprints and state. Leaving the page clears selected approval files
+    but does not cancel a submitted request.</p>
     <p>IOx and IOS-XR use the same device-agent image, packaged as
     <code>iris-arm64.tar</code>, <code>iris-amd64.tar</code>, and
     <code>iris-xr.rpm</code>. Guest Shell receives the shared agent in a

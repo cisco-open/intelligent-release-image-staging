@@ -254,17 +254,8 @@
           </div>
         </div>
         <div id="settings-pane-certificates" hidden>
-          <div class="card">
-            <h3>Certificate deadlines</h3>
-            <p class="muted">Server file observations, with dates in your browser's timezone. A valid date alone does not prove trust or the identity currently served by a listener.</p>
-            <div class="table-scroll"><table class="tbl">
-              <thead><tr><th>Purpose</th><th>State</th><th>Renew from</th><th>Expires</th><th>Operational impact</th></tr></thead>
-              <tbody id="certificate-rows"></tbody>
-            </table></div>
-            <p id="certificate-observed" class="muted" role="status" aria-live="polite"></p>
-            <p><button class="btn ghost" id="certificate-refresh">Refresh certificates</button>
-              <a class="btn ghost" href="#settings/tls">Replace browser certificate</a></p>
-          </div>
+          <div id="iris-certificates-root"></div>
+          <div id="iris-certificates-inventory"></div>
           <div class="card">
             <h3>Replace the Console browser certificate</h3>
             <p>Create the replacement key here, then download its public request for your CA. Import only the approved certificate. The private key stays encrypted on the server.</p>
@@ -315,49 +306,8 @@
               <p id="service-credential-result" role="status" aria-live="polite"></p>
             </div>
           </div>
-          <div class="card">
-            <h3>Renew instruction signing</h3>
-            <p>Keep the existing signing key. Download its public request, have an offline custodian issue the 30-day certificate, then import the approved public certificate here.</p>
-            <p class="muted">Signing stops seven days before expiry. Renew from the midpoint of the current certificate's validity. Private root keys stay with their custodians.</p>
-            <p><button class="btn" id="certificate-request">Download public renewal request</button></p>
-            <form id="certificate-renew-form" class="inline-form">
-              <label for="certificate-approved">Approved OpenSSH certificate (.pub)</label>
-              <input id="certificate-approved" type="file" accept=".pub" required disabled>
-              <button class="btn" id="certificate-renew" type="submit" disabled>Validate and apply renewal</button>
-            </form>
-            <p id="certificate-renew-result" role="status" aria-live="polite"></p>
-          </div>
-          <div class="card" id="signer-rotation">
-            <h3>Rotate the instruction signing key</h3>
-            <p>Prepare a replacement, obtain its public certificate from an offline custodian, then switch signers. Device roots and instruction counters stay unchanged.</p>
-            <p id="rotation-state" role="status" aria-live="polite">Checking rotation state…</p>
-            <div class="rotation-identities" aria-label="Signer comparison">
-              <div><strong>Previous key SHA256</strong><p class="machine" id="rotation-previous">Unknown</p></div>
-              <div><strong>Replacement key SHA256</strong><p class="machine" id="rotation-replacement">Unknown</p></div>
-            </div>
-            <p><button class="btn ghost" id="rotation-refresh">Refresh rotation</button>
-              <button class="btn" id="rotation-prepare" disabled>Prepare replacement key</button></p>
-            <div id="rotation-approval" hidden>
-              <p><button class="btn ghost" id="rotation-download">Download replacement public key</button>
-                <button class="btn ghost" id="rotation-cancel">Cancel pending replacement</button></p>
-              <p class="muted">The current signer remains active until you apply approval. On the offline station, run <code>irisctl approve-signing --public-key iris-replacement.pub --root-key /offline/root-a --output replacement-cert.pub</code>.</p>
-              <label for="rotation-certificate">Approved replacement certificate (.pub)</label>
-              <input id="rotation-certificate" type="file" accept=".pub">
-              <button class="btn" id="rotation-activate">Validate and switch signer</button>
-            </div>
-            <div id="rotation-retirement" hidden>
-              <p>The replacement is active. The former key can still verify until its certificates expire or its revocation reaches devices. Publish a root-approved retirement list, retaining all existing revocations.</p>
-              <label for="rotation-root">Offline approving root</label>
-              <select id="rotation-root"></select>
-              <button class="btn ghost" id="rotation-retirement-request">Download retirement request</button>
-              <p class="muted">On that root's offline station, run <code>irisctl approve-keylist --payload keylist.payload --root-key /offline/root-a --output keylist.envelope</code>. Use the selected root's private-key path. Return only the public approval.</p>
-              <label for="rotation-keylist">Approved retirement list (.envelope)</label>
-              <input id="rotation-keylist" type="file" accept=".envelope">
-              <button class="btn" id="rotation-retire">Validate and retire previous key</button>
-            </div>
-            <p id="rotation-result" role="status" aria-live="polite"></p>
-            <p class="muted">Server-side completion does not prove device acceptance. Confirm Guest Shell, both IOx architectures and IOS-XR devices fetch the new signer and keylist. Private roots stay offline.</p>
-          </div>
+          <div id="iris-certificates-renewal"></div>
+          <div id="iris-certificates-signer"></div>
           <div class="card" id="deployment-rotation-workflow">
             <h3>Rotate deployment trust and keys</h3>
             <p>Plan a maintenance window. The host worker verifies a cold backup before changing credentials. Device trust changes require removing the IRIS agent from affected devices first, then onboarding with the replacement trust.</p>

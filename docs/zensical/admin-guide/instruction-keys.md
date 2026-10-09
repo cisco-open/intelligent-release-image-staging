@@ -49,6 +49,10 @@ To change the key itself, use [Rotate the online signer](signer-rotation.md).
 4. Check the new expiry and signing cutoff. A changed online key or certificate
    invalidates a pending request; prepare it again before importing.
 
+If the response is unavailable, the server may already have applied the renewal.
+Download a fresh public renewal request before submitting again. Leaving the
+page clears the selected approval file; it does not cancel a submitted renewal.
+
 Renewal keeps the online key, device trust and instruction counters. It checks
 the configured root, principal, key match and validity before publication.
 Private roots remain with their custodians. Bare public keys have no expiry;

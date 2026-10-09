@@ -35,7 +35,8 @@ try {
   let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
   let certificateAvailable = true, renewalAccepted = false;
-  let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b']};
+  let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b'], previous_public_key: null, public_key: null,
+    previous_sha256: null, replacement_sha256: null, created_at: null, activated_at: null, retired_keylist_seq: null};
   let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null};
   let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null}))};
   let maintenanceFixture = {schema: 1, revision: 0, observed_at: null, worker: 'not-observed', policies: [], jobs: [], families: [
@@ -74,7 +75,7 @@ try {
       if (url.pathname === '/api/v1/settings/certificates/instruction/rotation' && route.request().method() === 'GET') return route.fulfill({json: rotationFixture});
       if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
         status: certificateAvailable ? 200 : 503,
-        json: certificateAvailable ? {observed_at: 1790160000, custody: {state: 'renewal_due'}, items: [
+        json: certificateAvailable ? {scope: 'server-certificate-files', observed_at: 1790160000, custody: {state: 'renewal_due'}, items: [
           {id: 'instruction-signer', kind: 'certificate', label: 'Instruction signing certificate', state: 'renewal-due',
             fingerprint_sha256: 'ab'.repeat(32), renew_at: 1790060000, expires_at: 1791360000,
             refuse_at: 1790755200, impact: 'Renew with the existing key and offline root approval.'},
@@ -82,7 +83,7 @@ try {
             impact: 'Coordinate server identity and Console trust before restart.'},
           {id: 'root-a', kind: 'public-key', label: 'Offline root A', state: 'public-key-present',
             fingerprint_sha256: 'SHA256:fixturePublicOnly', impact: 'Confirm private custody with the holder.'},
-        ]} : {error: 'unavailable'}});
+        ].map(row => ({source: 'server-file', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, fingerprint_sha256: null, ...row}))} : {error: 'unavailable'}});
       if (url.pathname === '/api/v1/settings/backups' && route.request().method() === 'GET') return route.fulfill({json: backupFixture});
       if (url.pathname === '/api/v1/settings/peer-tls' && route.request().method() === 'GET') return route.fulfill({json: peerTlsState});
       if (url.pathname === '/api/v1/logout') {
@@ -137,16 +138,20 @@ try {
         if (url.pathname === '/api/v1/settings/certificates/instruction/rotation') {
           assert.match(body.request_id, /^[0-9a-f-]{36}$/);
           if (body.action === 'retirement-request') return route.fulfill({json: {
-            request_id: body.request_id, root_id: body.root_id, payload: Buffer.from('public fixture').toString('base64')}});
+            request_id: body.request_id, root_id: body.root_id, payload: Buffer.from('IRIS-KEYLIST/1\n' +
+              Buffer.from(JSON.stringify({v: 1, keylist_seq: 8, issued_at: 1790160000, signer_root_id: body.root_id, krl_sha256: 'ab'.repeat(32)})).toString('base64') + '\n' +
+              Buffer.from('SSHKRL\n\x00fixture').toString('base64') + '\n').toString('base64')}});
           if (body.action === 'activate' || body.action === 'retire') assert.equal(body.confirm, true);
           rotationFixture = {...rotationFixture, request_id: body.request_id,
             state: {prepare: 'awaiting-approval', activate: 'retirement-pending', retire: 'completed', cancel: 'cancelled'}[body.action],
             previous_sha256: 'aa'.repeat(32), replacement_sha256: 'bb'.repeat(32),
-            public_key: 'ssh-ed25519 fixture-public-only\n', retired_keylist_seq: body.action === 'retire' ? 8 : null};
+            public_key: 'ssh-ed25519 AAAA fixture-public-only\n', previous_public_key: 'ssh-ed25519 BBBB previous-public-only\n',
+            created_at: 1790160000, activated_at: ['activate', 'retire'].includes(body.action) ? 1790160001 : null,
+            retired_keylist_seq: body.action === 'retire' ? 8 : null};
           return route.fulfill({json: rotationFixture});
         }
         if (url.pathname === '/api/v1/settings/certificates/instruction/request') return route.fulfill({json: {
-          public_key: 'ssh-ed25519 fixture-public-only\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
+          public_key: 'ssh-ed25519 AAAA fixture-public-only\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
         if (url.pathname === '/api/v1/settings/certificates/instruction/renew') return route.fulfill({
           status: renewalAccepted ? 200 : 409,
           json: renewalAccepted ? {applied: true, expires_at: 1793360000, refuse_at: 1792755200, status_refreshed: true}
@@ -603,9 +608,13 @@ try {
   assert.equal(settingsWrites.length, beforePrivate, 'Private key must not be uploaded');
   await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   await page.locator('#certificate-renew').click();
-  await page.locator('#certificate-renew-result').getByText('online certificate changed; prepare renewal again', {exact: true}).waitFor();
+  await page.locator('#certificate-renew-result').getByText(/Request refused.*Prepare a fresh public renewal request/).waitFor();
   assert.equal(settingsWrites.at(-1).body.public_key_sha256, 'ab'.repeat(32));
   renewalAccepted = true;
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
+  await page.locator('#certificate-request').click();
+  await page.waitForFunction(() => !document.getElementById('certificate-renew').disabled);
+  await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   await page.locator('#certificate-renew').click();
   await page.locator('#certificate-renew-result').getByText(/Renewal applied/).waitFor();
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
