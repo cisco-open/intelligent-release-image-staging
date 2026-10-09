@@ -90,8 +90,9 @@ The server's own copy of the image, the first source in the swarm. See
 
 ## park
 
-Keep an unassigned image on the device in case it is assigned again. See
-[Assign images and check status](../user-guide/assignments.md).
+Stop sharing an unassigned image and clean its staging copy. Retained files
+depend on the platform and who supplied them. See
+[What happens to an image you unassign](../user-guide/assignments.md#unassigned-image-park).
 
 ## verifier_missing
 

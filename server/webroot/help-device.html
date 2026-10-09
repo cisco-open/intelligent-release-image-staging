@@ -98,6 +98,10 @@ dir harddisk:</pre>
     <code>harddisk:iris-catalog.pem</code>. Agent diagnostics appear in the
     appmgr log above. An empty <code>iris-work/</code> directory after a
     successful undeploy is expected.</p>
+    <p>Unassigning an IOS-XR image removes files IRIS downloaded in place.
+    Adopted files and files of unknown origin stay. Undeploy itself leaves
+    any remaining root image files. See
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/assignments/#unassigned-image-park" target="_blank" rel="noopener">What happens to an image you unassign</a>.</p>
 
     <h2>Network and certificate checks</h2>
     <p>All agents need HTTPS to the catalog on TCP <code>8443</code>, HTTPS

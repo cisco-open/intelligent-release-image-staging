@@ -113,7 +113,7 @@ series routers, and Catalyst 9000 series switches with app-hosting storage.
 | Onboarding fails at `XR HTTPS staging failed` | The router could not fetch or verify the package | Check the router's bash and curl support, the route to the artifact server, the certificate validity and hostname, the enrollment authentication, and free space on `harddisk:`. The installer refuses an incomplete or hash-mismatched download and never falls back to SCP. |
 | Onboarding fails while opening repeated SSH sessions | The router is rate limiting SSH sessions | Check `show logging` for `Incoming SSH session rate limit exceeded`. The timing variables are in [Device agent configuration](../reference/device-configuration.md). |
 | A private `.iris-https.*` directory is left on `harddisk:` | A severed HTTPS installer session did not finish cleanup | Confirm no onboarding job is active for that device, inspect the directory, then remove it. |
-| A root image stays on the router after undeploy or after an image is parked | This is intended | Parking keeps an unassigned image on the device in case it is assigned again. See [Assign images and check staging status](assignments.md#unassigned-image-park). |
+| A root image stays on the router after undeploy or after an image is parked | Undeploy leaves root images; parking protects adopted files and files of unknown origin | Check the ownership rules in [What happens to an image you unassign](assignments.md#unassigned-image-park) before deleting it. |
 
 !!! warning
     Do not delete a device's instruction state or key files to make it accept

@@ -105,10 +105,10 @@ app-hosting storage. See [How an image reaches a device](../architecture/data-pa
 
 ## What happens to an image you unassign { #unassigned-image-park }
 
-Removing an image from a device's assignments **parks** it. To park an image is
-to keep it on the device in case it is assigned again. At the agent's next
-successful policy poll it stops the torrent, removes the staging copy and marks
-the image parked. Clearing all assignments parks every image.
+Removing an image from a device's assignments **parks** it. At the next
+successful policy poll, the agent stops its torrent and cleans its staging
+copy. Retained files depend on the platform and who supplied them, as shown
+below. Clearing all assignments parks every image.
 
 | Platform | What stays on the storage root |
 | --- | --- |

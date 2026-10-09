@@ -73,6 +73,28 @@ def test_catalyst_iox_storage_requirement_matches_the_onboarding_profile():
     assert 'app-hosting SSD and the required IRIS share' in supported
 
 
+def test_unassign_retention_docs_distinguish_xr_ownership_from_undeploy():
+    assignments = Path(DOCS, "user-guide/assignments.md").read_text()
+    parked = _section(assignments, "What happens to an image you unassign")
+    _assert_unit(parked, ("IOS-XR", "IRIS downloaded", "removed", "adopted",
+                          "unknown origin", "stay"),
+                 "XR parking removes only proven downloads, not adopted files")
+    assert "to keep it on the device" not in parked
+    undeploy = " ".join(Path(DOCS, "user-guide/undeploy.md").read_text().split())
+    assert "assignments and root image files" in undeploy
+    assert "Unassigning first can remove files IRIS downloaded on IOS-XR" in undeploy
+    assert "assignments.md#unassigned-image-park" in undeploy
+    glossary = Path(DOCS, "reference/glossary.md").read_text()
+    assert "Retained files" in _section(glossary, "park")
+    for relative in ("docs/dev/validation-records.md",
+                     "docs/dev/ai-assisted-deployment.md",
+                     "server/webroot/help-device.html"):
+        text = " ".join(Path(REPO, relative).read_text().split())
+        assert "Unassigning an IOS-XR image removes files IRIS downloaded in place" in text
+        assert "files of unknown origin stay" in text
+        assert "Undeploy itself leaves any remaining root image files" in text
+
+
 def test_nav_page_existence_check_catches_missing_file_and_directory_target(tmp_path):
     """Prove the os.path.isfile guard test_every_nav_page_exists relies on
     actually flags both failure shapes Zensical itself stays silent about: a

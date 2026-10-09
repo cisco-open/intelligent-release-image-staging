@@ -103,7 +103,7 @@ link to its definition.
 | wave | a group of devices a schedule releases together |
 | scheduled outcome | the record of what a scheduled run did on one device (the API calls it a receipt) |
 | origin seeder | the server's own copy of the image, the first source in the swarm |
-| park | keep an unassigned image on the device in case it is assigned again |
+| park | stop sharing an unassigned image and clean its staging copy; retained files depend on the platform and who supplied them |
 | verifier_missing | the device would check the signature but the tool to do so is not installed |
 | Bulk Hash | the checksum Cisco publishes for an image |
 | root key, signing root | one of the two offline keys that sign every instruction key |

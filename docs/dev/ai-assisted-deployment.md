@@ -305,8 +305,10 @@ each time; an earlier successful check-in does not stand in for a new one. A
 test image should be a distinct file, so cleanup removes only what the
 assistant added. After a test, it clears the image's assignments, undeploys
 with the job IDs it recorded, and removes only the files and catalog entries
-it created. Undeploying a device does not remove images already staged for
-real use.
+it created. Unassigning an IOS-XR image removes files IRIS downloaded in
+place; adopted files and files of unknown origin stay. Preserve real-use
+assignments and files outside the test. Undeploy itself leaves any remaining
+root image files.
 
 The assistant keeps this record separate from dated evidence with real
 numbers; that lives in [Dated lab evidence](validation-records.md), not on

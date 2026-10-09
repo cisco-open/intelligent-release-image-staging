@@ -36,8 +36,9 @@ download another. A synthetic file proves the transfer and the hash and
 placement checks, not that the bytes are an authentic Cisco image.
 Afterward, clear the image's assignments, undeploy using the job IDs you
 recorded, and remove only the files and catalog entries the test created.
-Undeploying a device does not remove images staged for real use, and a
-cleanup should not either.
+Unassigning an IOS-XR image removes files IRIS downloaded in place; adopted
+files and files of unknown origin stay. Preserve real-use assignments and
+files outside the test. Undeploy itself leaves any remaining root image files.
 
 ## Guest Shell, XR and reviewed origin access - 2026-10-09
 
