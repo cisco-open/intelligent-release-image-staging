@@ -51,7 +51,7 @@ done
 if [ -n "$FINALIZED_DIR$FINALIZATION_SHA$IOXCLIENT_SHA" ]; then
   [ -n "$FINALIZED_DIR" ] && [[ "$FINALIZATION_SHA" =~ ^[0-9a-f]{64}$ ]] \
     && { [ "$PACKAGE" -eq 0 ] || [[ "$IOXCLIENT_SHA" =~ ^[0-9a-f]{64}$ ]]; } \
-    || { echo "!! finalized input requires a receipt SHA256 and pinned local ioxclient" >&2; exit 2; }
+    || { echo "!! finalized input requires a finalization record SHA256 and pinned local ioxclient" >&2; exit 2; }
   [ -z "$ROOTS_EXPLICIT" ] && [ -z "${IOXCLIENT_HOME:-}" ] \
     || { echo "!! finalized mode cannot use instruction roots or an operator ioxclient profile" >&2; exit 2; }
   [ "$PACKAGE" -eq 0 ] || [ -n "$IOXCLIENT_EXPLICIT" ] \

@@ -55,7 +55,7 @@ FINALIZED_ARGS=()
 if [ -n "$FINALIZED_DIR$FINALIZATION_SHA$IOXCLIENT_SHA" ]; then
   [ -n "$FINALIZED_DIR" ] && [[ "$FINALIZATION_SHA" =~ ^[0-9a-f]{64}$ ]] \
     && [[ "$IOXCLIENT_SHA" =~ ^[0-9a-f]{64}$ ]] \
-    || { echo "!! finalized input requires a receipt SHA256 and pinned local ioxclient" >&2; exit 2; }
+    || { echo "!! finalized input requires a finalization record SHA256 and pinned local ioxclient" >&2; exit 2; }
   [ -n "$IOXCLIENT_EXPLICIT" ] \
     || { echo "!! finalized packaging requires IOXCLIENT to name a local executable" >&2; exit 2; }
   [ -x "$IOXCLIENT" ] || { echo "!! finalized packaging requires existing local ioxclient; nothing was downloaded" >&2; exit 1; }

@@ -32,9 +32,9 @@ for (const [name, change] of [
   ['missing format', value => {delete value.format;}],
   ['mixed source digest', value => {value.canonical_source_sha256 = '5'.repeat(64);}],
   ['missing neutral digest', value => {delete value.canonical_neutral_source_sha256;}],
-  ['missing receipt digest', value => {delete value.canonical_finalization_sha256;}],
+  ['missing finalization digest', value => {delete value.canonical_finalization_sha256;}],
   ['coerced neutral digest', value => {value.canonical_neutral_source_sha256 = ['3'.repeat(64)];}],
-  ['invalid receipt digest', value => {value.canonical_finalization_sha256 = 'bad';}],
+  ['invalid finalization digest', value => {value.canonical_finalization_sha256 = 'bad';}],
   ['unknown field', value => {value.extra = true;}],
 ]) test('reject v2 ' + name, () => {
   const raw = setupFixture(); raw.packages.items[0].provenance = finalizedProvenance();

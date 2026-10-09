@@ -208,7 +208,7 @@ def package_readiness(path, name, kind, platform, remedy):
         **{field: values[field] for field in source_fields},
     }
     if values["format"] == "iris-device-wrapper-v2":
-        # A neutral build-input digest and deployment finalization receipt are
+        # A neutral build-input digest and deployment finalization record are
         # distinct evidence, never aliases for v1's rooted source digest.
         entry["provenance"]["format"] = values["format"]
     return entry

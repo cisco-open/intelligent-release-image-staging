@@ -32031,7 +32031,7 @@
                                         "pattern": "^[0-9a-f]{64}$",
                                         "minLength": 64,
                                         "maxLength": 64,
-                                        "description": "Digest of the deployment-specific trust finalization receipt."
+                                        "description": "Digest of the deployment-specific trust finalization record."
                                       }
                                     },
                                     "required": [
@@ -72901,7 +72901,7 @@
                                         "pattern": "^[0-9a-f]{64}$",
                                         "minLength": 64,
                                         "maxLength": 64,
-                                        "description": "Digest of the deployment-specific trust finalization receipt."
+                                        "description": "Digest of the deployment-specific trust finalization record."
                                       }
                                     },
                                     "required": [

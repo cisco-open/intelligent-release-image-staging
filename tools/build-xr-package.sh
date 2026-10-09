@@ -44,7 +44,7 @@ if [ -n "$FINALIZED_DIR$FINALIZATION_SHA$APPMGR_ARCHIVE$APPMGR_SHA$APPMGR_REVISI
   [ -n "$FINALIZED_DIR" ] && [ -n "$APPMGR_ARCHIVE" ] \
     && [[ "$FINALIZATION_SHA" =~ ^[0-9a-f]{64}$ ]] && [[ "$APPMGR_SHA" =~ ^[0-9a-f]{64}$ ]] \
     && [[ "$APPMGR_REVISION" =~ ^[0-9a-f]{40}$ ]] \
-    || { echo "!! finalized input requires receipt and local appmgr archive SHA256 values and full source revision" >&2; exit 2; }
+    || { echo "!! finalized input requires finalization record and local appmgr archive SHA256 values and full source revision" >&2; exit 2; }
   [ -z "$ROOTS_EXPLICIT" ] && [ -z "${APPMGR_BUILD_CMD+x}" ] \
     || { echo "!! finalized mode cannot use instruction roots or an unpinned appmgr command" >&2; exit 2; }
 fi

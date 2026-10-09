@@ -71,6 +71,17 @@
     iris/tools/irisctl \
     iris/tools/iris-key-setup \
     iris/tools/release-auth.py \
+    iris/tools/prepare-device-context.py \
+    iris/tools/prepare-docker-hosts.py \
+    iris/tools/finalize-device-image.py \
+    iris/tools/build-release-kit.py \
+    iris/tools/build-release-candidate.py \
+    iris/tools/build-packaging-inputs.py \
+    iris/tools/build-offline-dependencies.py \
+    iris/tools/build-offline-sources.py \
+    iris/tools/inspect-image-components.py \
+    iris/tools/build-guest-inputs.py \
+    iris/tools/bootstrap-offline.py \
     iris/tools/iris_installer/cli.py \
     iris/tools/iris_installer/probe.py \
     iris/tools/check-host-time.sh \
@@ -141,6 +152,10 @@ _make_release_fixture() {
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
+           prepare-device-context.py prepare-docker-hosts.py finalize-device-image.py \
+           build-release-kit.py build-release-candidate.py build-packaging-inputs.py \
+           build-offline-dependencies.py build-offline-sources.py build-guest-inputs.py \
+           bootstrap-offline.py inspect-image-components.py \
            build-ssh-verifier.sh build-ssh-verifiers.sh \
            iris-aead.c build-instruction-crypto.sh build-instruction-crypto-inner.sh \
            build-instruction-crypto.Dockerfile \

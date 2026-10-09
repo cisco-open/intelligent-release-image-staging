@@ -3170,7 +3170,7 @@ def _success(route):
                 "description": "Neutral build-context digest, not the version 1 rooted source digest."},
             canonical_finalization_sha256={"type": "string", "pattern": "^[0-9a-f]{64}$",
                 "minLength": 64, "maxLength": 64,
-                "description": "Digest of the deployment-specific trust finalization receipt."})
+                "description": "Digest of the deployment-specific trust finalization record."})
         item["properties"]["provenance"] = {
             "type": ["object", "null"],
             "description": "Adjacent sidecar metadata bound to readable wrapper bytes. "
