@@ -65,6 +65,8 @@ def release(tmp_path, monkeypatch):
         if image:
             entry.update(platforms=["linux/amd64", "linux/arm64"] if role == "device-runtime" else ["linux/amd64"],
                          image_digest="sha256:" + "1" * 64)
+        if role == "device-runtime":
+            entry["neutral_source_sha256"] = "2" * 64
         manifest["assets"][role] = entry
     (directory / "attestations.jsonl").write_bytes(b"synthetic, not a valid attestation")
     (directory / "SHA256SUMS").write_bytes(b"synthetic checksum inventory")
@@ -109,6 +111,7 @@ def test_complete_prepared_host_kit_and_protected_copy(release, tmp_path, monkey
     result = verify(release)
     assert result.asset("server-image").config_digest == "sha256:" + "1" * 64
     assert result.asset("device-runtime").platforms == ("linux/amd64", "linux/arm64")
+    assert result.asset("device-runtime").neutral_source_sha256 == "2" * 64
     with pytest.raises(InstallError, match="Docker config"):
         _ = result.asset("device-runtime").config_digest
     receipt = result.receipt()
@@ -175,6 +178,20 @@ def test_duplicate_json_keys_are_refused_even_if_attested(release, filename):
         inventory["assets"][filename] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         write_json(release.directory / "release.json", inventory)
     with pytest.raises(InstallError, match="duplicate"):
+        verify(release)
+
+
+@pytest.mark.parametrize("change", ["missing", "invalid", "core-role"])
+def test_neutral_source_identity_is_required_and_role_specific(release, change):
+    runtime = release.manifest["assets"]["device-runtime"]
+    if change == "missing":
+        del runtime["neutral_source_sha256"]
+    elif change == "invalid":
+        runtime["neutral_source_sha256"] = COMMIT  # Git commit is not a source digest.
+    else:
+        release.manifest["assets"]["server-image"]["neutral_source_sha256"] = "2" * 64
+    seal(release)
+    with pytest.raises(InstallError):
         verify(release)
 
 

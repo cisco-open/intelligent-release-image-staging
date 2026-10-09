@@ -268,6 +268,7 @@ class Asset:
     format: str
     platforms: tuple = ()
     image_digest: str = ""
+    neutral_source_sha256: str = ""
 
     @property
     def config_digest(self):
@@ -356,6 +357,8 @@ def _kit_manifest(value, auth, tag, commit, inventory):
         fields = {"name", "size", "sha256", "format"}
         if role in IMAGES:
             fields.update(("platforms", "image_digest"))
+        if role == "device-runtime":
+            fields.add("neutral_source_sha256")
         _keys(entry, fields)
         name = _name(entry["name"])
         if name in names or name not in inventory or inventory[name] != {key: entry[key] for key in ("size", "sha256")}:
@@ -369,7 +372,8 @@ def _kit_manifest(value, auth, tag, commit, inventory):
             raise InstallError("Release kit image architectures are incomplete or unsupported")
         result.append(Asset(role, name, entry["size"], entry["sha256"], entry["format"],
                             platforms if role in IMAGES else (),
-                            _sha(entry["image_digest"], "sha256:") if role in IMAGES else ""))
+                            _sha(entry["image_digest"], "sha256:") if role in IMAGES else "",
+                            _sha(entry["neutral_source_sha256"]) if role == "device-runtime" else ""))
     return tuple(result)
 
 
