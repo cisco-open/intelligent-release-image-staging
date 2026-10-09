@@ -281,16 +281,21 @@ def _layer(source, destination, compressed, rendered, scratch):
                 entry = members.get(str(parent))
                 if entry is None or not entry.isdir():
                     fail("trust-file ancestors must be explicit real directories")
+        for member in members.values():
+            content_hash = None
+            if member.isfile():
+                content_hash, _ = _copy(archive.extractfile(member), None, MAX_LAYER)
+            inventory.append(_record(member, content_hash))
+        inventory.sort(key=lambda row: row["path"])
+        inventory_digest = hashlib.sha256(_json(inventory)).hexdigest()
+        if rendered is None:
+            return original_diff, original_diff, inventory_digest, len(inventory)
         with tarfile.open(rewritten, "w", format=tarfile.PAX_FORMAT) as outgoing:
             # Keep native tar ordering: a hard link may require its regular
             # target to have been extracted already. Sorting can break a valid
             # flattened runtime even when every file's bytes stay unchanged.
             for name in members:
                 member = members[name]
-                content_hash = None
-                if member.isfile():
-                    content_hash, _ = _copy(archive.extractfile(member), None, MAX_LAYER)
-                inventory.append(_record(member, content_hash))
                 outgoing.addfile(copy.copy(member), archive.extractfile(member) if member.isfile() else None)
             for name in TRUST:
                 member = tarfile.TarInfo(name)
@@ -305,8 +310,7 @@ def _layer(source, destination, compressed, rendered, scratch):
                 _copy(stream, packed, MAX_LAYER)
         else:
             _copy(stream, output, MAX_LAYER)
-    inventory.sort(key=lambda row: row["path"])
-    return original_diff, diff, hashlib.sha256(_json(inventory)).hexdigest(), len(inventory)
+    return original_diff, diff, inventory_digest, len(inventory)
 
 
 def _blob(path):
@@ -426,6 +430,12 @@ def _rewrite(archive_path, destination, scratch, rendered):
                 layers[0]["mediaType"].endswith("+gzip"), rendered, scratch)
             if rootfs["diff_ids"] != ["sha256:" + before]:
                 fail("uncompressed layer digest mismatch")
+            if rendered is None:
+                platforms[arch] = {"manifest_digest": descriptor["digest"],
+                    "config_digest": manifest["config"]["digest"],
+                    "layer_digest": layers[0]["digest"], "diff_id": "sha256:" + before,
+                    "runtime_inventory_sha256": inventory, "runtime_members": count}
+                continue
             config["rootfs"]["diff_ids"] = ["sha256:" + after]
             manifest["config"] = add_blob(_json(config), CONFIG, manifest["config"])
             manifest["layers"] = [add_blob(updated_layer, layers[0]["mediaType"], layers[0])]
@@ -441,6 +451,8 @@ def _rewrite(archive_path, destination, scratch, rendered):
             fail("both supported architectures are required")
         if used != {name for name, member in members.items() if member.isfile() and name.startswith("blobs/")}:
             fail("unreferenced OCI blobs or signature artifacts are not supported")
+        if rendered is None:
+            return old_index_digest, old_index_digest, platforms
         index["manifests"] = sorted(final_descriptors, key=lambda item: item["platform"]["architecture"])
         index_bytes = _json(index)
         final_index = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
@@ -462,6 +474,29 @@ def _rewrite(archive_path, destination, scratch, rendered):
                     with value.open("rb") as stream:
                         result.addfile(member, stream)
     return old_index_digest, final_index, platforms
+
+
+def inspect_neutral(input_oci, *, expected_archive_sha256):
+    """Inspect the exact neutral contract without roots or image generation.
+
+    Authentication of the expected digest belongs to the kit caller. Temporary
+    bounded snapshots/decompression are removed; input bytes are never executed.
+    """
+    if not isinstance(expected_archive_sha256, str) or not HEX.fullmatch(expected_archive_sha256):
+        fail("authenticated archive identity is required")
+    try:
+        with tempfile.TemporaryDirectory(prefix="iris-neutral-inspect-") as directory:
+            scratch = Path(directory)
+            snapshot = scratch / "input.oci.tar"
+            digest, _, identity = _snapshot(input_oci, snapshot, MAX_ARCHIVE)
+            if digest != expected_archive_sha256:
+                fail("archive differs from authenticated digest")
+            index, _, platforms = _rewrite(snapshot, None, scratch, None)
+            _unchanged(*identity)
+            return {"format": "iris-device-neutral-inspection-v1", "archive_sha256": digest,
+                    "index_digest": index, "platforms": platforms}
+    except (tarfile.TarError, EOFError, gzip.BadGzipFile, OSError) as exc:
+        raise InstallError("Device trust finalization: neutral archive inspection failed") from exc
 
 
 def _publish(parent_fd, stage_name, output_name):

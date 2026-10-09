@@ -361,3 +361,42 @@ def test_root_parser_failure_is_sanitized_at_cli(tmp_path, roots):
     assert result.returncode == 1
     assert "invalid public instruction roots" in result.stderr
     assert "SENTINEL" not in result.stderr and "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("compressed,nested", [(True, True), (True, False), (False, True), (False, False)])
+def test_read_only_inspector_shares_exact_neutral_contract(tmp_path, roots, monkeypatch, compressed, nested):
+    payload, originals = image_bytes(compressed=compressed, nested=nested)
+    source = tmp_path / "neutral.oci.tar"
+    source.write_bytes(payload)
+    def forbidden():
+        pytest.fail("read-only inspection must not access trust rendering")
+    monkeypatch.setattr(f, "instruction_module", forbidden)
+    result = f.inspect_neutral(source, expected_archive_sha256=digest(payload))
+    assert result["format"] == "iris-device-neutral-inspection-v1"
+    assert set(result["platforms"]) == {"amd64", "arm64"}
+    for arch, platform in result["platforms"].items():
+        assert set(platform) == {"manifest_digest", "config_digest", "layer_digest", "diff_id", "runtime_inventory_sha256", "runtime_members"}
+        assert platform["diff_id"] == "sha256:" + digest(originals[arch]["layer"])
+        assert platform["runtime_members"] == len(layer_entries(arch))
+    assert source.read_bytes() == payload
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["neutral.oci.tar", "roots"]
+
+
+@pytest.mark.parametrize("kind", ["active-trust", "digest", "extra-blob", "runtime-path", "changed-input"])
+def test_inspector_refuses_same_unsafe_inputs_as_finalizer(tmp_path, monkeypatch, kind):
+    options = {}
+    if kind == "active-trust": options["mutate_layer"] = lambda entries, arch: entries.append(entry(f.TRUST[0], b"active"))
+    elif kind == "extra-blob": options["outer_extra"] = [entry("blobs/sha256/" + "0" * 64, b"extra")]
+    elif kind == "runtime-path": options["mutate_layer"] = lambda entries, arch: entries.append(entry("../escape", b"unsafe"))
+    source = tmp_path / "neutral.oci.tar"
+    source.write_bytes(image_bytes(**options)[0])
+    if kind == "changed-input":
+        original = f._rewrite
+        def changed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            source.write_bytes(b"changed")
+            return result
+        monkeypatch.setattr(f, "_rewrite", changed)
+    expected = "0" * 64 if kind == "digest" else digest(source.read_bytes())
+    with pytest.raises(InstallError):
+        f.inspect_neutral(source, expected_archive_sha256=expected)
