@@ -132,6 +132,19 @@ def test_completed_resume_preserves_exact_wrappers_without_executing_or_requirin
     assert obj.journal.document["completed"]["packages"] == before
 
 
+@pytest.mark.parametrize("record", [None, {}, False, {"schema": 1}])
+def test_present_malformed_generation_record_cannot_trigger_regeneration(packaging, record):
+    obj = packaging()
+    obj.packages()
+    obj.journal.document["completed"].pop("packages")
+    obj.journal.document["completed"]["prebuilt-package-generated"] = record
+    packaging.active["tool"].unlink()
+    obj.wrapper_calls.clear()
+    with pytest.raises(InstallError, match="generation is invalid"):
+        obj.packages()
+    assert obj.wrapper_calls == []
+
+
 def test_generation_failure_publishes_no_partial_artifacts_and_can_resume(packaging):
     obj = packaging()
     obj.generation_failure = 2

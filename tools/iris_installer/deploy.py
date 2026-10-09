@@ -506,7 +506,7 @@ class DockerInstall:
             else:
                 local_tool = None
             generated = completed.get("prebuilt-package-generated")
-            if generated is None:
+            if "prebuilt-package-generated" not in completed:
                 if "packages" in completed:
                     raise InstallError("Recorded native package generation is missing; refusing to rebuild")
                 if local_tool is None:
