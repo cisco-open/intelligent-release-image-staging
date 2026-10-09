@@ -19,6 +19,7 @@ import sys
 import zipfile
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -453,7 +454,7 @@ def test_source_only_cannot_be_selected_as_prebuilt(stage):
     assert not stage["output"].exists()
 
 
-def test_cli_explicit_profile_defaults_do_not_change_workflows(tmp_path, monkeypatch):
+def test_cli_explicit_profile_preserves_source_only_default(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(STAGE, "acquire_stage", lambda *args, **kwargs: calls.append(kwargs["profile"]))
     args = ["acquire", "--tag", TAG, "--commit", COMMIT, "--run-id", "31", "--run-attempt", "2",
@@ -976,3 +977,89 @@ def test_manual_workflow_never_interpolates_dispatch_data_in_shell():
     assert '"$snapshot"/assets/*' in run
     assert "--qualification-env" in run and "--confirmation" in run
     assert "--clobber" not in run and "docker" not in run and "make-release" not in run
+    workflow = yaml.load(text, Loader=yaml.BaseLoader)
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    profile = workflow["on"]["workflow_dispatch"]["inputs"]["profile"]
+    assert profile == {"description": "Exact authenticated stage profile", "required": "true",
+                       "type": "choice", "default": "source-only",
+                       "options": ["source-only", "prepared-host", "ubuntu-dependencies"]}
+    job = workflow["jobs"]["publish"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["permissions"] == {"actions": "read", "contents": "write"}
+    assert job["if"] == ("github.repository == 'cisco-open/intelligent-release-image-staging' "
+                         "&& github.ref == 'refs/heads/main'")
+    assert job["env"]["RELEASE_PROFILE"] == "${{ inputs.profile }}"
+
+
+@pytest.mark.parametrize("profile,refuse", [(None, False), ("source-only", False),
+    ("prepared-host", False), ("ubuntu-dependencies", False), ("prepared-host", True),
+    ("", False), ("prepared-host --tag other; $(touch profile-injection)", False)])
+def test_actual_publisher_command_forwards_profile_before_inert_publication(tmp_path, profile, refuse):
+    """Run the actual YAML shell body with real CLI parsing and inert endpoints.
+
+    The helper's verification endpoint and gh executable are fixture recorders;
+    this is command wiring, never hosted authentication or publication evidence.
+    """
+    workflow = yaml.load((ROOT / ".github/workflows/publish-release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["publish"]
+    if profile is None:
+        profile = workflow["on"]["workflow_dispatch"]["inputs"]["profile"]["default"]
+    references = {"github.token": "inert-token", "inputs.profile": profile, "inputs.tag": TAG,
+        "inputs.commit": COMMIT, "inputs.stage_run_id": "31", "inputs.stage_run_attempt": "2",
+        "inputs.artifact_id": "47", "inputs.artifact_sha256": "a" * 64,
+        "inputs.qualification_json": '{"fixture":"literal; $(touch qualification-injection)"}',
+        "inputs.qualification_sha256": "b" * 64, "inputs.confirmation": "publish " + TAG + " " + "c" * 64}
+    environment = {key: references[value.removeprefix("${{ ").removesuffix(" }}")]
+                   for key, value in job["env"].items()}
+    fixture_bin, fixture_tools = tmp_path / "bin", tmp_path / "tools"
+    fixture_bin.mkdir()
+    fixture_tools.mkdir()
+    helper_log, gh_log = tmp_path / "helper.json", tmp_path / "gh.json"
+    environment.update(PATH=str(fixture_bin) + ":" + str(Path(sys.executable).parent) + ":/usr/bin:/bin",
+        LC_ALL="C", RUNNER_TEMP=str(tmp_path / "runner temp"), GITHUB_RUN_ID="91", GITHUB_RUN_ATTEMPT="3",
+        GITHUB_ACTOR="dispatcher", GITHUB_ACTOR_ID="17", GITHUB_TRIGGERING_ACTOR="reviewer",
+        IRIS_TEST_HELPER_LOG=str(helper_log), IRIS_TEST_GH_LOG=str(gh_log), IRIS_TEST_REFUSE=str(int(refuse)))
+    # Execute the shipped CLI parser; replace only its external verification
+    # endpoint, before main(), so malformed choices still use real argparse.
+    (fixture_tools / "release-stage.py").write_text(
+        "import importlib.util, json, os, sys\nfrom pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT / 'tools')!r})\n"
+        f"spec = importlib.util.spec_from_file_location('fixture_stage', {str(ROOT / 'tools/release-stage.py')!r})\n"
+        "module = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\n"
+        "def inert(selected, output, **options):\n"
+        "    options['qualification'] = options['qualification'].decode()\n"
+        "    Path(os.environ['IRIS_TEST_HELPER_LOG']).write_text(json.dumps({'argv':sys.argv[1:], "
+        "'selection':selected, 'options':options}))\n"
+        "    if os.environ['IRIS_TEST_REFUSE'] == '1':\n"
+        "        raise module.InstallError('inert verification refusal')\n"
+        "    assets = Path(output) / 'assets'\n    assets.mkdir(parents=True)\n"
+        "    (assets / 'fixture.txt').write_text('inert verified placeholder')\n"
+        "module.prepare_publication = inert\nraise SystemExit(module.main())\n")
+    gh = fixture_bin / "gh"
+    gh.write_text(f"#!{sys.executable}\nimport json, os, sys\nfrom pathlib import Path\n"
+                  "Path(os.environ['IRIS_TEST_GH_LOG']).write_text(json.dumps(sys.argv[1:]))\n")
+    gh.chmod(0o755)
+    run = next(step["run"] for step in job["steps"] if "run" in step)
+    result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", run], cwd=tmp_path,
+                            env=environment, capture_output=True, text=True, timeout=30)
+    assert not (tmp_path / "profile-injection").exists()
+    assert not (tmp_path / "qualification-injection").exists()
+    if profile not in STAGE.PROFILES:
+        assert result.returncode == 2 and "invalid choice" in result.stderr
+        assert not helper_log.exists() and not gh_log.exists()
+        return
+    called = json.loads(helper_log.read_bytes())
+    assert called["selection"] == STAGE.selection(TAG, COMMIT, 31, 2, 47, "a" * 64)
+    assert called["argv"].count("--profile") == 1
+    assert called["argv"][called["argv"].index("--profile") + 1] == profile
+    assert called["options"] == {"profile": profile,
+        "qualification": references["inputs.qualification_json"], "qualification_sha256": "b" * 64,
+        "confirmation": references["inputs.confirmation"], "actor": "dispatcher", "actor_id": 17,
+        "triggering_actor": "reviewer", "token": "inert-token"}
+    if refuse:
+        assert result.returncode == 1 and not gh_log.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(gh_log.read_bytes()) == ["release", "create", TAG,
+            str(tmp_path / "runner temp/iris-publish-91-3/assets/fixture.txt"),
+            "--repo", STAGE.REPOSITORY, "--verify-tag", "--title", "IRIS " + TAG, "--generate-notes"]

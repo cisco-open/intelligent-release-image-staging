@@ -7,6 +7,15 @@ name: Publish a qualified release stage
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: Exact authenticated stage profile
+        required: true
+        type: choice
+        default: source-only
+        options:
+          - source-only
+          - prepared-host
+          - ubuntu-dependencies
       tag:
         description: Exact authenticated release tag
         required: true
@@ -61,6 +70,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      RELEASE_PROFILE: ${{ inputs.profile }}
       RELEASE_TAG: ${{ inputs.tag }}
       RELEASE_COMMIT: ${{ inputs.commit }}
       STAGE_RUN_ID: ${{ inputs.stage_run_id }}
@@ -82,6 +92,7 @@ jobs:
           set -euo pipefail
           snapshot="$RUNNER_TEMP/iris-publish-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           python3 tools/release-stage.py prepare-publication --output-dir "$snapshot" \
+            --profile "$RELEASE_PROFILE" \
             --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
             --run-id "$STAGE_RUN_ID" --run-attempt "$STAGE_RUN_ATTEMPT" \
             --artifact-id "$STAGE_ARTIFACT_ID" --artifact-sha256 "$STAGE_ARTIFACT_SHA256" \
