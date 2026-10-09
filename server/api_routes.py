@@ -116,7 +116,7 @@ _CONSOLE_RESOURCES = (
     ("GET", "/settings/certificates/browser/rotation", "Read browser TLS rotation"),
     ("POST", "/settings/certificates/browser/rotation", "Prepare, approve or apply browser TLS rotation"),
     ("GET", "/settings/backups", "Read deployment backup worker status"),
-    ("POST", "/settings/backups", "Request a scoped backup, verification or isolated extraction"),
+    ("POST", "/settings/backups", "Request backup, verification, extraction, restore or restore recovery"),
     ("GET", "/settings/deployment-rotation", "Read deployment credential maintenance evidence"),
     ("POST", "/settings/deployment-rotation", "Request verified-backup credential maintenance"),
     ("GET", "/settings/trust-rotation", "Read public deployment trust approvals"),

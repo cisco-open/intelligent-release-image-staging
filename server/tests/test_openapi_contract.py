@@ -62,6 +62,17 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     assert doc == openapi_contract.build_document()
 
 
+def test_backup_summary_includes_restore_and_restore_recovery():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        operation = document["paths"][prefix + "/settings/backups"]["post"]
+        assert "restore" in operation["summary"].lower()
+        assert "recovery" in operation["summary"].lower()
+        variants = operation["requestBody"]["content"]["application/json"]["schema"]["oneOf"]
+        assert any(variant["properties"]["action"].get("enum") ==
+                   ["restore", "recover-restore"] for variant in variants)
+
+
 def test_audit_export_password_documents_conditional_recovery_requirement():
     document = openapi_contract.build_document()
     for prefix in ("/api/v1", "/internal/v1"):

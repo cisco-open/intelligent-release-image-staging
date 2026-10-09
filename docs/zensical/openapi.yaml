@@ -34663,8 +34663,8 @@
       },
       "post": {
         "operationId": "console_post_api_v1_settings_backups",
-        "summary": "Request a scoped backup, verification or isolated extraction",
-        "description": "Request a scoped backup, verification or isolated extraction. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "summary": "Request backup, verification, extraction, restore or restore recovery",
+        "description": "Request backup, verification, extraction, restore or restore recovery. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
         "tags": [
           "console"
         ],
@@ -34696,7 +34696,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Request a scoped backup, verification or isolated extraction response",
+            "description": "Request backup, verification, extraction, restore or restore recovery response",
             "content": {
               "application/json": {
                 "schema": {
@@ -75064,8 +75064,8 @@
       },
       "post": {
         "operationId": "management_post_internal_v1_settings_backups",
-        "summary": "Request a scoped backup, verification or isolated extraction",
-        "description": "Request a scoped backup, verification or isolated extraction. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "summary": "Request backup, verification, extraction, restore or restore recovery",
+        "description": "Request backup, verification, extraction, restore or restore recovery. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
         "tags": [
           "management"
         ],
@@ -75098,7 +75098,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Request a scoped backup, verification or isolated extraction response",
+            "description": "Request backup, verification, extraction, restore or restore recovery response",
             "content": {
               "application/json": {
                 "schema": {
