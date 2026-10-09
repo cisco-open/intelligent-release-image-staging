@@ -275,6 +275,22 @@ component, including Ubuntu packages, and confirm redistribution permission.
 Cisco's licensed ioxclient remains separately supplied. Candidate checks do not
 create release attestations or satisfy these publication and topology gates.
 
+### Inspect image source requirements
+
+Run `python3 tools/inspect-image-components.py --help` for the input options.
+Supply the exact server, Console and neutral runtime archives, their independently
+recorded SHA-256 values, the full source commit and a new protected output directory.
+The helper reads the images without starting containers or running their programs.
+
+The resulting `image-components.json` lists package versions and incorporated
+sources, runtime components and notice files in each layer and the final image.
+It includes both neutral runtime architectures. Core image revision labels must
+match the selected commit; the neutral image's source-commit binding is not assessed.
+
+This is an inventory, not complete source delivery or release authentication.
+Resolve the listed source requirements and unknown components before publication.
+Keep the record and exact input hashes with the candidate's review evidence.
+
 ## Bootstrap the installer offline
 
 This developer route needs an authenticated `ubuntu-dependencies` kit and its
