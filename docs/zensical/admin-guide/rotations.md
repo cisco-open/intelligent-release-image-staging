@@ -23,8 +23,8 @@ For the guided online-certificate workflow, see
 For browser TLS and telemetry credentials, use the
 [guided Console workflows](console-credentials.md).
 Installer-owned Docker, split Docker and Kubernetes deployments also have
-[guided deployment trust maintenance](deployment-rotation.md), including root key holder
-root approval and host-UI recovery-recipient changes. The procedures below
+[guided deployment trust maintenance](deployment-rotation.md), including approvals
+from root key holders and backup recovery key changes in the host UI. The procedures below
 remain relevant to deployments without that scoped worker.
 
 ## Rotate the management credential
