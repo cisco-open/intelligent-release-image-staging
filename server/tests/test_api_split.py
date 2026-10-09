@@ -435,6 +435,70 @@ def test_management_does_not_fall_back_to_device_certificate(tmp_path, monkeypat
             management_token_file=str(token))
 
 
+def _certificate_http_diagnostic(status, body):
+    """Keep failure context without trusting a response to redact secrets.
+
+    Only exact public contract phrases are echoed. Unknown fields, arbitrary
+    text, cookies, tokens, and PEM bodies never enter the assertion message.
+    """
+    result = {"status": status, "body_bytes": len(body)}
+    if len(body) > 64 * 1024:
+        return dict(result, problem="oversized body omitted")
+    try:
+        problem = json.loads(body)
+    except (ValueError, UnicodeError):
+        return dict(result, problem="non-JSON body omitted")
+    if not isinstance(problem, dict):
+        return dict(result, problem="non-object JSON omitted")
+    known = dict(api_problem.STATUS_DEFAULTS.values())
+    known.update({
+        "management-api-unavailable": "Management API unavailable",
+        "management-authentication-required": "Management authentication required",
+        "console-session-required": "Console session required",
+        "csrf-validation-failed": "CSRF validation failed",
+        "console-certificate-unavailable": "Console certificate unavailable",
+    })
+    public_types = {api_problem.TYPE_BASE + code for code in known}
+    public_text = set(known.values()) | {text.lower() for text in known.values()}
+    for field in ("type", "title", "detail", "error"):
+        if field in problem:
+            value = problem[field]
+            allowed = public_types if field == "type" else public_text
+            result[field] = (value if isinstance(value, str) and value in allowed
+                             else "[redacted]")
+    return result
+
+
+def test_certificate_http_diagnostic_retains_only_public_contract_text():
+    body = json.dumps({
+        "type": api_problem.TYPE_BASE + "management-api-unavailable",
+        "title": "Management API unavailable", "detail": "Management API unavailable",
+        "token": "secret-token", "csrf": "secret-csrf", "cookie": "secret-cookie",
+        "cert_pem": "-----BEGIN CERTIFICATE----- secret-certificate",
+        "key_pem": "-----BEGIN PRIVATE KEY----- secret-key",
+    }).encode()
+    assert _certificate_http_diagnostic(503, body) == {
+        "status": 503, "body_bytes": len(body),
+        "type": api_problem.TYPE_BASE + "management-api-unavailable",
+        "title": "Management API unavailable", "detail": "Management API unavailable",
+    }
+    for value in ("secret-token", "iris_sid=secret-cookie",
+                  "-----BEGIN PRIVATE KEY----- secret-key", ["secret-token"],
+                  {"value": "secret-token"}, None):
+        untrusted = json.dumps(dict.fromkeys(("type", "title", "detail", "error"), value)).encode()
+        assert _certificate_http_diagnostic(503, untrusted) == {
+            "status": 503, "body_bytes": len(untrusted),
+            "type": "[redacted]", "title": "[redacted]",
+            "detail": "[redacted]", "error": "[redacted]",
+        }
+    for untrusted, explanation in (
+            (b"-----BEGIN PRIVATE KEY----- secret-key", "non-JSON body omitted"),
+            (b'"secret-token"', "non-object JSON omitted"),
+            (b"x" * (64 * 1024 + 1), "oversized body omitted")):
+        assert _certificate_http_diagnostic(503, untrusted) == {
+            "status": 503, "body_bytes": len(untrusted), "problem": explanation}
+
+
 @pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
 def test_remote_console_reports_and_reloads_its_own_certificate(
         tmp_path, monkeypatch, projection_order):
@@ -508,17 +572,18 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
                 return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
 
     try:
-        assert request("/api/v1/settings")[0] == 401
+        status, _, body = request("/api/v1/settings")
+        assert status == 401, _certificate_http_diagnostic(status, body)
         status, login_headers, body = request(
             "/api/v1/login", "POST",
             json.dumps({"username": "admin", "password": "password-for-test"}),
             {"Content-Type": "application/json"})
-        assert status == 200
+        assert status == 200, _certificate_http_diagnostic(status, body)
         auth = {"Cookie": login_headers["Set-Cookie"].split(";", 1)[0],
                 "X-CSRF-Token": json.loads(body)["csrf"],
                 "Content-Type": "application/json"}
         status, headers, body = request("/api/v1/settings", headers=auth)
-        assert status == 200
+        assert status == 200, _certificate_http_diagnostic(status, body)
         assert int(headers["Content-Length"]) == len(body)
         settings = json.loads(body)
         assert settings["gui_cert"]["source"] == "built-in"
@@ -530,7 +595,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200
+        assert status == 200, _certificate_http_diagnostic(status, body)
         result = json.loads(body)
         assert result["applied"] is True and result["note"] is None
         assert result["gui_cert"]["source"] == "custom"
@@ -538,7 +603,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         assert served_fingerprint() == fingerprint(custom_cert)
         accepted_by_settings("cert", result)
         status, _, body = request("/api/v1/settings/gui-cert", "DELETE", headers=auth)
-        assert status == 200
+        assert status == 200, _certificate_http_diagnostic(status, body)
         result = json.loads(body)
         assert result["applied"] is True
         assert result["gui_cert"]["source"] == "built-in"
@@ -558,7 +623,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200
+        assert status == 200, _certificate_http_diagnostic(status, body)
         result = json.loads(body)
         assert result["applied"] is False and "restart" in result["note"]
         accepted_by_settings("cert", result)
