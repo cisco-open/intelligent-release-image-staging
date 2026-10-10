@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Remove temporary backup snapshots after a refused or failed capture while
+  retaining operation history and any captured encrypted archives.
+
 - Load restore validation from the installed deployment's verified source,
   including when the managed lifecycle worker runs from its separate runtime.
 

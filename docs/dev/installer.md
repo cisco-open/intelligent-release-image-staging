@@ -136,6 +136,8 @@ The managed worker keeps its Python runtime separate from the deployment source.
 Restore loads distribution-access validation from the verified live source, not
 from the backup. Test this layout in an isolated Python process so checkout
 imports cannot hide a missing runtime dependency.
+Backup capture releases its temporary topology snapshots after success or
+failure. Operation history and encrypted archives remain available for review.
 The scoped worker requires a verified backup for credential maintenance;
 `irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.
