@@ -18,28 +18,32 @@ function Deployment({data}) {
   const note = !data ? 'Reading deployment information…' : data.unavailable
     ? 'Deployment information could not be refreshed. Retrying automatically.' : data.note || '';
   return <section className="deployment-panel" aria-labelledby="deployment-heading">
-    <div className="deployment-heading">
-      <h3 id="deployment-heading">Deployment</h3>
-      <span id="deployment-layout" className="deployment-layout">{!data ? 'Loading…'
-        : data.unavailable ? 'Unavailable' : layouts[data.layout] || layouts.unknown}</span>
-      <span id="deployment-observed" className="muted">{available ? Number.isFinite(data.observed_at)
-        ? `Observed ${new Date(data.observed_at * 1000).toLocaleTimeString()}` : 'Observation time unavailable' : ''}</span>
-    </div>
-    <p id="deployment-context" className="muted" hidden={!context}>{context}</p>
-    <div className="table-scroll" id="deployment-table" hidden={!available || !data.components.length}
-      tabIndex={0} role="region" aria-label="IRIS containers and pods">
-      <table className="tbl deployment-table" aria-label="IRIS containers and pods">
-        <thead><tr><th scope="col">Component</th><th scope="col">Host / node</th><th scope="col">Environment</th><th scope="col">State</th></tr></thead>
-        <tbody id="deployment-rows">{available && data.components.map((item, index) => <tr key={`${item.role}:${item.name}:${index}`}>
-          <td>{item.role === 'server' ? 'Tracker / distribution' : item.role === 'console' ? 'Console' : 'Component'}
-            <small>{item.kind === 'pod' ? 'Pod: ' : item.kind === 'container' ? 'Container: ' : 'Runtime: '}{item.name || 'Not reported'}</small></td>
-          <td>{item.host || 'Not reported'}{item.address && <small>{item.kind === 'pod' ? 'Pod IP: ' : 'Host address: '}{item.address}</small>}</td>
-          <td>{[item.os, item.architecture].filter(Boolean).join(' · ') || (item.kind === 'pod' ? 'Pod container' : 'Container')}
-            {(item.image || item.kernel) && <small>{[item.image && `Image: ${item.image}`, item.kernel && `Kernel: ${item.kernel}`].filter(Boolean).join(' · ')}</small>}</td>
-          <td>{item.state || 'Not reported'}</td>
-        </tr>)}</tbody>
-      </table>
-    </div>
+    <details id="deployment-details">
+      <summary>
+        <h3 className="deployment-heading"><span id="deployment-heading">Deployment components</span>
+          <span id="deployment-layout" className="deployment-layout">{!data ? 'Loading…'
+            : data.unavailable ? 'Unavailable' : layouts[data.layout] || layouts.unknown}</span>
+          <span id="deployment-observed" className="muted">{available ? Number.isFinite(data.observed_at)
+            ? `Observed ${new Date(data.observed_at * 1000).toLocaleTimeString()}` : 'Observation time unavailable' : ''}</span>
+        </h3>
+      </summary>
+      <p id="deployment-context" className="muted" hidden={!context}>{context}</p>
+      <div className="table-scroll" id="deployment-table" hidden={!available || !data.components.length}
+        tabIndex={0} role="region" aria-label="IRIS containers and pods">
+        <table className="tbl deployment-table" aria-label="IRIS containers and pods">
+          <thead><tr><th scope="col">Component</th><th scope="col">Host / node</th><th scope="col">Environment</th><th scope="col">State</th></tr></thead>
+          <tbody id="deployment-rows">{available && data.components.map((item, index) => <tr key={`${item.role}:${item.name}:${index}`}>
+            <td>{item.role === 'server' ? 'Tracker / distribution' : item.role === 'console' ? 'Console' : 'Component'}
+              <small>{item.kind === 'pod' ? 'Pod: ' : item.kind === 'container' ? 'Container: ' : 'Runtime: '}{item.name || 'Not reported'}</small></td>
+            <td>{item.host || 'Not reported'}{item.address && <small>{item.kind === 'pod' ? 'Pod IP: ' : 'Host address: '}{item.address}</small>}</td>
+            <td>{[item.os, item.architecture].filter(Boolean).join(' · ') || (item.kind === 'pod' ? 'Pod container' : 'Container')}
+              {(item.image || item.kernel) && <small>{[item.image && `Image: ${item.image}`, item.kernel && `Kernel: ${item.kernel}`].filter(Boolean).join(' · ')}</small>}</td>
+            <td>{item.state || 'Not reported'}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      {available && !data.components.length && <p className="muted">No containers or pods were reported.</p>}
+    </details>
     <p id="deployment-note" className="muted" role="status" hidden={!note}>{note}</p>
   </section>;
 }

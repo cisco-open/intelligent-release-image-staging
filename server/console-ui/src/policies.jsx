@@ -23,7 +23,8 @@ function Policies({controller}) {
   }, [state, controller]);
   return <div className="policy-workspace" onFocusCapture={event => {lastFocus.current = event.target;}}>
     <div className="page-header"><h2 className="page-title">Policies</h2></div>
-    <p className="page-description">Choose which groups can exchange image pieces and use the distribution server. Assign devices to roles in <a href="#devices">Inventory</a>.</p>
+    <p className="page-description">Create or edit a role to choose which devices may exchange image pieces and use the distribution server. Preview the effect before saving, then assign devices in <a href="#devices">Inventory</a>.</p>
+    <p className="muted" id="policy-refresh-help">This page loads when you open it and after a save. Use Refresh policies to check for changes from elsewhere.</p>
     <p className="policy-warning" id="role-capability-banner" role="status" aria-live="polite" hidden={!warning}>{warning}</p>
     <div className="policy-simple-heading">
       <div><h3>Device-to-device sharing</h3><p className="muted">A role groups devices with the same rules. The table shows sharing allowed by both roles.</p></div>

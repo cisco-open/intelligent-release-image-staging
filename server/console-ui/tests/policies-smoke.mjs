@@ -11,7 +11,7 @@ const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = fileURLToPath(new URL('../', import.meta.url)), browser = await chromium.launch({headless: true});
 try {
   const page = await browser.newPage({viewport: {width: 1440, height: 1000}}); page.setDefaultTimeout(10000);
-  const errors = [], writes = [], prompts = [];
+  const errors = [], writes = [], prompts = [], policyReads = [];
   let mode = 'ok', held, reached, accept = true;
   const policy = {revision: 7, quarantine_assignments: [], roles_supported: true, roles: {defined: 2, restricted: 1, members: {boat: 2, fiber: 1}},
     enforcement: {state: 'enforced', stale: false, mutual_origin: {mode: 'preflight', newly_denied_device_count: 0}},
@@ -42,6 +42,7 @@ try {
         if (request.method() === 'PUT') {const {confirm_token, ...definition} = body; roles[url.pathname.split('/').at(-1)] = definition;}
         return route.fulfill({json: {ok: true, dry_run: false, revision: policy.revision, ...(request.method() === 'POST' ? {roles: 2} : {})}});
       }
+      if (url.pathname.startsWith('/api/v1/peer-policy')) policyReads.push(url.pathname);
       if (url.pathname.endsWith('/roles/export-csv')) return route.fulfill({body: 'role,restricted\nboat,true\nfiber,true\n', contentType: 'text/csv'});
       const fixtures = {'/api/v1/session': {username: 'Policy fixture', csrf: 'fixture-only'}, '/api/v1/help': {version: 'fixture'},
         '/api/v1/peer-policy': policy, '/api/v1/peer-policy/roles': {revision: policy.revision, roles}, '/api/v1/devices': {devices: [], total: 0, offset: 0, revision: 1, now: 2000000000},
@@ -56,8 +57,14 @@ try {
   const idle = () => page.waitForFunction(() => !window.irisPolicies.state.busy && !window.irisPolicies.state.loading);
   const save = async () => {await page.locator('#role-def-save').click(); await idle();};
   const edit = () => page.getByRole('button', {name: 'Edit role boat', exact: true}).click();
+  const tabAwayAndBack = () => page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', {configurable: true, value: true}); document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', {configurable: true, value: false}); document.dispatchEvent(new Event('visibilitychange'));
+    delete document.hidden;
+  });
   const snapshot = async name => {if (process.env.IRIS_BROWSER_SCREENSHOT_DIR) {await fs.mkdir(process.env.IRIS_BROWSER_SCREENSHOT_DIR, {recursive: true}); await page.screenshot({path: path.join(process.env.IRIS_BROWSER_SCREENSHOT_DIR, name + '.png')});}};
-  await page.goto('http://iris.test/#policies'); await page.waitForFunction(() => window.irisPolicies?.current());
+  await page.clock.install();
+  await page.goto('http://iris.test/#policies'); await page.waitForFunction(() => window.irisPolicies?.current()); await idle();
   assert.equal(await page.getByRole('heading', {name: 'Device-to-device sharing', exact: true}).count(), 1);
   for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
     await page.setViewportSize({width, height});
@@ -76,11 +83,32 @@ try {
   await page.locator('#role-def-save').focus(); await page.keyboard.press('Tab'); assert.equal(await focus('#role-def-modal-x'), true);
   await page.keyboard.press('Escape'); assert.equal(await page.getByRole('button', {name: 'Edit role boat', exact: true}).evaluate(node => node === document.activeElement), true);
   await edit(); await page.locator('#role-editor-advanced summary').click(); assert.equal(await page.locator('[data-qos]').count(), 17);
-  await page.locator('#rd-qos-numwant').fill('24'); await page.evaluate(() => window.irisPolicies.refresh()); assert.equal(await page.locator('#rd-qos-numwant').inputValue(), '24');
+  await page.locator('#rd-qos-numwant').fill('24'); await page.locator('#rd-qos-numwant').evaluate(node => node.setSelectionRange(0, 1));
+  const beforeIdleReads = policyReads.length, beforeScroll = await page.locator('#role-def-modal .modal-body').evaluate(node => node.scrollTop);
+  await page.clock.fastForward(16000); await tabAwayAndBack();
+  assert.equal(policyReads.length, beforeIdleReads, 'No five- or ten-second policy reads, including tab return');
+  assert.equal(await page.locator('#rd-qos-numwant').inputValue(), '24'); assert.equal(await focus('#rd-qos-numwant'), true);
+  assert.deepEqual(await page.locator('#rd-qos-numwant').evaluate(node => [node.selectionStart, node.selectionEnd]), [0, 1]);
+  assert.equal(await page.locator('#role-def-modal .modal-body').evaluate(node => node.scrollTop), beforeScroll);
+  assert.equal(await page.locator('#role-def-modal').isVisible(), true);
+  await page.locator('#rd-on-stale').selectOption('defaults');
+  assert.match(await page.locator('#role-expiry-choice').innerText(), /no upload or download speed limit/);
+  assert.match(await page.locator('#role-expiry-scope').innerText(), /Transfers can continue.*does not extend expired peer permissions/);
+  for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
+    await page.setViewportSize({width, height}); await page.locator('#role-expiry-help').scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await snapshot('policy-expiry-' + width);
+  }
+  await page.setViewportSize({width: 1440, height: 1000}); await page.locator('#rd-on-stale').selectOption('');
+  await page.evaluate(() => window.irisPolicies.refresh()); assert.equal(await page.locator('#rd-qos-numwant').inputValue(), '24');
   await page.locator('#rd-qos-overall_up_bps').fill('4096'); await save(); assert.equal(writes.length, 0); assert.match(await page.locator('#role-def-msg').innerText(), /8192/);
   await page.locator('#rd-qos-overall_up_bps').fill('16384'); await save(); assert.equal(await focus('#role-def-save'), true);
   assert.deepEqual(writes[0].body.qos_state, {seeder: {numwant: 8}});
   assert.match(await page.locator('#role-def-preview').innerText(), /Membership changes: 0.*Speed or agent settings changed: yes/s);
+  const reviewedText = await page.locator('#role-def-preview').innerText(), reviewedReads = policyReads.length;
+  await page.clock.fastForward(16000); await tabAwayAndBack();
+  assert.equal(policyReads.length, reviewedReads); assert.equal(await page.locator('#role-def-preview').innerText(), reviewedText);
+  assert.equal(await page.locator('#role-def-save').innerText(), 'Save role');
   for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
     await page.setViewportSize({width, height});
     await page.locator('#role-def-preview').scrollIntoViewIfNeeded();
@@ -117,7 +145,7 @@ try {
   accept = true; await page.locator('.role-def-delete[data-role="fiber"]').click(); await idle(); assert.match(await page.locator('#role-def-status').innerText(), /deleted at policy revision/);
   await snapshot('policy-diagnostics');
   await page.locator('#policy-advanced-close').click(); assert.equal(await focus('#policy-advanced-open'), true);
-  // A poll changing capability moves focus off the now-disabled edit button.
+  // An explicit refresh changing capability moves focus off the disabled edit button.
   await page.getByRole('button', {name: 'Edit role boat', exact: true}).focus(); policy.degraded = true;
   await page.evaluate(() => window.irisPolicies.refresh()); assert.equal(await focus('#policy-advanced-open'), true);
   assert.match(await page.locator('#role-capability-banner').innerText(), /degraded/); policy.degraded = false; await page.evaluate(() => window.irisPolicies.refresh());

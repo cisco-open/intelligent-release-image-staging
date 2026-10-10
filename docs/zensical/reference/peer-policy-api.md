@@ -47,7 +47,7 @@ Role names match `^[a-z0-9][a-z0-9._-]{0,31}$`, and at most 256 roles may exist.
 | `peers` | the role itself; at most 64 | Permitted role names. The list must contain the role itself. A link between two restricted roles must be symmetric; the server normalizes the reciprocal side for you. |
 | `origin` | `true` | Whether the tracker may introduce the server's own seeder to this restricted role. |
 | `nets` | empty | Optional IPv4 subnet hints for role management. |
-| `on_stale` | `keep` for restricted roles, `defaults` otherwise | What happens to QoS when the policy goes stale: keep the last verified values, or fall back to defaults. |
+| `on_stale` | `keep` for restricted roles, `defaults` otherwise, unless overridden globally | After the last verified instruction expires, retain its transfer settings or use built-in device settings. See [Choose behavior when instructions expire](../user-guide/roles.md#choose-behavior-when-instructions-expire). |
 | `qos` | empty | Overrides the global QoS values for this role, for the keys that allow a role scope. |
 | `qos_state` | omitted | The seeder and leecher tracker cadence overlay for this role. Tracker-only; editable through the API or role CSV. |
 
@@ -77,7 +77,7 @@ Values are integers. Rate keys are bytes per second, and `0` means unlimited; a 
 | `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | Catalog and staging cadence. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
 | `telemetry_every_ticks` | 1 | 1–60 | global, role, device | Ticks between telemetry sends. |
 | `telemetry_pause` | `false` | boolean | global, role, device | Suspends telemetry sends without changing anything else. |
-| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | What happens to QoS when the policy goes stale. |
+| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | Retain verified transfer settings after expiry, or restore built-in device settings. |
 | `origin_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Origin-wide upload limit; unlimited by default. |
 | `origin_per_torrent_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Per-image origin upload limit; unlimited by default. |
 | `origin_max_peers` | 55 | 1–1,000 | global only | Origin per-torrent peer cap. |
@@ -127,7 +127,7 @@ Use the returned `policy_revision`, not the example value above. `mode` is `pref
 
 The confirmation binds exact device identities and addresses, not just their counts. Changed endpoints, policy, control revision or request fields require a new preview. Preview returns the proposed mode but does not apply it. Commit advances the control revision and returns `pending` with no applied proof.
 
-GET separates requested `mode` from actual `state`. The Console labels these **Saved mode** and **Transfer-service status**. Only `enforced`, with non-null applied counts, `last_verified_at`, no `reason` and no blockers, confirms recent application. The Console shows **Blocks confirmed** for that state. Proof expires after 120 seconds. `review_required`, `degraded` or `unavailable` needs attention; never interpret **Approved for blocking** as **Confirmed blocked**. Shared-address conflicts cannot be fully enforced with an IP blocklist. Switching to `preflight` uses the same review procedure.
+GET separates requested `mode` from actual `state`. The Console labels these **Saved mode** and **Transfer-service status at last refresh**. Only `enforced`, with non-null applied counts, `last_verified_at`, no `reason` and no blockers, confirms recent application. The Console shows **Blocks confirmed** for that state. Proof expires after 120 seconds. Select **Refresh status** for current confirmation. `review_required`, `degraded` or `unavailable` needs attention; never interpret **Approved for blocking** as **Confirmed at last refresh**. Shared-address conflicts cannot be fully enforced with an IP blocklist. Switching to `preflight` uses the same review procedure.
 
 Missing `If-Match` returns `428 precondition_required`; a stale control marker returns `412 precondition_failed`. A changed policy returns `409 policy_revision_conflict`, a stale confirmation `409 origin_review_stale`, and an unsafe apply `409 origin_enforcement_blocked`. Invalid input returns `422 invalid_origin_enforcement`; unreadable private state returns `503 origin_enforcement_unavailable`. After an uncertain commit, reread current state before starting another preview.
 

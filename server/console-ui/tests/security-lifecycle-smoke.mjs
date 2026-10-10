@@ -46,7 +46,12 @@ try {
   await page.goto('http://iris.test/#settings/certificates');
   const idle = () => page.waitForFunction(() => window.irisSecurityLifecycle && !window.irisSecurityLifecycle.state.busy && !Object.values(window.irisSecurityLifecycle.state.loading).some(Boolean));
   const tab = async name => {await page.evaluate(name => {location.hash = '#settings/' + name;}, name); await page.locator('#settings-pane-' + name).waitFor({state: 'visible'}); await idle();};
-  await page.locator('#browser-tls-state').getByText('Approved certificate ready to apply.', {exact: true}).waitFor(); await idle();
+  await idle();
+  assert.equal(await page.locator('#browser-certificate-controls').evaluate(node => node.open), false);
+  assert.match(await page.locator('#browser-certificate-controls > summary').innerText(), /Approved certificate ready to apply/);
+  await page.locator('#browser-certificate-controls > summary').click();
+  await page.locator('#telemetry-credential-controls > summary').click();
+  await page.locator('#browser-tls-state').getByText('Approved certificate ready to apply.', {exact: true}).waitFor();
   assert.match(await page.locator('#browser-tls-next-step').innerText(), /current browser certificate is still active/);
   assert.match(await page.locator('[data-security-group=tls]').innerText(), /browser to the Console/);
   await page.locator('#browser-tls-workflow summary').click();
@@ -57,6 +62,9 @@ try {
     assert.match(await page.locator('#browser-tls-result').innerText(), /Outcome unknown/);
     assert.equal(await page.locator('#browser-tls-apply').isDisabled(), true);
     assert.equal(await page.locator('#browser-tls-result').evaluate(node => node === document.activeElement), true);
+    await page.locator('#browser-certificate-controls > summary').click();
+    assert.match(await page.locator('#browser-certificate-controls > summary').innerText(), /Outcome unknown.*review before continuing/);
+    await page.locator('#browser-certificate-controls > summary').click();
     const count = writes.length; await tab('general'); await tab('certificates');
     assert.equal(writes.length, count); assert.equal(await page.locator('#browser-tls-apply').isDisabled(), true, 'Navigation does not acknowledge uncertain outcomes');
     await page.locator('#browser-tls-refresh').click(); await idle();
@@ -74,6 +82,7 @@ try {
   assert.match(await page.locator('#service-credential-result').innerText(), /Outcome unknown/);
   assert.equal(await page.locator('#service-credential-token').inputValue(), '');
   assert.equal(await page.locator('#service-credential-replace').isDisabled(), true);
+  assert.match(await page.locator('#telemetry-credential-controls > summary').innerText(), /Outcome unknown.*review before continuing/);
   assert.equal(await page.evaluate(() => JSON.stringify(window.irisSecurityLifecycle.pending).includes('browser-only-secret')), false);
   await page.locator('#service-credential-family').selectOption('collector-headers');
   await page.locator('#service-credential-endpoint').fill('https://collector.example:4318');
@@ -109,6 +118,11 @@ try {
       }
     }
   }
+  await page.locator('#service-credential-headers [data-field=value]').fill('unsent-private-value');
+  await page.locator('#telemetry-credential-controls > summary').click();
+  await page.waitForFunction(() => window.irisSecurityLifecycle.state.headers.every(row => !row.value));
+  await page.locator('#telemetry-credential-controls > summary').click();
+  assert.equal(await page.locator('#service-credential-headers [data-field=value]').inputValue(), '', 'Collapsing clears entered secrets without changing the pending operation');
   await page.locator('#service-credential-headers [data-field=value]').fill('unsent-private-value');
   await tab('general'); await tab('certificates');
   assert.equal(await page.locator('#service-credential-headers [data-field=value]').inputValue(), '');

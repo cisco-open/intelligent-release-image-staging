@@ -11,13 +11,13 @@ const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = fileURLToPath(new URL('../', import.meta.url)), browser = await chromium.launch({headless: true});
 try {
   const page = await browser.newPage({viewport: {width: 1440, height: 1000}}); page.setDefaultTimeout(10000);
-  const errors = [], writes = [], token = 'a'.repeat(64);
+  const errors = [], writes = [], reads = [], prompts = [], token = 'a'.repeat(64);
   const policy = {revision: 7, quarantine_assignments: [], roles_supported: true, roles: {defined: 0, members: {}}};
   let value = {revision: 0, policy_revision: 7, mode: 'preflight', max_new_ips: 10, max_new_devices: 10,
     approved_ip_count: 0, approved_device_count: 0, new_ip_count: 2, new_device_count: 3, retained_ip_count: 0,
     proposed_ip_count: 2, proposed_device_count: 3, shared_conflict_count: 0, protected_conflict_count: 0,
     state: 'preflight', reason: null, applied_ip_count: null, applied_device_count: null, last_verified_at: null, blockers: []};
-  let mode = 'ok', held, reached;
+  let mode = 'ok', held, reached, accept = true;
   const response = body => ({json: body, headers: {ETag: `"origin-enforcement-${body.revision}"`}});
   const preview = body => ({...value, mode: body.mode, max_new_ips: body.max_new_ips, max_new_devices: body.max_new_devices,
     // Native release previews describe an empty proposed set, not a count of
@@ -26,11 +26,12 @@ try {
       proposed_ip_count: 0, proposed_device_count: 0} : {}),
     dry_run: true, requires_confirmation: true, confirm_token: token});
   page.on('pageerror', error => errors.push(error.message));
+  page.on('dialog', async dialog => {prompts.push(dialog.message()); await (accept ? dialog.accept() : dialog.dismiss());});
   await page.addInitScript(() => {window.csp = []; window.addEventListener('securitypolicyviolation', event => window.csp.push(event.violatedDirective));});
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url()); assert.equal(url.origin, 'http://iris.test');
     if (url.pathname === '/api/v1/peer-policy/origin-enforcement') {
-      if (request.method() === 'GET') return route.fulfill(response(value));
+      if (request.method() === 'GET') {reads.push(url.pathname); return route.fulfill(response(value));}
       const body = request.postDataJSON(); writes.push({body, headers: request.headers()});
       assert.equal(request.method(), 'PUT'); assert.equal(request.headers()['x-csrf-token'], 'fixture-only');
       assert.equal(request.headers()['if-match'], `"origin-enforcement-${value.revision}"`);
@@ -60,16 +61,23 @@ try {
   const idle = () => page.waitForFunction(() => !window.irisPolicies.origin.state.busy && !window.irisPolicies.origin.state.loading);
   const apply = async () => {await page.locator('#origin-apply').click(); await idle();};
   const refresh = async () => {await page.locator('#origin-refresh').click(); await idle();};
+  const tabAwayAndBack = () => page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', {configurable: true, value: true}); document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', {configurable: true, value: false}); document.dispatchEvent(new Event('visibilitychange'));
+    delete document.hidden;
+  });
   const snapshot = async name => {if (process.env.IRIS_BROWSER_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.IRIS_BROWSER_SCREENSHOT_DIR, {recursive: true});
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({path: path.join(process.env.IRIS_BROWSER_SCREENSHOT_DIR, name + '.png'), fullPage: true});
   }};
-  await page.goto('http://iris.test/#policies'); await page.waitForFunction(() => window.irisPolicies?.origin.state.ready);
+  await page.clock.install();
+  await page.goto('http://iris.test/#policies'); await page.waitForFunction(() => window.irisPolicies?.origin.state.ready); await idle();
   assert.equal(await page.locator('#origin-application-state').innerText(), 'Preview only');
   assert.equal(await page.locator('#origin-saved-mode').innerText(), 'Preview only');
   assert.equal(await page.locator('#origin-approved-counts').innerText(), '0 devices · 0 addresses');
   assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
+  assert.match(await page.locator('#origin-refresh-help').innerText(), /from your last read/);
   await snapshot('distribution-preview-only');
   await page.locator('#origin-mode').selectOption('enforce'); await page.locator('#origin-max_new_ips').fill('1001'); await apply();
   assert.equal(writes.length, 0); assert.match(await page.locator('#origin-message').innerText(), /0 to 1000/);
@@ -80,6 +88,21 @@ try {
   assert.equal(await page.locator('#origin-saved-mode').innerText(), 'Preview only', 'A requested draft does not replace saved settings');
   assert.equal(await page.locator('#origin-application-state').innerText(), 'Preview only');
   assert.equal(await page.locator('#origin-confirmed-counts').innerText(), 'Not confirmed');
+  const beforeTimer = reads.length, approved = await page.locator('#origin-preview').innerText();
+  await page.locator('#origin-max_new_devices').focus();
+  await page.locator('#origin-max_new_devices').evaluate(node => node.setSelectionRange(0, 1));
+  const scroll = await page.evaluate(() => window.scrollY);
+  await page.clock.fastForward(16000); await tabAwayAndBack();
+  assert.equal(reads.length, beforeTimer, 'No automatic origin reads while editing or on tab return');
+  assert.equal(await page.locator('#origin-preview').innerText(), approved);
+  assert.equal(await page.locator('#origin-max_new_devices').evaluate(node => node === document.activeElement), true);
+  assert.deepEqual(await page.locator('#origin-max_new_devices').evaluate(node => [node.selectionStart, node.selectionEnd]), [0, 1]);
+  assert.equal(await page.evaluate(() => window.scrollY), scroll);
+  accept = false; await refresh();
+  assert.match(prompts.at(-1), /Unsaved changes and the current preview will be discarded/);
+  assert.equal(reads.length, beforeTimer); assert.equal(await page.locator('#origin-preview').innerText(), approved);
+  assert.equal(await page.locator('#origin-refresh').evaluate(node => node === document.activeElement), true);
+  assert.equal(await page.locator('#origin-mode').inputValue(), 'enforce'); accept = true;
   for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
     await page.setViewportSize({width, height}); await page.locator('#origin-apply').scrollIntoViewIfNeeded();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

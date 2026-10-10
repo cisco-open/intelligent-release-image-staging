@@ -49,6 +49,8 @@ try {
   const idle = () => page.waitForFunction(() => window.irisWorkerLifecycle && !window.irisWorkerLifecycle.state.busy && !Object.values(window.irisWorkerLifecycle.state.loading).some(Boolean));
   const tab = async name => {await page.evaluate(name => {location.hash = '#settings/' + name;}, name); await page.locator('#settings-pane-' + name).waitFor({state: 'visible'}); await idle();};
   await page.goto('http://iris.test/#settings/certificates'); await idle();
+  await page.locator('#deployment-key-controls > summary').click();
+  await page.locator('#scheduled-key-controls > summary').click();
   await page.locator('#deployment-rotation-family').selectOption('peer-ca');
   assert.match(await page.locator('#deployment-rotation-purpose').innerText(), /Encrypted transfers between peers.*Remove.*IRIS deployments/s);
   await page.getByRole('link', {name: 'Open devices to remove IRIS deployments'}).click();
@@ -63,6 +65,9 @@ try {
     assert.match(await page.locator('#deployment-rotation-result').innerText(), /Outcome unknown/);
     assert.equal(await page.locator('#deployment-rotation-approve').isDisabled(), true);
     assert.equal(await page.locator('#deployment-rotation-result').evaluate(node => node === document.activeElement), true);
+    await page.locator('#deployment-key-controls > summary').click();
+    assert.match(await page.locator('#deployment-key-summary').innerText(), /Outcome unknown.*review before continuing/);
+    await page.locator('#deployment-key-controls > summary').click();
     assert.equal(await page.locator('#deployment-rotation-certificate').evaluate(node => node.files.length), 0);
     const count = writes.length; await tab('backups'); await tab('certificates');
     assert.equal(writes.length, count); assert.equal(await page.locator('#deployment-rotation-approve').isDisabled(), true);
@@ -73,6 +78,9 @@ try {
   await page.locator('#maintenance-save').click(); await idle();
   assert.match(await page.locator('#maintenance-result').innerText(), /Outcome unknown/);
   assert.equal(await page.locator('#maintenance-save').isDisabled(), true);
+  await page.locator('#scheduled-key-controls > summary').click();
+  assert.match(await page.locator('#scheduled-key-summary').innerText(), /Outcome unknown.*review before continuing/);
+  await page.locator('#scheduled-key-controls > summary').click();
   await page.locator('#maintenance-refresh').click(); await idle(); mode = 'success';
   await page.locator('#maintenance-save').click(); await idle();
   assert.match(await page.locator('#maintenance-result').innerText(), /Schedule saved at revision 1/);

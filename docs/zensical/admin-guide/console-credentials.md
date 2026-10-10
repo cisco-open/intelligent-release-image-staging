@@ -17,7 +17,7 @@ and the private Console-to-server connection have separate certificates.
 
 ## Replace the browser certificate
 
-1. In **Replace the Console browser certificate**, enter every exact DNS name
+1. Expand **Replace the Console browser certificate**. Enter every exact DNS name
    and IP address used to reach the Console. Separate names with commas; do not
    enter URLs or wildcards.
 2. Choose **My certificate authority (CA)** and select **Create replacement
@@ -72,7 +72,7 @@ A status refresh shows publication progress; it does not prove listener reload.
 
 ## Replace the metrics scraping token
 
-1. Under **Rotate telemetry credentials**, choose **Metrics scraping token**.
+1. Expand **Rotate telemetry credentials**, then choose **Metrics scraping token**.
 2. Select **Generate token in this browser**, or enter a replacement token.
    Select **Download private token file** and protect it as a credential.
    Status responses do not return the token later.

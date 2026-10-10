@@ -49,18 +49,35 @@ def test_policy_definitions_and_editor_belong_to_the_policies_page():
     assert "<PolicyDialogs" in (SOURCE / "policies.jsx").read_text()
 
 
-def test_policy_navigation_and_visible_poll_are_wired():
+def test_policy_navigation_loads_once_without_recurring_form_refreshes():
     js = (WEBROOT / "app.js").read_text()
     shell = (SOURCE / "main.jsx").read_text()
     assert "['policies', 'Policies', 'list-checks']" in shell
-    assert "else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }" in js
+    assert "else if (view === 'policies') { refreshPolicies(); }" in js
+    assert "poll = refreshPolicies" not in js
     assert "if (view !== 'policies') {" in js
     assert "function cancelPolicyReads() { policies.hide(); }" in js
+    assert "roleActions.hide(); policies.pause();" in js
     assert "function refreshPolicies() { return policies.refresh(); }" in js
+    assert "setInterval" not in (SOURCE / "origin-enforcement.jsx").read_text()
     assert "closeModal('role-def-modal')" not in js
     assert "policyTicket === peerPolicyReadGeneration" in js.split(
         "publish: function (state, policyTicket) {", 1)[1].split(
             "selectionChanged: updateSelBar", 1)[0]
+
+
+def test_expiry_choices_explain_transfer_settings_not_expiring_role_or_stop_timer():
+    model = (SOURCE / "policy-definitions-model.mjs").read_text()
+    for phrase in ("Follow the server setting", "Keep last verified settings",
+                   "Use built-in device settings", "no upload or download speed limit",
+                   "not your current role or server defaults", "Server-wide overrides"):
+        assert phrase in model
+    dialogs = (SOURCE / "policy-dialogs.jsx").read_text()
+    for phrase in ("Each message has an expiry time", "before a valid replacement arrives",
+                   "Transfers can continue with either choice",
+                   "does not extend expired peer permissions"):
+        assert phrase in dialogs
+    assert 'aria-describedby="role-expiry-help role-expiry-choice role-expiry-scope"' in dialogs
 
 
 def test_policy_reads_reject_late_bodies_hidden_routes_and_old_shared_tickets():

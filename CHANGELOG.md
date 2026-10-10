@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify Policies and certificate maintenance with plain-language choices and
+  expandable technical details. Stop periodic refreshes on the Policies form
+  and confirm before discarding edited distribution settings. Keep deployment
+  components collapsed on Overview until opened, without hiding read failures.
+
 - Make guided installation manage signing-key passphrases automatically. Generate
   strong random passphrases, keep them in protected local storage, and sign the
   checked server request without certificate-password prompts. Preserve existing

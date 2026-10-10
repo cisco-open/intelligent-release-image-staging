@@ -39,12 +39,24 @@ export class OriginEnforcementController {
   }
   hide() {
     this.cancel(this.state.committing ? 'A change is still being saved. Leaving this page does not cancel it.' : '');
+    this.pause();
+  }
+  pause() {
+    if (this.state.busy && !this.state.committing) {
+      this.writeGeneration++;
+      this.update({message: 'Preview interrupted. Preview again when you return.'});
+    }
     this.readGeneration++; this.reader?.abort(); this.reader = null; this.update({loading: false});
   }
   field(name, value) {
     if (this.state.committing || !Object.hasOwn(this.state.form, name)) return;
     this.cancel('Settings changed. Preview again before applying.');
     this.update({form: {...this.state.form, [name]: value}, dirty: true, failed: false});
+  }
+  async review() {
+    if (!this.visible() || this.state.busy) return false;
+    if (this.state.dirty && !this.services.confirm('Refresh the saved distribution settings? Unsaved changes and the current preview will be discarded.')) return false;
+    return this.refresh(true);
   }
   async refresh(review = false) {
     if (!this.visible() || this.state.busy) return false;
@@ -94,7 +106,7 @@ export class OriginEnforcementController {
       if (committing) {
         const result = originWriteResult(response, body, request, revision);
         this.update({preview: null, ready: false, reviewRequired: result === 'unknown', dirty: false,
-          message: result === 'saved' ? 'Review saved. Waiting for the transfer service to confirm application.' : result === 'unknown' ? UNKNOWN : originProblem(response.status, body),
+          message: result === 'saved' ? 'Review saved. Waiting for the transfer service to confirm application. Choose Refresh status to check.' : result === 'unknown' ? UNKNOWN : originProblem(response.status, body),
           failed: result !== 'saved'});
       } else if (!response.ok) {
         this.update({preview: null, ready: false, message: originProblem(response.status, body), failed: true});
@@ -110,7 +122,7 @@ export class OriginEnforcementController {
     } finally {
       this.update({busy: false, committing: false});
       if (!keepLock || mine !== this.writeGeneration) this.release();
-      // An automatic status poll is never enough to clear an unknown write.
+      // Post-save readback is never enough to clear an unknown write.
       if (committing && this.visible()) await this.refresh();
     }
   }

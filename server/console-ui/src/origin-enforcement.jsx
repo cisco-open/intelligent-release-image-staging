@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-import {useEffect, useLayoutEffect, useRef, useSyncExternalStore} from 'react';
+import {useLayoutEffect, useRef, useSyncExternalStore} from 'react';
 import {originApplicationConfirmed, originModeLabel, originNextAction, originReasons, originStates} from './origin-enforcement-model.mjs';
 
 const number = value => Number.isSafeInteger(value) && value >= 0 ? value : 'Unavailable';
@@ -10,10 +10,6 @@ export function OriginEnforcement({controller}) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
   const {value, form, preview, busy, committing, ready} = state;
   const heading = useRef(null), apply = useRef(null), wasBusy = useRef(false);
-  useEffect(() => {
-    const timer = setInterval(() => {if (!controller.state.loading && !controller.state.busy) controller.refresh();}, 5000);
-    return () => clearInterval(timer);
-  }, [controller]);
   useLayoutEffect(() => {
     if (wasBusy.current && !busy && controller.visible() && document.activeElement === heading.current
       && preview && !preview.body.blockers.length) apply.current?.focus({preventScroll: true});
@@ -25,11 +21,12 @@ export function OriginEnforcement({controller}) {
   return <section className="origin-enforcement" aria-labelledby="origin-enforcement-title">
     <h3 id="origin-enforcement-title" ref={heading} tabIndex={-1}>Distribution access</h3>
     <p className="muted">Apply the saved access rules to transfers from the distribution server. Preview the affected devices and addresses before you approve any blocks.</p>
+    <p className="muted" id="origin-refresh-help">The status below is from your last read. Choose Refresh status to check current application.</p>
     <dl className="origin-current" aria-label="Saved distribution settings and confirmed effect">
       <div><dt>Saved mode</dt><dd id="origin-saved-mode">{checked ? originModeLabel(checked.mode) : 'Unavailable'}</dd></div>
-      <div><dt>Transfer-service status</dt><dd id="origin-application-state" role="status">{checked ? originStates[checked.state] : 'Status unavailable'}</dd></div>
+      <div><dt>Transfer-service status at last refresh</dt><dd id="origin-application-state" role="status">{checked ? originStates[checked.state] : 'Status unavailable'}</dd></div>
       <div><dt>Approved for blocking</dt><dd id="origin-approved-counts">{checked ? <>{number(checked.approved_device_count)} devices · {number(checked.approved_ip_count)} addresses</> : 'Unavailable'}</dd></div>
-      <div><dt>Confirmed blocked</dt><dd id="origin-confirmed-counts">{originApplicationConfirmed(checked)
+      <div><dt>Confirmed at last refresh</dt><dd id="origin-confirmed-counts">{originApplicationConfirmed(checked)
         ? <>{number(checked.applied_device_count)} devices · {number(checked.applied_ip_count)} addresses</> : 'Not confirmed'}</dd></div>
     </dl>
     {checked?.last_verified_at && <p className="muted">Last confirmed by the transfer service: {new Date(checked.last_verified_at * 1000).toLocaleString()}.</p>}
@@ -70,7 +67,7 @@ export function OriginEnforcement({controller}) {
           {busy ? committing ? 'Saving…' : 'Reviewing…' : preview ? 'Apply reviewed change' : 'Preview change'}</button>
         {preview && <button className="btn ghost" type="button" disabled={committing} onClick={() => start(() => controller.cancel())}>Cancel review</button>}
         <button className="btn ghost" type="button" id="origin-refresh" disabled={busy || state.loading}
-          onClick={() => start(() => controller.refresh(true))}>{state.loading ? 'Refreshing…' : 'Refresh status'}</button>
+          onClick={() => controller.review()}>{state.loading ? 'Refreshing…' : 'Refresh status'}</button>
       </div>
     </form>
     <p className="muted">Blocks apply to IP addresses. Devices allowed and denied access need different addresses; a shared address cannot be blocked for only one device.</p>

@@ -4,7 +4,7 @@
 
 import {useLayoutEffect, useRef} from 'react';
 import {distributionAllowed, policyDiagnostics} from './policy-model.mjs';
-import {roleQosFields, rateHint} from './policy-definitions-model.mjs';
+import {roleQosFields, rateHint, expiryChoices} from './policy-definitions-model.mjs';
 
 const countLabels = [['policy-roles-defined', 'Roles defined'], ['policy-roles-restricted', 'Roles with sharing limits'],
   ['policy-role-drift', 'Devices with mismatched roles'], ['policy-outbox', 'Changes awaiting tracker confirmation']];
@@ -138,14 +138,20 @@ export function PolicyDialogs({controller, state, disabled}) {
             </fieldset>
           </div>
           <details id="role-editor-advanced" key={editor?.key} className="policy-diagnostics">
-            <summary>Speed limits and agent settings</summary><div className="role-def-grid">
-              {field('nets', 'rd-nets', <>Networks <span className="muted">IPv4 prefixes, comma separated</span></>, {placeholder: 'e.g. 10.20.0.0/16'})}
-              <label className="field" htmlFor="rd-on-stale"><span className="field-label">When instructions expire</span>
-                <select id="rd-on-stale" value={form.onStale} disabled={committing} onChange={event => controller.field('onStale', event.target.value)}>
-                  <option value="">Inherit (keep for restricted, defaults otherwise)</option><option value="keep">Keep the last verified QoS</option><option value="defaults">Fall back to defaults</option>
-                </select></label></div>
+            <summary>Speed limits and agent settings</summary>
+            <div className="policy-expiry">
+              <h4>If the device cannot get fresh settings</h4>
+              <p id="role-expiry-help">The server sends signed messages with transfer settings. Each message has an expiry time. Choose what happens if it expires before a valid replacement arrives.</p>
+              <label className="field" htmlFor="rd-on-stale"><span className="field-label">After the settings expire</span>
+                <select id="rd-on-stale" value={form.onStale} disabled={committing} aria-describedby="role-expiry-help role-expiry-choice role-expiry-scope" onChange={event => controller.field('onStale', event.target.value)}>
+                  {expiryChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+                </select></label>
+              <p id="role-expiry-choice">{expiryChoices.find(choice => choice.value === form.onStale)?.help}</p>
+              <p className="muted" id="role-expiry-scope">Transfers can continue with either choice. This does not extend expired peer permissions or stop all existing connections.</p>
+            </div>
+            <div className="role-def-grid">{field('nets', 'rd-nets', <>Networks <span className="muted">IPv4 prefixes, comma separated</span></>, {placeholder: 'e.g. 10.20.0.0/16'})}</div>
             <h4>Speed limits <span className="muted">bytes per second · 0 = unlimited · otherwise at least 8192 · blank = inherit</span></h4><div className="role-def-grid" id="rd-rates">{qosFields(true)}</div>
-            <h4>Swarm and agent cadence <span className="muted">blank = inherit</span></h4><div className="role-def-grid" id="rd-swarm">{qosFields(false)}</div>
+            <h4>Peer connections and check-in timing <span className="muted">blank = inherit</span></h4><div className="role-def-grid" id="rd-swarm">{qosFields(false)}</div>
           </details>
           {controller.capability() && <p className="err" role="status">{controller.capability()}</p>}
           <p className="role-preview" id="role-def-preview" aria-live="polite" hidden={!preview}>{preview?.text}</p>

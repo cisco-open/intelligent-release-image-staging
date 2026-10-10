@@ -36,6 +36,13 @@ export class PoliciesController {
   cancelReads() {this.readGeneration++; this.reader?.abort(); this.reader = null; this.update({loading: false});}
   close() {this.writeGeneration++; this.update({dialog: null, preview: null}); if (!this.state.busy) this.release();}
   hide() {this.close(); this.origin.hide(); this.cancelReads(); this.downloadReader?.abort(); this.downloadReader = null; this.update({downloading: false});}
+  pause() {
+    if (this.state.busy && !this.state.committing) {
+      this.writeGeneration++;
+      this.update({formMessage: 'Preview interrupted. Preview again when you return.', message: 'Review interrupted before saving. Start a new preview when you return.'});
+    }
+    this.cancelReads(); this.origin.pause(); this.downloadReader?.abort(); this.downloadReader = null; this.update({downloading: false});
+  }
   advanced() {if (this.state.dialog === 'editor') this.close(); this.update({dialog: 'advanced'});}
   async refresh(review = false) {
     if (!this.visible() || this.state.busy) return false;

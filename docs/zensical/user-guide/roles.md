@@ -42,6 +42,8 @@ own speed limits. Sharing needs permission from both roles.
 
 Open **Policies → Device-to-device sharing**. Each row shows a role, the other
 roles it may share with, and its distribution-server permission.
+The page loads when you open it and after a save. Select **Refresh policies**
+to check for changes from elsewhere while keeping your open role draft.
 
 1. Select **New role**, or **Edit** on a row.
 2. Turn on **Limit sharing to selected roles**, then enter **Other roles to
@@ -65,6 +67,23 @@ overrides (`qos_state`) use the management API or the role CSV below; editing ot
 them. Pair explanations are available only through
 `GET /api/v1/peer-policy/explain`.
 
+### Choose behavior when instructions expire
+
+Under **Speed limits and agent settings**, find **If the device cannot get fresh
+settings**. The server sends each device a signed
+[instruction](../reference/glossary.md#instruction) with transfer settings and an
+expiry time. Choose what happens if it expires before a valid replacement arrives.
+
+| Choice | What the device agent does |
+| --- | --- |
+| **Follow the server setting** | Uses the server's effective setting. Without an override, roles with sharing limits keep verified settings; other roles use built-in settings. Server-wide overrides can change this. |
+| **Keep last verified settings** | Keeps the last verified transfer limits and check-in timing until a valid replacement arrives. |
+| **Use built-in device settings** | Restores the agent's built-in settings, including no upload or download speed limit. These are not your current role or server defaults. |
+
+Transfers can continue with either behavior. This setting does not extend
+expired peer permissions or stop every existing connection. Save the role
+through **Preview change**, then **Save role**.
+
 !!! warning
     Do not edit server state files by hand.
 
@@ -80,11 +99,12 @@ The saved mode is separate from the transfer service's confirmed effect.
 3. Select **Preview change**. Review new and retained counts and resolve any
    checks shown. Applying can disconnect existing transfers from those addresses.
 4. Select **Apply reviewed change**. **Saved mode** records the request;
-   **Transfer-service status** first shows **Waiting for confirmation**.
-   Wait for **Blocks confirmed** before treating the reviewed blocks as applied.
+   **Transfer-service status at last refresh** first shows **Waiting for confirmation**.
+   Select **Refresh status** to check for **Blocks confirmed** before treating the reviewed blocks as applied.
 
 **Approved for blocking** counts the devices and addresses you approved.
-**Confirmed blocked** counts what the transfer service confirmed. **Not
+**Confirmed at last refresh** counts what the transfer service confirmed at that
+read. Select **Refresh status** for current confirmation. **Not
 confirmed** means that proof is unavailable, not that the count is zero.
 The **Next step** text tells you whether to preview, wait or refresh.
 
@@ -93,7 +113,8 @@ origin information or shared allowed/denied addresses prevents full enforcement.
 Use distinct addresses for those devices. Returning to **Preview only** uses the
 same preview and apply steps; ordinary quarantine and revocation remain active.
 If a save is uncertain, select **Refresh status** and check the current settings
-before previewing again.
+before previewing again. If you have unsaved changes, refreshing asks before
+discarding your draft and preview. Canceling keeps them and sends no read.
 
 ### Import and export the definitions file
 

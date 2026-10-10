@@ -654,7 +654,7 @@
     scheduled: function (id) { return schedules.scheduled(id); }
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); policies.hide(); }
+    if (document.hidden) { inventory.hide(); deviceForms.hide(); assignments.hide(); inventoryActions.hide(); schedules.hide(); roleActions.hide(); policies.pause(); }
     else if (!document.getElementById('view-devices').hidden) { deviceForms.resume(); schedules.resume(); }
   });
 
@@ -1185,7 +1185,12 @@
     },
     openSigner: function () {
       refreshRotation();
-      document.getElementById('signer-rotation').scrollIntoView({block: 'start'});
+      var target = document.getElementById('signer-rotation');
+      for (var node = target; node; node = node.parentElement) {
+        if (node.tagName === 'DETAILS') node.open = true;
+      }
+      target.scrollIntoView({block: 'start'});
+      target.querySelector('summary').focus({preventScroll: true});
     }
   });
 
@@ -1277,7 +1282,7 @@
   }
   publishHelp();
 
-  // The router remains the only Policies polling timer.
+  // Policies refresh on entry and operator request, not on a timer.
   function cancelPolicyReads() { policies.hide(); }
   function refreshPolicies() { return policies.refresh(); }
 
@@ -1353,16 +1358,15 @@
     if (view === 'settings') showSettingsSub(sub || 'general');
     if (view === 'monitoring') showMonitoringSub(sub || 'audit');
     else monitoringCommand('hide');
-    // Each view names the refresh the poll should repeat. Settings is
-    // deliberately excluded: it is a set of forms, and re-rendering them
-    // under the operator's cursor would discard half-typed input.
+    // Monitoring views poll. Settings and Policies are configuration forms;
+    // refresh them on entry or request without interrupting work on a timer.
     var poll = null;
     if (view === 'overview') { refreshOverview(); poll = refreshOverview; }
     else if (view === 'images') {
       refreshImages(); refreshImportable();
       poll = function () { refreshImages(); refreshImportable(); };
     } else if (view === 'devices') { refreshDevices(); deviceForms.resume(); schedules.resume(); poll = pollDevices; }
-    else if (view === 'policies') { refreshPolicies(); poll = refreshPolicies; }
+    else if (view === 'policies') { refreshPolicies(); }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'monitoring') { refreshMonitoring(); poll = pollMonitoring; }
     else if (view === 'setup') enterSetupWizard();

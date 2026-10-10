@@ -6,9 +6,9 @@
 // lifecycle models; an observed file or a saved request is not live adoption.
 const lookup = (map, key) => Object.hasOwn(map, key) ? map[key] : undefined;
 const purposes = {
-  'device-tls': ['Device connection certificate', 'Lets devices recognize the IRIS server when fetching instructions and images.', 'Plan replacement under Deployment keys below. Remove IRIS deployments, then onboard devices with the new certificate.'],
-  'management-tls': ['Console-to-server certificate', 'Protects the private connection between the Console and IRIS server.', 'Use Deployment keys below. The worker updates Console trust and checks the connection during maintenance.'],
-  'peer-ca': ['Private swarm certificate authority', 'Approves the short-lived certificates used for encrypted peer transfers.', 'Devices renew their own peer certificates. To replace this authority, use Deployment keys and re-onboard devices.'],
+  'device-tls': ['Device connection certificate', 'Lets devices recognize the IRIS server when fetching instructions and images.', 'Open Advanced: replace deployment keys. Remove IRIS deployments, then onboard devices with the new certificate.'],
+  'management-tls': ['Console-to-server certificate', 'Protects the private connection between the Console and IRIS server.', 'Open Advanced: replace deployment keys. The worker updates Console trust and checks the connection during maintenance.'],
+  'peer-ca': ['Private swarm certificate authority', 'Approves the short-lived certificates used for encrypted peer transfers.', 'Devices renew their own peer certificates. To replace this authority, open Advanced: replace deployment keys and re-onboard devices.'],
   'instruction-signer': ['Instruction signing certificate', 'Authorizes the server key that signs instructions for devices.', 'Use Renew signing certificate below to keep the current key. A root signing key holder must approve the request.'],
   'online-key': ['Server instruction signing key', 'Signs the instructions that devices verify before acting.', 'Renew its certificate for routine expiry. Use Replace signing key below when the key itself needs replacing.'],
 };
@@ -16,13 +16,26 @@ export function certificateGuidance(row) {
   const known = lookup(purposes, row.id);
   if (known) return {title: known[0], purpose: known[1], next: known[2]};
   if (row.id.startsWith('root-')) return {title: 'Root signing key: ' + row.id.slice('root-'.length), purpose: 'Public trust used by devices to check signing approvals.',
-    next: 'Ask this root signing key holder for signed confirmation under Deployment keys. Replacing the root requires new packages and re-onboarding.'};
+    next: 'Ask this root signing key holder for signed confirmation under Advanced: replace deployment keys. Replacing the root requires new packages and re-onboarding.'};
   return {title: row.label, purpose: row.impact, next: 'Review this identity with the person responsible for its keys before making changes.'};
 }
 export function certificateState(state) {
   return lookup({unknown: 'Status unavailable', 'not-yet-valid': 'Not valid yet', expired: 'Expired',
     'signing-refused': 'Signing stopped', 'renewal-due': 'Renewal due', 'within-validity': 'Within validity dates',
     'public-key-present': 'Public key found'}, state) || 'Status unavailable';
+}
+export function certificatePriority(state) {
+  return lookup({expired: 'danger', 'signing-refused': 'danger', 'not-yet-valid': 'warning',
+    'renewal-due': 'warning', unknown: 'warning', 'within-validity': 'neutral',
+    'public-key-present': 'neutral'}, state) || 'warning';
+}
+export function renewalGuidance(row) {
+  if (!row || row.state === 'unknown') return 'Check the signing certificate status before planning renewal.';
+  if (['expired', 'signing-refused'].includes(row.state)) return 'Renew the signing certificate to resume new instruction signing.';
+  if (row.state === 'renewal-due') return 'Renew the signing certificate now. Keep the existing signing key.';
+  if (row.state === 'not-yet-valid') return 'Check the certificate dates and server clock before renewing.';
+  if (row.state === 'within-validity') return 'For routine expiry, renew the certificate. You do not need to replace the signing key.';
+  return 'Check the signing certificate status before planning renewal.';
 }
 export function signingHealth(state) {
   return lookup({ready: 'Current signing certificate and revocation list passed the recorded checks.',

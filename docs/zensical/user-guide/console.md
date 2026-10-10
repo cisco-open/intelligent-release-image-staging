@@ -208,8 +208,10 @@ same job. An unavailable status does not mean the job stopped.
 
 ## Deployment information
 
-The **Deployment** panel on Overview shows Docker on one host, Docker on separate
-hosts, or Kubernetes. Each row identifies the Console or tracker/distribution
+The **Deployment components** panel on Overview shows the deployment layout.
+Expand it to see hosts, containers or pods. It stays open while status refreshes;
+unavailable information is flagged even when the panel is collapsed.
+Each row identifies the Console or tracker/distribution
 component, its host or node, container or pod name, image and observed state.
 Runtime details include the operating system, architecture and shared host kernel
 when reported. Kubernetes rows also show the pod IP and deployment namespace.

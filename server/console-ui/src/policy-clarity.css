@@ -26,6 +26,10 @@
 .iris-react-shell .policy-workspace .role-sharing-fields input[type="text"],
 .iris-react-shell .policy-workspace .role-sharing-fields .field input { width: 100%; min-width: 0; box-sizing: border-box; }
 .iris-react-shell .policy-workspace .role-sharing-fields .muted { margin-bottom: 0; }
+.iris-react-shell .policy-workspace .policy-expiry { margin: 16px 0 24px; padding: 16px; border: 1px solid var(--iris-rule); border-radius: var(--radius-control); background: var(--surface); }
+.iris-react-shell .policy-workspace .policy-expiry h4 { margin-top: 0; }
+.iris-react-shell .policy-workspace .policy-expiry .field { display: flex; flex-direction: column; gap: 6px; max-width: 420px; }
+.iris-react-shell .policy-workspace .policy-expiry select { width: 100%; min-width: 0; }
 @media (max-width: 640px) {
   .iris-react-shell .policy-workspace .origin-current,
   .iris-react-shell .policy-workspace .role-sharing-fields { grid-template-columns: minmax(0, 1fr); }

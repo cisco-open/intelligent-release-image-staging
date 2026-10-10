@@ -8,7 +8,7 @@ import {createPortal} from 'react-dom';
 import {WorkerLifecycleController} from './worker-lifecycle-controller.mjs';
 import {familyLabels, topologyLabels, activeJobs} from './worker-lifecycle-model.mjs';
 import {trustFamilies} from './deployment-trust-model.mjs';
-import {maintenanceAction} from './key-maintenance-model.mjs';
+import {maintenanceAction, activeMaintenance} from './key-maintenance-model.mjs';
 import {deploymentGuidance, trustState} from './certificate-guidance.mjs';
 
 function WorkerLifecycle({controller: c, roots}) {
@@ -19,6 +19,20 @@ function WorkerLifecycle({controller: c, roots}) {
     if ((!node.isConnected || node.disabled) && (document.activeElement === document.body || document.activeElement === node)) outcomes.current[group]?.focus();
   }, [s, c]);
   const message = (group, id) => <p id={id} role="status" aria-live="polite" tabIndex={-1} ref={node => {outcomes.current[group] = node;}}>{s.messages[group]?.text || ''}</p>;
+  const disclosureStatus = group => {
+    if (s.unknown[group]) return 'Outcome unknown: open, refresh and review before continuing';
+    if (group === 'deployment' && s.unknown.backups) return 'Backup outcome unknown: review Backup & restore before maintenance';
+    const jobs = group === 'deployment' ? c.ready('rotation', 'backups') ? activeJobs(s) : []
+      : s.valid.maintenance ? s.maintenance.jobs.filter(row => activeMaintenance.includes(row.state)) : [];
+    if (jobs.some(row => ['recovery-required', 'intervention-required'].includes(row.state))) return 'Operation needs recovery or intervention: open to review';
+    if (s.busy && s.messages[group]) return 'Request in progress: open to follow its outcome';
+    if (jobs.length) return 'An operation is running or awaiting follow-up: open to review';
+    if (s.messages[group]?.kind === 'error') return 'Action needs review: open the latest result';
+    if (group === 'deployment' && s.valid.trust && s.trust.items.some(row => ['awaiting-approval', 'approved', 'committing'].includes(row.state))) return 'Replacement in progress: open to review approval or recovery';
+    if (s.messages[group]?.text) return 'Latest operation result available: open to review';
+    if (group === 'deployment' ? !c.ready('rotation', 'trust') : !s.valid.maintenance) return 'Status unavailable: open and refresh before making changes';
+    return group === 'deployment' ? 'Planned downtime; some changes require removing and onboarding devices again' : 'Optional schedules and operation history';
+  };
   const files = (name, title, action, accept) => <label className="worker-field">{title}<input key={s.fileEpoch + ':' + name} id={'deployment-rotation-' + name} type="file" accept={accept} disabled={!c.canTrust(action)} onChange={event => c.file(name, event.target.files[0])} /></label>;
   const item = s.valid.trust ? c.item() : null, trust = trustFamilies.includes(s.family), state = item?.state || 'unavailable', worker = s.valid.rotation ? s.rotation : null;
   const attest = item?.family === 'instruction-roots' && ['idle', 'published', 'cancelled'].includes(state) && Object.keys(item.roots).length === 2;
@@ -122,11 +136,11 @@ function WorkerLifecycle({controller: c, roots}) {
     <p className="worker-actions">{backupButton('verify', 'verify', 'Verify backup')}{backupButton('extract', 'extract', 'Extract for isolated recovery')}{backupButton('restore', 'restore', 'Restore selected backup')}{backupButton('recover-restore', 'recover', 'Resume interrupted restore')}</p>
     <p className="muted">Restore stops this deployment, verifies the backup against current security authority, replaces saved content and checks restarted services. Changed credentials or missing instruction history prevent cutover. Use the host recovery window if the Console is offline.</p>
   </div></div>;
-  return <div onFocusCapture={event => {focus.current = {node: event.target, group: event.target.closest('[data-worker-group]')?.dataset.workerGroup};}}>{createPortal(deployment, roots.deployment)}{createPortal(scheduler, roots.maintenance)}{createPortal(backups, roots.backups)}</div>;
+  return <div onFocusCapture={event => {focus.current = {node: event.target, group: event.target.closest('[data-worker-group]')?.dataset.workerGroup};}}>{createPortal(deployment, roots.deployment)}{createPortal(scheduler, roots.maintenance)}{createPortal(backups, roots.backups)}{createPortal(disclosureStatus('deployment'), roots.deploymentSummary)}{createPortal(disclosureStatus('maintenance'), roots.maintenanceSummary)}</div>;
 }
 export function mountWorkerLifecycle() {
   const c = new WorkerLifecycleController(); window.irisWorkerLifecycle = c;
-  const root = document.getElementById('iris-worker-lifecycle-root'), roots = {deployment: document.getElementById('iris-worker-deployment'), maintenance: document.getElementById('iris-worker-maintenance'), backups: document.getElementById('iris-worker-backups')};
+  const root = document.getElementById('iris-worker-lifecycle-root'), roots = {deployment: document.getElementById('iris-worker-deployment'), maintenance: document.getElementById('iris-worker-maintenance'), backups: document.getElementById('iris-worker-backups'), deploymentSummary: document.getElementById('deployment-key-summary'), maintenanceSummary: document.getElementById('scheduled-key-summary')};
   if (!root || Object.values(roots).some(node => !node)) throw Error('Worker lifecycle mount points missing');
   createRoot(root).render(<WorkerLifecycle controller={c} roots={roots} />);
 }

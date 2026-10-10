@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import {PoliciesController} from '../src/policies-controller.mjs';
 import {InventoryController} from '../src/inventory-controller.mjs';
 import {definitionForm, definitionPayload, checkedDefinitions, checkedDefinitionPreview, definitionWriteResult,
-  definitionProblem, definitionPreviewText, policyEtagRevision, policyBody, rateHint, roleQosFields} from '../src/policy-definitions-model.mjs';
+  definitionProblem, definitionPreviewText, policyEtagRevision, policyBody, rateHint, roleQosFields, expiryChoices} from '../src/policy-definitions-model.mjs';
 import {instructionDiagnostics, instructionMapRows, policyDiagnostics, roleCapabilityMessage} from '../src/policy-model.mjs';
 
 const reply = (body, status = 200, headers = {}) => ({ok: status >= 200 && status < 300, status, body,
@@ -19,6 +19,19 @@ const preview = (extra = {}) => ({ok: true, dry_run: true, revision: 8, candidat
   member_delta: 0, origin_access_lost: 2, empty_permitted_sets: 0, role_pairs_stopped: 1,
   qos_changed: true, requires_confirmation: true, confirm_token: 'preview-token', ...extra});
 const saved = (extra = {}) => ({ok: true, dry_run: false, revision: 8, ...extra});
+test('expiry labels preserve API values and explain built-in fallback and inheritance', () => {
+  assert.deepEqual(expiryChoices.map(choice => choice.value), ['', 'keep', 'defaults']);
+  assert.equal(expiryChoices[0].label, 'Follow the server setting');
+  assert.match(expiryChoices[0].help, /roles with sharing limits keep.*Server-wide overrides can change this/);
+  assert.match(expiryChoices[1].help, /verified transfer limits and check-in timing/);
+  assert.match(expiryChoices[2].help, /no upload or download speed limit/);
+  assert.match(expiryChoices[2].help, /not your current role or server defaults/);
+  for (const choice of expiryChoices) {
+    const form = definitionForm('branch'); form.onStale = choice.value;
+    const {definition} = definitionPayload(form, {name: null, original: {}});
+    assert.equal(definition.on_stale, choice.value || undefined);
+  }
+});
 test('role preview describes exact impact counts without claiming live blocking', () => {
   const text = definitionPreviewText('Edit branch', preview({member_delta: 2, origin_access_lost: 3, empty_permitted_sets: 1, role_pairs_stopped: 4}));
   for (const line of ['Membership changes: 2', 'Devices losing distribution permission: 3', 'Devices losing all permitted peers: 1',
@@ -50,7 +63,7 @@ async function fixture() {
     releaseBulk() {inventory.update({bulkBusy: false});}, confirm(message) {prompts.push(message); return true;}, saveCsv: (...args) => downloads.push(args)});
   inventory.subscribe(() => c.prerequisites(inventory.state)); await c.refresh();
   const open = (name = null) => {c.open(name); if (!name) c.field('name', 'new-role');};
-  return {c, inventory, calls, replies, prompts, downloads, data, open, hide() {visible = false; c.hide();}, show() {visible = true;},
+  return {c, inventory, calls, replies, prompts, downloads, data, open, hide() {visible = false; c.hide();}, tabHide() {visible = false; c.pause();}, show() {visible = true;},
     supersede(policy) {ticket++; if (policy) c.policy(policy, true);}, writes: () => calls.filter(call => call.options.method)};
 }
 test('definition create previews and commits one captured body, token, CSRF and original CAS', async () => {
@@ -84,6 +97,39 @@ for (const field of ['nets', 'restricted']) test(`editing ${field} during pendin
 test('editing after preview cancels its token and releases only its own lease', async () => {
   const f = await fixture(); f.open(); f.replies.push(reply(preview())); await f.c.save(); f.c.field('origin', false);
   assert.equal(f.c.state.preview, null); assert.equal(f.inventory.state.bulkBusy, false); f.inventory.update({bulkBusy: true}); f.c.close(); assert.equal(f.inventory.state.bulkBusy, true);
+});
+test('tab pause preserves the open role draft and exact reviewed preview without another read', async () => {
+  const f = await fixture(); f.open('boat'); f.c.field('nets', '192.0.2.0/24');
+  f.replies.push(reply(preview())); await f.c.save();
+  const {form, editor, preview: approved} = f.c.state, calls = f.calls.length;
+  f.c.pause();
+  assert.equal(f.c.state.dialog, 'editor'); assert.equal(f.c.state.form, form);
+  assert.equal(f.c.state.editor, editor); assert.equal(f.c.state.preview, approved);
+  assert.equal(f.calls.length, calls); assert.equal(f.inventory.state.bulkBusy, true);
+  f.c.hide(); assert.equal(f.c.state.dialog, null); assert.equal(f.inventory.state.bulkBusy, false);
+});
+test('tab pause rejects a late policy read while preserving typed role fields', async () => {
+  const f = await fixture(); f.open('boat'); f.c.field('nets', '192.0.2.0/24');
+  const pending = gate(); f.c.services.fetch = () => pending.promise;
+  const read = f.c.refresh(); f.tabHide(); f.show();
+  pending.resolve(reply({revision: 88, roles_supported: true, quarantine_assignments: [], roles: {}}));
+  await read; assert.equal(f.c.state.loading, false); assert.equal(f.c.state.policy.revision, 7);
+  assert.equal(f.c.state.form.nets, '192.0.2.0/24'); assert.equal(f.c.state.dialog, 'editor');
+});
+test('preview started before tab hide cannot be adopted after returning', async () => {
+  const f = await fixture(), pending = gate(); f.open('boat');
+  f.replies.push(pending.promise); const action = f.c.save(); f.tabHide(); f.show();
+  pending.resolve(reply(preview())); await action;
+  assert.equal(f.c.state.preview, null); assert.equal(f.c.state.dialog, 'editor');
+  assert.match(f.c.state.formMessage, /Preview interrupted/); assert.equal(f.inventory.state.bulkBusy, false);
+  assert.equal(f.writes().length, 1);
+});
+for (const result of ['saved', 'unknown']) test('tab hide/return retains committed role result ' + result, async () => {
+  const f = await fixture(), pending = gate(); f.open('boat'); f.replies.push(reply(preview())); await f.c.save();
+  f.replies.push(pending.promise); const action = f.c.save(); f.tabHide(); f.show();
+  pending.resolve(reply(result === 'saved' ? saved() : {})); await action;
+  assert.equal(f.c.state.reviewRequired, result === 'unknown'); assert.equal(f.writes().length, 2);
+  assert.match(f.c.state.message, result === 'saved' ? /saved at policy revision/ : /may have been saved/);
 });
 for (const close of ['close', 'hide']) test(`${close} during preview blocks reopening until the request finishes`, async () => {
   const f = await fixture(), pending = gate(); f.open(); f.replies.push(pending.promise); const request = f.c.save();

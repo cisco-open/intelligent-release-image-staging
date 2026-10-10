@@ -6,11 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Replace or recover signing keys
 
-An instruction is the signed message the server sends a device saying which
-images to stage and how. A root key, also called a signing root, is one of the
-two keys that approve the server's signing key and sign revocation lists.
 Use this page for root replacement, key recovery, Guest Shell bundle updates
-and manual delivery of a first instruction file.
+and manual delivery of a first instruction file. See the glossary for
+[signing roots](../reference/glossary.md#root-key-signing-root) and [instructions](../reference/glossary.md#instruction).
 
 Run server commands in your deployment shell:
 `docker compose -f server/docker-compose.yml exec iris sh`, the split-host
@@ -31,11 +29,12 @@ attested roots; the terms it uses are in the next section.
 
 ## Renew the instruction signing certificate
 
-Use **Renew signing certificate** for a new 30-day approval of the existing key.
-To change the key itself, use [Replace signing key](signer-rotation.md).
+Renew the existing key's 30-day certificate here. To change the key itself, use [Replace signing key](signer-rotation.md).
 
-1. Open **Settings → Certificates & keys**. Check the renewal date and the
-   **New instruction signing stops** deadline, which is seven days before expiry.
+1. Open **Settings → Certificates & keys**, then **Renew signing certificate**.
+   The overview shows renewal and expiry dates. **Technical details: all public keys,
+   dates and fingerprints** shows the **New instruction signing stops** deadline,
+   seven days before expiry.
 2. Select **Download public renewal request**. Send `iris-online.pub` to the
    root signing key holder, who selects **Approve server request** in
    [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
@@ -51,17 +50,18 @@ To change the key itself, use [Replace signing key](signer-rotation.md).
 4. Check the new expiry and signing cutoff. A changed online key or certificate
    invalidates a pending request; prepare it again before importing.
 
+Keys created by automatic local setup use their saved passphrases for approval.
+Review each request. Renewal is not automatic; manual keys still ask for passphrases.
+
 If the response is unavailable, the server may already have applied the renewal.
 Download a fresh public renewal request before submitting again. Leaving the
 page clears the selected approval file; it does not cancel a submitted renewal.
 
 Renewal keeps the online key, device trust and instruction counters. It checks
-the configured root, principal, key match and validity before publication.
-Private roots remain in the holder's chosen protected storage. Public keys have
-no expiry date; their certificates and signed confirmations have separate deadlines.
+the configured root, identity, key match and validity before publication.
+Public keys have no expiry date; certificates and signed confirmations have separate deadlines.
 
-The inventory reads server files, not certificates presented by running services.
-Signing checks are reported separately.
+The inventory reads server files, not live service certificates. Signing checks are separate.
 
 ## What you see
 

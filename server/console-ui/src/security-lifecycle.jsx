@@ -20,7 +20,7 @@ function SecurityLifecycle({controller: c, roots}) {
   const tlsState = s.valid.tls ? s.tls.state : 'unavailable';
   const tlsGuide = browserGuidance(tlsState);
   const tlsButton = (action, label, ghost = false) => <button type="button" className={'btn' + (ghost ? ' ghost' : '')} id={'browser-tls-' + action} disabled={!c.canTls(action)} onClick={() => c.perform('tls', action)}>{label}</button>;
-  const tls = <div className="card" data-security-group="tls"><h3>Replace the Console browser certificate</h3>
+  const tls = <details className="card certificate-task" id="browser-certificate-controls" data-security-group="tls" onToggle={event => {if (event.target === event.currentTarget && !event.currentTarget.open) c.clearFile();}}><summary><strong>Replace the Console browser certificate</strong><span>{s.unknown.tls ? 'Outcome unknown: refresh request and review before continuing' : s.busy && s.messages.tls?.text ? s.messages.tls.text : s.loading.tls ? 'Checking certificate request…' : tlsGuide[0]}</span></summary><div className="certificate-task-body">
     <p>This certificate protects the HTTPS connection from your browser to the Console. View its current identity and expiry in <a href="#settings/tls">TLS &amp; trust</a>.</p>
     <p>IRIS creates a new key for this replacement. Your certificate authority approves the public request; the private key stays encrypted on the server.</p>
     <div id="browser-tls-workflow"><p id="browser-tls-state" role="status" aria-live="polite">{s.loading.tls ? 'Checking certificate request…' : tlsGuide[0] + '.'}</p>
@@ -44,10 +44,10 @@ function SecurityLifecycle({controller: c, roots}) {
       </form>
       <p className="security-actions">{tlsButton('apply', tlsState === 'committing' ? 'Recover approved publication' : tlsState === 'published' ? 'Retry Console certificate reload' : 'Apply approved certificate')}</p>
       {message('tls', 'tls', 'browser-tls-result')}
-    </div></div>;
+    </div></div></details>;
   const item = s.valid.credentials ? c.item() : null, replace = c.canCredential('replace'), metrics = s.family === 'metrics-token';
   const credentialButton = (action, label, ghost = false) => <button className={'btn' + (ghost ? ' ghost' : '')} id={'service-credential-' + action} disabled={!c.canCredential(action)} onClick={() => c.perform('credentials', action)}>{label}</button>;
-  const credentials = <div className="card" data-security-group="credentials"><h3>Rotate telemetry credentials</h3>
+  const credentials = <details className="card certificate-task" id="telemetry-credential-controls" data-security-group="credentials" onToggle={event => {if (event.target === event.currentTarget && !event.currentTarget.open) c.clearSecrets();}}><summary><strong>Rotate telemetry credentials</strong><span>{['metrics-token', 'collector-headers'].some(key => s.unknown[key]) ? 'Outcome unknown: refresh evidence and review before continuing' : s.busy && s.messages[s.family]?.text ? s.messages[s.family].text : !s.valid.credentials ? 'Credential status unavailable' : s.credentials.items.some(row => row.state === 'awaiting-verification') ? 'Replacement awaiting verification' : 'Access for your monitoring systems'}</span></summary><div className="certificate-task-body">
     <p>These credentials give monitoring systems access to metrics or let IRIS send telemetry to your collector. Replacements are stored encrypted on the server.</p>
     <div id="service-credential-workflow"><label className="security-field">Credential<select id="service-credential-family" value={s.family} disabled={s.busy} onChange={event => c.family(event.target.value)}><option value="metrics-token">Metrics scraping token</option><option value="collector-headers">Outbound collector authentication</option></select></label>
       <p id="service-credential-state" role="status" aria-live="polite">{s.loading.credentials ? 'Checking credential state…' : !item ? 'Credential state unavailable. Refresh before changing credentials.'
@@ -74,7 +74,7 @@ function SecurityLifecycle({controller: c, roots}) {
         <button className="btn ghost" id="service-credential-refresh" disabled={s.busy || s.loading.credentials} onClick={() => c.refresh('credentials', true)}>Refresh evidence</button></p>
       <p className="security-actions">{credentialButton('retire', 'Finish verified rotation')}{credentialButton('revert', 'Restore previous setting', true)}</p>
       {message(s.family, 'credentials', 'service-credential-result')}
-    </div></div>;
+    </div></div></details>;
   return <div onFocusCapture={event => {focus.current = {node: event.target, group: event.target.closest('[data-security-group]')?.dataset.securityGroup, header: !!event.target.closest('#service-credential-headers')};}}>{createPortal(tls, roots.tls)}{createPortal(credentials, roots.credentials)}</div>;
 }
 export function mountSecurityLifecycle() {

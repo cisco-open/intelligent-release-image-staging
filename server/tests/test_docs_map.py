@@ -693,7 +693,10 @@ def test_docs_state_phase_zero_role_and_qos_contract():
     _require("user-guide/roles.md", ["Distribution access", "Preview only",
         "New address limit", "New device limit", "Apply reviewed change",
         "Saved mode", "Transfer-service status", "Approved for blocking",
-        "Confirmed blocked", "Refresh status"])
+        "Confirmed at last refresh", "Refresh status",
+        "Choose behavior when instructions expire", "Follow the server setting", "Keep last verified settings",
+        "Use built-in device settings", "no upload or download speed limit",
+        "Canceling keeps them and sends no read"])
     _require("architecture/limitations.md",
              ["per-role origin shaping is not expressible"])
     _require("reference/peer-policy-api.md", [
@@ -2043,6 +2046,17 @@ def test_automatic_setup_docs_keep_passphrases_recovery_and_manual_keys_distinct
     runbook = " ".join(Path(REPO, "docs/dev/ai-assisted-deployment.md").read_text().split())
     assert "without asking the owner to type key passphrases" in runbook
     assert "existing manual keys require their original passphrases" in runbook
+
+
+def test_certificate_overview_keeps_routine_renewal_distinct_from_advanced_changes():
+    rotations = " ".join(_page("admin-guide/rotations.md").split())
+    signing = " ".join(_page("admin-guide/instruction-keys.md").split())
+    assert "what each certificate protects, its status and expiry" in rotations
+    assert "technical details and advanced changes start closed" in rotations
+    assert "Replacing the signing key is a separate advanced task" in rotations
+    assert "Dates come from public server files" in rotations
+    assert "use their saved passphrases for approval" in signing
+    assert "Renewal is not automatic" in signing
 
 
 def test_contributor_deployment_runbook_matches_managed_setup():

@@ -21,8 +21,8 @@ export function originNextAction(value, ready, reviewRequired) {
   if (!ready) return 'Choose Refresh status to read the saved settings and current effect.';
   return {
     preflight: 'To block distribution transfers denied by the policy, choose Enforce reviewed blocks, then Preview change.',
-    pending: 'Wait for the transfer service to confirm the saved change. Status refreshes every five seconds while this page is open.',
-    enforced: 'The reviewed blocks are confirmed. Preview a new change if you need to update or release them.',
+    pending: 'Wait for the transfer service to apply the saved change, then choose Refresh status to check for confirmation.',
+    enforced: 'The last check confirmed the reviewed blocks. Refresh status for current confirmation, or preview a change to update or release them.',
     review_required: 'Review the changed policy or addresses, then choose Preview change to check the current set.',
     degraded: 'Resolve the reported problem, then choose Refresh status before previewing again.',
     unavailable: 'Choose Refresh status. If status stays unavailable, check the distribution service.',

@@ -16,16 +16,17 @@ time, verify its consumers, then retire the previous value.
 | --- | --- |
 | **TLS & trust** | Shows the browser certificate this Console serves and its expiry. Imports existing certificate/key pairs and trusted authorities. |
 | **Device packages** | Compares the certificate the live services present with the public `iris-catalog.pem` copy that onboarding hands to devices. |
-| **Certificates & keys** | Explains each identity, its deadline and next action. Guides signing renewal, key replacement and deployment maintenance. |
+| **Certificates & keys** | Shows what each certificate protects, its status and expiry. Open the task you need; technical details and advanced changes start closed. |
 
-For the guided online-certificate workflow, see
-[Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate).
-For browser TLS and telemetry credentials, use the
-[guided Console workflows](console-credentials.md).
-Installer-owned Docker, split Docker and Kubernetes deployments also have
-[guided deployment trust maintenance](deployment-rotation.md), including approvals
-from root key holders and backup recovery key changes in the host UI. The procedures below
-remain relevant to deployments without that scoped worker.
+For routine signing expiry, select **Renew signing certificate**. Replacing the
+signing key is a separate advanced task. **Scheduled key maintenance** holds
+optional schedules and their history. Dates come from public server files;
+check the live connection separately after a certificate change.
+
+See [Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate)
+and [Browser and telemetry credentials](console-credentials.md) for those workflows.
+Installer-owned deployments also have [deployment trust maintenance](deployment-rotation.md),
+including root approvals and backup recovery key changes. Use the procedures below without that scoped worker.
 
 ## Rotate the management credential
 

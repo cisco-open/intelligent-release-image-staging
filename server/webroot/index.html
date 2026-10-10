@@ -165,14 +165,20 @@
         <div id="settings-pane-certificates" hidden>
           <div id="iris-certificates-root"></div>
           <div id="iris-certificates-inventory"></div>
+          <div id="iris-certificates-renewal"></div>
           <div id="iris-security-lifecycle-root"></div>
           <div id="iris-browser-tls"></div>
           <div id="iris-service-credentials"></div>
-          <div id="iris-certificates-renewal"></div>
           <div id="iris-certificates-signer"></div>
           <div id="iris-worker-lifecycle-root"></div>
-          <div id="iris-worker-deployment"></div>
-          <div id="iris-worker-maintenance"></div>
+          <details class="card certificate-task" id="deployment-key-controls">
+            <summary><strong>Advanced: replace deployment keys</strong><span id="deployment-key-summary" role="status" aria-live="polite"></span></summary>
+            <div id="iris-worker-deployment"></div>
+          </details>
+          <details class="card certificate-task" id="scheduled-key-controls">
+            <summary><strong>Scheduled key maintenance</strong><span id="scheduled-key-summary" role="status" aria-live="polite"></span></summary>
+            <div id="iris-worker-maintenance"></div>
+          </details>
         </div>
         <div id="iris-setup-packages-root"></div>
         <div id="settings-pane-setup" hidden><div id="iris-setup-checklist"></div></div>

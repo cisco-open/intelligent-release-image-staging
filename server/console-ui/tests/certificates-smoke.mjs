@@ -24,6 +24,7 @@ try {
     if (url.pathname.startsWith('/api/')) {
       if (request.method() !== 'GET') {
         assert.equal(request.headers()['x-csrf-token'], 'fixture-only'); writes.push(request.postDataJSON());
+        if (url.pathname.endsWith('/instruction/request')) return route.fulfill({json: {public_key: 'ssh-ed25519 AAAA fixture\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
         if (mode === 'hold') {hold = route; reached(); return;}
         if (mode === 'wrong-id') return route.fulfill({json: {...rotation, state: 'retirement-pending', activated_at: 1790160001, request_id: '22222222-2222-4222-8222-222222222222'}});
         return route.fulfill({json: rotation}); // A valid status, but not the requested transition.
@@ -32,7 +33,7 @@ try {
         {id: 'root-<img src=x onerror=alert(1)>', label: 'Offline root ignored', kind: 'public-key', source: 'server-file', state: 'public-key-present',
           fingerprint_sha256: 'SHA256:fixture', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, impact: 'Confirm the public root with its holder.'},
         ...['device-tls', 'management-tls', 'peer-ca', 'instruction-signer'].map(id => ({id, label: id, kind: 'certificate', source: 'server-file',
-          state: id === 'instruction-signer' ? 'renewal-due' : 'within-validity', fingerprint_sha256: 'ab'.repeat(32), valid_from: 1788864000,
+          state: id === 'instruction-signer' ? 'renewal-due' : id === 'device-tls' ? 'expired' : 'within-validity', fingerprint_sha256: 'ab'.repeat(32), valid_from: 1788864000,
           renew_at: 1790160000, expires_at: 1791456000, refuse_at: id === 'instruction-signer' ? 1790851200 : null, impact: 'Public file observation only.'}))]};
       const fixtures = {'/api/v1/session': {username: 'Certificate fixture', csrf: 'fixture-only'}, '/api/v1/help': {version: 'fixture'},
         '/api/v1/settings/certificates/instruction/rotation': rotation,
@@ -46,9 +47,36 @@ try {
   });
   await page.goto('http://iris.test/#settings/certificates');
   const idle = () => page.waitForFunction(() => window.irisCertificates && !window.irisCertificates.state.busy && !Object.values(window.irisCertificates.state.loading).some(Boolean));
-  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor(); await idle();
+  await idle();
+  for (const id of ['certificate-file-details', 'certificate-renewal-controls', 'signer-rotation', 'browser-certificate-controls', 'telemetry-credential-controls', 'deployment-key-controls', 'scheduled-key-controls']) {
+    assert.equal(await page.locator('#' + id).evaluate(node => node.open), false, id + ' starts collapsed');
+  }
+  assert.match(await page.locator('#certificate-next-action').innerText(), /Renew.*now.*existing signing key/);
+  assert.equal(writes.length, 0, 'Viewing the overview changes nothing');
+  assert.match(await page.locator('.certificate-protection').filter({hasText: 'Device connection certificate'}).innerText(), /Expired.*Replacement options/s);
+  await page.getByRole('button', {name: 'Replacement options for Device connection certificate', exact: true}).click();
+  assert.equal(await page.locator('#deployment-key-controls').evaluate(node => node.open), true);
+  assert.equal(writes.length, 0, 'Viewing replacement options makes no changes');
+  await page.locator('#deployment-key-controls > summary').click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
+    await page.setViewportSize({width, height});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Overview fits ' + width);
+    if (process.env.IRIS_UI_SCREENSHOTS) {
+      await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+      await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'certificates-overview-' + width + '.png'), fullPage: true});
+    }
+  }
+  await page.locator('#certificate-open-renewal').click();
+  assert.equal(await page.locator('#certificate-renewal-controls').evaluate(node => node.open), true);
+  assert.equal(writes.length, 0, 'Opening a task does not generate a request');
+  await page.locator('#certificate-renewal-controls .certificate-technical > summary').click();
+  assert.match(await page.locator('#certificate-renewal-controls').innerText(), /saved passphrases.*review and confirm the request SHA256/s);
+  await page.locator('#certificate-file-details > summary').click();
+  await page.locator('#signer-rotation > summary').focus(); await page.keyboard.press('Enter');
+  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor();
   assert.equal(await page.locator('#certificate-rows img').count(), 0);
-  assert.equal(await page.locator('#iris-certificates-inventory code').filter({hasText: /^iris-key-setup --local$/}).count(), 1);
+  assert.equal(await page.locator('#iris-certificates-renewal code').filter({hasText: /^iris-key-setup --local$/}).count(), 1);
   assert.match(await page.locator('#certificate-rows').innerText(), /Root signing key: <img src=x/);
   assert.doesNotMatch(await page.locator('#certificate-rows').innerText(), /Offline root ignored/);
   assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);
@@ -58,7 +86,7 @@ try {
   assert.match(await page.locator('#certificate-rows').innerText(), /Device connection certificate.*Remove IRIS deployments/s);
   assert.match(await page.locator('#certificate-rows').innerText(), /Instruction signing certificate.*Renewal due.*New instruction signing stops/s);
   assert.doesNotMatch(await page.locator('#certificate-rows').innerText(), /Policy \/ custody/);
-  const details = page.locator('#signer-rotation > details');
+  const details = page.locator('#signer-rotation .certificate-task-body > details');
   assert.equal(await details.evaluate(node => node.open), false);
   await details.locator('summary').focus(); await page.keyboard.press('Enter');
   assert.equal(await details.evaluate(node => node.open), true);
@@ -68,6 +96,9 @@ try {
   await choose(); await page.locator('#rotation-activate').click(); await idle();
   assert.match(await page.locator('#rotation-result').innerText(), /Outcome unknown/); assert.equal(await page.locator('#rotation-activate').isDisabled(), true);
   assert.equal(await page.locator('#rotation-result').evaluate(node => node === document.activeElement), true, 'Disabled action moves focus to its outcome');
+  await page.locator('#signer-rotation > summary').click();
+  assert.match(await page.locator('#signer-rotation > summary').innerText(), /Outcome unknown.*review before continuing/);
+  await page.locator('#signer-rotation > summary').click();
   await page.evaluate(() => {location.hash = '#settings/general';}); await page.locator('#settings-pane-general').waitFor({state: 'visible'});
   await page.evaluate(() => {location.hash = '#settings/certificates';}); await idle();
   assert.equal(writes.length, 1); assert.equal(await page.locator('#rotation-activate').isDisabled(), true, 'Navigation is not explicit recovery');
@@ -106,6 +137,13 @@ try {
   assert.equal(writes.length, 3); assert.match(await page.locator('#rotation-result').innerText(), /Replacement signer active/);
   inventoryAvailable = false; await page.locator('#certificate-refresh').click(); await idle();
   assert.equal(await page.locator('#certificate-rows tr').count(), 0); assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);
+  mode = 'wrong-state';
+  await page.locator('#certificate-request').click(); await idle();
+  await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com AAAA fixture\n')});
+  await page.locator('#certificate-renew').click(); await idle();
+  await page.locator('#certificate-renewal-controls > summary').click();
+  assert.match(await page.locator('#certificate-renewal-controls > summary').innerText(), /Outcome unknown.*fresh request/);
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true, 'Collapsing never clears the unknown renewal guard');
   assert.deepEqual(errors, []); assert.deepEqual(await page.evaluate(() => window.csp), []);
   console.log('Certificate browser checks passed: exact outcomes, explicit recovery, pending navigation, labels, focus, mobile and CSP.');
 } finally {await browser.close();}

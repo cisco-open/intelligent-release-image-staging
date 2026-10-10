@@ -9,6 +9,11 @@ export const POLICY_BODY_LIMIT = 64 * 1024;
 export const POLICY_CSV_LIMIT = 8 * 1024 * 1024;
 export const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
 export const count = value => Number.isSafeInteger(value) && value >= 0;
+export const expiryChoices = [
+  {value: '', label: 'Follow the server setting', help: 'Without an override, roles with sharing limits keep the last verified settings; other roles use built-in device settings. Server-wide overrides can change this.'},
+  {value: 'keep', label: 'Keep last verified settings', help: 'Keep the last verified transfer limits and check-in timing until the device receives a valid replacement.'},
+  {value: 'defaults', label: 'Use built-in device settings', help: 'Restore the device agent’s built-in settings, including no upload or download speed limit. These are not your current role or server defaults.'},
+];
 export const roleQosFields = [
   ['seed_up_bps', 'Upload while seeding', 'rate', 0, 10000000000],
   ['seed_down_bps', 'Download while seeding', 'rate', 0, 10000000000],

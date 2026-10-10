@@ -82,6 +82,29 @@ try {
   await page.locator('#telemetry-health').getByText('Telemetry export: ok', {exact: true}).waitFor();
   assert.match(await page.locator('#telemetry-health').getAttribute('title'), /queued 2/);
 
+  // Runtime details start compact, open with the keyboard, and remain open
+  // across status refreshes without moving focus away from their disclosure.
+  const deploymentDetails = page.locator('#deployment-details');
+  const deploymentToggle = deploymentDetails.locator('summary');
+  assert.equal(await deploymentDetails.evaluate(node => node.open), false);
+  assert.equal(await page.locator('#deployment-table').isVisible(), false);
+  await deploymentToggle.focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#deployment-table').waitFor();
+  assert.match(await page.locator('#deployment-rows').innerText(), /fixture-host/);
+  fixtures['/api/v1/deployment'].observed_at = 2000000000;
+  await refresh();
+  await page.waitForFunction(() => document.querySelector('#deployment-observed').textContent.startsWith('Observed '));
+  assert.equal(await deploymentDetails.evaluate(node => node.open), true);
+  assert.equal(await deploymentToggle.evaluate(node => node === document.activeElement), true);
+  await page.keyboard.press('Space');
+  assert.equal(await deploymentDetails.evaluate(node => node.open), false);
+  fixtures['/api/v1/deployment'].note = 'Full deployment inventory is unavailable.';
+  await refresh();
+  await page.locator('#deployment-note').getByText('Full deployment inventory is unavailable.', {exact: true}).waitFor();
+  assert.equal(await page.locator('#deployment-note').isVisible(), true, 'Partial inventory warning is visible while collapsed');
+  delete fixtures['/api/v1/deployment'].note;
+
   // Reconciliation must keep the focused action across refreshes.
   await page.locator('#ov-attention [data-attn="devices"]').focus();
   fixtures['/api/v1/overview'].staged = 2;
@@ -136,6 +159,7 @@ try {
     await refresh();
     await page.locator('#deployment-layout').getByText('Unavailable', {exact: true}).waitFor();
     assert.equal(await page.locator('#deployment-table').isVisible(), false);
+    assert.equal(await page.locator('#deployment-note').isVisible(), true, 'Unavailable data is flagged while collapsed');
     fixtures['/api/v1/deployment'] = deployment;
     await refresh();
     await page.locator('#deployment-layout').getByText('Single container', {exact: true}).waitFor();
@@ -159,12 +183,32 @@ try {
   assert.equal(await page.locator('#telemetry-health').innerText(), 'Telemetry export: degraded');
   assert.equal(await page.locator('#telemetry-health').getAttribute('title'), '');
 
-  for (const [width, name] of [[1440, 'desktop'], [390, 'mobile']]) {
-    await page.setViewportSize({width, height: 1000});
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    if (process.env.IRIS_UI_SCREENSHOTS) {
-      await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
-      await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, `overview-react-${name}.png`), fullPage: true});
+  // Both Docker and Kubernetes remain compact until expanded. Full runtime
+  // names stay readable inside the table without widening the whole page.
+  for (const [layout, components] of [
+    ['docker', [deployment.components[0], {...deployment.components[0], role: 'console', name: 'iris-console'}]],
+    ['docker-split', [deployment.components[0], {...deployment.components[0], role: 'console', name: 'iris-console', host: 'console-host'}]],
+    ['kubernetes', [
+      {...deployment.components[0], kind: 'pod', name: 'iris-server-6bbdf48f78-x4nrz', host: 'node-a'},
+      {...deployment.components[0], role: 'console', kind: 'pod', name: 'iris-console-765f78698b-4xvqn', host: 'node-b'},
+    ]],
+  ]) {
+    fixtures['/api/v1/deployment'] = {...deployment, layout, components};
+    await refresh();
+    await page.locator('#deployment-layout').getByText(layout === 'kubernetes' ? 'Kubernetes'
+      : layout === 'docker-split' ? 'Docker · separate hosts' : 'Docker · one host', {exact: true}).waitFor();
+    for (const [width, name] of [[1440, 'desktop'], [390, 'mobile'], [320, 'narrow']]) {
+      await page.setViewportSize({width, height: 1000});
+      for (const expanded of [false, true]) {
+        if (await deploymentDetails.evaluate(node => node.open) !== expanded) await deploymentToggle.click();
+        assert.equal(await page.locator('#deployment-table').isVisible(), expanded);
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        if (process.env.IRIS_UI_SCREENSHOTS) {
+          await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+          await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS,
+            `overview-${layout}-${name}-${expanded ? 'expanded' : 'collapsed'}.png`), fullPage: true});
+        }
+      }
     }
   }
   assert.deepEqual(await page.evaluate(() => window.testCspViolations), []);

@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {certificateGuidance, certificateState, signingHealth, signerGuidance, browserGuidance, deploymentGuidance, trustState} from '../src/certificate-guidance.mjs';
+import {certificateGuidance, certificateState, certificatePriority, renewalGuidance, signingHealth, signerGuidance, browserGuidance, deploymentGuidance, trustState} from '../src/certificate-guidance.mjs';
 import {familyLabels} from '../src/worker-lifecycle-model.mjs';
 
 test('certificate purposes distinguish browser-independent connection and approval boundaries', () => {
@@ -70,4 +70,15 @@ test('unrecognized and inherited states never become successful display states',
     assert.match(browserGuidance(state)[0], /unavailable/);
     assert.match(trustState(state), /unavailable/);
   }
+});
+test('overview priorities describe dates, not live trust, and renewal keeps the key', () => {
+  assert.equal(certificatePriority('expired'), 'danger');
+  assert.equal(certificatePriority('signing-refused'), 'danger');
+  assert.equal(certificatePriority('within-validity'), 'neutral');
+  for (const state of [undefined, 'unknown', 'not-yet-valid', '__proto__']) assert.equal(certificatePriority(state), 'warning');
+  assert.match(renewalGuidance(null), /Check.*status/);
+  assert.match(renewalGuidance({state: 'expired'}), /resume new instruction signing/);
+  assert.match(renewalGuidance({state: 'renewal-due'}), /now.*existing signing key/);
+  assert.match(renewalGuidance({state: 'not-yet-valid'}), /server clock/);
+  assert.match(renewalGuidance({state: 'within-validity'}), /do not need to replace/);
 });

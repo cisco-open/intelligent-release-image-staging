@@ -5,7 +5,8 @@
 // Run after npm run build. Supply PLAYWRIGHT_MODULE when Playwright is installed
 // outside this package. This test uses mocked APIs and never contacts a device.
 import assert from 'node:assert/strict';
-import {maintenance, trust, backups, prepared} from './worker-fixtures.mjs';
+import {maintenance, maintenanceJob, trust, backups, prepared} from './worker-fixtures.mjs';
+import {maintenanceStatus} from '../src/key-maintenance-model.mjs';
 import {setupFixture, verificationFixture} from './setup-packages-fixtures.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -270,11 +271,19 @@ try {
   });
   await page.goto('http://iris.test/');
   await page.getByText('UI test', { exact: true }).waitFor();
+  const openDetails = async id => {
+    const section = page.locator('#' + id);
+    if (!await section.evaluate(node => node.open)) await section.locator(':scope > summary').click();
+    assert.equal(await section.evaluate(node => node.open), true);
+  };
+  assert.equal(await page.locator('#deployment-details').evaluate(node => node.open), false,
+    'Deployment components start collapsed while the summary remains visible');
   const showDeployment = async () => {
     await page.goto('http://iris.test/#overview');
     await page.locator('#deployment-layout').getByText(
       deploymentUnavailable ? 'Unavailable' : deploymentSummary.layout === 'kubernetes' ? 'Kubernetes' :
         deploymentSummary.layout === 'docker-split' ? 'Docker · separate hosts' : 'Docker · one host', {exact: true}).waitFor();
+    await openDetails('deployment-details');
   };
   await showDeployment();
   assert.equal(await page.locator('#deployment-rows tr').count(), 2);
@@ -475,6 +484,12 @@ try {
   assert.deepEqual(settingsWrites.at(-1).body, {mode: 'off', hour_utc: 0});
   settingsFailure = '';
   await settingsTab('Certificates & keys');
+  for (const id of ['certificate-file-details', 'certificate-renewal-controls', 'signer-rotation',
+    'browser-certificate-controls', 'telemetry-credential-controls', 'deployment-key-controls', 'scheduled-key-controls']) {
+    assert.equal(await page.locator('#' + id).evaluate(node => node.open), false,
+      id + ' starts collapsed until an operator chooses that task');
+  }
+  await openDetails('browser-certificate-controls');
   await page.locator('#browser-tls-state').getByText('No replacement in progress.', {exact: true}).waitFor();
   await page.locator('#browser-tls-names').fill('console.example.com, 192.0.2.10');
   page.once('dialog', dialog => dialog.accept());
@@ -494,6 +509,7 @@ try {
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#browser-tls-apply').click();
   await page.locator('#browser-tls-result').getByText(/this Console listener reloaded/).waitFor();
+  await openDetails('telemetry-credential-controls');
   await page.locator('#service-credential-generate').click();
   const token = await page.locator('#service-credential-token').inputValue();
   assert.match(token, /^[0-9a-f]{64}$/);
@@ -542,6 +558,7 @@ try {
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-revert').click();
   await page.locator('#service-credential-result').getByText(/Previous IRIS setting restored/).waitFor();
+  await openDetails('deployment-key-controls');
   assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
   deploymentFixture = {...deploymentFixture, available: true, can_rotate: true, target: 'single-docker',
     families: ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'seeder-announce'], note: 'Verified backup required; downtime expected.'};
@@ -572,6 +589,7 @@ try {
     }
     await page.setViewportSize({width: 1440, height: 1000});
   }
+  await openDetails('scheduled-key-controls');
   await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
   assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
   await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).first().waitFor();
@@ -606,8 +624,12 @@ try {
     await page.setViewportSize({width: 1440, height: 1100});
     await page.locator('#key-maintenance').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'key-maintenance-desktop.png')});
   }
+  await openDetails('certificate-file-details');
   await page.locator('#certificate-rows').getByText('Renewal due', {exact: true}).waitFor();
   await page.locator('#certificate-rows').getByText('No expiry date', {exact: true}).waitFor();
+  await page.locator('#certificate-open-renewal').click();
+  assert.equal(await page.locator('#certificate-renewal-controls').evaluate(node => node.open), true);
+  assert.equal(await page.locator('#certificate-renewal-controls > summary').evaluate(node => node === document.activeElement), true);
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
   const download = page.waitForEvent('download');
   await page.locator('#certificate-request').click();
@@ -627,6 +649,23 @@ try {
   await page.locator('#certificate-request').click();
   await page.waitForFunction(() => !document.getElementById('certificate-renew').disabled);
   await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
+  settingsFailure = 'network';
+  const beforeUnknownRenewal = settingsWrites.length;
+  await page.locator('#certificate-renew').click();
+  await page.locator('#certificate-renew-result').getByText(/Outcome unknown/).waitFor();
+  await page.locator('#certificate-renewal-controls > summary').click();
+  assert.equal(await page.locator('#certificate-renewal-controls').evaluate(node => node.open), false);
+  await page.locator('#certificate-renewal-controls > summary').getByText(/Outcome unknown/).waitFor();
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true,
+    'Collapsing an uncertain renewal must not clear its action lock');
+  await page.evaluate(() => window.irisCertificates.perform('renew'));
+  assert.equal(settingsWrites.length, beforeUnknownRenewal + 1,
+    'An uncertain renewal is never replayed after collapsing the task');
+  settingsFailure = '';
+  await openDetails('certificate-renewal-controls');
+  await page.locator('#certificate-request').click();
+  await page.waitForFunction(() => !document.getElementById('certificate-renew').disabled);
+  await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   await page.locator('#certificate-renew').click();
   await page.locator('#certificate-renew-result').getByText(/Renewal applied/).waitFor();
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
@@ -637,6 +676,20 @@ try {
   certificateAvailable = true;
   await page.locator('#certificate-refresh').click();
   await page.locator('#certificate-rows tr').first().waitFor();
+  const signerJob = maintenanceJob('online-signer', 'approval-required');
+  maintenanceFixture.policies.push({...maintenanceFixture.policies[0], id: signerJob.policy_id,
+    family: 'online-signer', enabled: false});
+  maintenanceFixture.jobs = [signerJob];
+  assert.ok(maintenanceStatus(maintenanceFixture), 'The scheduled approval fixture must reference a valid saved policy');
+  await page.locator('#maintenance-refresh').click();
+  await page.getByRole('link', {name: 'Complete signer approval above', exact: true}).click();
+  assert.equal(await page.locator('#signer-rotation').evaluate(node => node.open), true,
+    'The scheduled approval link opens the signing task');
+  assert.equal(await page.locator('#signer-rotation > summary').evaluate(node => node === document.activeElement), true,
+    'The scheduled approval link moves keyboard focus to the opened task');
+  maintenanceFixture.jobs = [];
+  maintenanceFixture.policies = maintenanceFixture.policies.filter(row => row.id !== signerJob.policy_id);
+  await page.locator('#maintenance-refresh').click();
   await page.locator('#rotation-state').getByText('No replacement in progress.', {exact: true}).waitFor();
   const beforeRotation = settingsWrites.length;
   page.once('dialog', dialog => dialog.dismiss());
@@ -894,6 +947,10 @@ try {
   await page.getByRole('button', {name: 'Edit role branch', exact: true}).click();
   assert.equal(await page.locator('#role-editor-advanced').getAttribute('open'), null);
   await page.locator('#role-editor-advanced > summary').click();
+  await page.getByRole('combobox', {name: 'After the settings expire', exact: true}).waitFor({state: 'visible'});
+  assert.match(await page.locator('#role-expiry-scope').innerText(), /Transfers can continue with either choice/);
+  await page.locator('#rd-on-stale').selectOption('defaults');
+  assert.match(await page.locator('#role-expiry-choice').innerText(), /not your current role or server defaults/);
   assert.equal(await page.locator('[data-qos="overall_up_bps"]').inputValue(), '8192');
   await page.locator('[data-qos="overall_up_bps"]').fill('16384');
   await page.locator('#role-def-save').click();
