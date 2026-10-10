@@ -1587,6 +1587,24 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
             unit, re.IGNORECASE)
 
 
+def test_iox_native_signing_keeps_manifest_and_platform_trust_distinct():
+    signing = _section(_page("install/iox.md"), "Native package signing")
+    normalized = " ".join(signing.split())
+    for phrase in (
+            "IOS XE 17.15.x", "only Cisco-signed applications",
+            "Your own certificates and IRIS instruction keys cannot replace the Cisco package signature",
+            "unsigned packages with SHA512 entries", "authorized Cisco signing service",
+            "exact `package.mf` bytes", "adds `package.sign`",
+            "manifest excludes itself, `package.sign` and `package.cert`",
+            "Keep signed packages unchanged", "provenance sidecars after signing",
+            "target device with package verification enabled"):
+        assert phrase in normalized, phrase
+    assert (
+        "https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/"
+        "software/17_15/17-15-x-release-notes-ie3x00-ess3300.html"
+    ) in signing
+
+
 def test_docs_phase1_iox_verification_transaction():
     iox = _page("install/iox.md")
     verification_heading = "Signature verification is a device-wide setting"
