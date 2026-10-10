@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Remove the misleading Monitoring "All" filter; the available time ranges
+  now accurately describe searches of up to 90 days.
+
 - Correct the backup guide's permission-repair procedure to preserve the
   recorded deployment and private file modes instead of changing whole stores.
 

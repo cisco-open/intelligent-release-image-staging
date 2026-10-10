@@ -176,8 +176,8 @@ before trying again.
 onboard and undeploy job on the server. The newest 200 are kept.
 
 The table lists each log's finish time, device, action, result and size. A
-histogram bins them over the window you pick: 24h, 7d (the default), 30d, 90d
-or All. Drag a range across it to filter the table, narrow it further with the
+histogram bins them over the window you pick: 24h, 7d (the default), 30d or 90d.
+Drag a range across it to filter the table, narrow it further with the
 search box and the Action and Result pickers, and choose **view** to read a
 log. Widen the range if a job you expect is missing. The same list, filtered to
 one device, sits on that device's panel; see

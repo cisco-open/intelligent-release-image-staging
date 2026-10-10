@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {MonitoringController} from '../src/monitoring-controller.mjs';
 import {auditMessage, bounds, bucketCount, clampSelection, deploymentResult, deploymentRows, panSelection,
-  queries, validRows} from '../src/monitoring-model.mjs';
+  queries, ranges, validRows} from '../src/monitoring-model.mjs';
 
 const response = (data, status = 200) => ({ok: status === 200, status, json: async () => data, text: async () => data});
 const pending = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return {promise, resolve}; };
@@ -33,7 +33,22 @@ test('selection clamps both directions and panning retains width at boundaries',
   assert.deepEqual(panSelection({start: 1300, end: 1700}, 800, outer), {start: 1600, end: 2000});
   assert.deepEqual(panSelection({start: 1300, end: 1700}, -800, outer), {start: 1000, end: 1400});
   assert.deepEqual([bucketCount(60), bucketCount(3600), bucketCount(86400)], [1, 60, 90]);
-  assert.deepEqual(bounds('all', 10000000), {since: 2224000, until: 10000000});
+  assert.deepEqual(bounds('90d', 10000000), {since: 2224000, until: 10000000});
+});
+
+test('time ranges describe bounded searches and do not offer a false All option', t => {
+  assert.deepEqual(Object.keys(ranges), ['24h', '7d', '30d', '90d']);
+  for (const kind of ['audit', 'deploylogs']) {
+    const urls = queries(kind, {range: '90d'}, 10000000);
+    assert.equal(new URL(urls.list, 'http://iris.test').searchParams.get('after_ts'), '2224000');
+    assert.equal(new URL(urls.histogram, 'http://iris.test').searchParams.get('window'), '7776000');
+  }
+  const {controller, calls} = fixture(t);
+  controller.setRange('audit', 'all');
+  controller.setRange('deploylogs', 'all');
+  assert.equal(controller.snapshot().audit.range, '24h');
+  assert.equal(controller.snapshot().deploylogs.range, '7d');
+  assert.deepEqual(calls, [], 'Unsupported ranges must not trigger an unbounded request');
 });
 
 test('table, histogram and older-page requests keep identical time/category bounds', () => {

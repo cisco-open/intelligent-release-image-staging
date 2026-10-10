@@ -88,6 +88,10 @@ try {
   assert.match(await page.locator('#audit-rows').innerText(), /deployment\s+finished undeploying router-a/i);
   assert.equal(await page.locator('#audit-rows img').count(), 0);
   assert.equal(await page.locator('#audit-scope-tag').innerText(), 'Last 24 h');
+  for (const id of ['audit-range-chips', 'dl-range-chips']) {
+    assert.deepEqual(await page.locator(`#${id} [data-range]`).evaluateAll(rows => rows.map(row => row.dataset.range)),
+      ['24h', '7d', '30d', '90d']);
+  }
   assert.equal(await page.locator('#audit-bars rect').count(), 24);
   assert.equal(calls.some(url => url.startsWith('/api/v1/deploy-logs')), false, 'hidden pane is not fetched');
   await screenshot('audit-desktop');

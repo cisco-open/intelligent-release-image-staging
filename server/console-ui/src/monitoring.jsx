@@ -91,7 +91,7 @@ function Timeline({kind, state, active, controller}) {
   return <div id={`${id}-timeline`}>
     <div className="toolbar" id={`${id}-range-chips`}>
       {Object.keys(ranges).map(range => <button key={range} className={`chip${state.range === range ? ' active' : ''}`}
-        data-range={range} aria-pressed={state.range === range} onClick={() => controller.setRange(kind, range)}>{range === 'all' ? 'All' : range}</button>)}
+        data-range={range} aria-pressed={state.range === range} onClick={() => controller.setRange(kind, range)}>{range}</button>)}
     </div>
     <svg ref={svg} id={`${id}-histogram`} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none"
       tabIndex={0} role="group" aria-label={`${kind === 'audit' ? 'Audit' : 'Deployment'} time selection`}

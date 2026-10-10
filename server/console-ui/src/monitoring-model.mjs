@@ -7,7 +7,6 @@ export const ranges = {
   '7d': {window: 604800, buckets: 28, label: 'Last 7 d'},
   '30d': {window: 2592000, buckets: 30, label: 'Last 30 d'},
   '90d': {window: 7776000, buckets: 45, label: 'Last 90 d'},
-  all: {window: 7776000, buckets: 45, label: 'All time'},
 };
 export const PAGE_SIZE = 25;
 export const width = 600, height = 64, handleWidth = 4;
