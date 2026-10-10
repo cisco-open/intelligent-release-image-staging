@@ -1691,6 +1691,9 @@ def _query_parameters(route):
                 "schema": schema, "example": example})
     elif route.service in ("console", "management") and suffix == "/audit":
         params.extend([
+            {"name": "cursor", "in": "query", "required": False,
+             "description": "Opaque next_cursor from the previous page. Keep time/category filters unchanged. A 409 requires a fresh first page.",
+             "schema": {"type": "string", "minLength": 1, "maxLength": 256}},
             {"name": "limit", "in": "query", "required": False,
              "schema": {"type": "integer", "minimum": 1, "maximum": 500},
              "example": 200},
@@ -1724,6 +1727,9 @@ def _query_parameters(route):
         params.append({"name": "model", "in": "query", "required": False,
                        "description": "Device model used to derive supported install methods",
                        "schema": {"type": "string"}, "example": "IE-3400"})
+        params.append({"name": "management_type", "in": "query", "required": False,
+                       "description": "Restrict to the model and management pair; blank or unknown types return no options",
+                       "schema": {"type": "string"}, "example": "inband"})
     elif route.service in ("console", "management") and suffix == "/swarm":
         params.extend([
             {"name": "limit", "in": "query", "required": False,
@@ -2333,7 +2339,7 @@ def _json_success_example(route):
         "/peer-policy/quarantine/{device_id}": {
             "ok": True, "revision": 5, "quarantined": True},
         "/audit": {"events": [{"ts": 1788470400, "event": "login",
-                                  "category": "auth", "result": "ok"}]},
+                                  "category": "auth", "result": "ok"}], "next_cursor": None},
         "/audit/histogram": {"buckets": [{"start": 1788470400, "count": 1}],
                               "now": 1788474000, "bucket_seconds": 120},
         "/session": {"username": "admin", "csrf": "session-csrf-token"},
@@ -3274,6 +3280,7 @@ def _success(route):
             },
         }
     elif suffix == "/audit":
+        schema["properties"]["next_cursor"] = {"type": ["string", "null"], "maxLength": 256}
         event = schema["properties"]["events"]["items"]
         event["required"] = [name for name in event["required"]
                              if name != "category"]
@@ -3839,7 +3846,7 @@ def _description(route):
             notes.append("Accepts an empty object only. Replaces created_by with console:<current-session-username> "
                          "derived server-side; identity fields cannot be supplied by the caller.")
     if suffix == "/install-options":
-        notes.append("The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.")
+        notes.append("Without management_type, this retains the model-only response; null means no model-based restriction. With management_type, options is always an array of choices accepted for that model and management pair; an incompatible pair or invalid type returns an empty array. Management type alone controls network-field visibility in the Console. A saved free-text model does not confirm hardware support.")
     elif suffix == "/devices" and route.method == "GET":
         notes.append("Status filter keys remain stable: deployed displays as Staged, placement-failed as Staging failed, and waiting-staging means an assigned device has not reported work on the current set. Current per-image errors take precedence over earlier staged flags.")
     elif suffix == "/swarm":

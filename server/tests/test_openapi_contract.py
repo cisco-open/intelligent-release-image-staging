@@ -62,6 +62,20 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     assert doc == openapi_contract.build_document()
 
 
+def test_audit_position_cursor_schema_preserves_time_filters():
+    doc = openapi_contract.build_document()
+    operation = doc["paths"]["/api/v1/audit"]["get"]
+    params = {item["name"]: item for item in operation["parameters"]}
+    assert {"cursor", "before_ts", "after_ts", "category", "limit"} <= params.keys()
+    assert params["cursor"]["schema"]["maxLength"] == 256
+    media = operation["responses"]["200"]["content"]["application/json"]
+    schema = media["schema"]
+    if "$ref" in schema:
+        schema = doc["components"]["schemas"][schema["$ref"].rsplit("/", 1)[1]]
+    assert schema["properties"]["next_cursor"]["type"] == ["string", "null"]
+    assert "next_cursor" in schema["required"]
+
+
 def test_backup_summary_includes_restore_and_restore_recovery():
     document = openapi_contract.build_document()
     for prefix in ("/api/v1", "/internal/v1"):
@@ -835,10 +849,10 @@ def test_console_read_query_contract_matches_runtime_filters_and_limits():
         assert devices["limit"]["schema"]["maximum"] == 1000
         assert "__none" in devices["platform"]["schema"]["enum"]
         expected = {
-            "/audit": {"limit", "before_ts", "after_ts", "category"},
+            "/audit": {"limit", "before_ts", "after_ts", "category", "cursor"},
             "/audit/histogram": {
                 "category", "buckets", "window", "since_ts", "until_ts"},
-            "/install-options": {"model"},
+            "/install-options": {"model", "management_type"},
             "/swarm": {"limit", "offset"},
             "/deploy-logs": {"device_id", "after_ts", "before_ts"},
             "/deploy-logs/histogram": {

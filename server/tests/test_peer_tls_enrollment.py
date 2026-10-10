@@ -5,6 +5,7 @@
 import http.client
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -69,6 +70,71 @@ def test_enroll_reuse_and_encrypted_ca_recovery(enrollment):
     assert issuer.prepare().read_bytes() == original
     root = Path(cfg['stage_dir']) / 'peer-tls'
     assert (root / 'node.key').stat().st_mode & 0o077 == 0
+
+
+@pytest.fixture
+def flash_enrollment(enrollment, tmp_path, monkeypatch):
+    import peer_revocations as rev
+    cfg, client, issuer = enrollment
+    alias, storage = tmp_path / 'flash', tmp_path / 'bootflash'
+    storage.mkdir()
+    alias.symlink_to(storage)
+    monkeypatch.setattr(rev, '_FLASH_ALIAS', alias)
+    monkeypatch.setattr(rev, '_FLASH_STORAGE', storage)
+    original = Path.lstat
+    def system_metadata(path):
+        value = original(path)
+        if path in (alias, tmp_path):
+            fields = list(value)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return value
+    monkeypatch.setattr(Path, 'lstat', system_metadata)
+    cfg['stage_dir'] = str(alias / 'guest-share' / 'iris')
+    return cfg, client, storage / 'guest-share' / 'iris' / 'peer-tls'
+
+
+def test_flash_alias_enrolls_real_identity_and_launches_canonical_watcher(flash_enrollment, monkeypatch, capsys):
+    import agent_config
+    import catalog_client
+    import peer_revocations as rev
+    cfg, client, root = flash_enrollment
+    fragment = peer.ensure(cfg, client)
+    entries = dict(line.split('=', 1) for line in fragment.splitlines())
+    for key in ('bt-peer-tls-cert', 'bt-peer-tls-key', 'bt-peer-tls-ca', 'bt-peer-tls-revocations'):
+        assert Path(entries[key]).resolve() == Path(entries[key])
+        assert str(root) in entries[key]
+    assert (root / 'revocations.txt').is_file()
+    assert peer.ensure(cfg, client) == fragment and client.calls == 1
+    cfg.update(catalog_url='https://catalog.invalid', catalog_token='unit-token', catalog_ca='public-ca')
+    monkeypatch.setattr(agent_config, 'load', lambda _: dict(cfg))
+    monkeypatch.setattr(catalog_client, 'CatalogClient', lambda *_, **__: client)
+    monkeypatch.setattr(peer.ssl, 'create_default_context', lambda **_: object())
+    launched = []
+    monkeypatch.setattr(rev.subprocess, 'Popen', lambda *args, **kwargs: launched.append((args, kwargs)))
+    # Reuse the real enrolled identity here; only detached process creation is
+    # observed. Enrollment/chain validation above used real OpenSSL and issuer.
+    monkeypatch.setattr(peer, 'ensure', lambda *args: fragment)
+    monkeypatch.setattr('sys.argv', ['peer_tls.py', '--conf', str(root.parent / 'iris-agent.conf'), '--start-revocation-watch'])
+    assert peer.main() == 0
+    assert capsys.readouterr().out == fragment
+    argv = launched[0][0][0]
+    assert argv[argv.index('--root') + 1] == str(root)
+    assert launched[0][1]['start_new_session'] is True
+
+
+@pytest.mark.parametrize('linked', ['peer-directory', 'generation', 'ca'])
+def test_flash_alias_does_not_hide_linked_private_state(flash_enrollment, linked):
+    cfg, client, root = flash_enrollment
+    peer.ensure(cfg, client)
+    generation = json.loads((root / 'current.json').read_text())['generation']
+    selected = root if linked == 'peer-directory' else root / generation if linked == 'generation' else root / generation / 'ca.crt'
+    original = selected.with_name(selected.name + '-original')
+    selected.rename(original)
+    selected.symlink_to(original)
+    with pytest.raises(peer.PeerTLSError):
+        peer.ensure(cfg, client)
+    assert client.calls == 1
 
 
 def test_renewal_outage_only_allows_valid_matching_identity(enrollment, monkeypatch):

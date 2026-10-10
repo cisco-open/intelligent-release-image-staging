@@ -14,7 +14,8 @@ const profile = {id: 'operator', name: 'Operators', device_user: 'admin'};
 function fixture() {
   const controller = new DeviceFormsController(), writes = [], reports = [], publications = [];
   let refreshes = 0;
-  controller.connect({fetch: async path => response(path.includes('install-options') ? {options: null} : {profiles: [profile]}),
+  controller.connect({fetch: async path => response(path.includes('install-options')
+    ? {options: managementInstallOptions(new URL(path, 'http://fixture').searchParams.get('management_type'))} : {profiles: [profile]}),
     post: async (path, body) => { writes.push({path, body}); return response(path.endsWith('/devices') ? {device: {device_id: body.device_id}} : {profile: {id: body.id}}); },
     headers: () => ({'X-CSRF-Token': 'fixture'}), confirm: () => true, report: (...args) => reports.push(args),
     publishCredentials: state => publications.push(state), refreshInventory: async () => { refreshes++; }});
@@ -65,7 +66,7 @@ test('device validation stops each incomplete choice', () => {
 });
 test('known conflict is empty, XR explicit choice auto-selects, routers retain either installer', async () => {
   const {controller: c} = fixture(); await device(c, 'routed');
-  c.services.fetch = async () => response({options: ['xr-appmgr']}); await c.refreshOptions();
+  c.services.fetch = async path => response({options: path.includes('management_type=xr-host') ? ['xr-appmgr'] : []}); await c.refreshOptions();
   assert.deepEqual(c.state.options, []); assert.equal(c.state.device.platform, ''); assert.match(c.state.optionHint, /management type/);
   await c.saveDevice(); assert.equal(c.state.deviceFailed, true);
   await c.setDevice('management', 'xr-host'); assert.equal(c.state.device.platform, 'xr-appmgr');
@@ -75,13 +76,15 @@ test('known conflict is empty, XR explicit choice auto-selects, routers retain e
     for (const value of ['router', 'iox']) { c.setDevice('platform', value); await c.refreshOptions(); assert.equal(c.state.device.platform, value); }
   }
 });
-for (const result of ['http', 'network', 'json', 'malformed']) test(`model lookup ${result} retains explicit management and installer`, async () => {
-  const {controller: c} = fixture(); await device(c);
+for (const result of ['http', 'network', 'json', 'malformed', 'null', 'duplicate', 'wrong-management']) test(`model lookup ${result} retains management but refuses unchecked installers`, async () => {
+  const {controller: c, writes} = fixture(); await device(c);
   c.services.fetch = async () => { if (result === 'network') throw Error('offline');
     if (result === 'json') return {ok: true, json: async () => { throw Error('JSON'); }};
-    return response({options: 'not array'}, result === 'http' ? 503 : 200); };
-  await c.refreshOptions(); assert.equal(c.state.device.management, 'xr-host'); assert.equal(c.state.device.platform, 'xr-appmgr');
-  assert.match(c.state.optionHint, /validated when saved/);
+    return response({options: result === 'null' ? null : result === 'duplicate' ? ['xr-appmgr', 'xr-appmgr']
+      : result === 'wrong-management' ? ['iox'] : 'not array'}, result === 'http' ? 503 : 200); };
+  await c.refreshOptions(); assert.equal(c.state.device.management, 'xr-host'); assert.equal(c.state.device.platform, '');
+  assert.deepEqual(c.state.options, []); assert.match(c.state.optionHint, /could not be checked.*retry/);
+  await c.saveDevice(); assert.equal(writes.length, 0);
 });
 for (const fail of [false, true]) test(`late model body ${fail ? 'failure' : 'success'} cannot replace new form choice`, async () => {
   const {controller: c} = fixture(); await device(c); const gate = deferred();
@@ -95,8 +98,23 @@ test('closing cancels late model response even for same-device reopen', async ()
   const {controller: c} = fixture(); await device(c); const gate = deferred(); let signal;
   c.services.fetch = async (path, options) => { signal = options.signal; return {ok: true, json: () => gate.promise}; };
   const old = c.refreshOptions(); await Promise.resolve(); c.closeDevice(); assert.equal(signal.aborted, true);
-  c.services.fetch = async () => response({options: null}); await c.toggleDevice();
+  c.services.fetch = async () => response({options: ['xr-appmgr']}); await c.toggleDevice();
   gate.resolve({options: []}); await old; assert.equal(c.state.device.platform, 'xr-appmgr');
+});
+test('C8 switch-mode conflict uses authoritative pair and never offers stale IOx while checking', async () => {
+  const {controller: c, writes} = fixture(); await device(c, 'router-routed');
+  await c.setDevice('model', 'C8xxx'); c.setDevice('platform', 'iox');
+  const gate = deferred(); let requested;
+  c.services.fetch = async path => { requested = new URL(path, 'http://fixture'); return gate.promise; };
+  const pending = c.setDevice('management', 'inband');
+  assert.equal(requested.searchParams.get('model'), 'C8xxx');
+  assert.equal(requested.searchParams.get('management_type'), 'inband');
+  assert.deepEqual(c.state.options, []); assert.equal(c.state.optionsLoading, true);
+  await c.saveDevice(); assert.equal(writes.length, 0);
+  gate.resolve(response({options: []})); await pending;
+  assert.deepEqual(c.state.options, []); assert.equal(c.state.device.platform, '');
+  assert.match(c.state.optionHint, /no compatible agent install/);
+  await c.saveDevice(); assert.equal(writes.length, 0);
 });
 test('device save exact body and single lock survive close/reopen, hide avoids inventory read', async () => {
   const {controller: c, reports, refreshes} = fixture(); await device(c); const gate = deferred(), writes = [];

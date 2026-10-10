@@ -32,10 +32,53 @@ POLL_SECONDS = 30
 MAGIC = 'IRIS-PEER-REVOCATIONS-1'
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 DECIMAL = re.compile(r'(0|[1-9][0-9]{0,15})\Z')
+_FLASH_ALIAS = Path('/flash')
+_FLASH_STORAGE = Path('/bootflash')
 
 
 class RevocationError(Exception):
     pass
+
+
+def peer_root(stage_dir):
+    """Resolve only Guest Shell's protected /flash -> /bootflash alias.
+
+    Do not generally resolve caller paths: a link below the storage root (or
+    anywhere in another platform's path) must still fail the canonical guard.
+    Return the canonical spelling so later operations no longer traverse the
+    accepted platform alias, including the watcher and native TLS process.
+    """
+    root = Path(stage_dir) / 'peer-tls'
+    if (not root.is_absolute() or '..' in root.parts
+            or any(character in str(root) for character in '\r\n\0')):
+        raise RevocationError('invalid peer identity directory')
+    if root.resolve() == root:
+        return root
+    try:
+        suffix = root.relative_to(_FLASH_ALIAS)
+    except ValueError:
+        raise RevocationError('unsafe peer identity directory alias') from None
+    parent = _FLASH_ALIAS.parent
+    before = [path.lstat() for path in (parent, _FLASH_ALIAS, _FLASH_STORAGE)]
+    parent_info, alias_info, storage_info = before
+    if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != 0
+            or parent_info.st_mode & 0o022
+            or not stat.S_ISLNK(alias_info.st_mode) or alias_info.st_uid != 0
+            or os.readlink(str(_FLASH_ALIAS)) not in (str(_FLASH_STORAGE), _FLASH_STORAGE.name)
+            or not stat.S_ISDIR(storage_info.st_mode)
+            or _FLASH_STORAGE.parent != parent or _FLASH_STORAGE.resolve() != _FLASH_STORAGE):
+        raise RevocationError('unsafe Guest Shell storage alias')
+    normalized = _FLASH_STORAGE / suffix
+    if normalized.resolve() != normalized:
+        raise RevocationError('unsafe peer identity directory alias')
+    # The system-owned parent prevents an unprivileged alias/target swap. Also
+    # reject a replacement during validation; after return, only the canonical
+    # target is used and the existing private-directory/dirfd guards still apply.
+    fields = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+    after = [path.lstat() for path in (parent, _FLASH_ALIAS, _FLASH_STORAGE)]
+    if any(fields(old) != fields(new) for old, new in zip(before, after)):
+        raise RevocationError('Guest Shell storage alias changed during validation')
+    return normalized
 
 
 def _integer(value):
@@ -286,7 +329,7 @@ def refresh_configuration(conf, expected_root=None):
         return False
     if mode != 'required' or urlsplit(cfg['catalog_url']).scheme != 'https':
         raise RevocationError('peer revocation refresh requires verified HTTPS')
-    root = Path(cfg['stage_dir']) / 'peer-tls'
+    root = peer_root(cfg['stage_dir'])
     if expected_root is not None and root != Path(expected_root):
         return False
     current = json.loads(_read(root / 'current.json', 4096).decode('ascii'))

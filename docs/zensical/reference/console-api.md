@@ -98,7 +98,7 @@ See [Security model and trust boundaries](../architecture/security-model.md) for
 | `DELETE /api/v1/devices/<id>` | Retires the device: revokes its credentials, then clears its policy and row. Returns 207 with a `degraded` list on partial failure. |
 | `GET /api/v1/devices/export-csv`, `.../example-csv` | The inventory as `devices.csv`, and a blank example. |
 | `POST /api/v1/devices/import-csv` | Bulk inventory import (8 MiB cap, all or nothing). |
-| `GET /api/v1/install-options?model=<model>` | The onboarding options a model supports. |
+| `GET /api/v1/install-options?model=<model>` | Model-supported options; add `management_type` for choices compatible with both fields. |
 | `GET /api/v1/devices/<id>/plan` | The resolved deployment plan for one device. |
 | `GET /api/v1/devices/<id>/reports` | The device's stored telemetry history, device ID, observation time and pending report request. |
 | `GET /api/v1/devices/<id>/deployment` | The deployment record for the device. |
@@ -172,7 +172,7 @@ A receipt reason of `conflict` can mean the current same-name fleet row has a di
 | --- | --- |
 | `GET /api/v1/overview` | The dashboard rollup: image, device, and rollout state. |
 | `GET /api/v1/swarm` | The live swarm view. Optional `limit`/`offset` page the peers. |
-| `GET /api/v1/audit` | `{events: [...]}`; filter with `category`, `limit` (max 500), `before_ts`, `after_ts`. |
+| `GET /api/v1/audit` | `{events: [...], next_cursor}`; filter with `category`, `limit` (max 500), `before_ts`, `after_ts`. Send `next_cursor` as `cursor` for the next page, keeping filters unchanged. `null` means no more events; HTTP 409 means start again without a cursor. |
 | `GET /api/v1/audit/histogram` | Per-bucket audit event counts, for the activity strip. |
 | `GET /api/v1/deploy-logs` | Metadata for persisted per-job deployment logs, newest first; filter by `device_id`, `after_ts`, `before_ts`. |
 | `GET /api/v1/deploy-logs/histogram` | Evenly spaced counts of finished jobs, for the time-range histogram. |

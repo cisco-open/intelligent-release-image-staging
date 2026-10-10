@@ -6,6 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Upgrade to a new release
 
+!!! warning "Check how this deployment was installed"
+    This page covers deployments created from a source checkout. If you used
+    the `iris-installer` package or `irisctl`, do not apply these commands to
+    its managed deployment. A managed application upgrade is not available yet.
+    Installing a newer `.deb` updates the installer tools, not the running
+    server, Console or device packages.
+
 An upgrade is three steps: back up the server, undeploy the devices, and
 deploy the new release with fresh device agents. Your inventory, images, roles
 and schedules stay in place.

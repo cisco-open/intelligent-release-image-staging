@@ -5414,8 +5414,9 @@ def test_forget_host_key_unknown_device_404(tmp_path, monkeypatch):
         stop()
 
 
+@pytest.mark.parametrize("hashed", [False, True])
 def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, hashed):
     """The persistent known_hosts holds two devices; forgetting d1 must drop
     ONLY d1's line, leave d2's trust untouched, and leave the file in a state
     where the NEXT session re-verifies and re-pins d1's new key (plain
@@ -5426,6 +5427,11 @@ def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
     known_hosts.write_text(
         "192.0.2.10 ssh-ed25519 AAAAOLDKEYFORD1==\n"
         "192.0.2.20 ssh-ed25519 AAAAKEYFORD2==\n")
+    import subprocess
+    if hashed:
+        subprocess.run(["ssh-keygen", "-H", "-f", str(known_hosts)],
+                       check=True, capture_output=True, timeout=10)
+    control = known_hosts.read_text().splitlines()[1]
     host, port, fleet, stop = _serve_forget_host_key(
         tmp_path, monkeypatch, ssh_state_dir=ssh_state,
         devices=[{"device_id": "d1", "device_ip": "192.0.2.10"},
@@ -5437,9 +5443,10 @@ def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
                         {}, headers=hh)
         assert st == 200
         assert json.loads(b) == {"ok": True, "peer": "192.0.2.10"}
-        contents = known_hosts.read_text()
-        assert "192.0.2.10" not in contents      # d1's stale entry is gone
-        assert "192.0.2.20" in contents           # d2's trust is untouched
+        assert known_hosts.read_text().splitlines() == [control]
+        for peer, expected in [("192.0.2.10", 1), ("192.0.2.20", 0)]:
+            assert subprocess.run(["ssh-keygen", "-F", peer, "-f", str(known_hosts)],
+                                  capture_output=True, timeout=10).returncode == expected
     finally:
         stop()
 
@@ -5636,6 +5643,40 @@ def test_api_audit_after_ts_unparseable_ignored(tmp_path):
         assert st == 200
         events = json.loads(b)["events"]
         assert any(e["event"] == "e1" for e in events)
+    finally:
+        stop()
+
+
+def test_api_audit_cursor_keeps_timestamp_ties_and_detects_retention(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        for name in ("first", "second", "third"):
+            audit_mod.append_event(audit_path, name, category="device", ts=1000)
+        ck, _csrf = _auth(host, port)
+        route = "/api/audit?limit=1&category=device&after_ts=900&before_ts=1100"
+        def page(cursor=None):
+            status, _, body = _req(host, port, "GET", route + (
+                "&cursor=" + cursor if cursor is not None else ""), headers={"Cookie": ck})
+            return status, json.loads(body)
+        status, first = page()
+        assert status == 200 and first["events"][0]["event"] == "third"
+        audit_mod.append_event(audit_path, "newer", category="device", ts=1000)
+        status, second = page(first["next_cursor"])
+        assert status == 200 and second["events"][0]["event"] == "second"
+        status, last = page(second["next_cursor"])
+        assert status == 200 and last["events"][0]["event"] == "first"
+        assert last["next_cursor"] is None
+        assert page("malformed")[0] == 400
+        assert page("")[0] == 400
+        # Retention publishes a replacement file; a position in the old file
+        # must never silently continue in the replacement, even if bytes match.
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_bytes(Path(audit_path).read_bytes())
+        replacement.replace(audit_path)
+        status, expired = page(first["next_cursor"])
+        assert status == 409
+        assert "audit_cursor_expired" in json.dumps(expired)
+        assert page()[0] == 200
     finally:
         stop()
 

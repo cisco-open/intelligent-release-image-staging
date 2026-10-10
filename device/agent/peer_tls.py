@@ -95,13 +95,13 @@ def ensure(cfg, client):
         return 'bt-peer-tls=disabled\n'
     if mode != 'required':
         raise PeerTLSError('invalid peer TLS mode')
-    root = Path(cfg['stage_dir']) / 'peer-tls'
-    if not root.is_absolute() or any(c in str(root) for c in '\r\n'):
-        raise PeerTLSError('invalid peer identity directory')
-    if root.is_symlink():
-        raise PeerTLSError('peer identity directory must not be a symlink')
+    from peer_revocations import peer_root, refresh, identity_revoked, RevocationError
+    try:
+        root = peer_root(cfg['stage_dir'])
+    except (RevocationError, OSError):
+        raise PeerTLSError('unsafe peer identity directory') from None
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if root.stat().st_mode & 0o077:
+    if root.stat().st_uid != os.geteuid() or root.stat().st_mode & 0o077:
         raise PeerTLSError('peer identity directory permissions are unsafe')
     if (root / 'enrollment.lock').is_symlink():
         raise PeerTLSError('unsafe enrollment lock')
@@ -144,7 +144,6 @@ def ensure(cfg, client):
                         raise ValueError()
             except (ValueError, KeyError, TypeError):
                 raise PeerTLSError('invalid peer identity manifest') from None
-        from peer_revocations import refresh, identity_revoked, RevocationError
         withdrawn = False
         if ca is not None:
             try:
@@ -256,8 +255,8 @@ def main():
         client = CatalogClient(cfg['catalog_url'], cfg['catalog_token'], context=context)
         fragment = ensure(cfg, client)
         if args.start_revocation_watch:
-            from peer_revocations import start_watcher
-            start_watcher(args.conf, Path(cfg['stage_dir']) / 'peer-tls')
+            from peer_revocations import peer_root, start_watcher
+            start_watcher(args.conf, peer_root(cfg['stage_dir']))
         sys.stdout.write(fragment)
         return 0
     except Exception:

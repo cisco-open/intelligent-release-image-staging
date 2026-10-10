@@ -99,8 +99,9 @@ that lists every image assigned to that device. **Esc** or **✕** closes it.
 
 If a re-imaged or replaced device reports a changed SSH host key, verify its
 identity before choosing **Forget host key** and confirming. The next connection
-trusts and saves the key it presents. If the request outcome is unknown, check
-the saved key before trying again.
+trusts and saves the key it presents. Success confirms that device's saved entry
+is absent, including hashed entries; other devices' keys stay unchanged. If the
+request outcome is unknown, check the saved key before trying again.
 
 Saved deployment logs appear below the record. Missing dates and results show
 as unknown. **Previous device** marks a log dated before this device was added.

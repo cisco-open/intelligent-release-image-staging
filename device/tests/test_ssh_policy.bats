@@ -252,3 +252,86 @@ STUBEOF
   [ "$status" -eq 0 ] || return 1
   grep -q '192.0.2.10' "$operator_file"
 }
+
+@test "forget handles authentic hashed entries and preserves the exact other entry" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n192.0.2.20 ssh-ed25519 AAAAOTHER==\n' > "$IRIS_STATE/ssh/known_hosts"
+  ssh-keygen -H -f "$IRIS_STATE/ssh/known_hosts" >/dev/null 2>&1
+  other="$(ssh-keygen -F 192.0.2.20 -f "$IRIS_STATE/ssh/known_hosts" | tail -n 1)"
+  run bash -c 'set -e; . "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+  [ "$status" -eq 0 ] || return 1
+  run ssh-keygen -F 192.0.2.10 -f "$IRIS_STATE/ssh/known_hosts"
+  [ "$status" -eq 1 ] || return 1
+  [ "$(ssh-keygen -F 192.0.2.20 -f "$IRIS_STATE/ssh/known_hosts" | tail -n 1)" = "$other" ] || return 1
+  run bash -c '. "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "forget refuses real failed hashed removal without relying on errexit" {
+  [ "$(id -u)" -ne 0 ] || skip "root bypasses directory write permission checks"
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n' > "$IRIS_STATE/ssh/known_hosts"
+  ssh-keygen -H -f "$IRIS_STATE/ssh/known_hosts" >/dev/null 2>&1
+  before="$(sha256sum "$IRIS_STATE/ssh/known_hosts")"
+  chmod 500 "$IRIS_STATE/ssh"
+  run bash -c '. "$1"; if iris_ssh_forget 192.0.2.10; then exit 0; else exit 1; fi' iris-forget "$LAB/iris-ssh-policy.sh"
+  chmod 700 "$IRIS_STATE/ssh"
+  [ "$status" -eq 1 ] || return 1
+  [ "$(sha256sum "$IRIS_STATE/ssh/known_hosts")" = "$before" ] || return 1
+  run ssh-keygen -F 192.0.2.10 -f "$IRIS_STATE/ssh/known_hosts"
+  [ "$status" -eq 0 ]
+}
+
+@test "forget refuses inaccessible state rather than mistaking it for absence" {
+  [ "$(id -u)" -ne 0 ] || skip "root bypasses directory search permission checks"
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n' > "$IRIS_STATE/ssh/known_hosts"
+  before="$(sha256sum "$IRIS_STATE/ssh/known_hosts")"
+  for blocked in "$IRIS_STATE/ssh" "$IRIS_STATE"; do
+    chmod 000 "$blocked"
+    run bash -c '. "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+    chmod 700 "$blocked"
+    [ "$status" -eq 1 ] || return 1
+    [ "$(sha256sum "$IRIS_STATE/ssh/known_hosts")" = "$before" ] || return 1
+  done
+}
+
+@test "forget distinguishes an absent host from a lookup error before or after removal" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n' > "$IRIS_STATE/ssh/known_hosts"
+  cat > "$STUB/ssh-keygen" <<'STUBEOF'
+#!/usr/bin/env bash
+if [ "$1" = -R ]; then
+  printf 'removed\n' >> "$ARGV_LOG"
+  exit 0
+fi
+if [ "${FAIL_STAGE}" = before ] || [ -s "$ARGV_LOG" ]; then exit 255; fi
+exit 0
+STUBEOF
+  chmod +x "$STUB/ssh-keygen"
+  for stage in before after; do
+    : > "$ARGV_LOG"
+    run env FAIL_STAGE="$stage" bash -c '. "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+    [ "$status" -eq 1 ] || return 1
+    if [ "$stage" = before ]; then [ ! -s "$ARGV_LOG" ] || return 1; fi
+  done
+}
+
+@test "forget refuses a target still present after a successful removal command" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n' > "$IRIS_STATE/ssh/known_hosts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/ssh-keygen"
+  chmod +x "$STUB/ssh-keygen"
+  run bash -c '. "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+  [ "$status" -eq 1 ]
+}
+
+@test "forget refuses nonregular and dangling linked state rather than reporting absence" {
+  mkdir -p "$IRIS_STATE/ssh/known_hosts"
+  run bash -c '. "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+  [ "$status" -eq 1 ] || return 1
+  rmdir "$IRIS_STATE/ssh/known_hosts"
+  ln -s "$BATS_TEST_TMPDIR/missing" "$IRIS_STATE/ssh/known_hosts"
+  run bash -c '. "$1"; iris_ssh_forget 192.0.2.10' iris-forget "$LAB/iris-ssh-policy.sh"
+  [ "$status" -eq 1 ]
+}

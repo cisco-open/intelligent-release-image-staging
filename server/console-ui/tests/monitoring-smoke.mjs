@@ -19,7 +19,7 @@ try {
     {ts: now - 20, event: 'login', actor: 'console:operator', category: 'auth', result: 'ok', detail: '<img src=x onerror=alert(1)>'},
     {ts: now - 30, event: 'undeploy_finished', actor: 'system', target: 'router-a', category: 'onboard', result: 'ok'},
   ];
-  const older = [{ts: now - 60, event: 'refresh', device_id: 'router-a', secret_name: 'catalog', old_id: 'old', new_id: 'new'}];
+  const older = [{ts: now - 30, event: 'refresh', device_id: 'router-a', secret_name: 'catalog', old_id: 'old', new_id: 'new'}];
   const logs = Array.from({length: 31}, (_, index) => ({file: `log-${index}.txt`, device_id: `router-${index}`,
     finished_at: now - index * 60, action: index % 2 ? 'undeploy' : 'onboard', state: index % 3 ? 'done' : 'error', rc: index % 3 ? 0 : 1, size: 1234}));
   page.on('pageerror', error => errors.push(error.message));
@@ -45,9 +45,11 @@ try {
       }
       if (url.pathname === '/api/v1/audit') {
         const before = Number(url.searchParams.get('before_ts') ?? now + 1);
-        const rows = before === first.at(-1).ts ? older : before <= older.at(-1).ts ? [] : first;
+        const cursor = url.searchParams.get('cursor');
+        const rows = cursor === 'position-1' ? older : first;
         return route.fulfill({json: {events: rows.filter(event => event.ts > Number(url.searchParams.get('after_ts') || 0)
-          && event.ts < before && (!url.searchParams.get('category') || event.category === url.searchParams.get('category')))}});
+          && event.ts < before && (!url.searchParams.get('category') || event.category === url.searchParams.get('category'))),
+          next_cursor: cursor === 'position-1' ? null : 'position-1'}});
       }
       if (url.pathname === '/api/v1/deploy-logs') return route.fulfill({json: {logs: logs.filter(log =>
         log.finished_at > Number(url.searchParams.get('after_ts') || 0)
@@ -98,7 +100,6 @@ try {
   assert.equal(calls.length, 1);
   assert.ok(calls[0].startsWith('/api/v1/audit/histogram?'));
   assert.equal(await page.locator('#audit-rows tr').count(), 3);
-  await page.locator('#audit-load-older').click();
   await page.waitForFunction(() => document.getElementById('audit-load-older').disabled);
   await page.locator('#audit-refresh').click();
   await page.waitForFunction(() => document.querySelectorAll('#audit-rows tr').length === 2);

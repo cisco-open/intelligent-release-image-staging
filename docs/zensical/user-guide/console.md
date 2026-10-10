@@ -83,7 +83,8 @@ reply or when returning to a pending request.
 In **Monitoring → Audit trail**, choose a time range and category to find an
 action. **Load older** keeps those pages in place during automatic refreshes;
 **Refresh** returns to the newest events in the selected range. Drag on the
-graph to narrow the time range, or focus it and use the arrow keys.
+graph to narrow the time range, or focus it and use the arrow keys. If retention
+changes the log while you browse, select **Refresh** when prompted.
 
 ## Settings
 

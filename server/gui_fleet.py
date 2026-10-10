@@ -309,10 +309,9 @@ def install_options_for_record(record):
     so a Console can offer only what the row can take instead of letting the
     operator pick a choice the server then refuses. It is deliberately a
     projection of validate_record's rules, not a second policy: router
-    management types run the router recipe (Guest Shell) or the IOx app, xr-host runs the
-    appmgr container and nothing else, the two IOS-XE switch types run neither,
-    and within that the model table narrows further. An inventory-only row
-    (no management type yet) is narrowed by its model alone.
+    management types run the router recipe (Guest Shell) or the IOx app, xr-host
+    runs the appmgr container and nothing else, and the two IOS-XE switch types
+    run neither. The model and management type must also be compatible.
     """
     management_type = record.get("management_type") or ""
     model = gui_onboard.normalize_model(record.get("model") or "")
@@ -322,16 +321,23 @@ def install_options_for_record(record):
     # until a management type is chosen and the full rules run. Offer it all.
     if management_type in ("", "legacy_routed"):
         return list(_ALL_PLATFORMS)
+    if model and not _MODEL_RE.fullmatch(model):
+        return []
     by_model = gui_onboard.install_options_for(model, record.get("os_family") or "")
     options = list(_ALL_PLATFORMS) if by_model is None else list(by_model)
     if management_type in _ROUTER_TYPES:
+        if model and not _C8K_RE.match(model):
+            return []
         # Router recipe first: it is what a blank platform auto-resolves to.
-        options = [p for p in ("router", "iox") if p in options] or (
-            ["router", "iox"] if _C8K_RE.match(model or "") or not model else [])
+        options = [p for p in ("router", "iox") if p in options]
+    elif _C8K_RE.match(model):
+        return []
     elif management_type == "xr-host":
-        options = [p for p in options if p == "xr-appmgr"]
+        options = ["xr-appmgr"] if by_model == ["xr-appmgr"] else []
     elif management_type in ("routed", "inband"):
         options = [p for p in options if p not in ("router", "xr-appmgr")]
+    else:
+        return []
     return options
 
 

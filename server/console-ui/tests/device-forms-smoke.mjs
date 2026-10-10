@@ -52,7 +52,14 @@ try {
         holdCredentialRead = false; credentialRead = route; credentialReadResolve(); return;
       }
       if (unavailable && url.pathname === '/api/v1/credentials') return route.fulfill({status: 503, json: {error: 'Unavailable'}});
-      if (url.pathname === '/api/v1/install-options') return route.fulfill({json: {options: {C9xxx: ['guestshell', 'iox'], C8xxx: ['router', 'iox'], XR8000: ['xr-appmgr']}[url.searchParams.get('model')] || null}});
+      if (url.pathname === '/api/v1/install-options') {
+        const model = url.searchParams.get('model'), management = url.searchParams.get('management_type');
+        const modelOptions = {C9xxx: ['guestshell', 'iox'], C8xxx: ['router', 'iox'], XR8000: ['xr-appmgr']}[model] || [];
+        const managementOptions = {'router-routed': ['router', 'iox'], 'router-nat': ['router', 'iox'],
+          routed: ['guestshell', 'iox'], inband: ['guestshell', 'iox'], 'xr-host': ['xr-appmgr']}[management] || [];
+        const conflict = model === 'C8xxx' && !['router-routed', 'router-nat'].includes(management);
+        return route.fulfill({json: {options: conflict ? [] : modelOptions.filter(option => managementOptions.includes(option))}});
+      }
       const fixtures = {
         '/api/v1/session': {username: 'Device forms fixture', csrf: 'fixture-only'}, '/api/v1/help': {version: 'fixture', deployment_id: 'fixture-only'},
         '/api/v1/devices': {devices: device ? [device] : [], total: device ? 1 : 0, offset: 0, revision: 1, now: 2000000000},
@@ -84,6 +91,19 @@ try {
       assert.equal(await page.locator(`label[for="${id}"]`).isVisible(), visible.includes(id), 'Whole label/control is management-specific');
     }
   }
+  await page.locator('#df-model').selectOption('C8xxx');
+  for (const management of ['inband', 'routed']) {
+    await page.locator('#df-management-type').selectOption(management);
+    await outcome('df-platform-hint', /no compatible agent install/);
+    assert.equal(await page.locator('#df-platform option[value="iox"]').count(), 0);
+    assert.equal(await page.locator('#df-platform').isDisabled(), true);
+    assert.equal(await page.locator('#df-management-type').inputValue(), management);
+  }
+  await page.locator('#df-management-type').selectOption('router-routed');
+  await outcome('df-platform-hint', /^$/);
+  await page.locator('#df-platform').selectOption('iox');
+  assert.equal(await page.locator('#df-platform').inputValue(), 'iox');
+  await page.locator('#df-management-type').selectOption('xr-host');
   await page.locator('#df-model').selectOption('XR8000'); await outcome('df-platform-hint', /^$/);
   assert.equal(await page.locator('#df-platform').inputValue(), 'xr-appmgr');
   await page.locator('#df-cred').selectOption('operator'); await page.locator('#df-ip').focus(); const inputHandle = await page.locator('#df-ip').elementHandle();

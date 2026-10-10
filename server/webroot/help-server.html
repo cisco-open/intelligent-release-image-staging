@@ -125,6 +125,13 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       For an image conflict or unknown result, choose <strong>Review current
       assignments</strong> and check the new selection before applying again.
       Closing a dialog does not cancel submitted changes.</li>
+      <li><strong>Add device</strong> checks the model series and management type
+      together before offering an agent install. Catalyst 8000 series uses
+      <strong>Router routed</strong> or <strong>Router NAT</strong> for Guest Shell
+      or IOx. Reopen the form if the compatibility check is unavailable.</li>
+      <li><strong>Forget host key</strong> confirms the selected device's saved
+      SSH entry is absent, including hashed entries, and preserves other devices'
+      keys. Verify a replaced device's identity before using this action.</li>
       <li>CSV import results stay below the Inventory toolbar. Device edits
       wait until an import finishes. If its response is uncertain, check
       Inventory before retrying.</li>

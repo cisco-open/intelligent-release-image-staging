@@ -18,7 +18,7 @@ function fixture(t) {
   const services = {fetch: async (url, options) => {
     calls.push([url, options]);
     return response(url.includes('/histogram?') ? histogram
-      : url.includes('/deploy-logs') ? {logs: []} : {events: [event(999990)]});
+      : url.includes('/deploy-logs') ? {logs: []} : {events: [event(999990)], next_cursor: 'position-1'});
   }};
   controller.connect(services);
   t.after(() => controller.dispose());
@@ -41,8 +41,8 @@ test('table, histogram and older-page requests keep identical time/category boun
   const urls = queries('audit', state, 9999);
   assert.equal(urls.list, '/api/v1/audit?limit=200&after_ts=100&before_ts=3700&category=onboard');
   assert.equal(urls.histogram, '/api/v1/audit/histogram?since_ts=100&until_ts=3700&buckets=60&category=onboard');
-  assert.equal(queries('audit', state, 9999, 1000).list,
-    '/api/v1/audit?limit=200&after_ts=100&before_ts=1000&category=onboard');
+  assert.equal(queries('audit', state, 9999, 'position-1').list,
+    '/api/v1/audit?limit=200&after_ts=100&before_ts=3700&cursor=position-1&category=onboard');
   assert.equal(queries('deploylogs', {...state, selection: null}, 1000000).list,
     '/api/v1/deploy-logs?after_ts=913600');
 });
@@ -116,12 +116,12 @@ test('older audit requests cannot duplicate a page and polling retains appended 
   const {controller, services, calls} = fixture(t);
   await controller.refresh();
   const old = pending(), original = services.fetch;
-  services.fetch = (url, options) => url.includes('before_ts=') ? old.promise : original(url, options);
+  services.fetch = (url, options) => url.includes('cursor=') ? old.promise : original(url, options);
   const first = controller.older();
   await controller.older();
   await controller.refresh('audit', true);
   assert.equal(calls.length, 2, 'poll does not invalidate the in-flight older page');
-  old.resolve(response({events: [event(999000)]}));
+  old.resolve(response({events: [event(999000)], next_cursor: 'position-2'}));
   await first;
   assert.deepEqual(controller.snapshot().audit.rows.map(row => row.ts), [999990, 999000]);
   calls.length = 0;
@@ -141,7 +141,7 @@ test('older audit failure keeps rows and cursor, empty older page stops further 
   assert.equal(controller.snapshot().audit.rows.length, 1);
   assert.equal(controller.snapshot().audit.exhausted, false);
   assert.match(controller.snapshot().audit.error, /Older audit events/);
-  services.fetch = async () => response({events: []});
+  services.fetch = async () => response({events: [], next_cursor: null});
   await controller.older();
   assert.equal(controller.snapshot().audit.exhausted, true);
   services.fetch = () => assert.fail('no more reads');
@@ -195,10 +195,10 @@ test('deployment filters are local and preserve selection, refresh keeps a valid
 test('a late older page cannot append after the category changes', async t => {
   const {controller, services} = fixture(t), older = pending(), original = services.fetch;
   await controller.refresh();
-  services.fetch = (url, options) => url.includes('before_ts=') ? older.promise : original(url, options);
+  services.fetch = (url, options) => url.includes('cursor=') ? older.promise : original(url, options);
   const first = controller.older();
   await controller.setCategory('device');
-  older.resolve(response({events: [event(999000, 'stale older event')]}));
+  older.resolve(response({events: [event(999000, 'stale older event')], next_cursor: null}));
   await first;
   assert.equal(controller.snapshot().audit.category, 'device');
   assert.equal(controller.snapshot().audit.rows.length, 1);
@@ -229,5 +229,50 @@ test('invalid histogram data cannot replace a valid table with a mismatched inte
     await controller.refresh();
     assert.equal(controller.snapshot().audit.rows[0].ts, 999990);
     assert.match(controller.snapshot().audit.error, /could not be refreshed/);
+  }
+});
+
+test('older audit pages include timestamp ties and keep the original range as time advances', async t => {
+  const {controller, services} = fixture(t);
+  await controller.refresh();
+  controller.now = () => 1001000;
+  services.fetch = async url => {
+    const query = new URL(url, 'https://example.invalid').searchParams;
+    assert.equal(query.get('after_ts'), '913600');
+    assert.equal(query.get('before_ts'), null);
+    assert.equal(query.get('cursor'), 'position-1');
+    return response({events: [event(999990, 'same second')], next_cursor: null});
+  };
+  await controller.older();
+  assert.equal(controller.snapshot().audit.rows.length, 2);
+  assert.equal(controller.snapshot().audit.rows[1].detail, 'same second');
+  assert.equal(controller.snapshot().audit.exhausted, true);
+});
+
+test('expired audit cursor preserves rows and asks for Refresh instead of retrying it', async t => {
+  const {controller, services} = fixture(t), original = services.fetch;
+  await controller.refresh();
+  services.fetch = async () => response({error: 'audit_cursor_expired'}, 409);
+  await controller.older();
+  assert.equal(controller.snapshot().audit.rows.length, 1);
+  assert.equal(controller.snapshot().audit.exhausted, true);
+  assert.match(controller.snapshot().audit.error, /log changed.*Refresh/);
+  services.fetch = () => assert.fail('expired cursor must not be retried');
+  await controller.older();
+  services.fetch = original;
+  await controller.refresh();
+  assert.equal(controller.snapshot().audit.exhausted, false);
+  assert.equal(controller.snapshot().audit.error, '');
+});
+
+test('repeated or malformed next cursor cannot append an older page', async t => {
+  const {controller, services} = fixture(t);
+  await controller.refresh();
+  for (const cursor of ['position-1', '', {}, undefined]) {
+    services.fetch = async () => response({events: [event(999990)], next_cursor: cursor});
+    await controller.older();
+    assert.equal(controller.snapshot().audit.rows.length, 1);
+    assert.equal(controller.snapshot().audit.nextCursor, 'position-1');
+    assert.match(controller.snapshot().audit.error, /could not be loaded/);
   }
 });

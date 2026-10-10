@@ -127,9 +127,10 @@ For an installer-owned deployment:
 5. Sign in again. Restarting the Console invalidates existing sessions. Check the
    restored inventory, jobs, assignments and images before continuing operations.
 
-The worker preserves current instruction counters, revocations, disclosure records
-and completed-operation evidence. It requires matching credentials, sharing rules,
-device ownership, account data, image quarantine decisions and external trust.
+The worker preserves the current audit trail, instruction counters, revocations,
+disclosure records and completed-operation evidence. It requires matching
+credentials, sharing rules, device ownership, account data, image quarantine
+decisions and external trust.
 A refusal before replacement resumes the original services. Original data remains
 available in protected directories beside restored storage after publication.
 

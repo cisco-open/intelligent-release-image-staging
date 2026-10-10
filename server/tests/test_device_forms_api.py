@@ -91,6 +91,24 @@ def test_form_serializers_roundtrip_through_authenticated_console(
     headers = {"Cookie": login_headers["Set-Cookie"].split(";", 1)[0],
                "X-CSRF-Token": json.loads(raw)["csrf"],
                "Content-Type": "application/json"}
+    query = "/api/v1/install-options?model=" + model + "&management_type=" + management
+    assert _request(port, query)[0] == 401
+    status, _, raw = _request(port, query, headers=headers)
+    assert status == 200 and platform in json.loads(raw)["options"]
+    # Legacy model-only callers retain null/array behavior; explicit forms
+    # receive the full model/management coupling, not intersected guesses.
+    for query, expected in [
+        ("model=C8xxx", ["router", "iox"]), ("model=unknown", None),
+        ("model=C8xxx&management_type=inband", []),
+        ("model=C8xxx&management_type=routed", []),
+        ("model=C8xxx&management_type=router-nat", ["router", "iox"]),
+        ("model=C8xxx&management_type=", []),
+        ("model=C8xxx&management_type=sideways", []),
+        ("model=&management_type=xr-host", []),
+        ("model=unknown&management_type=inband", ["guestshell", "iox"]),
+    ]:
+        status, _, raw = _request(port, "/api/v1/install-options?" + query, headers=headers)
+        assert status == 200 and json.loads(raw) == {"options": expected}
     for path, body in (("/api/v1/credentials", bodies["credential"]),
                        ("/api/v1/devices", bodies["device"])):
         # Neither an unauthenticated caller nor a session without CSRF may save.

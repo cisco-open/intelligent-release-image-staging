@@ -150,6 +150,94 @@ def test_security_generation_compares_decrypted_credentials_and_refuses_revocati
         restore._config_generation(install, current, archived, tmp_path / 'identity')
 
 
+@pytest.mark.parametrize('old,now', [(b'old\n', b'old\nnew\n'),
+                                   (b'pruned\nretained\n', b'retained\n'),
+                                   (None, b'first event\n'), (None, None)])
+def test_audit_activity_is_preserved_without_weakening_config_generation(tmp_path, old, now):
+    current, archived = tmp_path / 'current', tmp_path / 'archived'
+    current.mkdir(); archived.mkdir()
+    for root in (current, archived):
+        atomic_write(root / 'account', b'unchanged credential')
+    if old is not None:
+        atomic_write(archived / 'audit.jsonl', old, 0o600)
+    if now is not None:
+        atomic_write(current / 'audit.jsonl', now, 0o640)
+    install = SimpleNamespace(base=tmp_path, command=lambda *args, **kwargs: pytest.fail('No credential decryption needed'))
+    before = storage.inventory(archived)
+    restore._config_generation(install, current, archived, tmp_path / 'identity')
+    assert storage.inventory(archived) == before  # Admission does not alter either tree.
+    restore._audit_overlay(current, archived)
+    if now is None:
+        assert not (archived / 'audit.jsonl').exists()
+    else:
+        assert (archived / 'audit.jsonl').read_bytes() == now
+        assert storage.inventory(archived / 'audit.jsonl') == storage.inventory(current / 'audit.jsonl')
+    assert (archived / 'account').read_bytes() == b'unchanged credential'
+
+
+def test_missing_current_audit_cannot_be_replaced_by_backup_history(tmp_path):
+    current, archived = tmp_path / 'current', tmp_path / 'archived'
+    current.mkdir(); archived.mkdir()
+    atomic_write(archived / 'audit.jsonl', b'old\n')
+    install = SimpleNamespace(base=tmp_path)
+    with pytest.raises(InstallError, match='Current audit history is missing'):
+        restore._config_generation(install, current, archived, tmp_path / 'identity')
+    with pytest.raises(InstallError, match='Current audit history is missing'):
+        restore._audit_overlay(current, archived)
+    assert (archived / 'audit.jsonl').read_bytes() == b'old\n'
+
+
+@pytest.mark.parametrize('name', ['audit.jsonl.extra', 'audit-private.age', 'nested/audit.jsonl'])
+def test_only_the_exact_audit_filename_is_exempt_from_generation_equality(tmp_path, name):
+    current, archived = tmp_path / 'current', tmp_path / 'archived'
+    current.mkdir(); archived.mkdir()
+    for root in (current, archived):
+        atomic_write(root / 'audit.jsonl', b'ordinary history\n')
+    (current / name).parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(current / name, b'unknown security authority')
+    with pytest.raises(InstallError, match='different credential generation'):
+        restore._config_generation(SimpleNamespace(base=tmp_path), current, archived, tmp_path / 'identity')
+
+
+@pytest.mark.parametrize('side', ['current', 'archived'])
+@pytest.mark.parametrize('kind', ['symlink', 'hardlink', 'fifo', 'directory'])
+def test_audit_overlay_refuses_unsafe_file_custody(tmp_path, side, kind):
+    current, archived = tmp_path / 'current', tmp_path / 'archived'
+    current.mkdir(); archived.mkdir()
+    for root in (current, archived):
+        atomic_write(root / 'audit.jsonl', b'valid history\n')
+    bad = {'current': current, 'archived': archived}[side] / 'audit.jsonl'
+    bad.unlink()
+    if kind == 'symlink':
+        bad.symlink_to(tmp_path / 'absent')
+    elif kind == 'hardlink':
+        atomic_write(tmp_path / 'original', b'history\n')
+        os.link(tmp_path / 'original', bad)
+    elif kind == 'fifo':
+        os.mkfifo(bad)
+    else:
+        bad.mkdir()
+    with pytest.raises(InstallError):
+        restore._config_generation(SimpleNamespace(base=tmp_path), current, archived, tmp_path / 'identity')
+    with pytest.raises(InstallError):
+        restore._audit_overlay(current, archived)
+
+
+def test_audit_overlay_refuses_current_history_truncated_during_copy(tmp_path, monkeypatch):
+    current, archived = tmp_path / 'current', tmp_path / 'archived'
+    current.mkdir(); archived.mkdir()
+    atomic_write(current / 'audit.jsonl', b'current history\n')
+    atomic_write(archived / 'audit.jsonl', b'old history\n')
+    copy = shutil.copy2
+    def changed(source, destination):
+        result = copy(source, destination)
+        atomic_write(source, b'')
+        return result
+    monkeypatch.setattr(restore.shutil, 'copy2', changed)
+    with pytest.raises(InstallError, match='changed while preparing restore'):
+        restore._audit_overlay(current, archived)
+
+
 def test_directory_publication_resumes_both_rename_boundaries(tmp_path, monkeypatch):
     live, source = tmp_path / 'live', tmp_path / 'archive'
     live.mkdir(); source.mkdir()
@@ -437,6 +525,7 @@ def transaction(tmp_path, monkeypatch, request):
     atomic_write(sources['environment'], b'IRIS_TEST=1\n')
     producer(sources['volume-iris-state'], 3)
     atomic_write(sources['volume-iris-config'] / 'account', b'owner-unchanged')
+    atomic_write(sources['volume-iris-config'] / 'audit.jsonl', b'{"event":"before-backup"}\n')
     atomic_write(sources['images'] / 'image.bin', b'original-image')
     volumes = {name: str(path) for name, path in sources.items() if name.startswith('volume-')}
     set_id, backup_id, operation = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
@@ -446,6 +535,8 @@ def transaction(tmp_path, monkeypatch, request):
     backup_archive.create({'service-identity': service, 'backup-signer': signer}, recovery / backup_id,
                           recipient, signer, metadata=dict(meta, scope='identity-recovery'))
     producer(sources['volume-iris-state'], 9)
+    atomic_write(sources['volume-iris-config'] / 'audit.jsonl',
+                 b'{"event":"before-backup"}\n{"event":"after-backup"}\n', 0o640)
     put(sources['volume-iris-state'] / 'fleet.json', {'switch-1': {'desired': 'new-image'}})
     put(sources['volume-iris-state'] / 'jobs.json', {'new': {'status': 'complete'}})
     atomic_write(sources['images'] / 'image.bin', b'damaged-image')
@@ -483,6 +574,10 @@ def test_complete_transaction_restores_data_restarts_and_authenticates_console(t
     assert json.loads((sources['volume-iris-state'] / 'fleet.json').read_text())['switch-1']['desired'] == 'historical-image'
     assert json.loads((sources['volume-iris-state'] / 'jobs.json').read_text()) == {'old': {'status': 'complete'}}
     assert (sources['volume-iris-config'] / 'account').read_bytes() == b'owner-unchanged'
+    assert (sources['volume-iris-config'] / 'audit.jsonl').read_bytes() == (
+        b'{"event":"before-backup"}\n{"event":"after-backup"}\n')
+    assert (sources['volume-iris-config'] / 'audit.jsonl').stat().st_mode & 0o777 == 0o640
+    assert result['proof']['audit_history'] == 'current-fenced-primary'
     assert restore._history(sources['volume-iris-state'])['switch-1']['high_water'] == 9
     assert calls[0] == 'fenced'
     assert [call[-1] for call in calls if isinstance(call, tuple) and call[0] == 'up'] == ['iris', 'console']
@@ -637,6 +732,8 @@ def test_failed_post_start_proof_stops_services_and_recovery_never_replays_backu
     def failed(_):
         put(sources['volume-iris-state'] / 'new-writer.json', {'committed': True})
         producer(sources['volume-iris-state'], 15)
+        with (sources['volume-iris-config'] / 'audit.jsonl').open('ab') as trail:
+            trail.write(b'{"event":"restart-attempt"}\n')
         raise InstallError('consumer unavailable')
     monkeypatch.setattr(restore, '_consumer_proof', failed)
     with pytest.raises(InstallError, match='consumer unavailable'):
@@ -649,6 +746,8 @@ def test_failed_post_start_proof_stops_services_and_recovery_never_replays_backu
     assert result['state'] == 'restored'
     assert (sources['volume-iris-state'] / 'new-writer.json').is_file()
     assert restore._history(sources['volume-iris-state'])['switch-1']['high_water'] == 15
+    assert (sources['volume-iris-config'] / 'audit.jsonl').read_bytes().endswith(
+        b'{"event":"after-backup"}\n{"event":"restart-attempt"}\n')
 
 
 def test_security_mismatch_refuses_before_live_mutation_and_resumes_original(transaction):

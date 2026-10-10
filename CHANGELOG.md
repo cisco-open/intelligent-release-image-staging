@@ -17,6 +17,21 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Start Guest Shell encrypted transfers when the platform maps `/flash` to
+  `/bootflash`, while continuing to reject untrusted links in private
+  certificate storage.
+
+- Offer only compatible model and management-type pairs when adding a device;
+  Catalyst 8000 series Guest Shell and IOx both use a router management type.
+- Verify removal of hashed SSH host keys and report lookup or removal failures
+  consistently, including callers that do not stop on shell errors.
+- Keep audit events from the same second visible when loading older pages.
+  Ask for a refresh if retention has replaced the log during browsing.
+- Preserve the current audit history when restoring a same-deployment backup,
+  while continuing to reject changed credentials and security state.
+- Report invalid device-certificate approvals as a request conflict instead of
+  a service outage, while keeping storage failures separate.
+
 - Revoke one device's peer certificates from its Inventory details without
   deleting its row or staged images. Show the saved decision separately from
   device-reported enforcement. Allow fresh onboarding under the same inventory

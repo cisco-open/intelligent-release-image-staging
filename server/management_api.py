@@ -4653,11 +4653,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         after_ts = float(qs["after_ts"][0])
                     except ValueError:
                         after_ts = None
-                events = (audit.read_events(audit_path, limit=limit,
-                                            before_ts=before_ts, after_ts=after_ts,
-                                            category=category)
-                         if audit_path else [])
-                self._json(200, {"events": events}); return
+                cursor_qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "",
+                                     keep_blank_values=True)
+                cursor = (cursor_qs.get("cursor") or [None])[0]
+                try:
+                    page = audit.read_page(audit_path, limit=limit,
+                                           before_ts=before_ts, after_ts=after_ts,
+                                           category=category, cursor=cursor)
+                except audit.CursorExpired:
+                    self._json(409, {"error": "audit_cursor_expired",
+                                     "detail": "Audit log changed. Refresh to load events."}); return
+                except ValueError:
+                    self._json(400, {"error": "invalid audit cursor"}); return
+                self._json(200, page); return
             if path == "/api/audit/histogram":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -4781,9 +4789,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/install-options":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "",
+                              keep_blank_values=True)
                 model = (qs.get("model") or [""])[0]
-                self._json(200, {"options": gui_onboard.install_options_for(model)}); return
+                if "management_type" in qs:
+                    management = qs["management_type"][0]
+                    options = (gui_fleet.install_options_for_record(
+                        {"model": model, "management_type": management})
+                        if management in ("routed", "inband", "router-routed",
+                                          "router-nat", "xr-host") else [])
+                else:
+                    # Retain the original model-only API, including null for
+                    # an unknown model. Forms request the explicit pair.
+                    options = gui_onboard.install_options_for(model)
+                self._json(200, {"options": options}); return
             if path.startswith("/api/devices/") and path.endswith("/plan"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -6705,7 +6724,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._audit('trust_approval', 'security', action=data.get('action'), actor=actor,
                         target=data.get('family'), detail='Public trust approval state updated', src_ip=self._client_ip())
                     self._json(200, result)
-                except (trust_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                except (trust_rotation.RotationError, tls_rotation.RotationError,
+                        instruction_keys.InstructionKeyError) as exc:
                     self._json(409, {'error': str(exc)})
                 except (OSError, ValueError, subprocess.SubprocessError):
                     self._json(503, {'error': 'Trust operation incomplete; refresh the request before retrying'})

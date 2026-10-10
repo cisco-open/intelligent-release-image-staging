@@ -25,6 +25,11 @@ Each device needs:
 
 ## Prepare the inventory
 
+In **Add device**, choose the model series and management type first. **Agent
+install** lists their compatible choices after the server checks them. For
+Catalyst 8000 series, choose **Router routed** or **Router NAT** for either
+Guest Shell or IOx. If the check is unavailable, reopen the form to retry.
+
 Add devices one at a time in the Console, or import a CSV file. Use
 `fleet/devices.csv.example` as the template. The header row is validated:
 

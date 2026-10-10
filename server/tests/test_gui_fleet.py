@@ -1571,6 +1571,13 @@ def test_malformed_fleet_revision_counter_fails_closed_before_mutating(tmp_path)
     ({"management_type": "inband", "model": "C9300-48UXM"}, ["guestshell", "iox"]),
     ({"management_type": "inband", "model": "IE-3400-8T2S"}, ["iox"]),
     ({"management_type": "routed", "model": ""}, ["guestshell", "iox"]),
+    ({"management_type": "inband", "model": "C8xxx"}, []),
+    ({"management_type": "routed", "model": "C8000V"}, []),
+    ({"management_type": "xr-host", "model": "C8xxx"}, []),
+    ({"management_type": "router-routed", "model": "unknown"}, []),
+    ({"management_type": "xr-host", "model": ""}, []),
+    ({"management_type": "xr-host", "model": "unknown", "os_family": "xr"}, []),
+    ({"management_type": "sideways", "model": "C9300"}, []),
     # inventory-only rows carry any platform as intent, exactly as the
     # allow_legacy path accepts them; the coupling rules run once a type is set
     ({"management_type": "legacy_routed", "model": ""},
@@ -1600,6 +1607,32 @@ def test_install_options_for_record_agrees_with_validate_record(tmp_path):
               "model": "C8000V"}
     for platform in gui_fleet.install_options_for_record(legacy):
         gui_fleet.validate_record(dict(legacy, platform=platform), allow_legacy=True)
+
+
+@pytest.mark.parametrize("model", ["", "unknown", "bad/model", "C8xxx", "C8000V", "C9xxx", "C9300", "IE3x00", "IR1x00", "NCS", "XR8000"])
+@pytest.mark.parametrize("os_family", ["", "xe", "xr"])
+@pytest.mark.parametrize("management", ["routed", "inband", "router-routed", "router-nat", "xr-host"])
+def test_install_options_pair_matches_validation(model, os_family, management):
+    base = {"device_id": "pair", "device_ip": "192.0.2.10", "model": model,
+            "os_family": os_family, "management_type": management}
+    if management != "xr-host":
+        base.update(app_ip="198.51.100.2", app_mask="255.255.255.252", app_gateway="198.51.100.1")
+    if management == "routed":
+        base.update(iris_vlan="100", svi_ip="198.51.100.1", svi_mask="255.255.255.252")
+    elif management == "inband":
+        base["inband_vlan"] = "100"
+    elif management.startswith("router-"):
+        base["vpg_number"] = "0"
+        if management == "router-nat":
+            base["nat_interface"] = "GigabitEthernet1"
+    accepted = []
+    for platform in gui_fleet._ALL_PLATFORMS:
+        try:
+            gui_fleet.validate_record(dict(base, platform=platform))
+            accepted.append(platform)
+        except ValueError:
+            pass
+    assert set(gui_fleet.install_options_for_record(base)) == set(accepted)
 
 
 

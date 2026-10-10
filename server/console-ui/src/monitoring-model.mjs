@@ -30,14 +30,14 @@ export function panSelection(selection, shift, outer) {
   return {start, end: start + span};
 }
 
-export function queries(kind, state, now, before) {
+export function queries(kind, state, now, cursor) {
   const prefix = `/api/v1/${kind === 'audit' ? 'audit' : 'deploy-logs'}`;
   const outer = bounds(state.range, now), cfg = ranges[state.range];
   const list = new URLSearchParams(), histogram = new URLSearchParams();
   if (kind === 'audit') list.set('limit', '200');
   list.set('after_ts', state.selection?.start ?? Math.floor(outer.since));
-  if (before != null) list.set('before_ts', before);
-  else if (state.selection) list.set('before_ts', state.selection.end);
+  if (state.selection) list.set('before_ts', state.selection.end);
+  if (kind === 'audit' && cursor != null) list.set('cursor', cursor);
   if (state.selection) {
     histogram.set('since_ts', state.selection.start);
     histogram.set('until_ts', state.selection.end);

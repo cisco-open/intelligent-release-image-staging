@@ -9895,6 +9895,17 @@
         ],
         "parameters": [
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque next_cursor from the previous page. Keep time/category filters unchanged. A 409 requires a fresh first page.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -9969,10 +9980,18 @@
                         ],
                         "additionalProperties": true
                       }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 256
                     }
                   },
                   "required": [
-                    "events"
+                    "events",
+                    "next_cursor"
                   ],
                   "additionalProperties": true
                 },
@@ -9984,7 +10003,8 @@
                       "category": "auth",
                       "result": "ok"
                     }
-                  ]
+                  ],
+                  "next_cursor": null
                 }
               }
             }
@@ -25018,7 +25038,7 @@
       "get": {
         "operationId": "console_get_api_v1_install_options",
         "summary": "List install options",
-        "description": "List install options. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets. The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.",
+        "description": "List install options. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets. Without management_type, this retains the model-only response; null means no model-based restriction. With management_type, options is always an array of choices accepted for that model and management pair; an incompatible pair or invalid type returns an empty array. Management type alone controls network-field visibility in the Console. A saved free-text model does not confirm hardware support.",
         "tags": [
           "console"
         ],
@@ -25045,6 +25065,16 @@
               "type": "string"
             },
             "example": "IE-3400"
+          },
+          {
+            "name": "management_type",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to the model and management pair; blank or unknown types return no options",
+            "schema": {
+              "type": "string"
+            },
+            "example": "inband"
           }
         ],
         "responses": {
@@ -54995,6 +55025,17 @@
         ],
         "parameters": [
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque next_cursor from the previous page. Keep time/category filters unchanged. A 409 requires a fresh first page.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -55069,10 +55110,18 @@
                         ],
                         "additionalProperties": true
                       }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 256
                     }
                   },
                   "required": [
-                    "events"
+                    "events",
+                    "next_cursor"
                   ],
                   "additionalProperties": true
                 },
@@ -55084,7 +55133,8 @@
                       "category": "auth",
                       "result": "ok"
                     }
-                  ]
+                  ],
+                  "next_cursor": null
                 }
               }
             }
@@ -68462,7 +68512,7 @@
       "get": {
         "operationId": "management_get_internal_v1_install_options",
         "summary": "List install options",
-        "description": "List install options. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets. The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.",
+        "description": "List install options. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets. Without management_type, this retains the model-only response; null means no model-based restriction. With management_type, options is always an array of choices accepted for that model and management pair; an incompatible pair or invalid type returns an empty array. Management type alone controls network-field visibility in the Console. A saved free-text model does not confirm hardware support.",
         "tags": [
           "management"
         ],
@@ -68490,6 +68540,16 @@
               "type": "string"
             },
             "example": "IE-3400"
+          },
+          {
+            "name": "management_type",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to the model and management pair; blank or unknown types return no options",
+            "schema": {
+              "type": "string"
+            },
+            "example": "inband"
           }
         ],
         "responses": {

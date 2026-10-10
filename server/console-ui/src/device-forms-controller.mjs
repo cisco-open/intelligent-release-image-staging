@@ -39,25 +39,29 @@ export class DeviceFormsController {
     if (!this.state.deviceOpen || !this.visible()) return;
     const mine = this.optionGeneration, {management, model} = this.state.device;
     const allowed = managementInstallOptions(management);
-    const render = (modelOptions, hint = '') => {
-      const options = allowed.filter(value => modelOptions === null || modelOptions.includes(value));
+    const render = (pairOptions, hint = '') => {
+      const options = allowed.filter(value => pairOptions.includes(value));
       const platform = options.includes(this.state.device.platform) ? this.state.device.platform
         : allowed.length === 1 ? options[0] || '' : '';
-      this.update({options, device: {...this.state.device, platform}, optionHint: allowed.length && !options.length
-        ? 'This model and management type have no compatible agent install. Check either value.' : hint, optionsLoading: false});
+      this.update({options, device: {...this.state.device, platform}, optionHint: hint || (allowed.length && !options.length
+        ? 'This model and management type have no compatible agent install. Check either value.' : ''), optionsLoading: false});
     };
-    render(null);
-    if (!model || !allowed.length) return;
-    const reader = this.optionReader = new AbortController(); this.update({optionsLoading: true});
+    if (!allowed.length) { render([]); return; }
+    // Keep the draft choice while checking, but never offer or save an option
+    // from the previous model/management pair before this response arrives.
+    const reader = this.optionReader = new AbortController();
+    this.update({options: [], optionsLoading: true, optionHint: 'Checking model and management compatibility…'});
     try {
-      const response = await this.services.fetch('/api/v1/install-options?model=' + encodeURIComponent(model), {signal: reader.signal});
+      const response = await this.services.fetch('/api/v1/install-options?model=' + encodeURIComponent(model)
+        + '&management_type=' + encodeURIComponent(management), {signal: reader.signal});
       if (!response.ok) throw new Error('Unavailable');
       const body = await response.json();
       if (mine !== this.optionGeneration) return;
-      if (body?.options !== null && (!Array.isArray(body?.options) || body.options.some(value => typeof value !== 'string'))) throw new Error('Invalid options');
-      render(body.options, body.options === null ? 'Unrecognized model. Confirm agent support before onboarding.' : '');
+      if (!Array.isArray(body?.options) || body.options.some(value => typeof value !== 'string' || !allowed.includes(value))
+        || new Set(body.options).size !== body.options.length) throw new Error('Invalid options');
+      render(body.options);
     } catch {
-      if (mine === this.optionGeneration) render(null, 'Model compatibility could not be checked. It will be validated when saved.');
+      if (mine === this.optionGeneration) render([], 'Compatibility could not be checked. Reopen Add device or change a choice to retry.');
     } finally { if (mine === this.optionGeneration) this.optionReader = null; }
   }
   async saveDevice() {

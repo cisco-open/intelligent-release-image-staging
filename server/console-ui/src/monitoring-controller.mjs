@@ -6,7 +6,9 @@ import {bounds, clampSelection, deploymentRows, queries, ranges, validRows} from
 
 const pane = range => ({range, selection: null, category: '', query: '', action: '', result: '', page: 0,
   rows: [], buckets: [], domain: null, bucketSeconds: 0, loaded: false, error: '', busy: false,
-  olderPages: 0, olderBusy: false, exhausted: false, interacting: false});
+  olderPages: 0, olderBusy: false, exhausted: false, interacting: false, nextCursor: null, queryNow: null});
+
+const validCursor = value => value === null || (typeof value === 'string' && value.length > 0 && value.length <= 256);
 
 export class MonitoringController {
   constructor({now = () => Date.now() / 1000} = {}) {
@@ -56,7 +58,7 @@ export class MonitoringController {
   resetQuery(kind, patch) {
     this.invalidate(kind);
     this.patch(kind, {...patch, page: 0, rows: [], buckets: [], domain: null, loaded: false,
-      error: '', olderPages: 0, olderBusy: false, exhausted: false, interacting: false});
+      error: '', olderPages: 0, olderBusy: false, exhausted: false, interacting: false, nextCursor: null, queryNow: null});
   }
   setSelection(kind, selection) {
     this.resetQuery(kind, {selection: selection
@@ -74,7 +76,7 @@ export class MonitoringController {
   }
   async json(url, signal) {
     const response = await this.services.fetch(url, {signal});
-    if (!response.ok) throw new Error('HTTP ' + response.status);
+    if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status), {status: response.status});
     return response.json();
   }
   async refresh(kind = this.state.active, fromPoll = false) {
@@ -95,7 +97,8 @@ export class MonitoringController {
       ]);
       if (!this.current(kind, generation)) return;
       const rows = listing?.[kind === 'audit' ? 'events' : 'logs'];
-      if ((!retainPages && !validRows(rows, kind)) || !histogram || !Array.isArray(histogram.buckets)
+      if ((!retainPages && (!validRows(rows, kind) || (kind === 'audit' && !validCursor(listing.next_cursor))))
+        || !histogram || !Array.isArray(histogram.buckets)
         || histogram.buckets.length > 200 || histogram.buckets.some(bucket => !bucket
           || !Number.isFinite(bucket.start) || !Number.isFinite(bucket.count) || bucket.count < 0)
         || (histogram.now != null && !Number.isFinite(histogram.now))) throw new Error('Invalid monitoring response');
@@ -105,7 +108,8 @@ export class MonitoringController {
       const bucketSeconds = histogram.bucket_seconds ?? ((domain.until - domain.since) / (histogram.buckets.length || 1));
       if (!Number.isFinite(bucketSeconds) || bucketSeconds <= 0) throw new Error('Invalid histogram interval');
       this.patch(kind, {buckets: histogram.buckets, domain, bucketSeconds, loaded: true, busy: false, error: '',
-        ...(retainPages ? {} : {rows, olderPages: 0, exhausted: !rows.length})});
+        ...(retainPages ? {} : {rows, olderPages: 0, queryNow: now, nextCursor: listing.next_cursor ?? null,
+          exhausted: !rows.length || (kind === 'audit' && listing.next_cursor === null)})});
     } catch (error) {
       if (!this.current(kind, generation) || error?.name === 'AbortError') return;
       this.patch(kind, {busy: false, error: `${kind === 'audit' ? 'Audit trail' : 'Deployment logs'} could not be refreshed. Try Refresh.`});
@@ -113,20 +117,22 @@ export class MonitoringController {
   }
   async older() {
     const state = this.state.audit;
-    if (!state.loaded || state.olderBusy || state.busy || state.exhausted || !state.rows.length) return;
+    if (!state.loaded || state.olderBusy || state.busy || state.exhausted || !state.rows.length || !state.nextCursor) return;
     this.invalidate('audit');
     const generation = this.generations.audit, controller = this.reads.audit = new AbortController();
-    const last = state.rows.at(-1).ts;
     this.patch('audit', {olderBusy: true});
     try {
-      const data = await this.json(queries('audit', state, Math.floor(this.now()), last).list, controller.signal);
+      const data = await this.json(queries('audit', state, state.queryNow, state.nextCursor).list, controller.signal);
       if (!this.current('audit', generation)) return;
-      if (!validRows(data?.events, 'audit') || data.events.some(row => row.ts >= last)) throw new Error('Invalid older page');
+      if (!validRows(data?.events, 'audit') || !validCursor(data.next_cursor)
+        || data.next_cursor === state.nextCursor) throw new Error('Invalid older page');
       this.patch('audit', {rows: [...state.rows, ...data.events], olderPages: state.olderPages + 1,
-        olderBusy: false, exhausted: !data.events.length, error: ''});
+        olderBusy: false, nextCursor: data.next_cursor, exhausted: !data.events.length || data.next_cursor === null, error: ''});
     } catch (error) {
       if (!this.current('audit', generation) || error?.name === 'AbortError') return;
-      this.patch('audit', {olderBusy: false, error: 'Older audit events could not be loaded. Try Load older.'});
+      this.patch('audit', {olderBusy: false, ...(error.status === 409 ? {exhausted: true} : {}),
+        error: error.status === 409 ? 'The audit log changed. Select Refresh to load events again.'
+          : 'Older audit events could not be loaded. Try Load older.'});
     }
   }
   async openDetail(file) {

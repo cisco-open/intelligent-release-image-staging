@@ -58,8 +58,10 @@ pass a truncated hash, e.g. hashlib.sha256(value.encode()).hexdigest()[:8]
 (correlatable across events but non-secret) -- never value[:8], which would
 leak 32 bits of a live secret onto the unencrypted /etc/iris volume.
 """
+import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -549,12 +551,124 @@ def _atomic_write_lines(path, lines):
             os.remove(tmp)
 
 
+class CursorExpired(ValueError):
+    """The audit file no longer contains the cursor's exact anchor."""
+
+
+_CURSOR = re.compile(r"1\.([0-9a-f]{1,16})\.([0-9a-f]{1,16})\."
+                     r"([0-9a-f]{1,16})\.([0-9a-f]{1,16})\.([0-9a-f]{64})")
+
+
+def _page_anchor(cursor):
+    if cursor is None:
+        return None
+    match = _CURSOR.fullmatch(cursor) if isinstance(cursor, str) else None
+    if match is None:
+        raise ValueError("invalid audit cursor")
+    return (*[int(value, 16) for value in match.groups()[:4]], match[5])
+
+
+def read_page(path, limit=200, before_ts=None, after_ts=None, category=None,
+              cursor=None):
+    """Read reverse-append pages without losing timestamp ties.
+
+    The opaque cursor binds the last returned line's position, bytes and file
+    identity. Appends preserve it; retention/replacement requires a new first
+    page. Time bounds remain filters, never pagination positions. Existing
+    audit files need no migration. Only complete lines can become anchors.
+    """
+    anchor = _page_anchor(cursor)
+    empty = {"events": [], "next_cursor": None}
+    indexed = _indexed(path) if path else None
+    if indexed is not None:
+        fh, entries, count, _ = indexed
+    else:
+        try:
+            fh = open(path, "rb") if path else None
+        except OSError:
+            fh = None
+        if fh is None:
+            if anchor is not None:
+                raise CursorExpired("audit cursor expired")
+            return empty
+        # Keep the fallback on the same descriptor too. As with the index,
+        # ignore an incomplete append tail, including otherwise valid JSON.
+        entries, offset = [], 0
+        try:
+            size = os.fstat(fh.fileno()).st_size
+            while offset < size:
+                line = fh.readline(size - offset)
+                if not line.endswith(b"\n"):
+                    break
+                entry = _index_line(offset, line[:-1])
+                if entry is not _BLANK and entry is not _GARBAGE:
+                    entries.append(entry)
+                offset += len(line)
+            count = len(entries)
+        except OSError:
+            fh.close()
+            if anchor is not None:
+                raise CursorExpired("audit cursor expired") from None
+            return empty
+    try:
+        st = os.fstat(fh.fileno())
+        stop = count
+        if anchor is not None:
+            dev, ino, offset, length, digest = anchor
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                raise CursorExpired("audit cursor expired")
+            stop = next((i for i in range(count)
+                         if entries[i][:2] == (offset, length)), None)
+            if stop is None:
+                raise CursorExpired("audit cursor expired")
+            # The length comes from a matching real entry, not an unchecked
+            # request value. Do not allow a supplied cursor to cause huge reads.
+            fh.seek(offset)
+            if hashlib.sha256(fh.read(length)).hexdigest() != digest:
+                raise CursorExpired("audit cursor expired")
+        if limit is not None and limit <= 0:
+            return empty
+        out, last, more = [], None, False
+        for i in range(stop - 1, -1, -1):
+            offset, length, ts, cat = entries[i]
+            if before_ts is not None or after_ts is not None:
+                if ts is None or (before_ts is not None and ts >= before_ts) \
+                        or (after_ts is not None and ts < after_ts):
+                    continue
+            if category is not None and cat != category:
+                continue
+            fh.seek(offset)
+            raw = fh.read(length)
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if limit is not None and len(out) >= limit:
+                more = True
+                break
+            out.append(event)
+            last = (offset, length, hashlib.sha256(raw).hexdigest())
+        next_cursor = None
+        if more:
+            offset, length, digest = last
+            next_cursor = f"1.{st.st_dev:x}.{st.st_ino:x}.{offset:x}.{length:x}.{digest}"
+        return {"events": out, "next_cursor": next_cursor}
+    except OSError:
+        if anchor is not None:
+            raise CursorExpired("audit cursor expired") from None
+        return empty
+    finally:
+        fh.close()
+
+
 def read_events(path, limit=200, before_ts=None, after_ts=None, category=None):
     """Return up to *limit* events from *path*, NEWEST FIRST (reverse append
     order).  Never raises; a missing/unreadable file yields [].
 
-    before_ts: only events with ts strictly below it (pagination cursor --
-    pass the ts of the oldest event from the previous page).
+    before_ts: only events with ts strictly below it (a time filter, not a
+    pagination cursor; use read_page() for lossless pagination).
     after_ts:  only events with ts greater than or equal to it (inclusive
     lower bound -- combine with before_ts to select a window).
     category:  only events whose category equals it (see AUDIT_CATEGORIES).

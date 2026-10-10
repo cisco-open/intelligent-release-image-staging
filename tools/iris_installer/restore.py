@@ -354,8 +354,18 @@ def _config_generation(install, current, archived, identity):
 
     Ciphertext randomness must not make identical credentials look different.
     A new field/file is security significant by default, never an allowlist gap.
+    The exact audit trail is carried forward separately from the fenced primary;
+    ordinary audit activity is not a credential change.
     """
     left, right = storage.inventory(current), storage.inventory(archived)
+    audit = [next((row for row in records if row['name'] == 'audit.jsonl'), None)
+             for records in (left, right)]
+    if any(row is not None and row['type'] != 'file' for row in audit):
+        raise InstallError('Audit history must be a regular file')
+    if audit[1] is not None and audit[0] is None:
+        raise InstallError('Current audit history is missing; restore refused')
+    left, right = ([row for row in records if row['name'] != 'audit.jsonl']
+                   for records in (left, right))
     index = {row['name']: row for row in right}
     if {row['name'] for row in left} != set(index):
         raise InstallError('Backup belongs to a different credential generation')
@@ -375,6 +385,26 @@ def _config_generation(install, current, archived, identity):
                                  archived / row['name']], capture=True)
         if actual != prior:
             raise InstallError('Backup would roll credentials or revocations backward')
+
+
+def _audit_overlay(current, archived):
+    """Preserve the fenced primary's exact audit bytes and file custody."""
+    source, destination = current / 'audit.jsonl', archived / 'audit.jsonl'
+    if not source.exists() and not source.is_symlink():
+        if destination.exists() or destination.is_symlink():
+            raise InstallError('Current audit history is missing; restore refused')
+        return
+    records = storage.inventory(source)
+    if len(records) != 1 or records[0]['type'] != 'file':
+        raise InstallError('Audit history must be a regular file')
+    if destination.exists() or destination.is_symlink():
+        prior = storage.inventory(destination)
+        if len(prior) != 1 or prior[0]['type'] != 'file':
+            raise InstallError('Archived audit history must be a regular file')
+    shutil.copy2(source, destination)
+    storage.apply_metadata(destination, records)
+    if storage.inventory(source) != records or storage.inventory(destination) != records:
+        raise InstallError('Audit history changed while preparing restore')
 
 
 def _history(root, *, allow_empty=False):
@@ -741,10 +771,13 @@ class Transaction:
                     raise InstallError('Kubernetes topology or Secret authority changed since this backup')
             # Restore original archive custody before adding live producer
             # members, so old metadata cannot overwrite the overlay's modes.
+            storage.apply_metadata(extracted / 'volume-iris-config', _records(extracted, 'volume-iris-config'))
+            _audit_overlay(sources['volume-iris-config'], extracted / 'volume-iris-config')
             storage.apply_metadata(extracted / 'volume-iris-state', _records(extracted, 'volume-iris-state'))
             state_authority(sources['volume-iris-state'], extracted / 'volume-iris-state')
             proof = replay_overlay(sources['volume-iris-state'], extracted / 'volume-iris-state')
             proof.update(authority)
+            proof['audit_history'] = 'current-fenced-primary'
             plan = list(cache_plan)
             components = [name for name in sources if name.startswith('volume-') or name in ('images', 'artifacts')]
             if generated_ca:
@@ -754,8 +787,9 @@ class Transaction:
             for name in components:
                 source = extracted / name
                 records = _records(extracted, name)
-                if name == 'volume-iris-state':
-                    # Overlay above may add live producer files absent in backup.
+                if name in ('volume-iris-state', 'volume-iris-config'):
+                    # Overlays may add current producer or audit files absent
+                    # in the backup, with current custody rather than old modes.
                     records = storage.inventory(source)
                 else:
                     storage.apply_metadata(source, records)
