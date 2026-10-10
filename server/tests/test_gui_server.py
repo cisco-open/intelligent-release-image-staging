@@ -9152,7 +9152,8 @@ def test_forced_undeploy_is_honoured_when_a_record_exists(tmp_path):
         seen.update(e)
         return 0
 
-    host, port, fleet, record_store, stop = _serve_router(tmp_path, run_fn)
+    audit_path = str(tmp_path / "audit.jsonl")
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, run_fn, audit_path=audit_path)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
@@ -9168,6 +9169,11 @@ def test_forced_undeploy_is_honoured_when_a_record_exists(tmp_path):
         # or the very next onboard is refused on it again.
         assert record_store.get(rid)["state"] == "abandoned"
         assert record_store.recoverable_for_device("r1") is None
+        events = _read_audit_lines(audit_path)
+        forced = [event for event in events if event["event"] == "undeploy_forced"]
+        assert len(forced) == 1
+        assert "IRIS-marked VPG/NAT configuration" in forced[0]["detail"]
+        assert "untouched" not in forced[0]["detail"]
     finally:
         stop()
 

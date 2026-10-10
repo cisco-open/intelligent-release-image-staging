@@ -625,6 +625,17 @@ PY2
   [ "$status" -eq 0 ]
 }
 
+@test "identity mismatch explains that Force also removes IRIS-marked network configuration" {
+  _router_uninstall_stub_setup
+  FAKE_DEVICE_IDENTITY=DIFFERENTBOARD run _router_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"device identity mismatch"* ]] || return 1
+  [[ "$output" == *"IRIS-marked VirtualPortGroup/NAT"* ]] || return 1
+  [[ "$output" == *"preserves unmarked operator network configuration"* ]] || return 1
+  [[ "$output" != *"NAT untouched"* ]] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "configure terminal")" -eq 0 ]
+}
+
 @test "forced live teardown still fails when the agent footprint really remains" {
   # The relaxed scan must not become a blanket pass: guestshell left behind is
   # still IRIS's own artifact and must still fail the undeploy.
@@ -643,8 +654,8 @@ PY2
   # which is the condition force exists to clear.
   #
   # These are IRIS-named artifacts, unambiguously ours -- the same argument
-  # that applies to `app-hosting appid guestshell`. The VPG and NAT stay
-  # untouched, because no deployment record proves IRIS created those.
+  # that applies to `app-hosting appid guestshell`. IRIS-marked VPG/NAT
+  # cleanup requires live discovery, so this dry-run cannot name them.
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no logging discriminator IRISQ"* ]] || return 1
   [[ "$output" == *"no logging buffered discriminator IRISQ"* ]] || return 1

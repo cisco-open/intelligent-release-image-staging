@@ -2007,14 +2007,16 @@ class _OnboardSubmissionAdapter(object):
                     def on_success():
                         self.record_store.retire_device(
                             device_id,
-                            "forced agent-only teardown; the record no longer "
+                            "forced IRIS teardown; the record no longer "
                             "describes this device")
+                force_detail = "forced IRIS agent teardown requested"
+                if resolved.get("platform") == "router":
+                    force_detail += "; includes IRIS-marked VPG/NAT configuration"
                 audit_emit(
                     "undeploy_forced", "onboard", action="start",
                     target=device_id, actor=actor, result="ok",
-                    detail="forced agent-footprint teardown; VPG/NAT left "
-                           "untouched, any deployment record abandoned once "
-                           "the teardown succeeds")
+                    detail=force_detail + "; any deployment record abandoned "
+                           "once the teardown succeeds")
             else:
                 try:
                     record = self.record_store.recoverable_for_device(
@@ -2026,12 +2028,12 @@ class _OnboardSubmissionAdapter(object):
                 except ValueError as exc:
                     return reject(
                         409, "%s; retry with force to remove the agent "
-                        "footprint only" % exc)
+                        "footprint" % exc)
                 if record is None:
                     return reject(
                         409, "no deployment record for this device; adopt it "
                         "first, then undeploy, or retry with force to remove "
-                        "the agent footprint only")
+                        "the IRIS footprint")
                 selected_record_id = record["record_id"]
                 try:
                     resolved = self._teardown_resolved(record)

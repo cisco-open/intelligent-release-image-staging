@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify Force undeploy in the guide, recovery message and audit trail:
+  router Guest Shell cleanup also removes IRIS-marked VirtualPortGroups and
+  related NAT configuration, while preserving unrelated operator networking.
+
 - Include the advertised Console address in new one-host browser certificates,
   keeping existing certificates unchanged on restart.
 

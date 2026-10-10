@@ -46,12 +46,17 @@ Catalyst 8000 series routers use Force instead (see
 
 Use **Force** when the record is missing or does not match the device.
 
-Force removes everything that carries the IRIS name: the IRIS EEM applets, the IRISQ logging discriminator with its bindings, `crypto pki trustpoint IRIS`, `ip http client secure-trustpoint IRIS`, the app-hosting stanza, and the staged IRIS files. It leaves your VLAN, SVI, VirtualPortGroup and NAT rules. The audit trail records `undeploy_forced`.
+Force removes the IRIS agent, its named configuration and its support files.
+For Guest Shell on Catalyst 8000 series routers, it also removes
+VirtualPortGroups with an IRIS ownership description, IRIS-named NAT rules
+and static NAT mappings inside those marked subnets. Unmarked operator
+interfaces and unrelated NAT rules stay in place. The audit trail records
+`undeploy_forced`.
 
 A record-driven undeploy verifies the device's processor-board identity
 against the deployment record before it removes anything. Force has no record
-to check that identity against, which is why its removal is scoped to
-IRIS-named artifacts only, never your network configuration.
+to check that identity against. Review the selected device carefully: Force
+uses IRIS names and ownership markers on the device to identify its scope.
 
 !!! warning "Force does not repair an IOx verification failure"
     Recover and reconcile the journal first: see [Recover from an interrupted job or damaged state](../admin-guide/recovery.md).

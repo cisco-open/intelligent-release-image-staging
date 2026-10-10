@@ -25,10 +25,9 @@ ROUTER_RESOURCES_OWNED="${ROUTER_RESOURCES_OWNED:-0}"
 # leaves a router that cannot be undeployed (no record), cannot be adopted
 # (routers never can) and cannot be re-onboarded (preflight refuses an
 # existing Guest Shell).
-# Force mode removes only the AGENT footprint, which is identifiable by name.
-# It must never touch the VPG/NAT: with no record there is no proof IRIS
-# created them, and removing an operator's network would be exactly the harm
-# the record design exists to prevent.
+# Force mode removes the named agent footprint and network objects whose
+# IRIS ownership can be established on the device. It preserves unmarked
+# operator VirtualPortGroups and unrelated NAT configuration.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 APP_IP="${APP_IP:-}"
 IOS_ROOT="bootflash:guest-share"
@@ -44,8 +43,8 @@ IRIS_DIR="$IOS_ROOT/iris"
 case "$MANAGEMENT_TYPE" in
   router-routed) ;;
   router-nat)
-    # Force skips the NAT teardown entirely, so requiring record-derived NAT
-    # values would re-strand the device this mode exists to rescue.
+    # Force discovers IRIS-owned NAT objects on the device, so requiring
+    # record-derived values would re-strand the device it exists to rescue.
     if [ "${IRIS_FORCE_AGENT_ONLY:-0}" != "1" ]; then
       [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
         || { echo "ERROR: router-nat deployment record is missing NAT_INTERFACE or APP_IP" >&2; exit 1; }
@@ -95,8 +94,8 @@ if [ "$DRY" -eq 0 ]; then
       echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
       echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '${LIVE_IDENTITY:-none}'" >&2
       echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
-      echo "  (removes the IRIS agent footprint only, leaving VirtualPortGroup and" >&2
-      echo "  NAT untouched), or delete and re-add it in the Console." >&2
+      echo "  (removes the IRIS agent and IRIS-marked VirtualPortGroup/NAT" >&2
+      echo "  configuration; preserves unmarked operator network configuration)." >&2
       exit 1
     fi
   fi
@@ -129,14 +128,9 @@ no event manager applet IRIS-RECLAIM-BUNDLE
 EOF
 }
 
-# Force mode skips config_cleanup, which owns the removal of everything IRIS
-# configured. What it must NOT remove is the operator's network -- the
-# VirtualPortGroup and the NAT rules -- because with no record there is no
-# proof IRIS created those. Everything else here is IRIS-named and
-# unambiguously ours, and router preflight refuses a re-onboard while ANY of
-# it is present (see the collisions list in gui_onboard.py). Leaving it behind
-# left the device exactly as stranded as before the teardown ran, which is the
-# one thing force mode exists to prevent.
+# Force mode skips record-driven config_cleanup. It discovers IRIS-owned
+# network objects below and removes them separately from the named agent
+# footprint. Unmarked operator network configuration is outside its scope.
 # The description each recipe writes into the VirtualPortGroup it creates is
 # on-device proof of ownership that survives the loss of a record -- which is
 # what makes the force path able to reclaim its own network config without
@@ -573,10 +567,9 @@ FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
 FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 forbidden=""
-# Only a record proves IRIS created the VirtualPortGroup, and only a record
-# supplies its number. Force mode deliberately preserves it, so scanning for a
-# bare "interface VirtualPortGroup" prefix would flag the operator's own group
-# and fail a teardown that actually succeeded.
+# Recorded teardown checks its recorded VPG number. Force checks the exact
+# IRIS-marked groups captured in OWNED below; a bare VirtualPortGroup prefix
+# would incorrectly flag unmarked operator interfaces that it preserves.
 if [ "$FORCE_AGENT_ONLY" != "1" ]; then
   case "$RUNNING" in
     *"interface VirtualPortGroup$VPG_NUMBER"*)

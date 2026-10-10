@@ -108,7 +108,7 @@ See [Security model and trust boundaries](../architecture/security-model.md) for
 | `POST /api/v1/devices/<id>/forget-host-key` | Clears a device's saved SSH host key after a re-image or replacement. |
 | `POST /api/v1/devices/<id>/request-report` | Returns the accepted device ID, request ID, request time and expiry. Completion needs a pull report with that request ID. |
 | `POST /api/v1/devices/<id>/adopt` | Adopts a pre-existing deployment; routers cannot be adopted. |
-| `POST /api/v1/devices/<id>/onboard`, `.../undeploy` | Starts the onboarding or undeploy job. See Onboarding jobs, below. Both accept an optional `log` flag. Undeploy with no deployment record returns 409 unless you send `force`, which removes only the IRIS-installed agent. |
+| `POST /api/v1/devices/<id>/onboard`, `.../undeploy` | Starts the onboarding or undeploy job. See Onboarding jobs, below. Both accept an optional `log` flag. Undeploy with no deployment record returns 409 unless you send `force`. See [Force undeploy](../user-guide/undeploy.md#force-undeploy) for its agent and IRIS-marked network cleanup scope. |
 
 Filters on `GET /api/v1/devices` combine:
 

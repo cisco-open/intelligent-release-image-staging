@@ -95,6 +95,17 @@ def test_unassign_retention_docs_distinguish_xr_ownership_from_undeploy():
         assert "Undeploy itself leaves any remaining root image files" in text
 
 
+def test_force_undeploy_docs_explain_marked_router_network_cleanup():
+    undeploy = " ".join(Path(DOCS, "user-guide/undeploy.md").read_text().split())
+    assert "VirtualPortGroups with an IRIS ownership description" in undeploy
+    assert "static NAT mappings inside those marked subnets" in undeploy
+    assert "Unmarked operator interfaces and unrelated NAT rules stay in place" in undeploy
+    assert "It leaves your VLAN, SVI, VirtualPortGroup and NAT rules" not in undeploy
+    api = Path(DOCS, "reference/console-api.md").read_text()
+    assert "../user-guide/undeploy.md#force-undeploy" in api
+    assert "force`, which removes only the IRIS-installed agent" not in api
+
+
 def test_nav_page_existence_check_catches_missing_file_and_directory_target(tmp_path):
     """Prove the os.path.isfile guard test_every_nav_page_exists relies on
     actually flags both failure shapes Zensical itself stays silent about: a
