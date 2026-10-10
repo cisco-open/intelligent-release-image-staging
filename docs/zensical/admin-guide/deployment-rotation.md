@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rotate deployment trust and keys
 
-Open **Settings > Certificates & keys > Deployment keys**.
+Open **Settings > Certificates & keys**, then **Advanced: replace deployment keys**.
 Credential replacement uses the Ubuntu installer's host worker. It supports an
 installer-owned Docker, split Docker or Kubernetes deployment. The worker
 shows the saved layout and the keys it can maintain. Use the

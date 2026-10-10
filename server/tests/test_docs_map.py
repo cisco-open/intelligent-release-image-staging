@@ -2057,6 +2057,11 @@ def test_certificate_overview_keeps_routine_renewal_distinct_from_advanced_chang
     assert "Dates come from public server files" in rotations
     assert "use their saved passphrases for approval" in signing
     assert "Renewal is not automatic" in signing
+    deployment = _page("admin-guide/deployment-rotation.md")
+    label = "Advanced: replace deployment keys"
+    assert "Open **Settings > Certificates & keys**, then **" + label + "**" in deployment
+    assert "<strong>" + label + "</strong>" in Path(REPO, "server/webroot/index.html").read_text()
+    assert "<strong>" + label + "</strong>" in Path(REPO, "server/webroot/help-server.html").read_text()
 
 
 def test_contributor_deployment_runbook_matches_managed_setup():
