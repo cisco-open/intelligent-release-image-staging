@@ -25912,17 +25912,20 @@
                     "type": "string"
                   },
                   "device_user": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Must not contain U+0000 (NUL)."
                   },
                   "device_pass": {
                     "type": "string",
                     "format": "password",
-                    "writeOnly": true
+                    "writeOnly": true,
+                    "description": "Must not contain U+0000 (NUL)."
                   },
                   "enable_secret": {
                     "type": "string",
                     "format": "password",
-                    "writeOnly": true
+                    "writeOnly": true,
+                    "description": "Must not contain U+0000 (NUL)."
                   }
                 },
                 "required": [
@@ -41613,7 +41616,7 @@
                     "type": "string",
                     "format": "password",
                     "writeOnly": true,
-                    "description": "Required for first configuration or recovery after an interrupted save/clear leaves the destination unconfigured. An absent or empty password keeps the stored secret only when the existing configuration is valid."
+                    "description": "Required for first configuration or recovery after an interrupted save/clear leaves the destination unconfigured. An absent or empty password keeps the stored secret only when the existing configuration is valid. Must not contain U+0000 (NUL)."
                   }
                 },
                 "required": [
@@ -69590,17 +69593,20 @@
                     "type": "string"
                   },
                   "device_user": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Must not contain U+0000 (NUL)."
                   },
                   "device_pass": {
                     "type": "string",
                     "format": "password",
-                    "writeOnly": true
+                    "writeOnly": true,
+                    "description": "Must not contain U+0000 (NUL)."
                   },
                   "enable_secret": {
                     "type": "string",
                     "format": "password",
-                    "writeOnly": true
+                    "writeOnly": true,
+                    "description": "Must not contain U+0000 (NUL)."
                   }
                 },
                 "required": [
@@ -83357,7 +83363,7 @@
                     "type": "string",
                     "format": "password",
                     "writeOnly": true,
-                    "description": "Required for first configuration or recovery after an interrupted save/clear leaves the destination unconfigured. An absent or empty password keeps the stored secret only when the existing configuration is valid."
+                    "description": "Required for first configuration or recovery after an interrupted save/clear leaves the destination unconfigured. An absent or empty password keeps the stored secret only when the existing configuration is valid. Must not contain U+0000 (NUL)."
                   }
                 },
                 "required": [

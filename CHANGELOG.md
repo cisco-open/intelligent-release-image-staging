@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Reject NUL characters in device credentials and audit export passwords
+  before saving, and reject malformed telemetry destination ports.
+
 - Allow finished maintenance history and unneeded saved backups to be cleared
   separately, preserving recovery records and protection against request replay.
   Failed backup attempts without saved files no longer consume backup slots.

@@ -100,6 +100,17 @@ def test_audit_export_password_documents_conditional_recovery_requirement():
         assert "password" not in schema["required"]  # retained-secret edits remain valid
 
 
+def test_subprocess_credential_fields_document_nul_exclusion():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        for path, fields in (("/credentials", ("device_user", "device_pass", "enable_secret")),
+                             ("/settings/audit-export", ("password",))):
+            schema = document["paths"][prefix + path]["post"][
+                "requestBody"]["content"]["application/json"]["schema"]
+            for field in fields:
+                assert "U+0000 (NUL)" in schema["properties"][field]["description"]
+
+
 def test_devices_target_expression_and_projection_are_public_contracts():
     document = openapi_contract.build_document()
     for prefix in ("/api/v1", "/internal/v1"):

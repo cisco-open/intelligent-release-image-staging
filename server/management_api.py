@@ -1583,6 +1583,9 @@ def _validate_otlp_endpoint(raw, authenticated=False):
     url = raw.strip()
     try:
         parts = urlsplit(url)
+        # urlsplit defers malformed and out-of-range port validation until
+        # this property is read. Refuse before saving an unusable override.
+        _ = parts.port
         if parts.scheme not in ("http", "https") or not parts.netloc:
             return None, "endpoint must be an http:// or https:// URL with a host"
         if parts.username is not None or parts.password is not None:
@@ -6932,6 +6935,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 password = data.get("password")
                 if password is not None and not isinstance(password, str):
                     self._json(400, {"error": "password must be a string"})
+                    return
+                if isinstance(password, str) and "\0" in password:
+                    self._json(400, {"error": "password must not contain NUL"})
                     return
                 candidate = dict(fields, port=port, auto=auto)
                 err = audit_export.validate_settings(candidate)
