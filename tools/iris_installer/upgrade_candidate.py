@@ -121,13 +121,13 @@ def build(install, operation, selection, source):
                IRIS_DEVICE_IMAGE_OCI=str(artifacts / 'device.oci.tar'),
                IRIS_DEVICE_PLATFORMS='linux/amd64,linux/arm64',
                IRIS_INSTRUCTION_ROOTS_DIR=str(install.base / 'roots'),
-               IRIS_CACHE_DIR=str(cache), IOXCLIENT=str(binary / 'ioxclient'))
+               XDG_CACHE_HOME=str(cache), IOXCLIENT=str(binary / 'ioxclient'))
     def run(arguments):
         return install.runner([str(value) for value in arguments], env=env, timeout=7200)
     run(['bash', candidate_source / 'tools/get-ioxclient.sh', binary])
     for architecture in ('arm64', 'amd64'):
         run(['bash', candidate_source / 'tools/stage-iox-package.sh', '--arch', architecture,
-             '--artifacts', artifacts])
+             '--artifacts-dir', artifacts])
     run(['bash', candidate_source / 'tools/build-xr-package.sh', '--out', artifacts])
     for architecture, filename in (('x86_64', 'iris-agent.tgz'), ('aarch64', 'iris-agent-arm64.tgz')):
         run(['bash', candidate_source / 'server/pack-agent-bundle.sh', candidate_source / 'device',

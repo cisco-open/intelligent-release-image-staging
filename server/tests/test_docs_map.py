@@ -824,6 +824,21 @@ def test_docs_state_rotation_proof_is_loopback_swarm():
     _require("admin-guide/rotations.md", ["/swarm", "service:seeder"])
 
 
+def test_docs_seeder_rotation_preserves_token_free_urls_and_enforces_overlap_cap():
+    """Credential headers and the overlap cap do not depend on fresh torrents."""
+    rotation = " ".join(_page("admin-guide/rotations.md").split())
+    deployment = " ".join(_page("admin-guide/deployment-rotation.md").split())
+    assert "HTTPS authorization header" in rotation
+    assert "published torrent URLs and image hashes unchanged" in rotation
+    assert "At most two previous credentials can remain valid" in rotation
+    assert "refreshing device torrents does not change this limit" in rotation
+    assert "Releasing it restarts seeding with the current credential" in rotation
+    assert "retired announce" not in rotation
+    assert "unless every device has a fresh torrent" not in rotation
+    assert "torrent announce URLs" not in deployment
+    assert "HTTPS authorization header" in deployment
+
+
 def test_docs_state_report_identity_survives_retries():
     """A report keeps its device identity through retries and export."""
     _require("reference/telemetry-signals.md",

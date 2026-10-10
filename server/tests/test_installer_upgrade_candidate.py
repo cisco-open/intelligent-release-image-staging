@@ -7,6 +7,8 @@
 import hashlib
 import json
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -100,3 +102,111 @@ def test_upgrade_cli_requires_explicit_operation_plan_and_package_proof():
         parser().parse_args(['upgrade', 'apply', '--state-dir', '/state'])
     with pytest.raises(SystemExit):
         parser().parse_args(['upgrade', 'prepare', '--state-dir', '/state', '--accept-changes'])
+
+
+def test_candidate_builder_arguments_reach_actual_script_parsers(tmp_path, monkeypatch):
+    """Exercise real parsing only: Docker builds and package bytes are stand-ins."""
+    repository = Path(__file__).resolve().parents[2]
+    source = tmp_path / 'selected source'; source.mkdir()
+    scripts = ('tools/get-ioxclient.sh', 'tools/stage-iox-package.sh',
+               'tools/build-xr-package.sh', 'tools/build-device-image.sh',
+               'server/pack-agent-bundle.sh')
+    manifest = {}
+    for name in scripts:
+        raw = (repository / name).read_bytes()
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(source / name, raw, 0o755)
+        manifest[name] = hashlib.sha256(raw).hexdigest()
+    atomic_write(source / 'INSTALLER-SOURCE.json', plan.canonical(manifest), 0o644)
+    base = tmp_path / 'existing installation'; base.mkdir()
+    served = base / 'artifacts'; served.mkdir()
+    atomic_write(served / 'sentinel', b'current served package', 0o644)
+    old_cache = base / 'cache'; old_cache.mkdir()
+    atomic_write(old_cache / 'sentinel', b'current builder cache', 0o644)
+    operation = SimpleNamespace(id='7f761c39-450f-4101-836e-6515449d7b28',
+                                directory=base / 'operation')
+    operation.directory.mkdir()
+    template = {'services': {name: {'image': 'existing-' + name,
+        'build': {'context': str(source), 'dockerfile': name + '/Dockerfile'}}
+        for name in plan.SERVICES}}
+    compose_file = base / 'compose.json'
+    atomic_write(compose_file, plan.canonical(template), 0o644)
+    monkeypatch.setattr(candidate, 'template', lambda *args: template)
+    calls = []
+    artifacts = operation.directory / 'artifacts'
+    binary = operation.directory / 'bin'
+
+    def command(argv, **kwargs):
+        if argv[:3] == ['docker', 'image', 'inspect']:
+            digit = '1' if str(argv[-1]).endswith(':iris') else '2'
+            return plan.canonical([{'Id': 'sha256:' + digit * 64}])
+        assert argv[:2] == ['docker', 'compose'] and 'build' in argv
+        return b''
+
+    def runner(argv, *, env, timeout):
+        assert argv[0] == 'bash' and timeout == 7200
+        name = Path(argv[1]).name; calls.append((name, argv[2:]))
+        assert env['IRIS_INSTRUCTION_ROOTS_DIR'] == str(base / 'roots')
+        assert env['IRIS_DEVICE_IMAGE_OCI'] == str(artifacts / 'device.oci.tar')
+        assert env['IOXCLIENT'] == str(binary / 'ioxclient')
+        assert env['XDG_CACHE_HOME'] == str(operation.directory / 'cache')
+        assert 'IRIS_CACHE_DIR' not in env
+        if name == 'get-ioxclient.sh':
+            assert argv[2:] == [str(binary)]
+            # The real supported existing-local-tool branch avoids downloads.
+            atomic_write(binary / 'ioxclient', b'parser-test tool, never executed', 0o755)
+            probe = argv
+        elif name == 'stage-iox-package.sh':
+            assert argv[2:] in (['--arch', arch, '--artifacts-dir', str(artifacts)]
+                                for arch in ('arm64', 'amd64'))
+            probe = [*argv, '--help']
+        elif name == 'build-xr-package.sh':
+            assert argv[2:] == ['--out', str(artifacts)]
+            # The actual no-write dry-run also resolves the default builder
+            # cache. Trace contains only these public temporary test inputs.
+            probe = ['bash', '-x', *argv[1:], '--dry-run']
+        else:
+            assert name == 'pack-agent-bundle.sh'
+            assert argv[2] == str(Path(argv[1]).parents[1] / 'device')
+            assert argv[-2:] == ['--instruction-roots-dir', str(base / 'roots')]
+            assert Path(argv[4]).parent == artifacts
+            assert (Path(argv[3]).name, Path(argv[4]).name) in (
+                ('aria2c-x86_64', 'iris-agent.tgz'), ('aria2c-aarch64', 'iris-agent-arm64.tgz'))
+            # This packer has no help mode. Its exact final rejection proves
+            # all preceding arguments parsed, before filesystem/build actions.
+            probe = [*argv, '--parser-test-stop']
+        result = subprocess.run(probe, env=env, capture_output=True, timeout=10)
+        if name == 'pack-agent-bundle.sh':
+            assert result.returncode == 2
+            assert result.stderr == b'pack-agent-bundle: unknown argument: --parser-test-stop\n'
+        else:
+            assert result.returncode == 0, result.stderr.decode()
+        if name == 'build-xr-package.sh':
+            resolved = [shlex.split(line.split('=', 1)[1]) for line in result.stderr.decode().splitlines()
+                        if line.startswith('+ APPMGR_BUILD_DIR=')]
+            assert resolved[-1] == [str(operation.directory / 'cache/iris/xr-appmgr-build')]
+            assert not (operation.directory / 'cache/iris').exists()
+        for filename in plan.BUILD_FILES:
+            atomic_write(artifacts / filename, b'unit-test output, not a native package', 0o644)
+        return b''
+
+    install = SimpleNamespace(base=base, source=source, compose_file=compose_file,
+        env=dict(candidate.deploy.clean_env(), XDG_CACHE_HOME=str(old_cache)),
+        command=command, runner=runner)
+    built = candidate.build(install, operation, {'source': manifest}, source)
+    assert [name for name, unused in calls] == ['get-ioxclient.sh', 'stage-iox-package.sh',
+        'stage-iox-package.sh', 'build-xr-package.sh', 'pack-agent-bundle.sh', 'pack-agent-bundle.sh']
+    assert built['native_admission'] == 'not-qualified-by-this-build'
+    assert (served / 'sentinel').read_bytes() == b'current served package'
+    assert list(served.iterdir()) == [served / 'sentinel']
+    assert list(old_cache.iterdir()) == [old_cache / 'sentinel']
+    assert (old_cache / 'sentinel').read_bytes() == b'current builder cache'
+
+
+def test_iox_parser_rejects_obsolete_upgrade_artifacts_flag_before_any_build(tmp_path):
+    script = Path(__file__).resolve().parents[2] / 'tools/stage-iox-package.sh'
+    output = tmp_path / 'must-not-be-created'
+    result = subprocess.run(['bash', str(script), '--arch', 'arm64', '--artifacts', str(output)],
+                            env=candidate.deploy.clean_env(), capture_output=True, timeout=10)
+    assert result.returncode == 2 and result.stderr == b'!! unknown option: --artifacts\n'
+    assert not output.exists()

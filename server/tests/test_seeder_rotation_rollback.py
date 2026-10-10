@@ -182,7 +182,7 @@ def test_rotate_announce_refuses_when_two_valid_previous():
              "revoked": False, "record_id": "a"},
             {"value": "P2", "created_at": 1, "expires_at": 0,
              "revoked": False, "record_id": "b"}]}}
-    with pytest.raises(rot.RotationError):
+    with pytest.raises(rot.RotationError, match="wait for one to expire"):
         rot.rotate_announce(store, now=100)
 
 

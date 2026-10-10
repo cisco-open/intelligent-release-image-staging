@@ -798,9 +798,8 @@ def rotate_announce(store, now):
     second key: nothing here needs an operator to remember a manual revoke.
 
     Refuses (raises) any rotation that would evict a still-valid previous
-    beyond ``SEEDER_PREV_CAP`` — the operator must revoke an old previous first
-    (or wait for it to expire), so a credential a device still relies on is
-    never silently dropped.
+    beyond ``SEEDER_PREV_CAP``. Wait for a previous credential to expire;
+    rotation never silently drops a valid one.
     """
     seeder = store.setdefault("seeder", {})
     seeder.setdefault("announce_token_previous", [])
@@ -809,9 +808,8 @@ def rotate_announce(store, now):
     valid_prev = [r for r in prev_list if valid(r, now, 0)]
     if len(valid_prev) >= SEEDER_PREV_CAP:
         raise ValueError(
-            "rotate_announce refused: %d valid previous records already at "
-            "SEEDER_PREV_CAP=%d; revoke one first" % (
-                len(valid_prev), SEEDER_PREV_CAP))
+            "cannot rotate: %d previous credentials are still valid; "
+            "wait for one to expire" % len(valid_prev))
     current = seeder.get("announce_token")
     if current is not None and "value" in current:
         archived = dict(current)

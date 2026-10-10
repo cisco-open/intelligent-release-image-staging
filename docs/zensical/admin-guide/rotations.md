@@ -187,8 +187,9 @@ See [Find your way around the Console](../user-guide/console.md).
 
 ## Rotate the seeder announce credential
 
-The seeder, the server's own copy of each published image and the first source
-in the swarm, announces itself to the tracker with its own credential.
+The server's seeder announces itself to the tracker with its own credential
+in an HTTPS authorization header. Rotation keeps the published torrent URLs
+and image hashes unchanged.
 
 1. Freeze maintenance for your layout.
 2. Run `rotate-seeder-announce --maintenance-frozen`. It exits zero only after
@@ -211,8 +212,9 @@ manifest of the pre-rotation torrent bytes, and `--recover` restores it.
     for that image before you lift the freeze.
 
 The rotated-out credential stays valid for 30 days, set by
-`IRIS_SEEDER_PREV_TTL`. Two retired credentials can be valid at once, so run at
-most two rotations per window unless every device has a fresh torrent.
+`IRIS_SEEDER_PREV_TTL`. At most two previous credentials can remain valid.
+Further rotation waits for one to expire; refreshing device torrents does
+not change this limit.
 
 ## Rotate the metrics scrape token
 
@@ -285,11 +287,9 @@ and the seeder endpoint. Reissue the certificate, publish it, re-onboard devices
 
 - A quarantined image, an image that failed the Cisco hash check and is held
   back from devices, is skipped during a seeder rotation and its id is listed.
-  Its torrent keeps the retired announce until you release the quarantine. If
-  every image is quarantined, the command refuses. See
+  Releasing it restarts seeding with the current credential. If every image
+  is quarantined, the command refuses. See
   [Publish and verify images](../user-guide/images.md).
-- A rotation you started but did not finish leaves both values working. Finish it
-  before you start another.
 
 ## Related
 

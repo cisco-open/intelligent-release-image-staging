@@ -45,7 +45,7 @@ block new maintenance while an operation is running or needs recovery.
 | Root signing keys | Both public roots, approved signing certificate and preserved revocation list | Key holders approve requests; remove deployments, rebuild packages, then onboard devices. |
 | Server encryption key | Key protecting saved server configuration | Independent recovery recipient stays unchanged; existing backups still need their original keys. |
 | Independent recovery recipient | Recovery recipient for encrypted configuration; service identity stays unchanged | Import the protected identity through the host terminal and retain original keys for older backups. |
-| Seeder announce credential | Token the server uses to join image swarms and the torrent announce URLs | Worker proves serving on an isolated tracker and again after normal restart. |
+| Seeder announce credential | Token the server sends to the tracker in an HTTPS authorization header | Worker proves serving on an isolated tracker and again after normal restart. |
 
 ## Rotate management TLS, encryption identity or seeder credentials
 

@@ -17,8 +17,15 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Correct seeder-rotation guidance for header authentication, unchanged torrent
+  URLs, quarantine release and the two-previous-credential limit. When that
+  limit is reached, explain that rotation must wait for a credential to expire.
+
 - Accept the recorded source-build input mode when preparing application
   upgrades, while continuing to refuse prebuilt or conflicting input records.
+
+- Pass the supported artifacts-directory option when preparing IOx packages
+  for application upgrades, and isolate the candidate XR builder cache.
 
 - Use plain signing-key status and root-confirmation labels in Advanced policies.
 
