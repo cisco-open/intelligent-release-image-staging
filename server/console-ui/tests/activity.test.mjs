@@ -213,6 +213,8 @@ test('undeploy cancellation and confirmation errors release the start guard with
   services.confirm = message => { confirmations.push(message); return false; };
   await controller.start('undeploy', ['a'], {force: true}); assert.equal(writes.length, 0);
   assert.match(confirmations[0], /skips record and device identity checks.*[\s\S]*Keeps staged images/);
+  assert.match(confirmations[0], /IRIS-marked VirtualPortGroups and related NAT settings on routers\. Keeps unrelated networking/);
+  assert.doesNotMatch(confirmations[0], /keeps VirtualPortGroup/);
   services.confirm = () => { throw new Error('no confirmation'); };
   await assert.rejects(controller.start('undeploy', ['a'], {}));
   services.confirm = () => true; await controller.start('undeploy', ['a'], {log: true});

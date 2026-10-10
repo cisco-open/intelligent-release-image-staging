@@ -216,7 +216,7 @@ export class ActivityController {
     this.startLock = true; const generation = this.viewGeneration;
     try {
       if (action === 'undeploy' && !await this.services.confirm(`Undeploy ${ids.length} device(s)?` + (options.force
-        ? '\n\nForce cleanup skips record and device identity checks. Removes only IRIS agent files and services; keeps VirtualPortGroup and NAT settings. Retires the old record on success.'
+        ? '\n\nForce cleanup skips record and device identity checks. Removes IRIS agent files and services, plus IRIS-marked VirtualPortGroups and related NAT settings on routers. Keeps unrelated networking. Retires the old record on success.'
         : '\n\nRemoves the IRIS agent and resources listed as IRIS-owned.')
         + '\n\nKeeps staged images in device storage. Does not stop running jobs.')) return;
       if (!this.visible || this.disposed || generation !== this.viewGeneration) return;

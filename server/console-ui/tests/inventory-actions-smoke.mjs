@@ -81,7 +81,8 @@ try {
   if (process.env.IRIS_BROWSER_SCREENSHOT_DIR) await page.screenshot({path: path.join(process.env.IRIS_BROWSER_SCREENSHOT_DIR, 'inventory-actions-undeploy-320.png')});
   await page.setViewportSize({width: 1440, height: 1000});
   await page.locator('#undeploy-force').check(); await page.locator('#undeploy-log').check();
-  page.once('dialog', dialog => { assert.match(dialog.message(), /1 device.*Force cleanup.*keeps VirtualPortGroup/s); dialog.dismiss(); });
+  assert.match(await page.locator('#undeploy-force-help').innerText(), /IRIS-marked VirtualPortGroups and related NAT settings on routers\. Keeps unrelated networking/);
+  page.once('dialog', dialog => { assert.match(dialog.message(), /1 device.*Force cleanup.*IRIS-marked VirtualPortGroups.*Keeps unrelated networking/s); dialog.dismiss(); });
   await page.locator('#undeploy-confirm').click(); assert.equal(requests.length, 2);
   await page.locator('#undeploy-selected').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('#undeploy-confirm').click(); await message(/Started undeploy for 1/);
   assert.deepEqual(requests.at(-1).body, {force: true, log: true}); await page.locator('#batch-close').click();

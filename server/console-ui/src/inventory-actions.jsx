@@ -59,7 +59,7 @@ function InventoryActions({controller, dialogsRoot}) {
           </> : <>
             <p className="muted">Removes the IRIS agent and resources listed as IRIS-owned. Keeps staged images in device storage. Does not stop running jobs.</p>
             {checkbox('force', 'undeploy-force', 'Force cleanup', 'undeploy-force-help')}
-            <p className="muted" id="undeploy-force-help">For a missing or unusable deployment record. Skips record and device identity checks. Removes only the IRIS agent files and services; keeps VirtualPortGroup and NAT settings. Retires the old record on success.</p>
+            <p className="muted" id="undeploy-force-help">For a missing or unusable deployment record. Skips record and device identity checks. Removes IRIS agent files and services, plus IRIS-marked VirtualPortGroups and related NAT settings on routers. Keeps unrelated networking. Retires the old record on success.</p>
             {checkbox('undeployLog', 'undeploy-log', 'Detailed logs', 'undeploy-log-help')}
             <p className="muted" id="undeploy-log-help">Show extra troubleshooting details. Errors are always shown.</p>
           </>}

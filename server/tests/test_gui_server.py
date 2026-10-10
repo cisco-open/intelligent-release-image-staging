@@ -8459,8 +8459,10 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
     for text in (modal, confirm):
         for warning in ("resources listed as IRIS-owned", "staged images in device storage",
                         "Does not stop running jobs", "record and device identity checks",
-                        "VirtualPortGroup and NAT settings", "Retires the old record on success"):
+                        "IRIS-marked VirtualPortGroups and related NAT settings on routers",
+                        "Keeps unrelated networking", "Retires the old record on success"):
             assert warning in text
+        assert "keeps VirtualPortGroup" not in text
         assert "never otherwise" not in text
     assert len(re.sub(r"<[^>]+>", " ", modal).split()) < 100
 
