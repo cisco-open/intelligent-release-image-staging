@@ -2013,6 +2013,38 @@ def test_managed_installer_offers_local_and_separate_holder_workflows():
         assert phrase in approval, phrase
 
 
+def test_automatic_setup_docs_keep_passphrases_recovery_and_manual_keys_distinct():
+    managed = " ".join(_page("install/managed-package.md").split())
+    for phrase in (
+            "Automatic key setup is the default (`--key-mode automatic`)",
+            "You do not choose or type signing-key passphrases",
+            "confirm **Start setup?**",
+            "strong random passphrase for each signing key", "mode `0600`", "mode `0700`",
+            "outside deployment storage and backups",
+            "~/.local/share/iris-setup-keys/<instance>", "setup prints the path",
+            "password for `sudo`", "Console administrator password remain separate",
+            "host compromise can expose both", "secure independent copy of the entire key folder",
+            "including passphrase files and `recovery.age`",
+            "Existing manual keys are never replaced or unlocked automatically",
+            "--key-mode manual", "original `--key-directory`"):
+        assert phrase in managed, phrase
+    approval = " ".join(_page("install/offline-approval.md").split())
+    assert "advanced workflow for separate key holders and later local approvals" in approval
+    assert "automatic setup does not unlock them" in approval
+    assert "Automatically managed keys use their saved passphrase" in approval
+    assert "manually managed keys ask you to enter theirs" in approval
+    developer = " ".join(Path(REPO, "docs/dev/installer.md").read_text().split())
+    for phrase in ("--key-mode automatic", "--key-mode manual", "SSH_ASKPASS",
+                   "never through secret arguments, environment values or logs",
+                   "exact pending request", "recorded managed keys",
+                   "does not protect against full host compromise",
+                   "request review and SHA256 confirmation remain required"):
+        assert phrase in developer, phrase
+    runbook = " ".join(Path(REPO, "docs/dev/ai-assisted-deployment.md").read_text().split())
+    assert "without asking the owner to type key passphrases" in runbook
+    assert "existing manual keys require their original passphrases" in runbook
+
+
 def test_contributor_deployment_runbook_matches_managed_setup():
     runbook = " ".join(Path(REPO, "docs/dev/ai-assisted-deployment.md").read_text().split())
     for phrase in ("managed package procedure", "both IOx architectures",

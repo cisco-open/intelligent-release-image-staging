@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The Ubuntu 24.04 amd64 installer builds the server, Console, both IOx
 architectures, IOS-XR RPM and Guest Shell bundles. It installs the tools it needs,
-creates the server's keys, and asks for signing approval.
+creates the server's keys, and completes local signing approval by default.
 Run it over SSH or in a local terminal. You create your Console account yourself.
 
 Published packages carry GitHub artifact attestations from the public IRIS
@@ -68,22 +68,30 @@ Run this as your normal user, without `sudo`:
 irisctl setup
 ```
 
-The script asks for the server address, Console address and private key folder.
-Press Enter to use the suggested folder, or enter a full path. It creates both
-passphrase-protected signing keys and a separate backup recovery key, builds
-the packages, and asks you to approve the server's signing request. It calls
-`sudo` when needed. Passphrases go directly to OpenSSH.
+Automatic key setup is the default (`--key-mode automatic`). Follow its four steps:
 
-You decide whether to keep the private keys here, move them or split them later.
-Keeping them on the server means a host compromise can affect those keys too.
-The `recovery.age` file has no passphrase; protect it and keep an independent copy.
-The deployment backup does not include these private setup keys.
+1. Review the server and Console addresses, then confirm **Start setup?**
+2. Setup creates protected local signing and recovery keys, then builds the server.
+3. It approves that server's signing request and finishes the device packages.
+4. Open the displayed Console address and create your administrator account.
+
+You do not choose or type signing-key passphrases. Setup generates a separate
+strong random passphrase for each signing key and stores them in mode `0600` files.
+The owner-only key folder is mode `0700`, outside deployment storage and backups.
+Its default is `~/.local/share/iris-setup-keys/<instance>`; setup prints the path.
+Use `--key-directory` to choose another protected location. Your operating-system
+password for `sudo` and the Console administrator password remain separate.
+
+Keeping keys and their passphrases on this host means a host compromise can expose
+both. Keep a secure independent copy of the entire key folder, including passphrase
+files and `recovery.age`. The deployment backup does not include these private setup keys.
 
 Rerun the same command with the same `--instance` or `--state-dir` to continue.
-Existing keys are checked and reused, not replaced. If you moved them, provide
-their original folder with `--key-directory` when approval is needed. Add the
-layout options below for split Docker or Kubernetes; local key setup works with
-all three layouts. You create the Console account yourself.
+Automatic setup checks and reuses its recorded keys. Existing manual keys are
+never replaced or unlocked automatically: use `--key-mode manual` and their
+original `--key-directory`, then enter their passphrases when OpenSSH asks.
+Manual mode also lets you choose key passphrases for a new installation.
+Add the layout options below for split Docker or Kubernetes; setup supports all three layouts.
 
 ### Separate key holders
 
@@ -219,12 +227,14 @@ administrator-provisioned PV bound to this namespace's `iris-data` claim.
 
 ## Approve and resume
 
-If setup stops while copying its initial files, run `irisctl resume` with the
-same `--state-dir`. Keep the original installer version available until setup
-finishes. Resume checks recorded inputs and preserves changed or unknown files.
+Continue local setup with `irisctl setup`, keeping the same key mode and paths.
+For separate key holders, use `irisctl resume` with the same `--state-dir`.
+Keep the original installer version until setup finishes. Resume checks recorded
+inputs and preserves changed or unknown files.
 
-With `irisctl setup`, the script guides local approval and resumes for you.
-With separate key holders, exit `20` means the installer is waiting for approval. Transfer only
+Automatic setup approves its own server request and resumes for you. Manual
+local setup asks you to approve it. With separate key holders, exit `20` means
+the installer is waiting for approval. Transfer only
 `requests/online.pub` from the state directory to a key holder. Record its SHA256
 value and share that value separately so the holder can check the request.
 On the holder's machine, run:

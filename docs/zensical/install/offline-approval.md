@@ -6,8 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Create keys and approve signing requests
 
-Choose separate key holders or protected local storage. For initial key creation
-and installation on the deployment host, use [local setup](managed-package.md#guided-local-setup).
+Use this advanced workflow for separate key holders and later local approvals.
+For automatic key creation and initial approval without typing key passphrases,
+use [local setup](managed-package.md#guided-local-setup). Choose `--key-mode manual`
+there when using existing manual keys; automatic setup does not unlock them.
 
 Run `iris-key-setup` in a terminal on the private key holder's machine.
 It asks for the files it needs, checks them and tells you what to transfer.
@@ -64,7 +66,8 @@ signing machines offline; use a transfer machine or removable storage instead.
    retirement list**. Select the request, your private signing key and a new
    output file.
 3. Compare the displayed SHA256 value with the independent record. Confirm
-   the full value when asked, then enter your private key's passphrase.
+   the full value when asked. Automatically managed keys use their saved passphrase;
+   manually managed keys ask you to enter theirs.
 4. Use **Copy public file** to return only the saved public approval. Apply it
    with `irisctl resume` during installation, or upload it to the matching
    request in the Console.

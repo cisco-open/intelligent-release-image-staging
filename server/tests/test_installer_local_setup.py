@@ -88,7 +88,7 @@ def test_private_keys_cannot_enter_deployment_or_served_folders(tmp_path, locati
 
 
 def test_folder_prompt_is_not_a_passphrase_prompt(tmp_path, monkeypatch):
-    args = arguments(tmp_path)
+    args = arguments(tmp_path, "--key-mode", "manual")
     args.key_directory = None
     monkeypatch.setattr("builtins.input", lambda prompt: "not-a-folder")
     with pytest.raises(InstallError, match="not a passphrase prompt"):
@@ -171,13 +171,17 @@ def test_initial_setup_runs_install_then_explicit_approval_then_resume(tmp_path,
 
     monkeypatch.setattr(setup, "controller", controller)
     monkeypatch.setattr(setup, "choose_key_folder", lambda args: tmp_path / "keys")
-    monkeypatch.setattr(setup, "prepare_keys", lambda folder: (folder / "public/roots", "age1fixture"))
-    monkeypatch.setattr(setup, "sign_request", lambda status, folder: tmp_path / "approval.pub")
+    monkeypatch.setattr(setup, "prepare_keys", lambda folder, **kw: (folder / "public/roots", "age1fixture"))
+    monkeypatch.setattr(setup, "sign_request", lambda status, folder, **kw: tmp_path / "approval.pub")
     assert setup.run_setup(args) == 0
     assert [call[0] for call in calls] == ["setup-status", "install", "setup-status", "resume", "setup-status"]
     assert "--certificate" in calls[3]
     assert "--key-directory" not in calls[1]
-    assert "No account was created or signed in" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "No account was created or signed in" in output
+    assert [output.index(f"[{step}/4]") for step in range(1, 5)] == sorted(
+        output.index(f"[{step}/4]") for step in range(1, 5))
+    assert "--key-mode" not in calls[1]
 
 
 @pytest.mark.parametrize("result", (0, 21, 22, 1))
@@ -204,7 +208,12 @@ def test_existing_installation_never_recreates_keys_or_overrides_config(tmp_path
 
 def test_local_setup_requires_terminal_nonroot_and_explicit_consent(tmp_path, terminal, monkeypatch):
     args = arguments(tmp_path)
-    monkeypatch.setattr(setup, "controller", lambda *a, **k: pytest.fail("no host action"))
+    def read_only(command, **kwargs):
+        assert command[0] == "setup-status"
+        assert kwargs["capture"] is True
+        return {"present": False}
+    monkeypatch.setattr(setup, "controller", read_only)
+    monkeypatch.setattr(setup, "choose_key_folder", lambda args: args.key_directory)
     monkeypatch.setattr(setup, "confirm", lambda prompt: False)
     assert setup.run_setup(args) == 0
     monkeypatch.setattr(setup.sys, "stdin", SimpleNamespace(isatty=lambda: False))
@@ -213,6 +222,69 @@ def test_local_setup_requires_terminal_nonroot_and_explicit_consent(tmp_path, te
     monkeypatch.setattr(setup.os, "geteuid", lambda: 0)
     with pytest.raises(InstallError, match="without sudo"):
         setup.run_setup(args)
+
+
+def test_automatic_is_default_and_uses_default_folder_without_prompt(tmp_path, monkeypatch):
+    args = arguments(tmp_path)
+    assert args.key_mode == "automatic"
+    args.key_directory = None
+    monkeypatch.setattr(setup.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(tmp_path / "home")))
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("no folder or key password prompt"))
+    assert setup.choose_key_folder(args) == tmp_path / "home/.local/share/iris-setup-keys/example"
+
+
+def test_automatic_key_creation_and_signing_receive_selected_mode(tmp_path, terminal, monkeypatch):
+    args = arguments(tmp_path)
+    waiting = {"present": True, "id": "same-id", "state": "WAITING_FOR_SIGNING_APPROVAL",
+               "request": "fixture", "config": {"instance": "example", "console_bind": "192.0.2.10", "console_port": 8080}}
+    statuses = iter([{"present": False}, waiting, waiting])
+    monkeypatch.setattr(setup, "controller", lambda command, capture=False:
+                        next(statuses) if capture else 20 if command[0] == "install" else 21)
+    monkeypatch.setattr(setup, "choose_key_folder", lambda args: args.key_directory)
+    modes = []
+    def prepare(folder, *, mode):
+        modes.append(mode)
+        return folder / "public/roots", "age1fixture"
+    def sign(status, folder, *, mode):
+        modes.append(mode)
+        return folder / "approval.pub"
+    monkeypatch.setattr(setup, "prepare_keys", prepare)
+    monkeypatch.setattr(setup, "sign_request", sign)
+    assert setup.run_setup(args) == 0
+    assert modes == ["automatic", "automatic"]
+
+
+@pytest.mark.skipif(not shutil.which("age-keygen"), reason="age required")
+def test_real_automatic_keys_and_pinned_approval_need_no_password_input(tmp_path, monkeypatch, capsys):
+    folder = key_setup.private_directory(tmp_path / "automatic")
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("automatic keys must not ask for passwords"))
+    roots, recipient = setup.prepare_keys(folder, mode="automatic")
+    before = {name: (folder / name / name).read_bytes() for name in ("root-a", "root-b")}
+    assert setup.prepare_keys(folder, mode="automatic") == (roots, recipient)
+    assert all((folder / name / name).read_bytes() == value for name, value in before.items())
+    assert recipient.startswith("age1")
+    certificate = setup.sign_request(signing_status(folder), folder, mode="automatic")
+    report = subprocess.check_output(["ssh-keygen", "-L", "-f", str(certificate)])
+    assert b"iris-server" in report
+    output = capsys.readouterr()
+    for name in ("root-a", "root-b"):
+        secret = (folder / name / (name + ".passphrase")).read_text().strip()
+        assert secret not in output.out + output.err
+    preserved = set((folder / "approvals").iterdir())
+    wrong = signing_status(folder)
+    wrong["roots"]["root-a.pub"] = key_setup.public_key((roots / "root-b.pub").read_bytes()).decode()
+    with pytest.raises(InstallError, match="does not match"):
+        setup.sign_request(wrong, folder, mode="automatic")
+    assert set((folder / "approvals").iterdir()) == preserved
+
+
+def test_existing_manual_keys_are_not_replaced_by_automatic_mode(keys, monkeypatch):
+    before = {path: path.read_bytes() for path in keys.rglob("*") if path.is_file()}
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("automatic mode must not prompt for old passwords"))
+    with pytest.raises(InstallError, match="--key-mode manual"):
+        setup.prepare_keys(keys, mode="automatic")
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert not list(keys.rglob("*.passphrase"))
 
 
 def test_controller_uses_matching_executable_and_no_shell(monkeypatch):

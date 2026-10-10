@@ -283,7 +283,10 @@
 [data-setup-packages] .wz-steplist-item { width: 100%; min-width: 0; flex-wrap: wrap; }
 [data-setup-packages] .wz-steplist-label { min-width: 0; }
 [data-setup-packages] .wz-content { width: 100%; min-width: 0; }
+[data-setup-packages] #wz-nav { flex-wrap: wrap; }
+[data-setup-packages] #wz-nav button { height: auto; min-height: 36px; max-width: 100%; white-space: normal; }
 [data-setup-packages] .status-pill { white-space: normal; }
+[data-setup-packages] .tbl { min-width: 640px; }
 [data-setup-packages] .tbl :is(th,td):last-child { text-align: left; }
 [data-setup-packages] .tbl td:first-child { white-space: nowrap; }
 #setup-nudge { flex-wrap: wrap; }

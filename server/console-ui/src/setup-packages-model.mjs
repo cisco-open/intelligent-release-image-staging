@@ -5,9 +5,9 @@
 export const setupURL = '/api/v1/settings/setup-status';
 export const verificationURL = '/api/v1/settings/image-verification';
 export const setupSteps = [
-  {id: 'telemetry', key: 'telemetry', label: 'Telemetry destination'},
-  {id: 'packages', key: 'packages', label: 'Device packages'},
-  {id: 'imageverification', key: 'image_verification', label: 'Image verification'},
+  {id: 'telemetry', key: 'telemetry', label: 'Telemetry destination', next: 'Continue to device packages', skip: 'Skip telemetry'},
+  {id: 'packages', key: 'packages', label: 'Device packages', next: 'Continue to image verification', skip: 'Skip package review'},
+  {id: 'imageverification', key: 'image_verification', label: 'Image verification', next: 'Open dashboard', skip: 'Skip image verification'},
 ];
 const packageNames = ['iris-amd64.tar', 'iris-arm64.tar', 'iris-xr.rpm', 'iris-agent.tgz'];
 const rank = {ok: 0, absent: 1, unknown: 2, stale: 3};
@@ -81,7 +81,6 @@ export function telemetryNote(item) {
   const scope = item.source === 'override' ? 'console override' : 'deployment default';
   return item.state === 'ok' ? `Exporting to ${item.endpoint} (${scope}).` : !item.enabled ? `Export is disabled (${scope}).` : `No endpoint is set (${scope}).`;
 }
-export function firstIncomplete(status) {return !status ? 0 : status.packages.state !== 'ok' ? 1 : 2;}
 export function incompleteCount(status) {
   if (!status) return 0;
   // Optional telemetry/verification remain visible in their cards; a nudge

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-import {setupStatus, setupURL, verificationURL, firstIncomplete, incompleteCount, setupSteps} from './setup-packages-model.mjs';
+import {setupStatus, setupURL, verificationURL, incompleteCount, setupSteps} from './setup-packages-model.mjs';
 import {verificationSettings} from './image-verification-model.mjs';
 
 export class SetupPackagesController {
@@ -34,7 +34,7 @@ export class SetupPackagesController {
     if (!['wizard', 'setup', 'packages'].includes(mode)) {this.hide(); this.update({mode: null}); return;}
     const changed = mode !== this.state.mode;
     this.hide(); this.update({mode, step: changed && mode === 'wizard' ? 0 : this.state.step, message: ''});
-    return this.refresh({initial: mode === 'wizard' && changed});
+    return this.refresh();
   }
   chooseStep(step) {
     if (!this.visible() || this.state.mode !== 'wizard' || !Number.isInteger(step) || step < 0 || step >= setupSteps.length) return;
@@ -48,14 +48,15 @@ export class SetupPackagesController {
   async next() {
     if (!this.visible() || this.state.mode !== 'wizard' || this.state.navigating) return;
     const mine = ++this.navigation, step = this.state.step;
-    this.update({navigating: true}); await this.refresh();
+    this.update({navigating: true}); const ready = await this.refresh();
     if (mine !== this.navigation || !this.visible() || this.state.mode !== 'wizard' || this.state.step !== step) return;
-    this.update({navigating: false}); this.skip();
+    this.update({navigating: false});
+    if (ready) this.skip();
   }
-  async refresh({initial = false} = {}) {
+  async refresh() {
     if (!this.visible()) return false;
     this.abort?.abort(); const abort = new AbortController(); this.abort = abort;
-    const mine = ++this.generation, navigation = this.navigation, annotation = this.annotationGeneration, mode = this.state.mode;
+    const mine = ++this.generation, annotation = this.annotationGeneration, mode = this.state.mode;
     this.update({loading: true, status: null, configured: null, message: 'Checking setup status…'});
     const read = async (url, validate) => {
       try {const reply = await this.services.fetch(url, {signal: abort.signal}); if (reply.status !== 200) return null; return validate(await reply.json());} catch {return null;}
@@ -65,7 +66,6 @@ export class SetupPackagesController {
     this.abort = null;
     const changes = {status, loading: false, attention: incompleteCount(status), message: status ? '' : 'Setup status cannot be determined. Re-check when the server is available.'};
     if (annotation === this.annotationGeneration) changes.configured = verification ? verification.mode !== 'off' : null;
-    if (initial && navigation === this.navigation) changes.step = firstIncomplete(status);
     this.update(changes); return Boolean(status);
   }
 }

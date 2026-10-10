@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Make guided installation manage signing-key passphrases automatically. Generate
+  strong random passphrases, keep them in protected local storage, and sign the
+  checked server request without certificate-password prompts. Preserve existing
+  manual keys and the separate-holder workflow. Show clear installation progress
+  and predictable Console setup steps with named next actions.
+
 - Add an offline installer bootstrap for the supported Ubuntu server baseline.
   Authenticate the package before importing its controller, record its accepted
   prerequisite plan, and preserve exact package evidence for interrupted recovery.

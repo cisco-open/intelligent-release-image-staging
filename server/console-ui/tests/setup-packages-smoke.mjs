@@ -59,23 +59,75 @@ try {
   assert.match(await page.locator('#setup-pkg-table').innerText(), /<img src=x onerror=alert\(1\)>/);
   assert.match(await page.locator('#setup-iv-chip').innerText(), /Configured.*no successful run yet/);
   await visit('#setup'); assert.equal(await page.locator('.wz-steplist-item').count(), 3);
-  assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), '2');
-  await page.locator('.wz-steplist-item').filter({hasText: 'Telemetry'}).click();
+  assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), '0');
+  assert.equal(await page.locator('#wz-next').innerText(), 'Continue to device packages');
+  assert.equal(await page.locator('#wz-skip').innerText(), 'Skip telemetry');
+  assert.match(await page.locator('#wz-step-telemetry').innerText(), /choose Save/);
+  assert.match(await page.locator('#wz-navigation-note').innerText(), /Save any form changes before leaving/);
   await page.locator('#wz-td-mount #td-form').waitFor();
-  await page.locator('.wz-steplist-item').filter({hasText: 'Device packages'}).focus(); await page.keyboard.press('Enter');
+  await page.locator('#td-endpoint').fill('https://unsaved.example.invalid');
+  await page.locator('#wz-next').focus(); await page.keyboard.press('Enter'); await idle();
   assert.equal(await page.locator('#wz-step-packages h3').evaluate(node => node === document.activeElement), true);
+  assert.equal(await page.locator('#wz-next').innerText(), 'Continue to image verification');
+  assert.equal(await page.locator('#wz-skip').innerText(), 'Skip package review');
   assert.equal(await page.locator('#wz-pkg-table tbody tr').count(), 4);
-  await page.locator('.wz-steplist-item').filter({hasText: 'Image verification'}).click(); await page.locator('#wz-iv-mount #iv-mode').waitFor();
+  failure = 'http'; await page.locator('#wz-next').click(); await idle();
+  assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), '1');
+  assert.match(await page.locator('#wz-msg').innerText(), /cannot be determined/);
+  assert.match(await page.locator('#wz-pkg-chip').innerText(), /Cannot determine/);
+  failure = ''; await page.locator('#wz-next').click(); await idle(); await page.locator('#wz-iv-mount #iv-mode').waitFor();
+  assert.equal(await page.locator('#wz-next').innerText(), 'Open dashboard');
+  assert.equal(await page.locator('#wz-skip').innerText(), 'Skip image verification');
+  assert.match(await page.locator('#wz-step-imageverification').innerText(), /select Save schedule/);
+  await page.locator('#iv-mode').selectOption('weekly');
+  await page.locator('#wz-next').click(); await page.locator('#view-overview').waitFor({state: 'visible'});
+  assert.deepEqual(writes, [], 'Navigation never submits edited forms');
+  // A slow initial read neither skips step one nor overrides a chosen step.
+  failure = 'hold'; const entering = new Promise(resolve => {reached = resolve;});
+  await page.evaluate(() => {location.hash = '#setup';}); await entering;
+  assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), '0');
+  await page.locator('.wz-steplist-item').filter({hasText: 'Device packages'}).focus(); await page.keyboard.press('Enter');
+  await held.fulfill({json: setup}); failure = ''; await idle();
+  assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), '1');
+  assert.equal(await page.locator('#wz-step-packages h3').evaluate(node => node === document.activeElement), true);
+  setup = setupFixture();
   for (const route of ['#settings/setup', '#settings/packages', '#setup']) {
     await visit(route);
-    if (route === '#setup') await page.locator('.wz-steplist-item').filter({hasText: 'Device packages'}).click();
-    for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
-      await page.setViewportSize({width, height});
-      const overflow = await page.evaluate(() => [...document.querySelectorAll('body *')].filter(node => {const rect = node.getBoundingClientRect(); return rect.width && rect.right > innerWidth + 1 && getComputedStyle(node).position !== 'fixed' && !node.closest('.table-scroll');}).map(node => node.id || node.className).slice(-12));
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, route + ' fits ' + width + ': ' + overflow.join(', '));
-      if (process.env.IRIS_UI_SCREENSHOTS) {await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true}); await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'setup-' + route.replace(/[#/]/g, '-') + '-' + width + '.png')});}
+    assert.equal(await page.locator('#iris-navigation a[href="#policies"]').getAttribute('aria-current'), null);
+    assert.equal(await page.locator('#iris-navigation a[href="#policies"]').evaluate(node => node.classList.contains('is-active')), false);
+    for (const step of route === '#setup' ? [0, 1, 2] : [null]) {
+      if (step !== null) {
+        await page.locator('.wz-steplist-item[data-step="' + step + '"]').click();
+        if (step === 0) await page.locator('#wz-td-mount #td-form').waitFor();
+        if (step === 2) await page.locator('#wz-iv-mount #iv-mode').waitFor();
+      }
+      for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
+        await page.setViewportSize({width, height});
+        const overflow = await page.evaluate(() => [...document.querySelectorAll('body *')].filter(node => {const rect = node.getBoundingClientRect(); return rect.width && rect.right > innerWidth + 1 && getComputedStyle(node).position !== 'fixed' && !node.closest('.table-scroll');}).map(node => node.id || node.className).slice(-12));
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, route + ' step ' + step + ' fits ' + width + ': ' + overflow.join(', '));
+        if (step !== null) {
+          for (const name of ['wz-back', 'wz-skip', 'wz-next']) {
+            const rect = await page.locator('#' + name).boundingBox();
+            assert.ok(rect.x >= 0 && rect.x + rect.width <= width + 1, name + ' fits ' + width);
+          }
+          await page.locator('#wz-next').focus();
+          assert.notEqual(await page.locator('#wz-next').evaluate(node => getComputedStyle(node).boxShadow), 'none', 'Visible keyboard focus');
+        }
+        await page.mouse.move(0, 0); // A previous click must not paint an unrelated navigation hover in screenshots.
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('#iris-navigation a[href="#policies"]')).backgroundColor === 'rgba(0, 0, 0, 0)');
+        await page.evaluate(() => window.scrollTo(0, 0));
+        if (process.env.IRIS_UI_SCREENSHOTS) {await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true}); await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'setup-' + route.replace(/[#/]/g, '-') + (step === null ? '' : '-step' + (step + 1)) + '-' + width + '.png'), fullPage: true});}
+      }
     }
   }
+  await page.locator('#wz-back').focus(); await page.keyboard.press('Enter');
+  assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), '1');
+  await page.locator('#wz-back').click(); assert.equal(await page.locator('#wz-back').isDisabled(), true);
+  for (const step of [0, 1, 2]) {
+    assert.equal(await page.locator('.wz-steplist-item[aria-current=step]').getAttribute('data-step'), String(step));
+    await page.locator('#wz-skip').focus(); await page.keyboard.press('Enter');
+  }
+  await page.locator('#view-overview').waitFor({state: 'visible'});
   await page.setViewportSize({width: 1440, height: 1000}); await visit('#settings/packages');
   failure = 'hold'; const pending = new Promise(resolve => {reached = resolve;}); await page.locator('#device-packages-recheck').click(); await pending;
   assert.match(await page.locator('#device-packages-chip').innerText(), /Cannot determine/);

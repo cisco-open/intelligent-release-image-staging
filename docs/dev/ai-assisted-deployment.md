@@ -94,17 +94,21 @@ a different binary when a download or package build fails.
 
 ## Who holds the private signing keys
 
-The owner chooses separate key holders or protected local storage. Guided
-`irisctl setup` creates or reuses protected local keys and passes only public
-inputs to the privileged installer. The owner enters passphrases directly into
-OpenSSH and reviews the signing request. Keep an independent recovery copy;
-deployment backups do not include private setup keys.
+`irisctl setup` defaults to automatic local keys and passes only public inputs
+to the privileged installer. It creates random root passphrases in protected
+files and approves its recorded server request without asking the owner to type
+key passphrases. `--key-mode manual` retains manual key creation and approval;
+existing manual keys require their original passphrases and are never replaced.
+Keep a secure independent copy of the entire key folder, including passphrase
+files and the recovery identity; deployment backups exclude these setup keys.
 
 For later approvals on the deployment host, the owner runs
 `iris-key-setup --local` and confirms **LOCAL KEY HOLDER**. The normal
-`iris-key-setup` command retains separate-holder checks. Private-key operations
-are refused inside containers in both modes. A host compromise can expose keys
-kept there; explain that tradeoff without choosing storage on the owner's behalf.
+`iris-key-setup` command retains separate-holder checks. Managed keys use their
+saved passphrases; the owner still reviews and confirms the request SHA256.
+Private-key operations
+are refused inside containers in both modes. A host compromise can expose both
+locally stored keys and their passphrases. Explain that tradeoff before setup.
 See [Create keys and approve signing requests](../zensical/install/offline-approval.md).
 
 ## Start signing instructions

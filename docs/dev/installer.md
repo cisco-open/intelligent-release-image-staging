@@ -29,12 +29,25 @@ repository and tagged release workflow, separate from deployment instruction roo
 
 On an isolated Ubuntu test host, run `sudo apt install ./iris-installer_<version>_amd64.deb`.
 
-Run `irisctl setup` without sudo for the owner-selected local-key workflow. It
-creates or checks protected signing roots and the recovery identity outside
-deployment storage, then invokes the matching privileged installer with public
-inputs only. It checks the selected signing key against the journal's pinned
-public roots before approving the exact reviewed request. Existing deployments
-resume without regenerating keys or changing their recorded configuration.
+Run `irisctl setup` without sudo for automatic local keys by default
+(`--key-mode automatic`). Its four steps cover settings review, key/server
+preparation, trusted approval/package completion, and opening the Console.
+It creates protected signing roots and a recovery identity outside deployment
+storage, then invokes the matching privileged installer with public inputs only.
+Each root has its own strong random passphrase in a mode-0600 file inside the
+owner's mode-0700 key folder. OpenSSH receives it through `SSH_ASKPASS`, never
+through secret arguments, environment values or logs. The default folder is
+`~/.local/share/iris-setup-keys/<instance>`; `--key-directory` selects another.
+
+Automatic approval checks the exact pending request against the deployment's
+pinned public roots and its recorded managed keys. Resume preserves those keys
+and the recorded configuration. Existing manual keys require `--key-mode manual`
+and their original passphrases; automatic mode never replaces or unlocks them.
+Manual local setup retains OpenSSH prompts and explicit request approval.
+Operating-system sudo authentication and the owner-chosen Console password are
+separate. Keeping keys with their passphrases does not protect against full host
+compromise. Keep a secure independent copy of the entire key folder, including
+passphrase files and the recovery identity; deployment backups exclude it.
 
 For separate holders, run `sudo irisctl install` for prompts, or supply public inputs:
 
@@ -68,7 +81,8 @@ is mounted read-only and included in backup and restore alongside uploads.
 Changes retain a recovery record until restart and backup checks pass.
 
 The engine pauses with exit 20 and exports `requests/online.pub` below its state
-directory. Local setup guides approval and resumes automatically. For separate
+directory. Automatic setup approves its matching managed request and resumes;
+manual local setup asks for approval. For separate
 holders, take that public file to the custodian machine and run:
 
 ```bash
@@ -98,8 +112,9 @@ and [backup controls](../zensical/admin-guide/backups.md#console-backup-controls
 Neither status is a production READY declaration.
 
 `iris-key-setup` guides separate key holders through key creation and approvals,
-copying only public files. Use `iris-key-setup --local` for later approvals when
-keys remain on the deployment host. See [offline approval](../zensical/install/offline-approval.md).
+copying only public files. Use `iris-key-setup --local` for later approvals with
+locally held keys. Managed roots reuse their saved passphrases; request review
+and SHA256 confirmation remain required. See [offline approval](../zensical/install/offline-approval.md).
 
 The installer also has explicit `docker-split` and `kubernetes` targets; see the
 [managed installation procedure](../zensical/install/managed-package.md).

@@ -6,13 +6,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {setupStatus, setupChip, packageRemedy, telemetryNote, firstIncomplete, incompleteCount} from '../src/setup-packages-model.mjs';
+import {setupStatus, setupChip, packageRemedy, telemetryNote, setupSteps, incompleteCount} from '../src/setup-packages-model.mjs';
 import {setupFixture} from './setup-packages-fixtures.mjs';
 
 test('setup projection is complete, bounded and does not copy extra fields', () => {
   const raw = setupFixture(); raw.secret = 'must-not-render'; raw.packages.items[0].secret = 'must-not-render';
   const status = setupStatus(raw); assert.ok(status); assert.equal(JSON.stringify(status).includes('must-not-render'), false);
-  assert.equal(status.packages.items[0].built_at, 1790000000); assert.equal(firstIncomplete(status), 2); assert.equal(incompleteCount(status), 0);
+  assert.equal(status.packages.items[0].built_at, 1790000000); assert.equal(incompleteCount(status), 0);
+});
+test('navigation labels name destinations and each explicit skip', () => {
+  assert.deepEqual(setupSteps.map(step => step.next), ['Continue to device packages', 'Continue to image verification', 'Open dashboard']);
+  assert.deepEqual(setupSteps.map(step => step.skip), ['Skip telemetry', 'Skip package review', 'Skip image verification']);
 });
 function finalizedProvenance() {
   return {format: 'iris-device-wrapper-v2', canonical_index_digest: 'sha256:' + '1'.repeat(64),
@@ -82,7 +86,7 @@ const invalid = [
 for (const [name, mutate] of invalid) test('reject ' + name, () => {const raw = setupFixture(); mutate(raw); assert.equal(setupStatus(raw), null);});
 test('absent platform is inactive and only real package failures trigger a nudge', () => {
   const raw = setupFixture(); Object.assign(raw.packages.items[1], {state: 'absent', built_at: null, provenance: null, reason: 'absent'}); raw.packages.state = 'absent';
-  const status = setupStatus(raw); assert.ok(status); assert.equal(setupChip('packages', status.packages.state).level, 'inactive'); assert.equal(firstIncomplete(status), 1); assert.equal(incompleteCount(status), 0);
+  const status = setupStatus(raw); assert.ok(status); assert.equal(setupChip('packages', status.packages.state).level, 'inactive'); assert.equal(incompleteCount(status), 0);
   Object.assign(raw.packages.items[1], {state: 'unknown', reason: 'provenance-absent'}); raw.packages.state = 'unknown';
   assert.equal(incompleteCount(setupStatus(raw)), 1);
 });

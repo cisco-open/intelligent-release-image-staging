@@ -100,7 +100,9 @@ def parser():
         "setup", parents=[install], add_help=False,
         help="interactive install with locally created signing and recovery keys")
     local_setup.add_argument("--key-directory", type=Path,
-                             help="private local key folder; prompted if omitted")
+                             help="private local key folder; defaults to this user's setup folder")
+    local_setup.add_argument("--key-mode", choices=("automatic", "manual"), default="automatic",
+                             help="automatic generates and stores strong key passphrases; manual uses your existing passphrases")
     public_status = commands.add_parser("setup-status", help="show public setup details for the terminal helper")
     public_status.add_argument("--state-dir", type=Path, required=True)
     worker_status = commands.add_parser("worker-status", help="inspect the pinned maintenance service and storage")

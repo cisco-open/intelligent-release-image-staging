@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Owner-selected local key setup; privileged deployment receives public files only."""
+"""Guided local setup; privileged deployment receives public files only."""
 
 import hashlib
 import json
@@ -86,8 +86,11 @@ def choose_key_folder(args):
     default = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share/iris-setup-keys" / args.instance
     value = args.key_directory
     if value is None:
-        answer = input("Private key folder [" + str(default) + "]: ").strip()
-        value = Path(answer).expanduser() if answer else default
+        if args.key_mode == "automatic":
+            value = default
+        else:
+            answer = input("Private key folder [" + str(default) + "]: ").strip()
+            value = Path(answer).expanduser() if answer else default
     folder = Path(value).expanduser()
     if not folder.is_absolute():
         raise InstallError("Enter a full folder path, or press Enter for the default. This is not a passphrase prompt")
@@ -103,7 +106,7 @@ def choose_key_folder(args):
     return key_setup.private_directory(folder)
 
 
-def prepare_keys(folder):
+def prepare_keys(folder, *, mode="manual"):
     public = key_setup.private_directory(folder / "public")
     roots = key_setup.private_directory(public / "roots")
     if set(path.name for path in roots.iterdir()) - {"root-a.pub", "root-b.pub"}:
@@ -113,8 +116,12 @@ def prepare_keys(folder):
         if (roots / (name + ".pub")).exists() and not private.exists():
             raise InstallError("A signing key was moved or is missing. Use its original folder; nothing was replaced")
     for name in ("root-a", "root-b"):
-        print("\nSet up " + name + ". Existing keys are checked and reused.")
-        result = key_setup.create_root(name, folder / name)
+        if mode == "automatic":
+            from . import automatic_keys
+            result = automatic_keys.create_root(name, folder / name)
+        else:
+            print("\nSet up " + name + ". Existing keys are checked and reused.")
+            result = key_setup.create_root(name, folder / name)
         key_setup.publish(roots / (name + ".pub"), key_setup.public_data(result))
     recovery = folder / "recovery"
     recipient = public / "recovery-recipient.pub"
@@ -123,7 +130,7 @@ def prepare_keys(folder):
     result = key_setup.create_recovery(recovery)
     key_setup.publish(recipient, key_setup.public_data(result))
     print("Private keys: " + str(folder))
-    print("You choose whether to keep, move or split them. Keep an independent recovery copy.")
+    print("Keep a separate secure copy of this complete folder for recovery.")
     return roots, key_setup.public_data(recipient).decode("ascii").strip()
 
 
@@ -144,25 +151,35 @@ def install_arguments(args):
     return result
 
 
-def sign_request(status, folder):
+def sign_request(status, folder, *, mode="manual"):
     data = status["request"].encode("ascii")
     key_setup.public_key(data)
     root = folder / "root-a/root-a"
     key_setup.protected_root(root)
-    selected = key_setup.public_key(key_setup.run(["ssh-keygen", "-y", "-f", str(root)], capture=True))
+    if mode == "automatic":
+        from . import automatic_keys
+        selected = automatic_keys.root_public(root)
+    else:
+        selected = key_setup.public_key(key_setup.run(["ssh-keygen", "-y", "-f", str(root)], capture=True))
     if selected.decode("ascii") != status["roots"].get("root-a.pub"):
         raise InstallError("This root-a does not match the installation. No certificate was signed")
-    print("Approve server " + status["config"]["host"] + ", installation " + status["id"] + ".")
+    print("Server " + status["config"]["host"] + ", installation " + status["id"] + ".")
     print("Public request SHA256: " + hashlib.sha256(data).hexdigest())
-    print("This signs the local server request for 30 days.")
-    if not confirm("Sign this request with root-a and continue?"):
-        raise InstallError("Setup is paused. Your keys and installation state are kept")
+    if mode == "manual":
+        print("This signs the local server request for 30 days.")
+        if not confirm("Sign this request with root-a and continue?"):
+            raise InstallError("Setup is paused. Your keys and installation state are kept")
+    else:
+        print("Signing the checked local server request automatically (valid for 30 days).")
     approvals = key_setup.private_directory(folder / "approvals")
     output = approvals / ("online-cert-" + uuid.uuid4().hex + ".pub")
     with tempfile.TemporaryDirectory(prefix="iris-public-request-") as temporary:
         request = Path(temporary) / "online.pub"
         request.write_bytes(data)
-        custody.approve(SimpleNamespace(root_key=root, public_key=request, output=output))
+        if mode == "automatic":
+            automatic_keys.sign_online(root, request, output)
+        else:
+            custody.approve(SimpleNamespace(root_key=root, public_key=request, output=output))
     return output
 
 
@@ -177,10 +194,9 @@ def run_setup(args):
         if args.roots_dir is not None or args.recovery_recipient is not None:
             raise InstallError("For existing public keys, use irisctl install. Setup creates or reuses local keys")
         args.state_dir = (args.state_dir or Path("/var/lib/iris-installer") / args.instance).absolute()
-        print("This sets up IRIS and its signing and recovery keys on this host.")
-        print("Loss or compromise of this host can also affect keys kept here.")
-        if not confirm("Continue with local key setup?"):
-            return 0
+        print("\n[1/4] Review this installation")
+        print("IRIS will prepare the server, device packages and Console.")
+        print("Your system may ask for your sudo password; this is not a certificate password.")
         status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
         folder = None
         if status["present"]:
@@ -191,30 +207,45 @@ def run_setup(args):
             args.instance = status["config"]["instance"]
             if "image_root" in status["config"]:
                 args.image_root = Path(status["config"]["image_root"])
-            result = controller(["resume", "--state-dir", str(args.state_dir)])
         else:
             args.host = args.host or input("Server IPv4 address that devices can reach: ").strip()
             if args.console_bind == "127.0.0.1":
                 args.console_bind = input("Console listen IPv4 address [127.0.0.1; management access only]: ").strip() or "127.0.0.1"
             folder = choose_key_folder(args)
-            args.roots_dir, args.recovery_recipient = prepare_keys(folder)
-            print("Console: https://" + args.console_bind + ":" + str(args.console_port) + "/")
-            if not confirm("Prepare IRIS packages and start this deployment?"):
-                print("Keys saved. Run the same setup command when ready.")
-                return 0
+            print("Server: " + args.host)
+            print("Console address after setup: https://" + args.console_bind + ":" + str(args.console_port) + "/")
+        if args.key_mode == "automatic":
+            print("Keys: automatic. Strong random passphrases are saved privately on this host.")
+        else:
+            print("Keys: manual. OpenSSH will ask for your signing-key passphrase.")
+        print("A host compromise can expose keys and passwords kept here. Keep a separate secure copy.")
+        if not confirm("Start setup?"):
+            print("Setup paused. No deployment was started or changed.")
+            return 0
+        print("\n[2/4] Prepare keys and build the server")
+        print("This can take several minutes. Wait for the next numbered step.")
+        if status["present"]:
+            result = controller(["resume", "--state-dir", str(args.state_dir)])
+        else:
+            args.roots_dir, args.recovery_recipient = prepare_keys(folder, mode=args.key_mode)
             args.accept_changes = True
             result = controller(install_arguments(args))
         if result == 20:
+            print("\n[3/4] Finish trusted setup and build device packages")
             status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
             if status.get("state") != "WAITING_FOR_SIGNING_APPROVAL" or "request" not in status:
                 raise InstallError("The installation changed. Rerun setup to review its current state")
             folder = folder or choose_key_folder(args)
-            certificate = sign_request(status, folder)
+            certificate = sign_request(status, folder, mode=args.key_mode)
+            print("Preparing device packages and starting the Console. No action is needed while this runs.")
             result = controller(["resume", "--state-dir", str(args.state_dir), "--certificate", str(certificate)])
+        elif result in (0, 21, 22):
+            print("\n[3/4] Existing signing and device package checks completed")
         if result not in (0, 21, 22):
             raise InstallError("Installer stopped with code " + str(result) + ". Keep your files, fix the reported error and rerun setup")
         status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
         config = status["config"]
+        print("\n[4/4] Open the Console")
         print("Open https://" + config["console_bind"] + ":" + str(config["console_port"]) + "/ and check its certificate.")
         print("Create your own administrator account if asked. No account was created or signed in for you.")
         print("Finish the Console setup checks and arrange key renewal and independent backups.")

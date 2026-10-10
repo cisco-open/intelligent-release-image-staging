@@ -850,13 +850,26 @@ def test_absent_package_state_renders_inactive_not_warning():
     assert "absent: 'warning'" not in source
 
 
-def test_wizard_first_incomplete_step_skips_optional_items():
-    source = _react_source("setup-packages-model.mjs")
-    first = source.split("export function firstIncomplete(", 1)[1].split("\n", 1)[0]
-    assert "status.packages.state !== 'ok' ? 1 : 2" in first
-    assert "telemetry" not in first and "image_verification" not in first
+def test_wizard_entry_starts_at_one_and_refresh_does_not_choose_steps():
     controller = _react_source("setup-packages-controller.mjs")
-    assert "initial && navigation === this.navigation" in controller
+    assert "step: changed && mode === 'wizard' ? 0" in controller
+    assert "firstIncomplete" not in controller
+    assert "changes.step" not in controller
+    assert "if (ready) this.skip()" in controller
+
+
+def test_wizard_names_destinations_and_distinguishes_form_save_from_navigation():
+    model = _react_source("setup-packages-model.mjs")
+    for label in ("Continue to device packages", "Continue to image verification",
+                  "Open dashboard", "Skip telemetry", "Skip package review",
+                  "Skip image verification"):
+        assert label in model
+    view = _react_source("setup-packages.jsx")
+    assert "<strong>Save</strong>" in view
+    assert "<strong>Save schedule</strong>" in view
+    assert "Save any form changes before leaving a step" in view
+    assert 'aria-describedby="wz-navigation-note"' in view
+    assert "'Done' : 'Next" not in view
 
 
 def test_setup_nudge_is_session_only_and_handles_disabled_browser_storage():

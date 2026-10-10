@@ -39,10 +39,23 @@ test('hidden completion is ignored and returning performs only GETs', async () =
   const pending = c.refresh(); c.hide(); old.resolve(response(setupFixture())); await pending; assert.equal(c.state.status, null); assert.equal(c.state.loading, false);
   c.services.fetch = async () => response(setupFixture()); await c.refresh(); assert.ok(c.state.status); assert.equal(requests.some(row => row.options.method === 'POST'), false);
 });
-test('first incomplete step skips optional integrations, and every step remains directly accessible', async () => {
+test('new wizard entry starts at step one even with absent packages, and every step is accessible', async () => {
   const {c} = fixture(); const raw = setupFixture(); raw.packages.state = 'absent'; Object.assign(raw.packages.items[0], {state: 'absent', built_at: null, provenance: null, reason: 'absent'});
-  c.services.fetch = async url => response(url.endsWith('setup-status') ? raw : verificationFixture()); await c.select('wizard'); assert.equal(c.state.step, 1);
+  c.services.fetch = async url => response(url.endsWith('setup-status') ? raw : verificationFixture()); await c.select('wizard'); assert.equal(c.state.step, 0);
   c.chooseStep(0); assert.equal(c.state.step, 0); c.chooseStep(2); assert.equal(c.state.step, 2); c.chooseStep(4); assert.equal(c.state.step, 2);
+});
+test('healthy, unknown and failed initial reads stay on step one', async () => {
+  for (const raw of [setupFixture(), {}, null]) {
+    const {c} = fixture();
+    c.services.fetch = async url => response(url.endsWith('setup-status') ? raw : verificationFixture());
+    await c.select('wizard'); assert.equal(c.state.step, 0);
+  }
+});
+test('refresh preserves the current step, while leaving and returning starts at step one', async () => {
+  const {c} = fixture(); await c.select('wizard'); c.chooseStep(2);
+  await c.refresh(); assert.equal(c.state.step, 2);
+  c.hide(); await c.refresh(); assert.equal(c.state.step, 2);
+  await c.select('packages'); await c.select('wizard'); assert.equal(c.state.step, 0);
 });
 test('initial wizard response cannot override an explicit step selection', async () => {
   const {c} = fixture(); const held = deferred(); c.services.fetch = url => url.endsWith('setup-status') ? held.promise : Promise.resolve(response(verificationFixture()));
@@ -56,7 +69,23 @@ test('direct step selection wins over a pending Next and does not advance twice'
   const {c} = fixture(); await c.select('wizard'); c.chooseStep(0); const held = deferred(); c.services.fetch = url => url.endsWith('setup-status') ? held.promise : Promise.resolve(response(verificationFixture()));
   const pending = c.next(); c.chooseStep(1); held.resolve(response(setupFixture())); await pending; assert.equal(c.state.step, 1); assert.equal(c.state.navigating, false);
 });
-test('Done returns to Overview and never submits server changes', async () => {const {c, navigations} = fixture(); await c.select('wizard'); await c.next(); assert.deepEqual(navigations, ['#overview']);});
+test('Continue follows the three steps and Open dashboard never submits form changes', async () => {
+  const {c, navigations, requests} = fixture(); await c.select('wizard');
+  await c.next(); assert.equal(c.state.step, 1); assert.deepEqual(navigations, []);
+  await c.next(); assert.equal(c.state.step, 2); assert.deepEqual(navigations, []);
+  await c.next(); assert.deepEqual(navigations, ['#overview']);
+  assert.equal(requests.some(row => row.options.method === 'POST'), false);
+});
+for (const step of [0, 1, 2]) test('failed status refresh cannot advance or complete step ' + (step + 1), async () => {
+  const {c, navigations} = fixture(); await c.select('wizard'); c.chooseStep(step);
+  c.services.fetch = async () => response({}, 503);
+  await c.next(); assert.equal(c.state.step, step); assert.equal(c.state.navigating, false);
+  assert.equal(c.state.status, null); assert.match(c.state.message, /cannot be determined/); assert.deepEqual(navigations, []);
+  // An explicit skip is navigation, not evidence that this step succeeded.
+  c.skip(); assert.equal(c.state.status, null);
+  assert.equal(c.state.step, step === 2 ? 2 : step + 1);
+  assert.deepEqual(navigations, step === 2 ? ['#overview'] : []);
+});
 test('a newer verified schedule annotation survives an older pending setup read', async () => {
   const {c} = fixture(); await c.select('setup'); const held = deferred(); c.services.fetch = url => url.endsWith('setup-status') ? Promise.resolve(response(setupFixture())) : held.promise;
   const pending = c.refresh(); c.annotation(true); held.resolve(response(verificationFixture('off'))); await pending; assert.equal(c.state.configured, true);

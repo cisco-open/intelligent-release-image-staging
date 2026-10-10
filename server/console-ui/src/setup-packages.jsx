@@ -24,14 +24,16 @@ function PackageDescription() {
     <p className="muted">Wrapper readiness checks bytes against the adjacent build-provenance manifest. It does not authenticate that manifest or verify native package signatures. Guest Shell readiness checks the latest startup provisioning evidence. “Artifact updated” is the file modification time.</p></>;
 }
 function SetupPackages({controller: c, roots}) {
-  const s = useSyncExternalStore(c.subscribe, c.snapshot), status = s.status, heading = useRef(null), previousStep = useRef(null), previousMode = useRef(null);
+  const s = useSyncExternalStore(c.subscribe, c.snapshot), status = s.status, heading = useRef(null), previousStep = useRef(null), previousMode = useRef(null), navigationFocus = useRef(false);
   useLayoutEffect(() => {
-    if (s.mode !== 'wizard') {previousMode.current = s.mode; return;}
+    if (s.mode !== 'wizard') {previousMode.current = s.mode; navigationFocus.current = false; return;}
     const changed = previousStep.current !== s.step || previousMode.current !== 'wizard';
     previousStep.current = s.step; previousMode.current = 'wizard';
     if (changed) {
       c.services.wizardSelect?.(setupSteps[s.step].id);
-      if (document.activeElement?.closest('#wz-nav, #wz-steplist')) heading.current?.focus();
+      // A disabled Continue can lose focus during its asynchronous status read.
+      if (document.activeElement?.closest('#wz-nav, #wz-steplist') ||
+          (navigationFocus.current && document.activeElement === document.body)) heading.current?.focus();
     }
   }, [s.mode, s.step, c]);
   const chip = (key, id) => <span id={id}><Chip item={key} state={status?.[key]?.state} configured={s.configured} /></span>;
@@ -46,17 +48,18 @@ function SetupPackages({controller: c, roots}) {
   const packages = <div className="card" data-setup-packages><h3>Device packages {chip('packages', 'device-packages-chip')}</h3><PackageDescription />
     <p className="muted">Build or repair packages on the build host, then re-check them here. Build packages only for the platforms you use.</p><PackageTable pkg={status?.packages} prefix="device-packages" />
     <p>{recheck('device-packages-recheck', 'Re-check packages')}</p>{message('device-packages-msg')}</div>;
-  const wizard = <div data-setup-packages><p className="muted" id="wz-progress" role="status" aria-live="polite">Step {s.step + 1} of {setupSteps.length}</p>
+  const wizard = <div data-setup-packages onFocusCapture={event => {navigationFocus.current = Boolean(event.target.closest('#wz-nav, #wz-steplist'));}}><p className="muted">Review this server's settings and device packages. Telemetry and image verification are optional.</p><p className="muted" id="wz-progress" role="status" aria-live="polite">Step {s.step + 1} of {setupSteps.length}: {setupSteps[s.step].label}</p>
     <div className="wz-layout"><div className="wz-panel"><div id="wz-steplist" role="list" aria-label="Setup steps">{setupSteps.map((row, index) => {
       const current = index === s.step, done = !current && status?.[row.key]?.state === 'ok';
       return <div role="listitem" key={row.id}><button type="button" className={'wz-steplist-item' + (current ? ' current' : '')} data-step={index} aria-current={current ? 'step' : undefined} aria-controls={'wz-step-' + row.id} onClick={() => c.chooseStep(index)}>
         <span className={'wz-steplist-n ' + (current ? 'is-current' : done ? 'is-done' : 'is-upcoming')}>{done ? <svg aria-hidden="true"><use href="#i-check" /></svg> : index + 1}</span><span className="wz-steplist-label">{row.label}</span><Chip item={row.key} state={status?.[row.key]?.state} configured={s.configured} /></button></div>;
     })}</div></div><div className="wz-content">
       <div className="wz-done" id="wz-admin"><h3>Admin account {chip('admin', 'wz-admin-chip')}</h3><p className="muted">Created during first-run sign-in. Change the password from Settings › General.</p></div>
-      <div className="wz-step" id="wz-step-telemetry" hidden={s.step !== 0}><h3 tabIndex={-1} ref={s.step === 0 ? heading : null}>1. Telemetry destination {chip('telemetry', 'wz-td-chip')}</h3><p className="muted">Choose where to export swarm progress, device reports and export health. This integration is optional.</p><div className="form-mount" id="wz-td-mount" /></div>
-      <div className="wz-step" id="wz-step-packages" hidden={s.step !== 1}><h3 tabIndex={-1} ref={s.step === 1 ? heading : null}>2. Device packages {chip('packages', 'wz-pkg-chip')}</h3><PackageDescription /><p className="muted">Build or repair packages on the build host, then re-check. You can skip platforms you do not use.</p><PackageTable pkg={status?.packages} prefix="wz-pkg" /><p>{recheck('wz-pkg-recheck', 'Re-check')}</p></div>
-      <div className="wz-step" id="wz-step-imageverification" hidden={s.step !== 2}><h3 tabIndex={-1} ref={s.step === 2 ? heading : null}>3. Image verification {chip('image_verification', 'wz-iv-chip')}</h3><p className="muted">Compare imported image hashes with Cisco's Bulk Hash feed.</p><div className="form-mount" id="wz-iv-mount" /></div>
-      <div className="toolbar" id="wz-nav"><button className="btn ghost" id="wz-back" disabled={s.step === 0 || s.navigating} onClick={() => c.chooseStep(s.step - 1)}>‹ Back</button><button className="btn ghost" id="wz-skip" disabled={s.navigating} onClick={() => c.skip()}>Skip for now</button><button className="btn" id="wz-next" disabled={s.navigating} onClick={() => c.next()}>{s.step === setupSteps.length - 1 ? 'Done' : 'Next ›'}</button></div>{message('wz-msg')}
+      <div className="wz-step" id="wz-step-telemetry" hidden={s.step !== 0}><h3 tabIndex={-1} ref={s.step === 0 ? heading : null}>1. Telemetry destination {chip('telemetry', 'wz-td-chip')}</h3><p className="muted">Choose where to export swarm progress, device reports and export health. This integration is optional.</p><p>To enable export, enter a destination and select Export enabled, then choose <strong>Save</strong>. After saving, continue to device packages, or skip telemetry to keep your current settings.</p><div className="form-mount" id="wz-td-mount" /></div>
+      <div className="wz-step" id="wz-step-packages" hidden={s.step !== 1}><h3 tabIndex={-1} ref={s.step === 1 ? heading : null}>2. Device packages {chip('packages', 'wz-pkg-chip')}</h3><p>Review the packages for the platforms you use. Repair any that need attention on the build host, then choose <strong>Re-check packages</strong>. Continue to image verification when you are ready, or skip this review for now.</p><details><summary>What package checks cover</summary><PackageDescription /></details><PackageTable pkg={status?.packages} prefix="wz-pkg" /><p>{recheck('wz-pkg-recheck', 'Re-check packages')}</p></div>
+      <div className="wz-step" id="wz-step-imageverification" hidden={s.step !== 2}><h3 tabIndex={-1} ref={s.step === 2 ? heading : null}>3. Image verification {chip('image_verification', 'wz-iv-chip')}</h3><p className="muted">Compare imported image hashes with Cisco's Bulk Hash feed. This integration is optional.</p><p>Choose a schedule and select <strong>Save schedule</strong> to keep it. Then open the dashboard, or skip image verification to keep your current settings.</p><div className="form-mount" id="wz-iv-mount" /></div>
+      <p className="muted" id="wz-navigation-note">Continue, Back and Skip change steps only. Save any form changes before leaving a step.</p>
+      <div className="toolbar" id="wz-nav" aria-describedby="wz-navigation-note"><button className="btn ghost" id="wz-back" disabled={s.step === 0 || s.navigating} onClick={() => c.chooseStep(s.step - 1)}>Back</button><button className="btn ghost" id="wz-skip" disabled={s.navigating} onClick={() => c.skip()}>{setupSteps[s.step].skip}</button><button className="btn" id="wz-next" disabled={s.navigating} onClick={() => c.next()}>{setupSteps[s.step].next}</button></div>{message('wz-msg')}
     </div></div></div>;
   const nudge = <div id="setup-nudge" className="nudge" hidden={s.dismissed || !s.attention}><span id="setup-nudge-text">Device packages needed attention at the last check.</span><a className="btn ghost" href="#settings/packages" id="setup-nudge-open">Review packages</a><button className="linkish" id="setup-nudge-dismiss" onClick={() => c.dismiss()}>Dismiss</button></div>;
   return <>{createPortal(checklist, roots.checklist)}{createPortal(packages, roots.packages)}{createPortal(wizard, roots.wizard)}{createPortal(nudge, roots.nudge)}</>;
