@@ -45,8 +45,11 @@ def signer_path(state_dir):
     return Path(state_dir) / 'restore-custody' / 'signer.pub'
 
 
-def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None):
+def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None,
+          upgrade_operation_id=None):
     """Other maintenance entry points must respect an interrupted restore."""
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state_dir, operation_id=upgrade_operation_id, instance_id=instance_id)
     base = Path(state_dir)
     image_change = base / 'image-root-change.json'
     if image_change.exists() or image_change.is_symlink():

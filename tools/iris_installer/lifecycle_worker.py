@@ -123,6 +123,8 @@ class Worker:
                     'note': 'Keep encrypted copies and pinned backup signer trust off this host. Restore requires the existing owned deployment, unchanged credentials and current producer replay authority.'}
 
     def submit_restore(self, request):
+        from .upgrade_state import guard as upgrade_guard
+        upgrade_guard(self.state_dir)
         from . import restore
         if (set(request) != {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'}
                 or request['allow_downtime'] is not True or request['confirm_restore'] is not True):
@@ -226,6 +228,8 @@ class Worker:
         return proof_request(self.state_dir, request, peer_sha256)
 
     def submit_transport(self, request):
+        from .upgrade_state import guard as upgrade_guard
+        upgrade_guard(self.state_dir)
         if (self.target != 'kubernetes' or getattr(self, 'network_server', None) is None
                 or not isinstance(request, dict)
                 or set(request) != {'action', 'request_id', 'allow_downtime'}
@@ -303,6 +307,8 @@ class Worker:
                 return result
 
     def submit_rotation(self, request):
+        from .upgrade_state import guard as upgrade_guard
+        upgrade_guard(self.state_dir)
         if set(request) != {'action', 'request_id', 'family', 'allow_downtime'}:
             raise InstallError('Unexpected rotation fields')
         request_id, family = request['request_id'], request['family']
@@ -399,6 +405,8 @@ class Worker:
             self.save()
 
     def submit(self, request):
+        from .upgrade_state import guard as upgrade_guard
+        upgrade_guard(self.state_dir)
         if isinstance(request, dict) and request.get('action') in ('restore', 'recover-restore'):
             return self.submit_restore(request)
         if isinstance(request, dict) and request.get('action') == 'sync-management':

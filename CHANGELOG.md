@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add reviewed, forward-recoverable application upgrades for source-built
+  single-host Docker installations, preserving accounts, keys and storage.
+  Split Docker, Kubernetes and prebuilt-release upgrades remain unsupported.
+
 - Remove temporary backup snapshots after a refused or failed capture while
   retaining operation history and any captured encrypted archives.
 

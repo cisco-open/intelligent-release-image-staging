@@ -7,11 +7,75 @@ SPDX-License-Identifier: Apache-2.0
 # Upgrade to a new release
 
 !!! warning "Check how this deployment was installed"
-    This page covers deployments created from a source checkout. If you used
-    the `iris-installer` package or `irisctl`, do not apply these commands to
-    its managed deployment. A managed application upgrade is not available yet.
-    Installing a newer `.deb` updates the installer tools, not the running
-    server, Console or device packages.
+    Use the managed procedure below for a source-built, single-host Docker
+    deployment created by `irisctl`. The source-checkout procedure later on
+    this page is separate. Managed upgrades of prebuilt release kits, split
+    Docker and Kubernetes are not supported by this command yet.
+
+## Managed single-host Docker
+
+Installing a newer `.deb` updates the installer tools. The separate upgrade
+command rebuilds and replaces the server, Console and device packages while
+keeping your accounts, keys, inventory, images and deployment storage.
+
+1. [Download and authenticate](../install/managed-package.md#download-and-authenticate)
+   the new installer and its source inventory. Install that exact `.deb` with
+   `sudo apt install ./<installer-package>.deb`.
+2. Finish running jobs. Undeploy every IRIS agent and wait for confirmed
+   removal. Keep the device inventory; you will onboard it again afterwards.
+3. Check that the managed worker is running and that recovery access and the
+   independent backup signer are configured. See [Back up and restore](backups.md).
+
+Prepare the candidate using the authenticated release's full commit and the
+SHA256 of its `.deb.source.json` file:
+
+```bash
+sudo irisctl upgrade prepare \
+  --state-dir /var/lib/iris-installer/my-instance \
+  --source-proof /path/to/installer.deb.source.json \
+  --source-proof-sha256 <reviewed-source-inventory-sha256> \
+  --source-commit <full-release-commit> --accept-changes
+```
+
+Preparation builds the candidate in a separate directory. Your running server
+and Console stay on their existing version. The command prints an operation ID,
+a plan file and the plan's SHA256. Review that plan, then use those exact values:
+
+```bash
+sudo irisctl upgrade apply \
+  --state-dir /var/lib/iris-installer/my-instance \
+  --operation-id <operation-id> --plan-sha256 <plan-sha256> \
+  --allow-downtime
+```
+
+IRIS takes and verifies separate encrypted data and identity backups, stops the
+old services, updates the application and checks the new server, Console and
+maintenance worker. The backups use your recorded backup locations. Previous
+source, device packages and container images are retained for inspection.
+Rebuilding an IOx package does not certify its native platform signature.
+
+If preparation reports a build failure before printing a plan SHA256, the
+running deployment is unchanged. Fix that problem and run `upgrade prepare` again.
+It creates a new operation and retains the failed attempt's files for inspection.
+An unfinished preparation cannot use `upgrade recover`.
+
+If `upgrade apply` stops, inspect the recorded status:
+
+```bash
+sudo irisctl upgrade status --state-dir /var/lib/iris-installer/my-instance
+```
+
+Use `irisctl upgrade recover` with the same state directory, operation ID,
+plan SHA256 and `--allow-downtime` to finish that approved upgrade. Recovery
+continues forward; it does not restart old code over data the new code may have
+changed. Do not delete the operation files, edit installer checkpoints or run
+Compose commands to bypass a refusal.
+
+After a successful upgrade, onboard the devices again to receive the new agent.
+This initial managed upgrade refuses a release that changes the Docker storage
+or service layout; such a change needs a separately supported migration.
+
+## Source-checkout deployments
 
 An upgrade is three steps: back up the server, undeploy the devices, and
 deploy the new release with fresh device agents. Your inventory, images, roles

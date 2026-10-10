@@ -324,6 +324,8 @@ def _setup(args):
     _root()
     state = private_directory(args.state_dir)
     _path(state)
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state, operation_id=getattr(args, 'application_upgrade_id', None))
     identifier, config = _installation(state)
     record_path = state / RECORD
     if record_path.exists() or record_path.is_symlink():
@@ -550,6 +552,8 @@ def configure_recovery(state_dir, identity_path=None):
 
 
 def _configure_recovery(state, identity_path):
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state)
     _apply_recovery_intent(state)
     record = _load(state)
     _check_unit(state, record)
@@ -629,6 +633,8 @@ def configure_restore_signer(state_dir, public_key_path):
 
 
 def _configure_restore_signer(state, public_key_path):
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state)
     record = _load(state)
     _check_unit(state, record)
     source = Path(public_key_path).absolute()
@@ -675,6 +681,8 @@ def action(args):
     record = _load(state)
     _check_unit(state, record)
     if args.action != 'stop':
+        from .upgrade_state import guard as upgrade_guard
+        upgrade_guard(state)
         check_storage(state, record)
     command(['systemctl', args.action, record['unit']], timeout=3600)
     if args.action != 'stop':
@@ -685,7 +693,11 @@ def action(args):
 def serve_managed(args):
     _root()
     state = private_directory(args.state_dir)
-    _apply_recovery_intent(state)
+    from .upgrade_state import guard as upgrade_guard
+    # During an upgrade the new pinned worker may expose read-only status.
+    # It must not replay another family's pending startup mutation.
+    if not upgrade_guard(state, inspection=True):
+        _apply_recovery_intent(state)
     record = _load(state)
     check_storage(state, record)
     _runtime(state, record)

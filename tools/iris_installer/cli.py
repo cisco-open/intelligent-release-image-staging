@@ -38,6 +38,25 @@ def parser():
     maintenance = commands.add_parser("maintenance", help="check or repair this deployment from the terminal")
     from .maintenance import add_arguments as maintenance_arguments
     maintenance_arguments(maintenance)
+    upgrade = commands.add_parser('upgrade', help='review and apply a managed single-Docker application upgrade')
+    upgrade_actions = upgrade.add_subparsers(dest='upgrade_action', required=True)
+    upgrade_prepare = upgrade_actions.add_parser('prepare', help='build isolated candidates without changing running applications')
+    upgrade_prepare.add_argument('--state-dir', type=Path, required=True)
+    upgrade_prepare.add_argument('--source', type=Path, default=Path(__file__).resolve().parent.parent / 'source')
+    upgrade_prepare.add_argument('--source-proof', type=Path, required=True,
+                                 help='source.json shipped beside the independently authenticated installer .deb')
+    upgrade_prepare.add_argument('--source-proof-sha256', required=True, help='independently selected source proof SHA256')
+    upgrade_prepare.add_argument('--source-commit', required=True, help='full selected release source commit')
+    upgrade_prepare.add_argument('--accept-changes', action='store_true')
+    for verb in ('apply', 'recover'):
+        action = upgrade_actions.add_parser(verb, help=('apply the reviewed generation' if verb == 'apply'
+                                                       else 'finish the same interrupted generation; never roll back'))
+        action.add_argument('--state-dir', type=Path, required=True)
+        action.add_argument('--operation-id', required=True)
+        action.add_argument('--plan-sha256', required=True)
+        action.add_argument('--allow-downtime', action='store_true')
+    upgrade_status = upgrade_actions.add_parser('status', help='show the recorded upgrade phase')
+    upgrade_status.add_argument('--state-dir', type=Path, required=True)
     install = commands.add_parser("install", help="install a new owned deployment from Ubuntu 24.04")
     install.add_argument("--target", choices=("docker", "docker-split", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
@@ -278,6 +297,11 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == 'upgrade':
+                from . import application_upgrade
+                if args.upgrade_action in ('apply', 'recover'):
+                    return application_upgrade.apply(args, recovery=args.upgrade_action == 'recover')
+                return getattr(application_upgrade, args.upgrade_action)(args)
             if args.command in ("setup", "setup-status"):
                 from . import local_setup
                 if args.command == "setup-status":

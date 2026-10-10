@@ -87,6 +87,8 @@ def change(args):
     from .backup import capture_plan
     from .deploy import DockerInstall
     require_approval(args)
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(args.state_dir)
     validate_name(str(args.path))
     with Journal(args.state_dir).locked() as journal:
         if journal.document is None or journal.document['config']['target'] != 'docker':

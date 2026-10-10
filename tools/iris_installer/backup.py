@@ -55,7 +55,8 @@ def initialize(journal, installation):
 
 def capture_plan(installation, *, allow_missing_prebuilt=False, cleanup_on_failure=False):
     from .restore import guard
-    guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None))
+    guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None),
+          upgrade_operation_id=getattr(installation, 'application_upgrade_id', None))
     hook = getattr(installation, 'capture_plan', None)
     sources, volumes, containers = hook() if hook is not None else docker_capture_plan(installation)
     from .prebuilt_backup import capture_sources
@@ -284,6 +285,7 @@ def create(args):
         if journal.document is None:
             raise InstallError("No installer-owned deployment was found")
         installation = _installation(journal)
+        installation.application_upgrade_id = getattr(args, 'application_upgrade_id', None)
         with _capture_workspace(installation) as (sources, volumes, containers):
             capacity_preflight(installation, sources, output, recovery)
             signer = initialize(journal, installation)
