@@ -126,11 +126,44 @@ class Retention:
                 return False, 'Delete the saved rotation backups separately before clearing this row.'
         return True, ''
 
+    def _storage_marker(self, path, kind):
+        """Recognize only the managed worker's independently recorded custody."""
+        def document(candidate):
+            with os.fdopen(os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+                before = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                        or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1):
+                    raise InstallError('Unsafe managed backup custody file')
+                raw = stream.read(4 * 1024 * 1024 + 1)
+                signature = lambda value: (*_identity(value), value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                if (len(raw) > 4 * 1024 * 1024 or signature(before) != signature(os.fstat(stream.fileno()))
+                        or signature(before) != signature(candidate.lstat())):
+                    raise InstallError('Managed backup custody changed during observation')
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise InstallError('Invalid managed backup custody')
+            return value
+
+        installation = document(self.worker.state_dir / 'installation.json')
+        record = document(self.worker.state_dir / 'worker-service.json')
+        instance = identifier(installation.get('id'))
+        storage = record.get('storage')
+        if (record.get('schema') != 1 or record.get('instance_id') != instance
+                or record.get('state_dir') != str(self.worker.state_dir)
+                or record.get('unit') != 'iris-lifecycle-' + instance + '.service'
+                or not isinstance(storage, dict) or not isinstance(storage.get(kind), dict)
+                or storage[kind].get('directory') != str(path.parent)
+                or document(path) != {'instance_id': instance}):
+            raise InstallError('Managed backup custody does not match this deployment')
+
     def backup_ids(self):
         found = set()
-        for root in (self.worker.backup_dir, self.worker.recovery_dir):
+        for kind, root in (('backup', self.worker.backup_dir), ('recovery', self.worker.recovery_dir)):
             backup_archive.private_directory(root)
             for path in root.iterdir():
+                if path.name == '.iris-storage.json':
+                    self._storage_marker(path, kind)
+                    continue
                 if (path.name.startswith(('.iris-backup-', '.iris-verify-', '.iris-restore-'))
                         and (self.store.pending() or any(row.get('state') == 'running' for row in self.worker.jobs))):
                     # Product-owned temporary authentication/capture workspaces

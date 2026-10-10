@@ -76,6 +76,56 @@ def test_twenty_failed_captures_without_archives_do_not_exhaust_saved_backup_lim
     assert len(worker.jobs) == 21
 
 
+def managed_storage(worker):
+    instance = json.loads((worker.state_dir / 'installation.json').read_bytes())['id']
+    record = {'schema': 1, 'instance_id': instance, 'state_dir': str(worker.state_dir),
+              'unit': 'iris-lifecycle-' + instance + '.service',
+              'storage': {kind: {'directory': str(root)} for kind, root in
+                          (('backup', worker.backup_dir), ('recovery', worker.recovery_dir))}}
+    atomic_write(worker.state_dir / 'worker-service.json', json.dumps(record).encode())
+    for root in (worker.backup_dir, worker.recovery_dir):
+        atomic_write(root / '.iris-storage.json', json.dumps({'instance_id': instance}).encode())
+    return record
+
+
+def test_managed_storage_markers_are_not_backups_and_allow_new_capture(worker, monkeypatch):
+    managed_storage(worker)
+    assert worker.status()['retention']['capacity']['backup_used'] == 0
+    backup_id = uid()
+    for root in (worker.backup_dir, worker.recovery_dir):
+        (root / backup_id).mkdir(mode=0o700)
+    assert worker.status()['retention']['capacity']['backup_used'] == 1
+    monkeypatch.setattr('threading.Thread.start', lambda self: None)
+    assert worker.submit(dict(action='backup', request_id=uid(), allow_downtime=True))['job_id']
+
+
+@pytest.mark.parametrize('change', ['foreign-instance', 'extra-field', 'public-mode', 'symlink', 'hardlink',
+                                  'missing-record', 'wrong-directory', 'wrong-role', 'wrong-unit', 'other-dotfile'])
+def test_only_exact_private_managed_storage_marker_is_exempt(worker, change):
+    record = managed_storage(worker)
+    marker = worker.backup_dir / '.iris-storage.json'
+    if change == 'foreign-instance': atomic_write(marker, json.dumps({'instance_id': uid()}).encode())
+    elif change == 'extra-field':
+        value = json.loads(marker.read_bytes()); value['extra'] = True
+        atomic_write(marker, json.dumps(value).encode())
+    elif change == 'public-mode': marker.chmod(0o644)
+    elif change in ('symlink', 'hardlink'):
+        original = worker.state_dir / 'preserved-marker'; marker.rename(original)
+        if change == 'symlink': marker.symlink_to(original)
+        else: os.link(original, marker)
+    elif change == 'missing-record': (worker.state_dir / 'worker-service.json').unlink()
+    elif change == 'other-dotfile': atomic_write(worker.backup_dir / '.owner-note', b'preserve')
+    else:
+        if change == 'wrong-directory': record['storage']['backup']['directory'] = str(worker.state_dir)
+        elif change == 'wrong-role': record['storage']['backup'] = record['storage']['recovery']
+        else: record['unit'] = 'foreign.service'
+        atomic_write(worker.state_dir / 'worker-service.json', json.dumps(record).encode())
+    before = marker.read_bytes()
+    with pytest.raises((InstallError, OSError)):
+        worker.status()
+    assert marker.read_bytes() == before
+
+
 @pytest.mark.parametrize('change', ['revision', 'missing', 'duplicate', 'too-many', 'active', 'same-id'])
 def test_refused_selections_never_publish_intent_or_tombstone(worker, change):
     worker.jobs = [finished()]; worker.save(); selected = request(worker)
