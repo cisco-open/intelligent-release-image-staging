@@ -326,7 +326,7 @@ test('actual Policies bridge shares Inventory read ordering and mutation locks i
   inventory.releaseRow('one'); policies.open('boat'); assert.equal(policies.claim(), true); assert.equal(inventory.state.bulkBusy, true);
   policies.close(); assert.equal(inventory.state.bulkBusy, false);
 });
-test('diagnostics keep exact revision strings, unknown counts, custody states and count-only evidence', () => {
+test('diagnostics keep exact revisions and explain signing status without inventing evidence', () => {
   const p = {fleet_rollup: {issued_revision: 12, applied: {'7': 2, '9223372036854775807': 1}, states: {applied: 3}},
     instruction_status: {observed_at: 456, instr_stamp_missing: 0, pointer_skew: 1},
     instruction_keys: {enabled: true, state: 'signing_refused', certificate_days_to_expiry: -2, keylist_age_days: 136,
@@ -335,12 +335,26 @@ test('diagnostics keep exact revision strings, unknown counts, custody states an
   const diag = instructionDiagnostics(p, time => 'time:' + time);
   assert.deepEqual(diag.applied, [{label: 'r7', count: 2}, {label: 'r9223372036854775807', count: 1}]);
   assert.equal(diag.cells['policy-instr-stamp-missing'], '0 devices'); assert.equal(diag.cells['instruction-cert-days'], '-2 days');
-  assert.equal(diag.cells['policy-instruction-observed'], 'time:456'); assert.match(diag.cells['instruction-root-quorum'], /degraded.*1\/2/);
-  assert.equal(diag.cells['instruction-key-actions'], 'certificate renewal due · signing refused');
-  const missing = instructionDiagnostics({}, String); assert.equal(missing.cells['instruction-key-actions'], 'unavailable'); assert.deepEqual(missing.applied, [{label: 'unavailable'}]);
-  const disabled = instructionDiagnostics({instruction_keys: {enabled: false}}, String); assert.equal(disabled.cells['instruction-root-quorum'], 'not enabled'); assert.equal(disabled.cells['instruction-key-actions'], 'not enabled');
+  assert.equal(diag.cells['policy-instruction-observed'], 'time:456'); assert.match(diag.cells['instruction-root-quorum'], /Confirmation needed.*1 of 2 roots confirmed within 180 days/);
+  assert.equal(diag.cells['instruction-key-state'], 'Signing stopped');
+  assert.equal(diag.cells['instruction-root-ceremony'], 'Review overdue');
+  assert.equal(diag.cells['instruction-key-actions'], 'Renew signing certificate · Signing is stopped');
+  const missing = instructionDiagnostics({}, String); assert.equal(missing.cells['instruction-key-actions'], 'Unavailable'); assert.deepEqual(missing.applied, [{label: 'unavailable'}]);
+  const disabled = instructionDiagnostics({instruction_keys: {enabled: false}}, String); assert.equal(disabled.cells['instruction-root-quorum'], 'Not enabled'); assert.equal(disabled.cells['instruction-key-actions'], 'Not enabled');
   const hidden = policyDiagnostics({...p, roles: {members: {boat: 2}, nets: ['192.0.2.1']}, role_drift: {count: 1, device_ids: ['192.0.2.2']}}, true, String);
   assert.doesNotMatch(JSON.stringify(hidden), /192\.0\.2/);
   assert.deepEqual(instructionMapRows({}, false, 'none'), [{label: 'none'}]); assert.deepEqual(instructionMapRows({bad: -1}, false, 'none'), [{label: 'unavailable'}]);
   assert.match(roleCapabilityMessage({roles_supported: false}, true), /Independent peer quarantine is not enforced by older servers/);
+});
+test('signing diagnostics translate only recognized public status codes', () => {
+  for (const [state, label] of [['phase0', 'Not enabled'], ['invalid', 'Check signing files'], ['ready', 'Ready'],
+    ['signing_refused', 'Signing stopped'], ['keylist_missing', 'Revocation list missing'], ['renewal_due', 'Certificate renewal due'],
+    ['constructor', 'Unavailable'], ['__proto__', 'Unavailable'], ['unknown-future-state', 'Unavailable'], [null, 'Unavailable']]) {
+    const result = instructionDiagnostics({instruction_keys: {state, root_ceremony_overdue: state}}, String);
+    assert.equal(result.cells['instruction-key-state'], label);
+    assert.equal(result.cells['instruction-root-ceremony'], 'Unavailable');
+  }
+  for (const [status, label] of [['ok', 'Current'], ['warn', 'Review due'], ['critical', 'Review overdue'], ['unknown', 'Unavailable']]) {
+    assert.equal(instructionDiagnostics({instruction_keys: {root_ceremony_overdue: status}}, String).cells['instruction-root-ceremony'], label);
+  }
 });

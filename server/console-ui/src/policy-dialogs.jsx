@@ -10,8 +10,8 @@ const countLabels = [['policy-roles-defined', 'Roles defined'], ['policy-roles-r
   ['policy-role-drift', 'Devices with mismatched roles'], ['policy-outbox', 'Changes awaiting tracker confirmation']];
 const deliveryLabels = [['policy-issued-revision', 'Highest issued revision'], ['policy-instr-stamp-missing', 'Devices missing an instruction stamp'],
   ['policy-pointer-skew', 'Devices reporting pointer skew'], ['policy-instruction-observed', 'Server observation time']];
-const custodyLabels = [['instruction-key-state', 'Custody state'], ['instruction-cert-days', 'Signing certificate remaining'],
-  ['instruction-keylist-age', 'Key list age'], ['instruction-root-ceremony', 'Root ceremony'], ['instruction-root-quorum', 'Root quorum'], ['instruction-key-actions', 'Required action']];
+const custodyLabels = [['instruction-key-state', 'Signing status'], ['instruction-cert-days', 'Signing certificate remaining'],
+  ['instruction-keylist-age', 'Revocation list age'], ['instruction-root-ceremony', 'Root review timing'], ['instruction-root-quorum', 'Root confirmations'], ['instruction-key-actions', 'Action needed']];
 const Counts = ({labels, cells}) => <dl className="policy-counts">{labels.map(([id, label]) => <div key={id}><dt>{label}</dt><dd id={id}>{cells[id]}</dd></div>)}</dl>;
 const CountList = ({id, rows}) => <ul className="policy-members" id={id}>{rows.map(row => <li key={row.label} className={row.count === undefined ? 'muted' : undefined}>
   {row.count === undefined ? row.label : <><span className="machine">{row.label}</span>: {row.count}</>}</li>)}</ul>;
@@ -97,13 +97,13 @@ export function PolicyDialogs({controller, state, disabled}) {
               </div>
               <p className={'role-message' + (state.failed ? ' err' : '')} id="role-def-status" role="status" aria-live="polite">{state.message}</p>
               <p className="muted" role="status">{state.downloadMessage}</p>
-              <details className="policy-diagnostics"><summary>Instruction delivery and key custody</summary>
+              <details className="policy-diagnostics"><summary>Instruction delivery and signing keys</summary>
                 <h3>Instruction delivery</h3><Counts labels={deliveryLabels} cells={diag.instruction.cells} />
                 <p className="muted">Reported applied policy revisions — agent-asserted</p><CountList id="policy-applied-revisions" rows={diag.instruction.applied} />
                 <p className="muted">Primary instruction states — mixed evidence; old reports remain in the fleet denominator</p><CountList id="policy-instruction-states" rows={diag.instruction.states} />
-                <h3>Instruction key custody</h3><Counts labels={custodyLabels} cells={diag.instruction.cells} />
+                <h3>Signing key status</h3><Counts labels={custodyLabels} cells={diag.instruction.cells} />
                 <ul className="policy-members" aria-label="Evidence sources">
-                  <li><strong>Server-observed:</strong> report age, origin and tracker observations, durable revocation and key custody, and missing instruction stamps.</li>
+                  <li><strong>Server-observed:</strong> report age, origin and tracker observations, saved revocations and signing key status, and missing instruction stamps.</li>
                   <li><strong>Device-authored:</strong> announce upload and download counters reported by the transfer client.</li>
                   <li><strong>Agent-asserted:</strong> instruction identity and state, applied options, QoS drift, and pointer skew.</li>
                 </ul>

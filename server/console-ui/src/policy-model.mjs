@@ -62,19 +62,20 @@ export function instructionDiagnostics(policy, formatDate) {
       : count(rollup?.issued_revision) ? 'r' + rollup.issued_revision : 'unavailable',
     'policy-instr-stamp-missing': devices(status.instr_stamp_missing), 'policy-pointer-skew': devices(status.pointer_skew),
     'policy-instruction-observed': Number.isFinite(status.observed_at) && status.observed_at >= 0 ? formatDate(status.observed_at) : 'unavailable',
-    'instruction-key-state': typeof custody?.state === 'string' ? custody.state : 'unavailable',
+    'instruction-key-state': new Map([['phase0', 'Not enabled'], ['invalid', 'Check signing files'], ['ready', 'Ready'],
+      ['signing_refused', 'Signing stopped'], ['keylist_missing', 'Revocation list missing'], ['renewal_due', 'Certificate renewal due']]).get(custody?.state) || 'Unavailable',
     'instruction-cert-days': days(custody?.certificate_days_to_expiry), 'instruction-keylist-age': days(custody?.keylist_age_days),
-    'instruction-root-ceremony': ['ok', 'warn', 'critical', 'unknown'].includes(custody?.root_ceremony_overdue) ? custody.root_ceremony_overdue : 'unknown',
-    'instruction-root-quorum': 'unknown', 'instruction-key-actions': 'unavailable',
+    'instruction-root-ceremony': new Map([['ok', 'Current'], ['warn', 'Review due'], ['critical', 'Review overdue']]).get(custody?.root_ceremony_overdue) || 'Unavailable',
+    'instruction-root-quorum': 'Unavailable', 'instruction-key-actions': 'Unavailable',
   };
   if (custody) {
     const roots = count(custody.roots_attested_180d) && count(custody.roots_configured)
-      ? ` · ${custody.roots_attested_180d}/${custody.roots_configured} roots attested in 180 days` : '';
-    cells['instruction-root-quorum'] = custody.enabled === false ? 'not enabled' : custody.enabled !== true ? 'unknown'
-      : custody.root_quorum_degraded === true ? 'degraded' + roots : custody.root_quorum_degraded === false ? 'healthy' + roots : 'unknown';
-    const flags = [['certificate_renewal_due', 'certificate renewal due'], ['signing_refused', 'signing refused'], ['keylist_resign_due', 'key list re-sign due']];
-    cells['instruction-key-actions'] = custody.enabled === false ? 'not enabled' : custody.enabled !== true || flags.some(([key]) => typeof custody[key] !== 'boolean')
-      ? 'unavailable' : flags.filter(([key]) => custody[key]).map(([, text]) => text).join(' · ') || 'none';
+      ? ` · ${custody.roots_attested_180d} of ${custody.roots_configured} roots confirmed within 180 days` : '';
+    cells['instruction-root-quorum'] = custody.enabled === false ? 'Not enabled' : custody.enabled !== true ? 'Unavailable'
+      : custody.root_quorum_degraded === true ? 'Confirmation needed' + roots : custody.root_quorum_degraded === false ? 'Confirmed' + roots : 'Unavailable';
+    const flags = [['certificate_renewal_due', 'Renew signing certificate'], ['signing_refused', 'Signing is stopped'], ['keylist_resign_due', 'Re-sign revocation list']];
+    cells['instruction-key-actions'] = custody.enabled === false ? 'Not enabled' : custody.enabled !== true || flags.some(([key]) => typeof custody[key] !== 'boolean')
+      ? 'Unavailable' : flags.filter(([key]) => custody[key]).map(([, text]) => text).join(' · ') || 'None';
   }
   return {cells,
     applied: instructionMapRows(count(status.pointer_skew) && rollup ? rollup.applied : null, true, 'No accepted identity reported.'),

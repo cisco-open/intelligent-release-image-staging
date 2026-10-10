@@ -128,12 +128,14 @@ try {
   await page.locator('#policy-advanced-open').click(); assert.equal(await focus('#policy-advanced-close'), true);
   const unrestricted = page.locator('#role-def-rows tr').filter({has: page.getByRole('cell', {name: 'fiber', exact: true})});
   assert.match(await unrestricted.innerText(), /No role limit.*All roles, if the other role permits sharing.*Allowed by role/s);
-  await page.locator('.policy-diagnostics summary').filter({hasText: 'Instruction delivery and key custody'}).click();
+  await page.locator('.policy-diagnostics summary').filter({hasText: 'Instruction delivery and signing keys'}).click();
+  assert.equal(await page.getByRole('heading', {name: 'Signing key status', exact: true}).count(), 1);
+  assert.doesNotMatch(await page.locator('#policy-advanced-modal .policy-diagnostics').innerText(), /key custody|Root ceremony|Root quorum/);
   assert.match(await page.locator('#policy-applied-revisions').innerText(), /r9223372036854775807: 2/);
   assert.equal(await page.locator('#policy-issued-revision').innerText(), 'r9223372036854775807');
   assert.match(await page.locator('#policy-instruction-states').innerText(), /<img src=x onerror=alert\(1\)>/);
   assert.equal(await page.locator('#policy-instruction-states img').count(), 0);
-  assert.equal(await page.locator('#instruction-key-actions').innerText(), 'none');
+  assert.equal(await page.locator('#instruction-key-actions').innerText(), 'None');
   assert.match(await page.locator('#policy-mutual-origin').innerText(), /0 newly denied devices.*not active/);
   const download = page.waitForEvent('download'); await page.locator('#role-def-export').click(); assert.equal((await download).suggestedFilename(), 'roles.csv');
   const csv = 'role,restricted\nboat,true\nfiber,true\n';

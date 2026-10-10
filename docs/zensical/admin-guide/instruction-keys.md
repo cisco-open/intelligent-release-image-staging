@@ -23,9 +23,9 @@ iris -- sh`.
 
 ## In the Console
 
-Open **Policies → Advanced → Instruction delivery and key custody**. The panel
-shows signing status, certificate and keylist age, ceremony status, and
-attested roots; the terms it uses are in the next section.
+Open **Policies → Advanced → Instruction delivery and signing keys**. The panel
+shows signing status, certificate time remaining and revocation list age. **Action needed** lists required work.
+Root confirmations show how many roots were confirmed within the last 180 days.
 
 ## Renew the instruction signing certificate
 

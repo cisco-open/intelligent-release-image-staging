@@ -12770,11 +12770,12 @@ assert.equal(panel.cells['policy-instr-stamp-missing'], '4 devices');
 assert.equal(panel.cells['policy-pointer-skew'], '1 device');
 assert.equal(panel.cells['policy-instruction-observed'], 'time:456');
 assert.equal(panel.cells['instruction-cert-days'], '-2 days');
-assert.match(panel.cells['instruction-root-ceremony'], /critical/);
-assert.match(panel.cells['instruction-root-quorum'], /degraded/);
-assert.match(panel.cells['instruction-key-actions'], /certificate renewal due/);
-assert.match(panel.cells['instruction-key-actions'], /signing refused/);
-assert.match(panel.cells['instruction-key-actions'], /key list re-sign due/);
+assert.equal(panel.cells['instruction-key-state'], 'Signing stopped');
+assert.match(panel.cells['instruction-root-ceremony'], /Review overdue/);
+assert.match(panel.cells['instruction-root-quorum'], /Confirmation needed/);
+assert.match(panel.cells['instruction-key-actions'], /Renew signing certificate/);
+assert.match(panel.cells['instruction-key-actions'], /Signing is stopped/);
+assert.match(panel.cells['instruction-key-actions'], /Re-sign revocation list/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 500, instr_stamp_missing: null,
@@ -12782,8 +12783,8 @@ renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, state
 assert.equal(panel.cells['policy-instr-stamp-missing'], 'unavailable');
 assert.equal(panel.cells['policy-pointer-skew'], 'unavailable');
 assert.equal(panel.cells['instruction-cert-days'], 'unavailable');
-assert.equal(panel.cells['instruction-root-ceremony'], 'unknown');
-assert.equal(panel.cells['instruction-key-actions'], 'unavailable');
+assert.equal(panel.cells['instruction-root-ceremony'], 'Unavailable');
+assert.equal(panel.cells['instruction-key-actions'], 'Unavailable');
 assert.deepEqual(panel.applied, [{label: 'unavailable'}]);
 
 let unknownDrift = instructionBadge({instruction: {label: 'unknown',
@@ -12803,9 +12804,9 @@ assert.equal(panel.cells['policy-issued-revision'], 'r0');
 assert.equal(panel.cells['policy-instr-stamp-missing'], '0 devices');
 assert.equal(panel.cells['policy-pointer-skew'], '0 devices');
 assert.equal(panel.cells['instruction-cert-days'], '0 days');
-assert.match(panel.cells['instruction-root-ceremony'], /warn/);
-assert.match(panel.cells['instruction-root-quorum'], /healthy/);
-assert.equal(panel.cells['instruction-key-actions'], 'key list re-sign due');
+assert.match(panel.cells['instruction-root-ceremony'], /Review due/);
+assert.match(panel.cells['instruction-root-quorum'], /Confirmed/);
+assert.equal(panel.cells['instruction-key-actions'], 'Re-sign revocation list');
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 502, instr_stamp_missing: 0,
@@ -12815,8 +12816,8 @@ renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, state
     keylist_age_days: null, root_ceremony_overdue: 'unknown',
     root_quorum_degraded: false, roots_attested_180d: 0,
     roots_configured: 0}});
-assert.equal(panel.cells['instruction-root-quorum'], 'not enabled');
-assert.equal(panel.cells['instruction-key-actions'], 'not enabled');
+assert.equal(panel.cells['instruction-root-quorum'], 'Not enabled');
+assert.equal(panel.cells['instruction-key-actions'], 'Not enabled');
 ''')
 
 
