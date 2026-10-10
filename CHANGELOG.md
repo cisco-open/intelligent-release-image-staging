@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Show public certificate validity for Kubernetes projected Secret mounts,
+  while retaining strict private-key and renewal custody checks.
+
 - Reject NUL characters in device credentials and audit export passwords
   before saving, and reject malformed telemetry destination ports.
 
