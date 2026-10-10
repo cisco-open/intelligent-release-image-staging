@@ -58,6 +58,14 @@ def test_every_nav_page_exists():
             "zensical.toml nav references missing page: %s" % page
 
 
+def test_activity_abort_describes_preflight_wait_and_installer_stop_request():
+    page = Path(DOCS, "user-guide/onboarding.md").read_text()
+    text = " ".join(page.split())
+    assert "requests a stop for a running installer" in text
+    assert "waits for those checks to finish and prevents the installer from starting" in text
+    assert "Wait for the job's final status before another action" in text
+
+
 def test_catalyst_iox_storage_requirement_matches_the_onboarding_profile():
     source = Path(REPO, 'server/gui_onboard.py').read_text()
     module = ast.parse(source)

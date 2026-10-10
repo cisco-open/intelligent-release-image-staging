@@ -165,8 +165,10 @@ running.
 
 **Cancel queued** asks for confirmation and cancels only queued jobs in the
 displayed list. **Abort** asks for confirmation, then cancels a queued job or
-stops a running installer, which
-can leave the agent partly configured: onboard the device again or undeploy it.
+requests a stop for a running installer. During connection checks, it waits for
+those checks to finish and prevents the installer from starting.
+Stopping an installer can leave the agent partly configured: onboard the device
+again or undeploy it. Wait for the job's final status before another action.
 If a request's outcome is unknown, close and reopen Activity to check the job
 before trying again.
 

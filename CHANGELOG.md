@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify that aborting onboarding during connection checks waits for those
+  checks to finish and prevents the installer from starting.
+
 - Remove the misleading Monitoring "All" filter; the available time ranges
   now accurately describe searches of up to 90 days.
 
