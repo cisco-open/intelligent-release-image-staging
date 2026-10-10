@@ -54,7 +54,7 @@ as unknown. See [Deployment information](../user-guide/console.md#deployment-inf
 | `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory mounted read-write at `/srv/artifacts`. |
 | `IRIS_SHARP_SANS_FONT_HOST` | `/dev/null` | Legacy font bind mount. Leave unset. |
 | `IRIS_GUI_PUBLISH` | `8080` | Published Console host port. |
-| `IRIS_CONSOLE_URL` | unset | Full external HTTPS Console URL shown in server settings, for example `https://console.example.com:8080`. |
+| `IRIS_CONSOLE_URL` | unset | Full external HTTPS Console URL shown in server settings, for example `https://console.example.com:8080`. Its hostname is included in new one-host default browser certificates; existing certificates are retained on restart. |
 | `IRIS_PEER_TLS_MODE` | `disabled` | `required` turns on peer transfer TLS. Set the same value on every process in the swarm. See [Guardrails](../architecture/security-model.md#guardrails). |
 | `IRIS_GUI_ALLOW_PLAINTEXT`, `IRIS_CATALOG_ALLOW_PLAINTEXT`, `IRIS_ARTIFACTS_ALLOW_PLAINTEXT` | unset | `1` serves that component over plain HTTP when no usable certificate is set. Loopback or an isolated test network only. |
 | `IRIS_VERSION` | unset | Build argument for the release string the Console Settings page shows. |

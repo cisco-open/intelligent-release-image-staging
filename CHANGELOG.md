@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Include the advertised Console address in new one-host browser certificates,
+  keeping existing certificates unchanged on restart.
+
 - Start Guest Shell encrypted transfers when the platform maps `/flash` to
   `/bootflash`, while continuing to reject untrusted links in private
   certificate storage.
