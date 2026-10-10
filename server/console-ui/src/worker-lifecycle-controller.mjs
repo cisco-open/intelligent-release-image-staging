@@ -7,12 +7,13 @@ import {normalizeNames, publicPem} from './security-lifecycle-model.mjs';
 import {urls, workerStatus, activeJobs, acceptedJob, matchingJob, workerBody, workerRefusalHint, familyLabels} from './worker-lifecycle-model.mjs';
 import {trustFamilies, trustStatus, trustAllows, checkedTrust, rootId, rootsPublic, signedKeylist} from './deployment-trust-model.mjs';
 import {maintenanceStatus, maintenanceAction, checkedMaintenance, scheduleDraft, schedulePayload, equalPolicy} from './key-maintenance-model.mjs';
+import {matchingRetention, retentionOperation} from './backup-retention-model.mjs';
 
 export class WorkerLifecycleController {
   constructor() {
     this.state = {rotation: null, trust: null, maintenance: null, backups: null, valid: {}, loading: {}, unknown: {}, messages: {}, busy: false,
       family: 'management-tls', names: '', mode: 'ca', rootA: 'root-a', rootB: 'root-b', attestRoot: '', attestation: null,
-      files: {}, fileEpoch: 0, schedule: scheduleDraft(null, Date.now()), draftDirty: false, draftRevision: null, backupSelected: ''};
+      files: {}, fileEpoch: 0, schedule: scheduleDraft(null, Date.now()), draftDirty: false, draftRevision: null, backupSelected: '', backupDeleteSelected: '', retentionAttempt: null, retentionUncertain: false};
     this.listeners = new Set(); this.generations = {}; this.readers = {}; this.pending = {}; this.context = 0; this.pane = null;
   }
   snapshot = () => this.state;
@@ -34,7 +35,18 @@ export class WorkerLifecycleController {
   ready(...keys) {return keys.every(key => this.state.valid[key] && !this.state.loading[key]);}
   item() {return this.state.trust?.items.find(row => row.family === this.state.family);}
   workerReady() {return this.ready('rotation', 'backups') && !this.state.unknown.deployment && !this.state.unknown.backups;}
-  workerIdle(except = null) {return this.workerReady() && !activeJobs(this.state).some(row => row.id !== except);}
+  workerIdle(except = null) {return this.workerReady() && !this.state.backups?.retention?.busy && !activeJobs(this.state).some(row => row.id !== except);}
+  backupSpace() {const capacity = this.state.backups?.retention?.capacity; return !capacity || capacity.backup_used < capacity.backup_limit;}
+  historySpace() {const capacity = this.state.backups?.retention?.capacity; return !capacity || capacity.history_used < capacity.history_limit;}
+  retirableJobs() {return this.state.backups?.retention?.jobs.filter(row => row.retire_allowed).slice(0, 25) || [];}
+  canRetire(action) {
+    const retention = this.state.backups?.retention;
+    if (this.pane !== 'backups' || !this.available('backups') || !this.workerReady() || !this.state.backups.available || !retention) return false;
+    if (action === 'resume-delete') return !activeJobs(this.state).length && retention.operation?.action === 'delete-backup' && retention.operation.state === 'recovery-required';
+    if (!this.workerIdle()) return false;
+    if (action === 'retire-history') return this.retirableJobs().length > 0;
+    return action === 'delete-backup' && retention.backups.some(row => row.backup_id === this.state.backupDeleteSelected && row.delete_allowed);
+  }
   canTrust(action) {
     if (this.pane !== 'certificates' || !this.available('deployment') || !this.ready('trust') || !this.workerIdle() || !trustAllows(this.item(), action)) return false;
     if (action === 'attestation-apply') return this.item().attestation_root_id === this.state.attestRoot && requestId(this.item().attestation_request_id);
@@ -45,7 +57,7 @@ export class WorkerLifecycleController {
     if (recovery) {const row = this.state.rotation.jobs.find(row => row.id === recovery);
       return !!row && row.state === 'recovery-required' && this.state.rotation.families.includes(row.family) && this.workerIdle(row.id);}
     const item = this.item();
-    return this.workerIdle() && this.state.rotation.families.includes(this.state.family) &&
+    return this.workerIdle() && this.backupSpace() && this.historySpace() && this.state.rotation.families.includes(this.state.family) &&
       (!trustFamilies.includes(this.state.family) || this.ready('trust') && item?.state === 'approved' && this.state.trust.drain.ready);
   }
   canBackup(action, recovery = null) {
@@ -54,8 +66,8 @@ export class WorkerLifecycleController {
       const row = this.state.backups.jobs.find(row => row.id === recovery);
       return this.state.backups.can_restore && row?.action === 'restore' && row.state === 'recovery-required' && this.workerIdle(row.id);
     }
-    if (!['backup', 'verify', 'extract', 'restore'].includes(action) || !this.workerIdle()) return false;
-    if (action === 'backup') return true;
+    if (!['backup', 'verify', 'extract', 'restore'].includes(action) || !this.workerIdle() || !this.historySpace()) return false;
+    if (action === 'backup') return this.backupSpace();
     return this.state.backups['can_' + action] && this.state.backups.jobs.some(row => row.backup_id === this.state.backupSelected && row.action === 'backup' && row.state === 'captured');
   }
   recoveryRestore() {
@@ -73,7 +85,7 @@ export class WorkerLifecycleController {
       if (!Object.hasOwn(familyLabels, value) || value === 'age-recovery' || value === this.state.family) return;
       this.clearFiles(); this.update({family: value, attestRoot: ''}); this.pickAttestRoot(); return;
     }
-    if (key === 'backupSelected') {if (this.ready('backups')) this.update({backupSelected: value}); return;}
+    if (['backupSelected', 'backupDeleteSelected'].includes(key)) {if (this.ready('backups')) this.update({[key]: value}); return;}
     if (key === 'attestRoot') {if (!Object.hasOwn(this.item()?.roots || {}, value)) return; this.clearFiles(); this.update({attestRoot: value}); return;}
     if (!['names', 'mode', 'rootA', 'rootB'].includes(key) || !this.canTrust('prepare') || key === 'mode' && !['ca', 'self-signed'].includes(value)) return;
     this.update({[key]: value});
@@ -105,7 +117,8 @@ export class WorkerLifecycleController {
     this.generations[key] = generation; this.readers[key]?.abort(); const reader = new AbortController(); this.readers[key] = reader;
     this.update({loading: {...this.state.loading, [key]: true}, valid: {...this.state.valid, [key]: false}});
     try {
-      const response = await this.services.fetch(urls[key], {signal: reader.signal}), data = await response.json();
+      const address = urls[key] + (key === 'backups' && this.state.retentionAttempt ? '?retention_request_id=' + encodeURIComponent(this.state.retentionAttempt.request_id) : '');
+      const response = await this.services.fetch(address, {signal: reader.signal}), data = await response.json();
       if (generation !== this.generations[key] || context !== this.context || !this.visible()) return false;
       const state = key === 'trust' ? trustStatus(data) : key === 'maintenance' ? maintenanceStatus(data) : workerStatus(data, key);
       if (response.status !== 200 || !state) throw Error();
@@ -135,7 +148,12 @@ export class WorkerLifecycleController {
     const reads = keys.map(key => this.refresh(key)), generations = keys.map(key => this.generations[key]);
     const results = await Promise.all(reads);
     if (!results.every(Boolean) || keys.some((key, index) => this.generations[key] !== generations[index]) || context !== this.context || !this.visible() || group === 'deployment' && family !== this.state.family || !this.ready(...keys)) return;
-    this.update({unknown: {...this.state.unknown, [group]: false}});
+    if (group === 'backups' && this.state.retentionUncertain &&
+        !matchingRetention(this.state.backups?.retention?.operation, this.state.retentionAttempt)) {
+      this.say('backups', 'The worker has not confirmed this exact cleanup request. Keep its request ID and review it on the installer host before continuing.');
+      return;
+    }
+    this.update({unknown: {...this.state.unknown, [group]: false}, ...(group === 'backups' ? {retentionUncertain: false, retentionAttempt: null} : {})});
     if (group === 'deployment') this.clearFiles();
     for (const [key, pending] of Object.entries(this.pending)) {
       if (pending.group !== group) continue;
@@ -226,6 +244,23 @@ export class WorkerLifecycleController {
       return payload;
     }, (payload, data) => acceptedJob(data, payload) ? {accepted: payload.request_id} : null);
   }
+  async retire(action) {
+    if (!this.canRetire(action)) return;
+    const retention = this.state.backups.retention, rows = this.retirableJobs(), prior = retention.operation;
+    const selected = action === 'resume-delete' ? prior.backup_id : this.state.backupDeleteSelected;
+    await this.write('backups', 'backups', async () => {
+      const question = action === 'retire-history'
+        ? 'Clear ' + rows.length + ' finished history record' + (rows.length === 1 ? '' : 's') + '? Saved backups, security records and recovery records are kept.'
+        : action === 'resume-delete'
+          ? 'Resume deletion of backup ' + selected + '? This continues the same interrupted deletion of its deployment and recovery archives.'
+          : 'Delete backup ' + selected + '? This permanently removes its encrypted deployment and recovery archives from this host. Check any independently stored copies before continuing.';
+      if (!this.services.confirm(question)) return;
+      const payload = {action, request_id: action === 'resume-delete' ? prior.request_id : this.services.uuid(), expected_revision: retention.revision,
+        ...(action === 'retire-history' ? {job_ids: rows.map(row => row.id)} : {backup_id: selected, confirm_delete: true})};
+      this.update({retentionAttempt: structuredClone(payload), retentionUncertain: false});
+      return payload;
+    }, (payload, data) => matchingRetention(data?.retention_operation, payload) ? {retention: retentionOperation(data.retention_operation)} : null);
+  }
   async schedule(action = 'save-policy', id = null) {
     if (!this.canSchedule(action, id)) return;
     const before = this.state.maintenance;
@@ -259,11 +294,24 @@ export class WorkerLifecycleController {
       try {response = await this.services.fetch(urls[kind], {method: 'POST', headers: this.services.headers({'Content-Type': 'application/json'}), body}); data = await response.json().catch(() => null);} catch { /* No result is not proof of refusal. */ }
       const result = response?.status === 200 ? check(payload, data) : null;
       if (!result) {
-        this.update({unknown: {...this.state.unknown, [group]: true}});
+        const retention = kind === 'backups' && ['retire-history', 'delete-backup', 'resume-delete'].includes(payload.action);
+        if (retention && [400, 401, 403, 409].includes(response?.status)) {
+          this.update({retentionAttempt: null, retentionUncertain: false});
+          this.say(group, 'Cleanup request refused (' + response.status + '). ' + workerRefusalHint(response.status, data) + 'Refresh backup history and review the available actions before continuing.');
+          return;
+        }
+        this.update({unknown: {...this.state.unknown, [group]: true}, ...(retention ? {retentionUncertain: true} : {})});
         this.say(group, (response?.status >= 400 && response.status < 500 ? 'Request refused (' + response.status + '). ' + workerRefusalHint(response.status, data) : 'Outcome unknown. The server may have accepted the request. ') + 'Refresh and review the exact operation before continuing.'); return;
       }
       for (const [key, pending] of Object.entries(this.pending)) if (pending.id === (payload.request_id || payload.policy?.id)) delete this.pending[key];
-      if (result.accepted) this.say(group, 'Accepted operation ' + result.accepted + '. Refresh history for the worker result. During downtime, use host recovery if the Console remains offline.', 'success');
+      if (result.retention) {
+        const operation = result.retention;
+        this.update({retentionUncertain: false, retentionAttempt: null});
+        this.say(group, operation.state === 'completed'
+          ? operation.action === 'retire-history' ? 'Cleared ' + operation.retired_count + ' finished history record' + (operation.retired_count === 1 ? '' : 's') + '. Saved backups and recovery records are kept.' : 'Deleted the deployment and recovery archives for backup ' + operation.backup_id + '.'
+          : operation.state === 'recovery-required' ? 'Backup deletion needs recovery. Refresh history, then resume this exact deletion.'
+            : 'Accepted cleanup request ' + operation.request_id + '. Refresh backup history to check its result.', operation.state === 'recovery-required' ? 'error' : 'success');
+      } else if (result.accepted) this.say(group, 'Accepted operation ' + result.accepted + '. Refresh history for the worker result. During downtime, use host recovery if the Console remains offline.', 'success');
       else if (kind === 'maintenance') {
         this.update({maintenance: result.state});
         if (payload.action === 'save-policy') this.update({schedule: scheduleDraft(payload.policy, this.services.now()), draftDirty: false, draftRevision: result.state.revision});
@@ -282,7 +330,10 @@ export class WorkerLifecycleController {
               : 'Replacement prepared: ' + payload.request_id + '. Download public files and complete the required approvals.', 'success');
       }
     } catch (error) {
-      if (sent) {this.update({unknown: {...this.state.unknown, [group]: true}}); this.say(group, 'Outcome unknown. Refresh and review current evidence before continuing.');}
+      if (sent) {
+        const retention = kind === 'backups' && ['retire-history', 'delete-backup', 'resume-delete'].includes(payload?.action);
+        this.update({unknown: {...this.state.unknown, [group]: true}, ...(retention ? {retentionUncertain: true} : {})}); this.say(group, 'Outcome unknown. Refresh and review current evidence before continuing.');
+      }
       else this.say(group, error.message);
     } finally {
       if (!sent && context !== this.context) this.say(group, 'The request was not submitted because you left this page.', 'info');

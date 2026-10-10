@@ -4,6 +4,7 @@
 
 import {epoch, requestId} from './certificates-model.mjs';
 import {refusalHint} from './security-lifecycle-model.mjs';
+import {retentionStatus} from './backup-retention-model.mjs';
 export const urls = {rotation: '/api/v1/settings/deployment-rotation', trust: '/api/v1/settings/trust-rotation',
   maintenance: '/api/v1/settings/key-maintenance', backups: '/api/v1/settings/backups'};
 export const rotationFamilies = ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce'];
@@ -55,7 +56,9 @@ export function workerStatus(data, kind) {
   if (!['can_verify', 'can_extract', 'can_restore'].every(key => typeof data[key] === 'boolean') || !boundedText(data.storage, 256)) return null;
   if (!data.available && (jobs.length || data.can_verify || data.can_extract || data.can_restore)) return null;
   if (data.available && data.restore_scope !== 'same-deployment-same-security-generation') return null;
-  return {...result, ...pick(data, ['can_verify', 'can_extract', 'can_restore', 'storage']), restore_scope: data.restore_scope ?? null};
+  const retention = data.retention === undefined ? null : retentionStatus(data.retention);
+  if (data.retention !== undefined && !retention) return null;
+  return {...result, ...pick(data, ['can_verify', 'can_extract', 'can_restore', 'storage']), restore_scope: data.restore_scope ?? null, retention};
 }
 export const activeJobs = state => [...(state.rotation?.jobs || []), ...(state.backups?.jobs || [])].filter(row => ['running', 'recovery-required'].includes(row.state));
 export function acceptedJob(data, payload) {return !!data && data.job_id === payload.request_id && requestId(data.job_id);}

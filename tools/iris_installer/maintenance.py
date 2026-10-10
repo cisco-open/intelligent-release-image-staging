@@ -70,6 +70,8 @@ def prepare_recovery_candidate(client, path, approved_recipient, *, independent_
     with Journal(client.state_dir).locked() as journal:
         if journal.document is None:
             raise InstallError("Installer deployment state is unavailable")
+        from .lifecycle_history import existing_store, guard as retention_guard
+        retention_guard(client.state_dir)
         if journal.document["config"].get("recovery_recipient") == recipient:
             raise InstallError("Choose a different recovery recipient")
         target = client.state_dir / "recovery-candidate.json"
@@ -79,11 +81,25 @@ def prepare_recovery_candidate(client, path, approved_recipient, *, independent_
                     or not isinstance(previous["operation_id"], str)
                     or not re.fullmatch(r"[0-9a-f-]{36}", previous["operation_id"])):
                 raise InstallError("Preserve the invalid recovery candidate for investigation")
-            finished = any(job.get("id") == previous["operation_id"] and job.get("state") == "rotated" for job in jobs)
+            history = existing_store(client.state_dir)
+            retired = history.retired_job(previous['operation_id']) if history is not None else None
+            predecessor_jobs = jobs + ([retired] if retired is not None else [])
+            finished = any(job.get("id") == previous["operation_id"] and job.get('action') == 'rotate'
+                and job.get('family') == 'age-recovery' and job.get("state") == "rotated" for job in predecessor_jobs)
             intent = client.state_dir / "credential-operations" / previous["operation_id"] / "record.json"
+            if retired is not None and finished:
+                finished = False
+                if intent.exists() and intent.resolve() == intent:
+                    info = intent.lstat()
+                    if (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+                            and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1):
+                        record = json.loads(regular_bytes(intent, 1024 * 1024))
+                        finished = (record.get('operation_id') == previous['operation_id']
+                            and record.get('instance_id') == journal.document['id']
+                            and record.get('kind') == 'age-recovery' and record.get('phase') == 'rotated')
             failed = any(job.get("id") == previous["operation_id"] and
                 job.get("action") == "rotate" and job.get("family") == "age-recovery" and
-                job.get("state") == "failed" for job in jobs)
+                job.get("state") == "failed" for job in predecessor_jobs)
             safely_refused = failed and not intent.exists() and not intent.is_symlink()
             if failed and intent.exists() and intent.resolve() == intent:
                 info = intent.lstat()
@@ -178,7 +194,25 @@ class MaintenanceClient:
         self.backup_state = None
 
     def call(self, request):
-        if isinstance(request, dict) and request.get("action") in ("renew-transport", "recover-transport"):
+        if isinstance(request, dict) and request.get('action') in ('retire-history', 'delete-backup', 'resume-delete', 'retention-status'):
+            from .lifecycle_history import identifier
+            identifier(request.get('request_id'))
+            fields = {'action', 'request_id'}
+            if request['action'] != 'retention-status':
+                fields.add('expected_revision')
+                if not isinstance(request.get('expected_revision'), str) or not re.fullmatch('[0-9a-f]{64}', request['expected_revision']):
+                    raise InstallError('Use the current maintenance history revision')
+                if request['action'] == 'retire-history':
+                    fields.add('job_ids'); selected = request.get('job_ids')
+                    if not isinstance(selected, list) or not 1 <= len(selected) <= 25:
+                        raise InstallError('Select one to 25 finished operations')
+                    for value in selected: identifier(value)
+                    if len(set(selected)) != len(selected): raise InstallError('Select distinct finished operations')
+                else:
+                    fields.update(('backup_id', 'confirm_delete')); identifier(request.get('backup_id'))
+                    if request.get('confirm_delete') is not True: raise InstallError('Confirm archive deletion')
+            if set(request) != fields: raise InstallError('Unsupported maintenance retention fields')
+        elif isinstance(request, dict) and request.get("action") in ("renew-transport", "recover-transport"):
             if (set(request) != {"action", "request_id", "allow_downtime"} or request["allow_downtime"] is not True
                     or not isinstance(request["request_id"], str)
                     or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", request["request_id"])):
@@ -257,7 +291,8 @@ class MaintenanceClient:
 
 
 ACTIONS = ("status", "recover", "restore", "renew-transport", "replace-recovery",
-           "configure-recovery", "disable-recovery", "trust-signer")
+           "configure-recovery", "disable-recovery", "trust-signer", 'history',
+           'retire-history', 'delete-backup', 'resume-delete')
 
 
 def add_arguments(parser):
@@ -266,6 +301,10 @@ def add_arguments(parser):
     parser.add_argument("--job-id", help="operation ID shown by maintenance status")
     parser.add_argument("--identity", type=Path, help="private age recovery key file")
     parser.add_argument("--signer", type=Path, help="independently trusted public backup signing key")
+    parser.add_argument('--request-id', help='unique retention request ID; reuse only to observe or explicitly resume the same deletion')
+    parser.add_argument('--revision', help='exact revision from maintenance history')
+    parser.add_argument('--retire-job-id', action='append', help='finished history row to clear; repeat for up to 25 rows')
+    parser.add_argument('--backup-id', help='saved archive pair ID from maintenance history')
     parser.add_argument("--allow-downtime", action="store_true",
                         help="allow this operation to stop and restart IRIS")
     parser.add_argument("--independent-copy", action="store_true",
@@ -283,17 +322,21 @@ def _validate_arguments(args):
         "trust-signer": {"signer"},
         "disable-recovery": set(),
         "status": set(),
+        'history': set(),
+        'retire-history': {'request_id', 'revision', 'retire_job_id'},
+        'delete-backup': {'request_id', 'revision', 'backup_id'},
+        'resume-delete': {'request_id', 'revision', 'backup_id'},
     }
     if args.action not in needed:
         raise InstallError("Choose a supported maintenance action")
-    for name in ("job_id", "identity", "signer", "allow_downtime", "independent_copy"):
+    for name in ("job_id", "identity", "signer", "allow_downtime", "independent_copy", 'request_id', 'revision', 'retire_job_id', 'backup_id'):
         value = getattr(args, name, None)
         flag = "--" + name.replace("_", "-")
         if name in needed[args.action] and not value:
             raise InstallError(args.action + " requires " + flag)
-        if name not in needed[args.action] and value:
+        if name not in needed[args.action] and value and not (args.action == 'history' and name == 'request_id'):
             raise InstallError(flag + " does not apply to " + args.action)
-    if args.action == "status" and args.yes:
+    if args.action in ("status", 'history') and args.yes:
         raise InstallError("--yes does not apply to status")
     if args.job_id and not re.fullmatch(
             r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.job_id):
@@ -310,6 +353,9 @@ def _confirm(args):
         "configure-recovery": "Let the worker use this private recovery key. A protected copy may be kept on this host. Keep your separate copy.",
         "disable-recovery": "Disable recovery key access for new operations. Existing keys and backup history are kept.",
         "trust-signer": "Trust this public key for backup restore. Check it with the key owner, not just the backup.",
+        'retire-history': 'Clear only the selected finished history rows. Request IDs and protected recovery records remain retained.',
+        'delete-backup': 'Permanently delete the selected on-host deployment and recovery archives. Other copies are not checked.',
+        'resume-delete': 'Continue the exact interrupted archive deletion using its retained request and file checkpoints.',
     }
     print(descriptions[args.action])
     if not args.yes:
@@ -339,7 +385,7 @@ def main(args):
         # Review the public address before approval, without importing the key.
         reviewed_identity = recovery_identity(args.identity, allow_invoking_user=True)
         print("Public recovery address: " + reviewed_identity[1])
-    if args.action != "status":
+    if args.action not in ("status", 'history'):
         # Refusal must not open a socket, import a key or write state.
         _confirm(args)
     if args.action in ("configure-recovery", "disable-recovery", "trust-signer"):
@@ -355,13 +401,23 @@ def main(args):
         print(json.dumps(managed_worker.inspect(args.state_dir), indent=2, sort_keys=True))
         return 0
     client = MaintenanceClient(args.state_dir)
+    if args.action == 'history':
+        request_id = getattr(args, 'request_id', None)
+        result = client.call({'action': 'status'} if request_id is None else {'action': 'retention-status', 'request_id': request_id})
+        if 'retention' not in result: raise InstallError('This worker does not support maintenance history retirement')
+        print(json.dumps(result['retention'], indent=2, sort_keys=True))
+        return 0
     if args.action == "status":
         jobs = client.snapshot()
         print("Current maintenance operations and backup readiness:")
         print(json.dumps({"jobs": jobs, "backup": client.backup_state,
                           "connection": client.transport_state}, indent=2, sort_keys=True))
         return 0
-    if args.action == "recover":
+    if args.action in ('retire-history', 'delete-backup', 'resume-delete'):
+        request = {'action': args.action, 'request_id': args.request_id, 'expected_revision': args.revision}
+        if args.action == 'retire-history': request['job_ids'] = args.retire_job_id
+        else: request.update(backup_id=args.backup_id, confirm_delete=True)
+    elif args.action == "recover":
         request = recovery_request(_selected_job(client, args.job_id))
     elif args.action == "restore":
         request = restore_request(_selected_job(client, args.job_id))

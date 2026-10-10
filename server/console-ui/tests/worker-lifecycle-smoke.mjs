@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {id, other, certificate, prepared, trust, rotation, backups, maintenance, job} from './worker-fixtures.mjs';
+import {id, other, hash, now, certificate, prepared, trust, rotation, backups, maintenance, job} from './worker-fixtures.mjs';
 const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = fileURLToPath(new URL('../', import.meta.url)), browser = await chromium.launch({headless: true});
 try {
@@ -33,6 +33,23 @@ try {
         if (kind === 'maintenance') {
           if (mode === 'success') fixtures.maintenance = {...fixtures.maintenance, revision: body.revision + 1, policies: [body.policy]};
           return route.fulfill({json: fixtures.maintenance});
+        }
+        if (['retire-history', 'delete-backup', 'resume-delete'].includes(body.action)) {
+          const retention = fixtures.backups.retention;
+          assert.equal(body.expected_revision, retention.revision);
+          const operation = {request_id: body.request_id, action: body.action === 'resume-delete' ? 'delete-backup' : body.action,
+            state: mode === 'cleanup-interrupted' ? 'recovery-required' : 'completed',
+            retired_count: body.job_ids?.length || 0, backup_id: body.backup_id || null};
+          if (body.action === 'retire-history') {
+            retention.jobs = retention.jobs.filter(row => !body.job_ids.includes(row.id));
+            retention.capacity.history_used = retention.jobs.length;
+          } else if (operation.state === 'completed') {
+            assert.equal(body.confirm_delete, true);
+            retention.backups = []; retention.capacity.backup_used = 0;
+            fixtures.backups.jobs = fixtures.backups.jobs.filter(row => row.action !== 'backup');
+          }
+          retention.operation = operation; retention.busy = operation.state !== 'completed';
+          return route.fulfill({json: {retention_operation: operation}});
         }
         if (mode === 'success') fixtures[kind].jobs = [{...job(body.action === 'recover-restore' ? 'restore' : body.action), id: body.request_id, backup_id: body.backup_id || body.request_id}];
         return route.fulfill({json: {job_id: mode === 'wrong-id' ? other : body.request_id}});
@@ -105,6 +122,28 @@ try {
   await page.locator('#backup-refresh').click(); await idle(); await page.locator('#backup-recover').click(); await idle();
   assert.equal(writes.at(-1).action, 'recover-restore'); assert.equal(writes.at(-1).request_id, restore.request_id); assert.equal(writes.at(-1).backup_id, accepted);
   fixtures.backups.jobs[0].state = 'restored';
+  assert.equal(await page.locator('#backup-history-retention').count(), 0, 'Older worker has no unsupported cleanup controls');
+  fixtures.backups.jobs.push({...job('backup', 'captured'), id: accepted, backup_id: accepted});
+  fixtures.backups.retention = {schema: 1, revision: hash, busy: false,
+    capacity: {history_used: 1, history_limit: 100, backup_used: 1, backup_limit: 20},
+    jobs: [{id: other, action: 'verify', state: 'failed', backup_id: accepted, family: null, finished_at: now, retire_allowed: true, retire_reason: ''}],
+    backups: [{backup_id: accepted, created_at: now, delete_allowed: true, delete_reason: ''}], operation: null};
+  await page.locator('#backup-refresh').click(); await idle();
+  await page.locator('#backup-history-clear').focus(); await page.keyboard.press('Enter'); await idle();
+  assert.equal(writes.at(-1).action, 'retire-history'); assert.deepEqual(writes.at(-1).job_ids, [other]);
+  assert.match(await page.locator('#backup-operation-result').innerText(), /Cleared 1 finished history record\..*Saved backups/);
+  assert.equal(await page.locator('#backup-history-clear').isDisabled(), true);
+  assert.equal(await page.locator('#backup-operation-result').evaluate(node => node === document.activeElement), true);
+  await page.locator('#backup-delete-selected').selectOption(accepted); mode = 'cleanup-interrupted';
+  await page.locator('#backup-delete').click(); await idle();
+  const deletion = writes.at(-1); assert.equal(deletion.action, 'delete-backup'); assert.equal(deletion.backup_id, accepted);
+  assert.equal(await page.locator('#backup-create').isDisabled(), true);
+  await page.locator('#backup-delete-resume').waitFor({state: 'visible'}); mode = 'success';
+  await page.locator('#backup-delete-resume').click(); await idle();
+  assert.equal(writes.at(-1).action, 'resume-delete'); assert.equal(writes.at(-1).request_id, deletion.request_id);
+  assert.equal(writes.at(-1).backup_id, deletion.backup_id);
+  assert.match(await page.locator('#backup-operation-result').innerText(), /Deleted the deployment and recovery archives/);
+  assert.equal(await page.locator('#backup-delete').isDisabled(), true); assert.equal(await page.locator('#backup-create').isDisabled(), false);
   for (const pane of ['certificates', 'backups']) {
     await tab(pane);
     for (const [width, height] of [[1440, 1000], [390, 844], [320, 568]]) {
@@ -130,5 +169,5 @@ try {
   await held.fulfill({json: {job_id: other}}); await idle(); await tab('backups');
   assert.equal(writes.length, count); assert.equal(await page.locator('#backup-create').isDisabled(), true);
   assert.deepEqual(await page.evaluate(() => window.csp), []); assert.deepEqual(errors, []);
-  console.log('Worker lifecycle smoke passed: exact approvals/revisions/jobs, uncertainty, recovery, labels, focus, responsive layout and CSP.');
+  console.log('Worker lifecycle smoke passed: exact approvals/revisions/jobs, uncertainty, backup history and deletion recovery, labels, focus, responsive layout and CSP.');
 } finally {await browser.close();}

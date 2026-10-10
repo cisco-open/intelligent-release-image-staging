@@ -1606,6 +1606,10 @@ def _query_parameters(route):
     path = route.path
     suffix = _resource_suffix(route)
     params = []
+    if suffix == '/settings/backups' and route.method == 'GET':
+        params.append({'name': 'retention_request_id', 'in': 'query', 'required': False,
+                       'description': 'Observe the exact history-retirement or archive-deletion request after an uncertain response',
+                       'schema': {'type': 'string', 'format': 'uuid'}})
     if path == "/v1/devices/{device_id}/peer-tls-revocations":
         params.append({"name": "nonce", "in": "query", "required": True,
                        "description": "Fresh client challenge echoed by the authenticated response",
@@ -2146,7 +2150,15 @@ def _request_body(route):
              'properties': {'action': {'enum': ['restore', 'recover-restore']},
                             'backup_id': {'type': 'string', 'format': 'uuid'},
                             'request_id': {'type': 'string', 'format': 'uuid'},
-                            'allow_downtime': {'const': True}, 'confirm_restore': {'const': True}}}]}
+                            'allow_downtime': {'const': True}, 'confirm_restore': {'const': True}}},
+            _schedule_object({'action': {'const': 'retire-history'}, 'request_id': {'type': 'string', 'format': 'uuid'},
+                'expected_revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+                'job_ids': {'type': 'array', 'minItems': 1, 'maxItems': 25, 'uniqueItems': True,
+                            'items': {'type': 'string', 'format': 'uuid'}}}),
+            _schedule_object({'action': {'enum': ['delete-backup', 'resume-delete']},
+                'request_id': {'type': 'string', 'format': 'uuid'},
+                'expected_revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+                'backup_id': {'type': 'string', 'format': 'uuid'}, 'confirm_delete': {'const': True}})]}
     if suffix == "/settings/peer-tls":
         schema["additionalProperties"] = False
         for field in ("mode", "expected_mode"):
@@ -2284,6 +2296,28 @@ def _request_body(route):
             schema["properties"]["device_ids"].update(minItems=1, maxItems=10000)
     return {"required": required_body,
             "content": {"application/json": _media(schema, example)}}
+
+
+def _retention_operation_schema():
+    return _schedule_object({'request_id': {'type': 'string', 'format': 'uuid'},
+        'action': {'enum': ['retire-history', 'delete-backup']},
+        'state': {'enum': ['running', 'completed', 'recovery-required']},
+        'retired_count': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'backup_id': {'type': ['string', 'null'], 'format': 'uuid'}})
+
+
+def _retention_schema():
+    return _schedule_object({'schema': {'const': 1}, 'revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+        'busy': {'type': 'boolean'}, 'capacity': _schedule_object({
+            'history_used': {'type': 'integer', 'minimum': 0, 'maximum': 100}, 'history_limit': {'const': 100},
+            'backup_used': {'type': 'integer', 'minimum': 0}, 'backup_limit': {'const': 20}}),
+        'jobs': {'type': 'array', 'maxItems': 100, 'items': _schedule_object({
+            'id': {'type': 'string', 'format': 'uuid'}, 'action': {'type': 'string'}, 'state': {'type': 'string'},
+            'backup_id': {'type': ['string', 'null'], 'format': 'uuid'}, 'family': {'type': ['string', 'null']},
+            'finished_at': {'type': ['integer', 'null']}, 'retire_allowed': {'type': 'boolean'}, 'retire_reason': {'type': 'string'}})},
+        'backups': {'type': 'array', 'items': _schedule_object({'backup_id': {'type': 'string', 'format': 'uuid'},
+            'created_at': {'type': ['integer', 'null']}, 'delete_allowed': {'type': 'boolean'}, 'delete_reason': {'type': 'string'}})},
+        'operation': {'oneOf': [_retention_operation_schema(), {'type': 'null'}]}})
 
 
 def _json_success_example(route):
@@ -3064,6 +3098,8 @@ def _success(route):
     example = _json_success_example(route)
     title = _operation_name(route, suffix) + "Response"
     schema = _schema_for_example(example, title)
+    if suffix == '/settings/backups' and route.method == 'POST':
+        schema = {'oneOf': [schema, _schedule_object({'retention_operation': _retention_operation_schema()})]}
     if suffix == "/install-options":
         schema["properties"]["options"] = {
             "type": ["array", "null"], "items": {"type": "string"}}
@@ -3180,6 +3216,7 @@ def _success(route):
                         'root_sha256': {'type': 'object', 'additionalProperties': {'type': 'string'}},
                         'keylist_seq': {'type': 'integer'}}}}}}})
     elif suffix == "/settings/backups" and route.method == "GET":
+        schema['properties']['retention'] = _retention_schema()
         schema['properties']['restore_scope'] = {'type': 'string', 'enum': ['same-deployment-same-security-generation']}
         schema["properties"]["jobs"]["items"] = {
             "type": "object", "additionalProperties": False,

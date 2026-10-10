@@ -138,6 +138,15 @@ from the backup. Test this layout in an isolated Python process so checkout
 imports cannot hide a missing runtime dependency.
 Backup capture releases its temporary topology snapshots after success or
 failure. Operation history and encrypted archives remain available for review.
+The worker limits recent history to 100 records and saved backups to 20 pairs
+of deployment and recovery archives. Failed captures without saved files consume
+history, not a saved-backup slot. The Console exposes separate history clearing and archive
+deletion controls through the existing settings/backups API. Both bind an exact
+request ID and reviewed history revision. Retired requests remain recorded to
+prevent replay; unresolved recovery records are protected. Archive deletion has
+its own durable operation record outside the bounded recent history so a full
+history cannot prevent cleanup. Lost responses require read-only reconciliation;
+resuming a partial deletion requires explicit confirmation of the original ID.
 The scoped worker requires a verified backup for credential maintenance;
 `irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.

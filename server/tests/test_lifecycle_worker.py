@@ -24,6 +24,9 @@ from test_api_split import policy_tiers
 def worker(tmp_path):
     for name in ('state', 'backups', 'recovery', 'extract'):
         (tmp_path / name).mkdir(mode=0o700)
+    from iris_installer.state import atomic_write
+    atomic_write(tmp_path / 'state/installation.json', json.dumps(dict(schema=1,
+        id=str(uuid.uuid4()), config={'target': 'docker'}, completed={})).encode())
     return worker_module.Worker(tmp_path / 'state', tmp_path / 'backups', tmp_path / 'recovery')
 
 

@@ -40,6 +40,8 @@ def worker_state(base):
 
 
 def jobs_idle(base):
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(base)
     path = base / 'lifecycle-jobs.json'
     rows = json.loads(regular_bytes(path, 16 * 1024 * 1024)) if path.exists() else []
     plan.require(isinstance(rows, list) and all(isinstance(row, dict) for row in rows)

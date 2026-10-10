@@ -71,6 +71,29 @@ server PVC. A vanished or forcibly terminated pod is not sufficient evidence.
 The service age identity remains in the separate recovery set. The external
 worker and its transport credentials must remain available during downtime.
 
+## Make room for new operations
+
+**Settings → Backup & restore** shows space for 100 recent maintenance records
+and 20 saved backups. Failed attempts use history space. An attempt that leaves
+no saved files does not use a backup slot.
+
+Use **Clear finished history** to remove up to 25 finished records from the
+recent list. The worker keeps saved backups, security records, recovery records
+and the evidence that prevents old requests from running again. Records still
+needed by unfinished maintenance stay in place.
+
+To free backup storage, choose a **Saved backup to delete**, then select
+**Delete selected backup**. Review the backup ID before confirming. This permanently
+removes its encrypted deployment and recovery archives from this host. Independently stored
+copies are unchanged. A backup still needed for recovery cannot be deleted.
+Files left by a failed capture can also be deleted once services have recovered;
+the worker checks every remaining archive before removing it.
+
+After either action, select **Refresh backup history** to check the result.
+If the response was lost, the Console checks that same request before allowing
+more work. An interrupted deletion has a **Resume backup deletion** action.
+Resolve the host error, then use that action to finish the original deletion.
+
 ## What to back up
 
 Back up before an upgrade, a key rotation, a move, or a reset.

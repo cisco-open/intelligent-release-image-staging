@@ -93,6 +93,8 @@ def change(args):
     with Journal(args.state_dir).locked() as journal:
         if journal.document is None or journal.document['config']['target'] != 'docker':
             raise InstallError('Changing an existing image folder requires a one-host Docker installation')
+        from .lifecycle_history import guard as retention_guard
+        retention_guard(journal.directory)
         intent = journal.directory / 'image-root-change.json'
         if intent.exists() or intent.is_symlink():
             saved = json.loads(regular_bytes(intent, 8 * 1024 * 1024))

@@ -297,9 +297,24 @@ including after a worker restart, rather than creating another backup.
 A stopped worker with a running job returns `recovery-required` after restart;
 inspect the protected `backup-operation.json` and actual service state before
 reconciling it. Automated crash recovery for this state is not yet implemented.
-There is no web API to delete backups or acknowledge an unresolved failure.
-The worker bounds history at 100 operations and 20 capture requests, and refuses
-more rather than silently deleting a backup. This is not a retention policy.
+The worker bounds recent history at 100 operations and saved backups at 20
+archive pairs. Failed attempts without saved files consume history, not backup slots.
+The existing backups API exposes separately confirmed history retirement and
+archive deletion. History retirement keeps immutable request records in the
+worker's private `lifecycle-history.sqlite3` authority, so a retired request ID
+cannot start new work. Its initialized marker and the database ID recorded in
+`installation.json` must match. Missing or altered authority blocks further
+maintenance, including host commands. Read-only checks leave older deployments
+without initialized retention storage unchanged.
+It never acknowledges an unresolved failure or removes security journals.
+Archive deletion checks the exact deployment and recovery archive pair and
+refuses backups still needed for recovery. A durable intent outside the recent
+history survives partial deletion. Repeating its request observes the recorded
+result; only explicit `resume-delete` continues an interrupted deletion.
+For a failed capture with a clean service restart, authenticated surviving
+archives can be deleted. Missing sides are recorded and must stay absent;
+unexpected new files block completion without deleting them.
+These are operator actions, not scheduled retention.
 Host diagnostics retain safe refusal reasons; browser history never receives
 subprocess output or raw exception text.
 

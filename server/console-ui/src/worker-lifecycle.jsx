@@ -22,6 +22,7 @@ function WorkerLifecycle({controller: c, roots}) {
   const disclosureStatus = group => {
     if (s.unknown[group]) return 'Outcome unknown: open, refresh and review before continuing';
     if (group === 'deployment' && s.unknown.backups) return 'Backup outcome unknown: review Backup & restore before maintenance';
+    if (group === 'deployment' && s.backups?.retention?.busy) return 'Maintenance is unfinished: open to review the operation history';
     const jobs = group === 'deployment' ? c.ready('rotation', 'backups') ? activeJobs(s) : []
       : s.valid.maintenance ? s.maintenance.jobs.filter(row => activeMaintenance.includes(row.state)) : [];
     if (jobs.some(row => ['recovery-required', 'intervention-required'].includes(row.state))) return 'Operation needs recovery or intervention: open to review';
@@ -47,6 +48,9 @@ function WorkerLifecycle({controller: c, roots}) {
     {trust && <p id="deployment-rotation-state" role="status">{trustState(state)}.</p>}
     {blockers.length > 0 && <p className="muted">A worker operation is running or requires recovery. Review its history before starting another operation.</p>}
     {s.unknown.backups && <p>Review the uncertain operation in <a href="#settings/backups">Backup &amp; restore</a> before starting maintenance.</p>}
+    {s.backups?.retention?.operation && s.backups.retention.operation.state !== 'completed' && <p>Backup cleanup is unfinished. Open <a href="#settings/backups">Backup &amp; restore</a> to check its result before starting maintenance.</p>}
+    {s.backups?.retention && !c.backupSpace() && <p>Backup storage is full. Review saved backups in <a href="#settings/backups">Backup &amp; restore</a> before starting another rotation.</p>}
+    {s.backups?.retention && !c.historySpace() && <p>Recent maintenance history is full. Clear finished history in <a href="#settings/backups">Backup &amp; restore</a> before starting another operation.</p>}
     <div id="deployment-rotation-trust" hidden={!trust}>
       <p><a href="#devices">Open devices to remove IRIS deployments</a>. A missing or abandoned device is not proof of removal.</p>
       {item?.request_id && <p className="machine">Request: {item.request_id}{item.names.length > 0 && <><br />Requested names: {item.names.join(', ')}</>}</p>}
@@ -117,7 +121,7 @@ function WorkerLifecycle({controller: c, roots}) {
       {maintenance && !maintenance.jobs.length && <tr><td colSpan={4}>No maintenance operations yet.</td></tr>}</tbody></table></div>
     {message('maintenance', 'maintenance-result')}
   </div>;
-  const backup = s.valid.backups ? s.backups : null, recovery = c.recoveryRestore();
+  const backup = s.valid.backups ? s.backups : null, recovery = c.recoveryRestore(), retention = backup?.retention;
   const backupButton = (action, name, label) => <button className={'btn' + (action === 'restore' ? '' : ' ghost')} id={'backup-' + name} disabled={!c.canBackup(action, action === 'recover-restore' ? recovery?.id : null)} onClick={() => c.backup(action, action === 'recover-restore' ? recovery?.id : null)}>{label}</button>;
   const backups = <div data-worker-group="backups"><div className="card"><h3>Deployment backups</h3>
     <p id="backup-worker-note" className="muted">{s.loading.backups ? 'Checking the deployment worker…' : backup ? topologyLabels[backup.target] + '. ' + backup.note : 'Backup status unavailable. Refresh after the Console returns or use the host recovery window.'}</p>
@@ -127,14 +131,29 @@ function WorkerLifecycle({controller: c, roots}) {
     <p className="worker-actions"><button className="btn" id="backup-create" disabled={!c.canBackup('backup')} onClick={() => c.backup('backup')}>Back up now</button>
       <button className="btn ghost" id="backup-refresh" disabled={s.busy || s.loading.backups || s.loading.rotation} onClick={() => c.review('backups')}>Refresh backup history</button></p>
     {message('backups', 'backup-operation-result')}
+    {s.retentionUncertain && <p className="machine" id="backup-cleanup-request">Cleanup request: {s.retentionAttempt?.request_id}</p>}
     <div className="table-scroll" tabIndex={0} role="region" aria-label="Backup history"><table className="tbl"><thead><tr>{['Started', 'Operation', 'Backup set', 'Result'].map(title => <th key={title} scope="col">{title}</th>)}</tr></thead><tbody id="backup-job-rows">
       {(backup?.jobs || []).slice().reverse().map(row => <tr key={row.id}><td>{c.services.formatDate(row.started_at)}</td><td><span>{row.action}</span><br /><span className="machine">{row.id}</span></td><td className="machine">{row.backup_id}</td><td>{row.state.replaceAll('-', ' ')}<br /><small>{row.detail}</small>
         {row.action === 'restore' && row.state === 'recovery-required' && <p><button className="btn ghost" disabled={!c.canBackup('recover-restore', row.id)} onClick={() => c.backup('recover-restore', row.id)}>Resume this interrupted restore</button></p>}</td></tr>)}</tbody></table></div>
+    {retention && <div id="backup-history-retention"><h4>Finished history</h4>
+      <p id="backup-history-capacity">{retention.capacity.history_used} of {retention.capacity.history_limit} recent maintenance records. Clear finished backup and rotation history to make room. Saved backups and recovery records stay.</p>
+      <p className="worker-actions"><button className="btn ghost" id="backup-history-clear" disabled={!c.canRetire('retire-history')} onClick={() => c.retire('retire-history')}>Clear finished history</button></p>
+      <p className="muted">Up to 25 records at a time. Records needed for recovery stay in place.</p>
+    </div>}
   </div><div className="card"><h3>Restore deployment</h3>
     <p>Verify decrypts and checks both sets. Isolated extraction writes to a new protected host directory. It does not start IRIS or contact devices.</p>
     <label className="worker-field">Captured backup<select id="backup-selected" disabled={s.busy || !c.ready('backups')} value={s.backupSelected} onChange={event => c.field('backupSelected', event.target.value)}><option value="">Choose a backup</option>{(backup?.jobs || []).filter(row => row.action === 'backup' && row.state === 'captured').map(row => <option key={row.id} value={row.backup_id}>{c.services.formatDate(row.started_at) + ' · ' + row.backup_id}</option>)}</select></label>
     <p className="worker-actions">{backupButton('verify', 'verify', 'Verify backup')}{backupButton('extract', 'extract', 'Extract for isolated recovery')}{backupButton('restore', 'restore', 'Restore selected backup')}{backupButton('recover-restore', 'recover', 'Resume interrupted restore')}</p>
     <p className="muted">Restore stops this deployment, verifies the backup against current security authority, replaces saved content and checks restarted services. Changed credentials or missing instruction history prevent cutover. Use the host recovery window if the Console is offline.</p>
+    {retention && <div id="backup-archive-retention"><h4>Saved backups</h4>
+      <p id="backup-storage-capacity">{retention.capacity.backup_used} of {retention.capacity.backup_limit} backups saved on this host. Deleting a backup removes its deployment and recovery archives.</p>
+      <label className="worker-field">Saved backup to delete<select id="backup-delete-selected" disabled={s.busy || !c.ready('backups')} value={s.backupDeleteSelected} onChange={event => c.field('backupDeleteSelected', event.target.value)}><option value="">Choose a saved backup</option>{retention.backups.map(row => <option key={row.backup_id} value={row.backup_id}>{(row.created_at === null ? 'Date unavailable' : c.services.formatDate(row.created_at)) + ' · ' + row.backup_id}</option>)}</select></label>
+      <p className="worker-actions"><button className="btn danger" id="backup-delete" disabled={!c.canRetire('delete-backup')} onClick={() => c.retire('delete-backup')}>Delete selected backup</button></p>
+      {s.backupDeleteSelected && retention.backups.find(row => row.backup_id === s.backupDeleteSelected && !row.delete_allowed)?.delete_reason && <p id="backup-delete-reason" className="muted">{retention.backups.find(row => row.backup_id === s.backupDeleteSelected).delete_reason}</p>}
+      {retention.busy && <p id="backup-cleanup-status" role="status">Maintenance is unfinished. Refresh history to check its result before starting another operation.</p>}
+      {retention.operation?.state === 'recovery-required' && <div id="backup-delete-recovery"><p>Deletion of backup <span className="machine">{retention.operation.backup_id}</span> was interrupted. Resume this exact deletion after resolving the host error.</p>
+        <p className="worker-actions"><button className="btn danger" id="backup-delete-resume" disabled={!c.canRetire('resume-delete')} onClick={() => c.retire('resume-delete')}>Resume backup deletion</button></p></div>}
+    </div>}
   </div></div>;
   return <div onFocusCapture={event => {focus.current = {node: event.target, group: event.target.closest('[data-worker-group]')?.dataset.workerGroup};}}>{createPortal(deployment, roots.deployment)}{createPortal(scheduler, roots.maintenance)}{createPortal(backups, roots.backups)}{createPortal(disclosureStatus('deployment'), roots.deploymentSummary)}{createPortal(disclosureStatus('maintenance'), roots.maintenanceSummary)}</div>;
 }

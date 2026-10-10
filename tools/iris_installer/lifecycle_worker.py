@@ -26,6 +26,8 @@ from types import SimpleNamespace
 import uuid
 
 from . import backup, backup_archive
+from .lifecycle_history import RetentionConflict
+from .lifecycle_retention import Retention
 from .state import InstallError, Journal, atomic_write, regular_bytes
 
 
@@ -79,6 +81,7 @@ class Worker:
         self.jobs = json.loads(regular_bytes(self.record)) if self.record.exists() else []
         if not isinstance(self.jobs, list) or len(self.jobs) > 100:
             raise InstallError("Lifecycle journal is invalid")
+        self.retention = Retention(self)
         # A stopped worker is not evidence that its last capture completed.
         for job in self.jobs:
             if job.get('state') == 'running':
@@ -109,7 +112,7 @@ class Worker:
             'identities': list(dict.fromkeys(map(str, self.identity_history))),
             'operations': self.operation_identities}, sort_keys=True).encode())
 
-    def status(self):
+    def status(self, retention_request_id=None):
         with self.lock:
             return {'available': True, 'target': self.target,
                     'storage': 'operator-configured-host-directories',
@@ -117,6 +120,7 @@ class Worker:
                     'can_extract': self.identity is not None and self.extract_dir is not None,
                     'can_restore': self.identity is not None and (self.state_dir / 'restore-custody/signer.pub').is_file(),
                     'restore_scope': 'same-deployment-same-security-generation',
+                    'retention': self.retention.status(retention_request_id),
                     'jobs': json.loads(json.dumps([{key: value for key, value in job.items()
                         if key != 'restore_authority_started'} for job in self.jobs
                         if job['action'] not in ('rotate', 'renew-transport')])),
@@ -135,6 +139,7 @@ class Worker:
         restore.custody(self.state_dir, self.identity)
         recovery = request['action'] == 'recover-restore'
         with self.lock:
+            self.retention.guard(request_id)
             prior = next((job for job in self.jobs if job['id'] == request_id), None)
             if prior:
                 if prior['action'] != 'restore' or prior['backup_id'] != backup_id:
@@ -240,6 +245,7 @@ class Worker:
         identifier = _id(request['request_id'])
         recovery = request['action'] == 'recover-transport'
         with self.lock:
+            self.retention.guard(identifier)
             previous = next((job for job in self.jobs if job['id'] == identifier), None)
             if previous:
                 if previous['action'] != 'renew-transport':
@@ -289,6 +295,7 @@ class Worker:
         # host, a path or a command. The adapter checks the durable producer
         # operation against the actual pair before and after publication.
         with self.lock:
+            self.retention.guard(request['request_id'])
             if any(job['state'] in ('running', 'recovery-required') for job in self.jobs):
                 raise InstallError('Finish the active lifecycle operation before synchronizing consumers')
             with Journal(self.state_dir).locked() as journal:
@@ -321,6 +328,7 @@ class Worker:
         if not self.identity:
             raise InstallError('Provision independent recovery access before rotation')
         with self.lock:
+            self.retention.guard(request_id)
             previous = next((job for job in self.jobs if job['id'] == request_id), None)
             if previous:
                 if previous['action'] != 'rotate' or previous['family'] != family:
@@ -342,6 +350,8 @@ class Worker:
                 raise InstallError('A maintenance operation is active or requires recovery')
             if len(self.jobs) >= 100:
                 raise InstallError('Lifecycle history limit reached; operator maintenance required')
+            if len(self.retention.backup_ids()) >= 20:
+                raise RetentionConflict('Saved backup limit reached. Delete a saved backup before another credential rotation.')
             job = {'id': request_id, 'action': 'rotate', 'family': family,
                    'state': 'running', 'started_at': int(time.time()), 'detail': '', 'proof': None}
             # Pin the old recovery identity before the job can mutate custody.
@@ -407,6 +417,8 @@ class Worker:
     def submit(self, request):
         from .upgrade_state import guard as upgrade_guard
         upgrade_guard(self.state_dir)
+        if isinstance(request, dict) and request.get('action') in ('retire-history', 'delete-backup', 'resume-delete'):
+            return self.retention.submit(request)
         if isinstance(request, dict) and request.get('action') in ('restore', 'recover-restore'):
             return self.submit_restore(request)
         if isinstance(request, dict) and request.get('action') == 'sync-management':
@@ -427,6 +439,7 @@ class Worker:
         if action != 'backup' and (not self.identity or (action == 'extract' and not self.extract_dir)):
             raise InstallError("An operator must provision recovery access on the worker first")
         with self.lock:
+            self.retention.guard(request_id)
             for job in self.jobs:
                 if job['id'] == request_id:
                     if job['action'] != action or (action != 'backup' and job['backup_id'] != request['backup_id']):
@@ -437,8 +450,8 @@ class Worker:
             if len(self.jobs) >= 100:
                 raise InstallError("Lifecycle history limit reached; operator maintenance required")
             if action == 'backup':
-                if sum(job['action'] == 'backup' for job in self.jobs) >= 20:
-                    raise InstallError("Backup count limit reached; archive sets off-host before operator maintenance")
+                if len(self.retention.backup_ids()) >= 20:
+                    raise RetentionConflict("Saved backup limit reached. Delete a saved backup after reviewing its recovery requirements.")
                 backup_id = str(uuid.uuid4())
             else:
                 backup_id = request['backup_id']
@@ -548,9 +561,12 @@ def make_server(path, worker, *, allowed_uids=(0, 10001)):
                     result = (worker.transport_status() if request == {'action': 'transport-status'} else worker.submit_transport(request))
                 else:
                     result = (worker.status() if request == {'action': 'status'} else
+                              worker.status(request['request_id']) if (isinstance(request, dict) and set(request) == {'action', 'request_id'} and request['action'] == 'retention-status') else
                               worker.deployment_info() if request == {'action': 'deployment-info'} else
                               worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
+            except RetentionConflict as exc:
+                response = {'ok': False, 'error': str(exc), 'code': 'retention-conflict'}
             except (InstallError, ValueError, TypeError) as exc:
                 response = {'ok': False, 'error': str(exc) if isinstance(exc, InstallError) else 'Invalid maintenance request'}
             self.wfile.write(json.dumps(response).encode() + b'\n')

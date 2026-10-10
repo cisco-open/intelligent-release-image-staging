@@ -552,6 +552,8 @@ def configure_recovery(state_dir, identity_path=None):
 
 
 def _configure_recovery(state, identity_path):
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(state)
     from .upgrade_state import guard as upgrade_guard
     upgrade_guard(state)
     _apply_recovery_intent(state)
@@ -633,6 +635,8 @@ def configure_restore_signer(state_dir, public_key_path):
 
 
 def _configure_restore_signer(state, public_key_path):
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(state)
     from .upgrade_state import guard as upgrade_guard
     upgrade_guard(state)
     record = _load(state)

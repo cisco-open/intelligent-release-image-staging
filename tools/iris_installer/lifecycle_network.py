@@ -19,6 +19,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import urlsplit
 
 from .state import InstallError, atomic_write, regular_bytes
+from .lifecycle_history import RetentionConflict
 
 
 def endpoint(value):
@@ -214,9 +215,13 @@ def make_https_server(bind, port, worker, custody):
                     result = worker.transport_proof(request, peer)
                 else:
                     result = (worker.status() if request == {'action': 'status'} else
+                              worker.status(request['request_id']) if (set(request) == {'action', 'request_id'} and request['action'] == 'retention-status') else
                               worker.deployment_info() if request == {'action': 'deployment-info'} else
                               worker.rotation_status() if request == {'action': 'rotation-status'} else worker.submit(request))
                 response = {'ok': True, 'result': result}
+                status = 200
+            except RetentionConflict as exc:
+                response = {'ok': False, 'error': str(exc), 'code': 'retention-conflict'}
                 status = 200
             except (InstallError, ValueError, TypeError):
                 response = {'ok': False, 'error': 'Maintenance request refused; inspect the protected host journal.'}

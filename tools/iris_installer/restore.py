@@ -48,6 +48,8 @@ def signer_path(state_dir):
 def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None,
           upgrade_operation_id=None):
     """Other maintenance entry points must respect an interrupted restore."""
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(state_dir)
     from .upgrade_state import guard as upgrade_guard
     upgrade_guard(state_dir, operation_id=upgrade_operation_id, instance_id=instance_id)
     base = Path(state_dir)

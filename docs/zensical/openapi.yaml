@@ -35963,7 +35963,18 @@
             "consoleSession": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "retention_request_id",
+            "in": "query",
+            "required": false,
+            "description": "Observe the exact history-retirement or archive-deletion request after an uncertain response",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Read deployment backup worker status response",
@@ -36052,6 +36063,193 @@
                     },
                     "note": {
                       "type": "string"
+                    },
+                    "retention": {
+                      "type": "object",
+                      "properties": {
+                        "schema": {
+                          "const": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "busy": {
+                          "type": "boolean"
+                        },
+                        "capacity": {
+                          "type": "object",
+                          "properties": {
+                            "history_used": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "history_limit": {
+                              "const": 100
+                            },
+                            "backup_used": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "backup_limit": {
+                              "const": 20
+                            }
+                          },
+                          "required": [
+                            "history_used",
+                            "history_limit",
+                            "backup_used",
+                            "backup_limit"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "jobs": {
+                          "type": "array",
+                          "maxItems": 100,
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "action": {
+                                "type": "string"
+                              },
+                              "state": {
+                                "type": "string"
+                              },
+                              "backup_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "format": "uuid"
+                              },
+                              "family": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "finished_at": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "retire_allowed": {
+                                "type": "boolean"
+                              },
+                              "retire_reason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "action",
+                              "state",
+                              "backup_id",
+                              "family",
+                              "finished_at",
+                              "retire_allowed",
+                              "retire_reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "backups": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "backup_id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "created_at": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "delete_allowed": {
+                                "type": "boolean"
+                              },
+                              "delete_reason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "backup_id",
+                              "created_at",
+                              "delete_allowed",
+                              "delete_reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "operation": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "request_id": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                },
+                                "action": {
+                                  "enum": [
+                                    "retire-history",
+                                    "delete-backup"
+                                  ]
+                                },
+                                "state": {
+                                  "enum": [
+                                    "running",
+                                    "completed",
+                                    "recovery-required"
+                                  ]
+                                },
+                                "retired_count": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 100
+                                },
+                                "backup_id": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ],
+                                  "format": "uuid"
+                                }
+                              },
+                              "required": [
+                                "request_id",
+                                "action",
+                                "state",
+                                "retired_count",
+                                "backup_id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "schema",
+                        "revision",
+                        "busy",
+                        "capacity",
+                        "jobs",
+                        "backups",
+                        "operation"
+                      ],
+                      "additionalProperties": false
                     },
                     "restore_scope": {
                       "type": "string",
@@ -36288,8 +36486,8 @@
       },
       "post": {
         "operationId": "console_post_api_v1_settings_backups",
-        "summary": "Request backup, verification, extraction, restore or restore recovery",
-        "description": "Request backup, verification, extraction, restore or restore recovery. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "summary": "Request backup, verification, extraction, restore or recovery, history retirement or exact archive deletion",
+        "description": "Request backup, verification, extraction, restore or recovery, history retirement or exact archive deletion. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
         "tags": [
           "console"
         ],
@@ -36321,21 +36519,76 @@
         ],
         "responses": {
           "200": {
-            "description": "Request backup, verification, extraction, restore or restore recovery response",
+            "description": "Request backup, verification, extraction, restore or recovery, history retirement or exact archive deletion response",
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "ConsoleSettingsBackupsResponse",
-                  "type": "object",
-                  "properties": {
-                    "job_id": {
-                      "type": "string"
+                  "oneOf": [
+                    {
+                      "title": "ConsoleSettingsBackupsResponse",
+                      "type": "object",
+                      "properties": {
+                        "job_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "job_id"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "retention_operation": {
+                          "type": "object",
+                          "properties": {
+                            "request_id": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "action": {
+                              "enum": [
+                                "retire-history",
+                                "delete-backup"
+                              ]
+                            },
+                            "state": {
+                              "enum": [
+                                "running",
+                                "completed",
+                                "recovery-required"
+                              ]
+                            },
+                            "retired_count": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "backup_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "format": "uuid"
+                            }
+                          },
+                          "required": [
+                            "request_id",
+                            "action",
+                            "state",
+                            "retired_count",
+                            "backup_id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "retention_operation"
+                      ],
+                      "additionalProperties": false
                     }
-                  },
-                  "required": [
-                    "job_id"
-                  ],
-                  "additionalProperties": true
+                  ]
                 },
                 "example": {
                   "job_id": "00000000-0000-0000-0000-000000000001"
@@ -36659,6 +36912,73 @@
                         "const": true
                       }
                     }
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "retire-history"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "expected_revision": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "job_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 25,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "expected_revision",
+                      "job_ids"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "delete-backup",
+                          "resume-delete"
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "expected_revision": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "backup_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm_delete": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "expected_revision",
+                      "backup_id",
+                      "confirm_delete"
+                    ],
+                    "additionalProperties": false
                   }
                 ]
               },
@@ -77928,7 +78248,18 @@
             "consoleSession": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "retention_request_id",
+            "in": "query",
+            "required": false,
+            "description": "Observe the exact history-retirement or archive-deletion request after an uncertain response",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Read deployment backup worker status response",
@@ -78017,6 +78348,193 @@
                     },
                     "note": {
                       "type": "string"
+                    },
+                    "retention": {
+                      "type": "object",
+                      "properties": {
+                        "schema": {
+                          "const": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "busy": {
+                          "type": "boolean"
+                        },
+                        "capacity": {
+                          "type": "object",
+                          "properties": {
+                            "history_used": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "history_limit": {
+                              "const": 100
+                            },
+                            "backup_used": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "backup_limit": {
+                              "const": 20
+                            }
+                          },
+                          "required": [
+                            "history_used",
+                            "history_limit",
+                            "backup_used",
+                            "backup_limit"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "jobs": {
+                          "type": "array",
+                          "maxItems": 100,
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "action": {
+                                "type": "string"
+                              },
+                              "state": {
+                                "type": "string"
+                              },
+                              "backup_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "format": "uuid"
+                              },
+                              "family": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "finished_at": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "retire_allowed": {
+                                "type": "boolean"
+                              },
+                              "retire_reason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "action",
+                              "state",
+                              "backup_id",
+                              "family",
+                              "finished_at",
+                              "retire_allowed",
+                              "retire_reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "backups": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "backup_id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "created_at": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "delete_allowed": {
+                                "type": "boolean"
+                              },
+                              "delete_reason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "backup_id",
+                              "created_at",
+                              "delete_allowed",
+                              "delete_reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "operation": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "request_id": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                },
+                                "action": {
+                                  "enum": [
+                                    "retire-history",
+                                    "delete-backup"
+                                  ]
+                                },
+                                "state": {
+                                  "enum": [
+                                    "running",
+                                    "completed",
+                                    "recovery-required"
+                                  ]
+                                },
+                                "retired_count": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 100
+                                },
+                                "backup_id": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ],
+                                  "format": "uuid"
+                                }
+                              },
+                              "required": [
+                                "request_id",
+                                "action",
+                                "state",
+                                "retired_count",
+                                "backup_id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "schema",
+                        "revision",
+                        "busy",
+                        "capacity",
+                        "jobs",
+                        "backups",
+                        "operation"
+                      ],
+                      "additionalProperties": false
                     },
                     "restore_scope": {
                       "type": "string",
@@ -78183,8 +78701,8 @@
       },
       "post": {
         "operationId": "management_post_internal_v1_settings_backups",
-        "summary": "Request backup, verification, extraction, restore or restore recovery",
-        "description": "Request backup, verification, extraction, restore or restore recovery. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
+        "summary": "Request backup, verification, extraction, restore or recovery, history retirement or exact archive deletion",
+        "description": "Request backup, verification, extraction, restore or recovery, history retirement or exact archive deletion. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Configured API work budgets are shared across Console users and hosts in one management process. Admission follows authentication, CSRF and route checks, before body processing or mutation. HTTP 429 carries Retry-After; stream starts consume one request, not one per event. Login, setup and private tier controls are outside these work budgets.",
         "tags": [
           "management"
         ],
@@ -78217,21 +78735,76 @@
         ],
         "responses": {
           "200": {
-            "description": "Request backup, verification, extraction, restore or restore recovery response",
+            "description": "Request backup, verification, extraction, restore or recovery, history retirement or exact archive deletion response",
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "ManagementSettingsBackupsResponse",
-                  "type": "object",
-                  "properties": {
-                    "job_id": {
-                      "type": "string"
+                  "oneOf": [
+                    {
+                      "title": "ManagementSettingsBackupsResponse",
+                      "type": "object",
+                      "properties": {
+                        "job_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "job_id"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "retention_operation": {
+                          "type": "object",
+                          "properties": {
+                            "request_id": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "action": {
+                              "enum": [
+                                "retire-history",
+                                "delete-backup"
+                              ]
+                            },
+                            "state": {
+                              "enum": [
+                                "running",
+                                "completed",
+                                "recovery-required"
+                              ]
+                            },
+                            "retired_count": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "backup_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "format": "uuid"
+                            }
+                          },
+                          "required": [
+                            "request_id",
+                            "action",
+                            "state",
+                            "retired_count",
+                            "backup_id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "retention_operation"
+                      ],
+                      "additionalProperties": false
                     }
-                  },
-                  "required": [
-                    "job_id"
-                  ],
-                  "additionalProperties": true
+                  ]
                 },
                 "example": {
                   "job_id": "00000000-0000-0000-0000-000000000001"
@@ -78523,6 +79096,73 @@
                         "const": true
                       }
                     }
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "retire-history"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "expected_revision": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "job_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 25,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "expected_revision",
+                      "job_ids"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "delete-backup",
+                          "resume-delete"
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "expected_revision": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "backup_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "confirm_delete": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "expected_revision",
+                      "backup_id",
+                      "confirm_delete"
+                    ],
+                    "additionalProperties": false
                   }
                 ]
               },

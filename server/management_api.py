@@ -5154,7 +5154,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/settings/backups":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                self._json(200, lifecycle_client.status())
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if query and (set(query) != {'retention_request_id'} or len(query['retention_request_id']) != 1
+                              or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', query['retention_request_id'][0])):
+                    self._json(400, {'error': 'Choose one exact maintenance retention request ID'}); return
+                try:
+                    self._json(200, lifecycle_client.status(query['retention_request_id'][0]) if query else lifecycle_client.status())
+                except lifecycle_client.LifecycleConflict as exc:
+                    self._json(409, {'error': str(exc)})
                 return
             if path == "/api/settings/setup-status":
                 info = app.session_info(self._sid())
@@ -6712,6 +6719,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     result = lifecycle_client.call(data)
                 except ValueError as exc:
                     self._json(400, {'error': str(exc)}); return
+                except lifecycle_client.LifecycleConflict as exc:
+                    self._json(409, {'error': str(exc)}); return
                 except lifecycle_client.LifecycleUnavailable as exc:
                     self._json(503, {'error': str(exc)}); return
                 self._audit('deployment_rotation', 'security', action=data['action'],
@@ -6736,12 +6745,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 data = self._json_body(raw)
                 if data is None:
                     return
-                if data.get('action') not in ('backup', 'verify', 'extract', 'restore', 'recover-restore'):
+                if data.get('action') not in ('backup', 'verify', 'extract', 'restore', 'recover-restore',
+                                             'retire-history', 'delete-backup', 'resume-delete'):
                     self._json(400, {"error": "Choose backup, verify, extraction or deployment restore"}); return
                 try:
                     result = lifecycle_client.call(data)
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
+                except lifecycle_client.LifecycleConflict as exc:
+                    self._json(409, {"error": str(exc)}); return
                 except lifecycle_client.LifecycleUnavailable as exc:
                     self._json(503, {"error": str(exc)}); return
                 self._audit('deployment_maintenance', 'security', action=data['action'],

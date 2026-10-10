@@ -384,7 +384,7 @@ def test_recipient_rejects_running_job_and_pending_candidate_replacement(client,
     with pytest.raises(InstallError, match="different recovery candidate"):
         gui.prepare_recovery_candidate(client, other, other_recipient, independent_copy=True)
     assert json.loads((client.state_dir / "recovery-candidate.json").read_text())["operation_id"] == first["request_id"]
-    monkeypatch.setattr(client, "snapshot", lambda: [job(id=first["request_id"], state="rotated")])
+    monkeypatch.setattr(client, "snapshot", lambda: [job(id=first["request_id"], family='age-recovery', state="rotated")])
     second = gui.prepare_recovery_candidate(client, other, other_recipient, independent_copy=True)
     assert second["request_id"] != first["request_id"]
 
