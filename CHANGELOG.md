@@ -261,6 +261,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Prepare both IOx architectures with verified SHA512 package manifests for
   native Polaris signing. Exclude signature files from manifests and refuse
   to rewrite signed wrappers. Keep image payloads and OCI digests unchanged.
+  Clarify the Cisco signing requirement for Industrial Ethernet on IOS XE 17.15.
 
 ## [2026.10.08]
 

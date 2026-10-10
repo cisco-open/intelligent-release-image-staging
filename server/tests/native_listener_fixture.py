@@ -11,6 +11,14 @@ import time
 import pytest
 
 
+def https_fixture_url(server):
+    """Address the reserved IPv4 listener, not a second localhost family."""
+    host, port = server.server_address[:2]
+    if server.address_family != socket.AF_INET or host != "127.0.0.1":
+        raise ValueError("expected an explicitly bound IPv4 loopback fixture")
+    return "https://%s:%d" % (host, port)
+
+
 class NativeListenerFixture:
     """Keep owned socket handles even after TLS takes the accepted descriptor."""
 

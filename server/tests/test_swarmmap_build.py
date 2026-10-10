@@ -15,6 +15,7 @@ import gui_app
 import gui_server
 import management_api
 from test_api_split import _certificate, _request, _thread, _write_secret
+from native_listener_fixture import https_fixture_url
 from test_gui_server import _MAP_FIXTURE, _auth, _req, _serve_reports
 
 
@@ -110,11 +111,12 @@ def test_console_proxy_streams_complete_generated_map_and_preserves_nonce_policy
         request.addfinalizer(stop)
         return server.server_address[1]
 
-    management_port = start(management_api.make_server(
-        "127.0.0.1", 0, app, certfile=str(cert), keyfile=str(key), management_token_file=str(token)))
+    management = management_api.make_server(
+        "127.0.0.1", 0, app, certfile=str(cert), keyfile=str(key), management_token_file=str(token))
+    start(management)
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console_port = start(gui_server.make_server(
-        "127.0.0.1", 0, f"https://localhost:{management_port}", str(token), str(cert)))
+        "127.0.0.1", 0, https_fixture_url(management), str(token), str(cert)))
     assert _request(console_port, "/swarmmap")[0] == 401
     status, headers, _ = _request(console_port, "/api/v1/login", method="POST",
         headers={"Content-Type": "application/json"}, body=json.dumps({"username": "admin", "password": "pw"}).encode())

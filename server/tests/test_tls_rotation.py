@@ -227,6 +227,7 @@ def test_real_split_console_tls_reload_and_retry(environment, monkeypatch):
     import gui_server
     import management_api
     from test_api_split import _certificate, _write_secret, _thread, _request
+    from native_listener_fixture import https_fixture_url
 
     cert, key = _certificate(environment, 'management')
     default, default_key = _certificate(environment, 'browser')
@@ -241,7 +242,7 @@ def test_real_split_console_tls_reload_and_retry(environment, monkeypatch):
     runtime.write_bytes(default.read_bytes() + default_key.read_bytes())
     runtime.chmod(0o600)
     console = gui_server.make_server('127.0.0.1', 0,
-        'https://localhost:' + str(management.server_address[1]), str(token), str(cert),
+        https_fixture_url(management), str(token), str(cert),
         certfile=str(runtime),
         default_certfile=str(default), default_keyfile=str(default_key))
     _thread(console)

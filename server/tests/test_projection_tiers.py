@@ -12,6 +12,7 @@ import management_api
 import gui_app
 import gui_server
 from projection_reads import ReadProjectionGate
+from native_listener_fixture import https_fixture_url
 from test_api_split import _certificate, _thread, _write_secret
 from test_api_split import policy_tiers  # noqa: F401 - pytest fixture
 
@@ -70,7 +71,7 @@ def test_default_wait_fits_console_upstream_timeout(tmp_path, monkeypatch):
             management_token_file=str(token))
         servers.append((management, _thread(management)))
         console = gui_server.make_server(
-            "127.0.0.1", 0, "https://localhost:%d" % management.server_address[1],
+            "127.0.0.1", 0, https_fixture_url(management),
             str(token), str(cert))
         servers.append((console, _thread(console)))
         # The handler passes its own timeout to the upstream helper; that

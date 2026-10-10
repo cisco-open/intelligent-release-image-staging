@@ -20,6 +20,7 @@ import gui_creds
 import gui_fleet
 import gui_server
 import management_api
+from native_listener_fixture import https_fixture_url
 from test_api_split import _certificate, _request, _thread, _write_secret
 
 
@@ -80,7 +81,7 @@ def test_form_serializers_roundtrip_through_authenticated_console(
         certfile=str(cert), keyfile=str(key), management_token_file=str(token)))
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = start(gui_server.make_server(
-        "127.0.0.1", 0, "https://localhost:%d" % backend.server_address[1],
+        "127.0.0.1", 0, https_fixture_url(backend),
         str(token), str(cert)))
     port = console.server_address[1]
     status, login_headers, raw = _request(

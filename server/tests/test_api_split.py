@@ -30,7 +30,7 @@ import management_api
 import secrets_store
 import telemetry
 import tracker
-from native_listener_fixture import start_fixture_server
+from native_listener_fixture import https_fixture_url, start_fixture_server
 
 
 def _write_secret(path, value, scope="management"):
@@ -70,6 +70,95 @@ def _request(port, path, method="GET", headers=None, body=None, https=False):
     result = (response.status, dict(response.getheaders()), response.read())
     conn.close()
     return result
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_fixture_backend_uses_its_bound_family_before_first_request(
+        tmp_path, monkeypatch, request, console_transport_failures, method):
+    """A second-family listener must not receive the fixture's TLS traffic."""
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 loopback is unavailable")
+    cert, key = _certificate(tmp_path, "owned-management")
+    other_cert, other_key = _certificate(tmp_path, "other-family")
+    token = tmp_path / "token"
+    _write_secret(token, "t" * 64)
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    management = management_api.make_server(
+        "127.0.0.1", 0, app, certfile=str(cert), keyfile=str(key),
+        management_token_file=str(token))
+    _fixture_server(management, request)
+    port = management.server_address[1]
+    original_resolve = socket.getaddrinfo
+    choices = original_resolve("localhost", port, 0, socket.SOCK_STREAM)
+    if not any(row[0] == socket.AF_INET6 for row in choices):
+        pytest.skip("localhost has no IPv6 loopback address")
+
+    class OtherFamily(management_api._ConsoleServer):
+        address_family = socket.AF_INET6
+
+    try:
+        other = OtherFamily(("::1", port), management.RequestHandlerClass)
+    except OSError as error:
+        import errno
+        if error.errno == errno.EADDRINUSE:
+            pytest.skip("IPv6 loopback port is unavailable for the interference fixture")
+        if error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
+            pytest.skip("IPv6 loopback is unavailable")
+        raise
+    try:
+        other.tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        other.tls_context.load_cert_chain(str(other_cert), str(other_key))
+        _fixture_server(other, request)
+    except BaseException:
+        other.server_close()
+        raise
+    accepts = {"owned": 0, "other": 0}
+
+    def count_connections(server, label):
+        original = server.get_request
+
+        def get_request():
+            value = original()
+            accepts[label] += 1
+            return value
+
+        monkeypatch.setattr(server, "get_request", get_request)
+
+    count_connections(management, "owned")
+    count_connections(other, "other")
+
+    def ipv6_first(host, target_port, *args, **kwargs):
+        rows = original_resolve(host, target_port, *args, **kwargs)
+        # Reorder only real resolver results for this exact negative control.
+        if host == "localhost" and target_port == port:
+            rows.sort(key=lambda row: row[0] != socket.AF_INET6)
+        return rows
+
+    monkeypatch.setattr(socket, "getaddrinfo", ipv6_first)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    path = "/api/v1/settings" if method == "GET" else "/api/v1/login"
+    body = None if method == "GET" else json.dumps({"username": "admin", "password": "pw"})
+    bad = gui_server.make_server(
+        "127.0.0.1", 0, "https://localhost:%d" % port, str(token), str(cert))
+    _fixture_server(bad, request)
+    status, _, payload = _request(
+        bad.server_address[1], path, method=method, body=body,
+        headers={"Content-Type": "application/json"})
+    assert status == 503 and json.loads(payload)["code"] == "management-api-unavailable"
+    assert accepts == {"owned": 0, "other": 1}
+    assert list(console_transport_failures) == [{
+        "operation": "browser-request", "exception": "SSLCertVerificationError",
+        "stage": "tls-handshake"}]
+    fixed = gui_server.make_server(
+        "127.0.0.1", 0, https_fixture_url(management), str(token), str(cert))
+    _fixture_server(fixed, request)
+    status, _, _ = _request(
+        fixed.server_address[1], path, method=method, body=body,
+        headers={"Content-Type": "application/json"})
+    assert status == (401 if method == "GET" else 200)
+    assert accepts == {"owned": 1 if method == "GET" else 2, "other": 1}
+    assert len(console_transport_failures) == 1
 
 
 def test_bff_probe_body_matches_content_length_without_extra_crlf(
@@ -216,7 +305,7 @@ def test_bff_unknown_and_known_routes_authenticate_before_existence(
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1],
+        https_fixture_url(management),
         str(token), str(cert))
     _thread(console)
     try:
@@ -321,7 +410,7 @@ def test_bff_rejects_ambiguous_framing_and_forwards_one_validated_length(
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % backend.server_address[1],
+        https_fixture_url(backend),
         str(token), str(cert))
     _thread(console)
 
@@ -405,7 +494,7 @@ def test_proxy_stream_failure_emits_one_response_without_replay(
     _fixture_server(backend, request)
     console = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % backend.server_address[1],
+        https_fixture_url(backend),
         str(token), str(cert), certfile=str(combined))
     _fixture_server(console, request)
     client_context = ssl.create_default_context(cafile=str(cert))
@@ -446,11 +535,11 @@ def test_split_login_cookie_follows_public_bff_scheme_not_tls_backend(
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     plain = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1],
+        https_fixture_url(management),
         str(token), str(cert))
     tls = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1],
+        https_fixture_url(management),
         str(token), str(cert), certfile=str(combined))
     _thread(plain)
     _thread(tls)
@@ -820,7 +909,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         keyfile=str(management_key), management_token_file=str(server_token),
         management_previous_token_file=str(server_previous))
     _fixture_server(management, request)
-    backend = "https://localhost:%d" % management.server_address[1]
+    backend = https_fixture_url(management)
     runtime = tmp_path / "console-runtime.pem"
     gui_server.fetch_console_certificate(
         backend, str(token), str(management_cert), str(runtime),
@@ -995,7 +1084,7 @@ def test_console_certificate_does_not_mask_authenticated_bad_response(
     try:
         with pytest.raises(gui_server.ConsoleConfigurationError):
             gui_server.fetch_console_certificate(
-                "https://localhost:%d" % backend.server_address[1],
+                https_fixture_url(backend),
                 str(token), str(cert), str(output),
                 default_certfile=str(cert), default_keyfile=str(key))
         assert not output.exists()
@@ -1412,7 +1501,7 @@ def policy_tiers(tmp_path, monkeypatch, request, console_transport_failures):
     _fixture_server(management, request)
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server("127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1], str(token), str(cert))
+        https_fixture_url(management), str(token), str(cert))
     _fixture_server(console, request)
     headers = {}
     def request(tier, method, suffix, body=None, duplicates=False,

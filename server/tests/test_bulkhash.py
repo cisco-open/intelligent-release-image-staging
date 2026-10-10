@@ -20,6 +20,7 @@ import threading
 import pytest
 
 import bulkhash
+from native_listener_fixture import https_fixture_url
 
 CSV_HEADER = "FILE_NAME,MD5_CHECKSUM,SHA512_CHECKSUM,PUBLISH_DATE,DEFERRAL_STATUS,IMAGE_SIZE"
 
@@ -1035,7 +1036,7 @@ def test_fetch_uses_configured_ca_and_rejects_untrusted_https(tmp_path, monkeypa
     cert, key = tmp_path / 'ca.pem', tmp_path / 'key.pem'
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                     '-days', '1', '-subj', '/CN=localhost', '-addext',
-                    'subjectAltName=DNS:localhost', '-keyout', str(key), '-out', str(cert)],
+                    'subjectAltName=DNS:localhost,IP:127.0.0.1', '-keyout', str(key), '-out', str(cert)],
                    check=True, capture_output=True)
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1053,7 +1054,7 @@ def test_fetch_uses_configured_ca_and_rejects_untrusted_https(tmp_path, monkeypa
     try:
         monkeypatch.setenv('IRIS_CA_BUNDLE', str(tmp_path / 'absent.pem'))
         dest = str(tmp_path / 'download.tar')
-        url = 'https://localhost:%s/feed' % srv.server_port
+        url = https_fixture_url(srv) + '/feed'
         with pytest.raises(bulkhash.BulkHashError, match='TLS certificate verification failed'):
             bulkhash.fetch(url, 2, dest)
         monkeypatch.setenv('IRIS_CA_BUNDLE', str(cert))
