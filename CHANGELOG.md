@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Accept the recorded source-build input mode when preparing application
+  upgrades, while continuing to refuse prebuilt or conflicting input records.
+
 - Use plain signing-key status and root-confirmation labels in Advanced policies.
 
 - Show public certificate validity for Kubernetes projected Secret mounts,

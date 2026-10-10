@@ -90,7 +90,8 @@ def require_source_build(journal):
     identifier(journal.get('id'))
     require(isinstance(journal.get('config'), dict) and journal['config'].get('target') == 'docker',
             'Managed application upgrade currently supports Docker on one host')
-    require('input_selection' not in journal and not any(str(key).startswith('prebuilt_') for key in journal),
+    from .prebuilt_install import selected
+    require(not selected(journal) and not any(str(key).startswith('prebuilt_') for key in journal),
             'Prebuilt release-kit upgrades require a separately supported transition')
     require(isinstance(journal.get('completed'), dict)
             and {'prepared', 'images', 'packages', 'signing', 'guestshell'} <= set(journal['completed'])

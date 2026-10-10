@@ -10,6 +10,7 @@ from pathlib import Path
 import shlex
 import socket
 import sys
+import time
 
 import pytest
 
@@ -43,20 +44,40 @@ def probe(request, monkeypatch):
 
 @pytest.mark.parametrize('probe', ['local', 'remote'], indirect=True)
 def test_closed_connection_time_wait_is_not_a_live_listener(probe):
-    host = '127.0.0.1'
+    tcp_table = Path('/proc/net/tcp')
+    if not tcp_table.exists():
+        pytest.skip('This regression requires the Linux TCP state table')
+    # Keep the listener apart from the source address chosen for concurrent
+    # loopback clients elsewhere in the suite.
+    host = '127.42.0.1'
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((host, 0))
         port = listener.getsockname()[1]
         listener.listen(1)
         with socket.create_connection((host, port), timeout=5) as client:
-            connection, _ = listener.accept()
+            connection, peer = listener.accept()
             with connection:
                 connection.settimeout(5)
                 connection.shutdown(socket.SHUT_WR)
                 assert client.recv(1) == b''
                 client.shutdown(socket.SHUT_WR)
                 assert connection.recv(1) == b''
+    # Closing Python's descriptors does not establish which TCP shutdown state
+    # the kernel has reached. Observe this exact connection in TIME_WAIT before
+    # asking the real product probe to accept it; never retry the product probe.
+    def endpoint(address):
+        return f'{int.from_bytes(socket.inet_aton(address[0]), sys.byteorder):08X}:{address[1]:04X}'
+
+    local, remote = endpoint((host, port)), endpoint(peer)
+    deadline = time.monotonic() + 5
+    while True:
+        rows = [line.split() for line in tcp_table.read_text().splitlines()[1:]]
+        states = [row[3] for row in rows if row[1:3] == [local, remote]]
+        if states == ['06']:
+            break
+        assert time.monotonic() < deadline, f'Test connection did not reach TIME_WAIT: {states}'
+        time.sleep(0.01)
     # Reproduce the previous failure before testing the repaired preflight.
     with socket.socket() as plain:
         with pytest.raises(OSError) as error:

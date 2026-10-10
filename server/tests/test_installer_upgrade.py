@@ -7,11 +7,13 @@
 import copy
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
 from iris_installer import upgrade_plan as plan
+from iris_installer import prebuilt_install, release_kit
 from iris_installer.state import InstallError
 
 ID = 'fef3a99c-32dc-49bb-88ef-bd2e6397aed7'
@@ -92,6 +94,65 @@ def test_upgrade_rejects_unsupported_or_incomplete_install(change):
     else: value['root_digests']['root-a.pub'] = 'invalid'
     with pytest.raises(InstallError):
         plan.require_source_build(value)
+
+
+def test_upgrade_accepts_actual_source_install_selection_without_changing_it(tmp_path):
+    value = journal()
+    value.update(prebuilt_install.prepare_selection(SimpleNamespace(), value['source_manifest'], tmp_path))
+    assert value['input_selection'] == {'schema': 'iris-install-input-v1', 'mode': 'source'}
+    original = copy.deepcopy(value)
+    plan.require_source_build(value)
+    final = plan.candidate_compose(compose(), compose(), compose(), IMAGES)
+    result = plan.next_journal(value, operation_id=OPERATION, source={'new.py': 'a' * 64},
+                              compose=final, packages=value['completed']['packages'],
+                              guestshell={'state': 'ok'})
+    assert value == original
+    assert result['input_selection'] == original['input_selection']
+
+
+def test_upgrade_accepts_legacy_source_journal_without_selection():
+    value = journal(); original = copy.deepcopy(value)
+    plan.require_source_build(value)
+    assert value == original and 'input_selection' not in value
+
+
+def test_upgrade_rejects_valid_prebuilt_selection(tmp_path):
+    kit = release_kit.VerifiedKit(tmp_path, 'v2026.10.08', 'a' * 40,
+                                 'b' * 64, 'c' * 64, 'd' * 64, None, False, ())
+    value = journal(); value['input_selection'] = release_kit.selection('prebuilt', kit=kit)
+    assert prebuilt_install.selected(value) is True
+    original = copy.deepcopy(value)
+    with pytest.raises(InstallError, match='Prebuilt release-kit upgrades'):
+        plan.require_source_build(value)
+    assert value == original
+
+
+@pytest.mark.parametrize('selection', [None, False, [], {}, {'mode': 'source'},
+    {'schema': 'iris-install-input-v1', 'mode': 'other'},
+    {'schema': 'iris-install-input-v1', 'mode': 'prebuilt', 'kit': {}},
+    {'schema': 'iris-install-input-v1', 'mode': 'source', 'kit': {}},
+    {'schema': 'iris-install-input-v1', 'mode': 'source', 'offline': False},
+    {'schema': True, 'mode': 'source'}])
+def test_upgrade_refuses_malformed_source_selection(selection):
+    value = journal(); value['input_selection'] = selection
+    original = copy.deepcopy(value)
+    with pytest.raises(InstallError):
+        plan.require_source_build(value)
+    assert value == original
+
+
+@pytest.mark.parametrize('explicit_source', [False, True])
+@pytest.mark.parametrize('field', ['release_kit', 'prebuilt_ioxclient', 'prebuilt_kubectl',
+                                  'prebuilt_future_authority', 'prebuilt_'])
+def test_upgrade_refuses_conflicting_or_unknown_prebuilt_fields(explicit_source, field):
+    value = journal()
+    if explicit_source:
+        value['input_selection'] = release_kit.selection()
+    value[field] = None
+    original = copy.deepcopy(value)
+    with pytest.raises(InstallError):
+        plan.require_source_build(value)
+    assert value == original
 
 
 def test_upgrade_next_generation_only_changes_code_checkpoints():
