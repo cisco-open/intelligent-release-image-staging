@@ -60,8 +60,7 @@ the connection certificates need renewal.
     These controls require an installer-owned deployment and its recorded topology.
     Restore requires current security records from the same deployment.
     Missing records, changed credentials or changed sharing rules block restoration.
-    Keep separate copies for recovery from host loss. Scheduled retention remains
-    a separate operation. See
+    Keep separate copies for recovery from host loss. See
     [Install the Ubuntu package](../install/managed-package.md) for managed deployment setup.
 
 Split Docker also captures the Console's protected configuration from the recorded remote
@@ -80,8 +79,8 @@ no saved files does not use a backup slot.
 **Protected upgrade backups** are listed separately. They also use host storage
 but stay with their upgrade recovery records, outside the 20 ordinary backup
 slots. The list shows which archives are present. Use the recorded upgrade
-operation on the installer host to review recovery; these archives cannot be
-deleted from the Console.
+operation on the installer host to [review recovery](upgrade.md#managed-single-host-docker);
+these archives cannot be deleted from the Console.
 
 Use **Clear finished history** to remove up to 25 finished records from the
 recent list. The worker keeps saved backups, security records, recovery records
