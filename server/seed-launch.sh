@@ -123,8 +123,11 @@ PYCONF
 }
 
 PEER_TLS_FLAG=""
+PEER_REVOCATIONS_FLAG=""
 if [ "${IRIS_PEER_TLS_MODE:-disabled}" = required ]; then
   PEER_TLS_FLAG="--bt-peer-tls=required"
+  [ -n "${IRIS_PEER_TLS_REVOCATIONS:-}" ] || exit 1
+  PEER_REVOCATIONS_FLAG="--bt-peer-tls-revocations=$IRIS_PEER_TLS_REVOCATIONS"
   [ -s "${IRIS_PEER_TLS_CONF:-}" ] || exit 1
   cat "$IRIS_PEER_TLS_CONF" >> "$CONF"
 fi
@@ -132,6 +135,7 @@ fi
 exec "$ARIA2" \
   --conf-path="$CONF" \
   ${PEER_TLS_FLAG:+"$PEER_TLS_FLAG"} \
+  ${PEER_REVOCATIONS_FLAG:+"$PEER_REVOCATIONS_FLAG"} \
   --listen-port="$LISTEN_PORT" \
   ${EXT_FLAG:+"$EXT_FLAG"} \
   --enable-rpc=true \

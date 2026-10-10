@@ -40,6 +40,41 @@ Unassigning an IOS-XR image removes files IRIS downloaded in place; adopted
 files and files of unknown origin stay. Preserve real-use assignments and
 files outside the test. Undeploy itself leaves any remaining root image files.
 
+## Device certificate withdrawal - 2026-10-10
+
+The eleven-patch AMD64 and ARM64 clients were checked in isolated loopback
+environments with generated certificates and synthetic payloads. ARM64 ran under
+emulation. This was client behavior qualification, not a deployment, native
+performance measurement or live fleet test.
+
+- Ten TLS checks passed on each architecture. A still-valid certificate on the
+  previous client lost its established connection after its identity was
+  withdrawn. A different certificate using the same IP address continued
+  transferring. New connections
+  with the withdrawn certificate were rejected.
+- Missing, invalid and expired revocation data stopped encrypted peer
+  connections. The runtime report reflected the list actually loaded by the
+  client. The standalone reader passed 44 malformed-input and enforcement checks.
+- Fragmented crossed connections, both peer-ID orders, the peer connection cap,
+  and plaintext transfers passed their regression checks.
+- Real OpenSSL enrollment tests completed two revoke-and-replace cycles under
+  the same inventory ID. Each replacement used a new key and certificate
+  identity; the earlier identities remained withdrawn.
+- Console browser checks covered confirmation, lost write responses, safe
+  status checks, fresh-onboarding approval and narrow-screen layout.
+- The complete corresponding-source bundle was extracted and verified. Offline
+  rebuilds reproduced both client hashes using cached compiler layers and
+  checksum-locked dependencies; this was not a second uncached compilation.
+- Fresh Guest Shell bundles for both architectures, both IOx packages and the
+  XR RPM contained the current agent and exact tested clients. IOx SHA512
+  manifests passed; the AMD64 IOx and XR payloads matched the same canonical
+  image. These isolated packages used disposable test-only public roots.
+
+The checks used disposable keys and did not revoke any operator device,
+modify a live deployment or qualify native IOx signature admission. The IOx
+wrappers were unsigned. Updated
+clients enforce certificate withdrawal; earlier clients need replacement.
+
 ## Guest Shell, XR and reviewed origin access - 2026-10-09
 
 An independent single-host Docker deployment used source `f7c7f72`, freshly
@@ -75,7 +110,7 @@ acceptance, or measure an isolated bandwidth cost for ten-second reporting.
 
 ## Native security acceptance — 2026-09-20
 
-The current ten-patch aria2c client and installed instruction verifier were
+The then-current ten-patch aria2c client and installed instruction verifier were
 checked on a Catalyst 9300 Guest Shell, completing the remaining native
 acceptance checks after the earlier IE3400, C8KV and IOS-XR runs.
 

@@ -59,6 +59,8 @@ EXEMPTIONS = {
     "tools/aria2c-patches/0008-required-hybrid-peer-tls.patch": "GPL patch; see sibling README",
     "tools/aria2c-patches/0009-test-seeder-goodbye-grace.patch": "GPL patch; see sibling README",
     "tools/aria2c-patches/0010-resolve-crossed-peer-handshakes.patch": "GPL patch; see sibling README",
+    "tools/aria2c-patches/0011-withdraw-peer-identities.patch": "GPL patch; see sibling README",
+    "tools/aria2c-build/revocation-probe.cc": "GPL parser probe linking the modified aria2 native code",
 }
 
 

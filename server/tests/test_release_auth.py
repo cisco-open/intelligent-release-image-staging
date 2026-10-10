@@ -92,6 +92,18 @@ def test_rejects_tampered_or_mismatched_downloads(release, monkeypatch, change):
         AUTH.verify(directory, TAG, COMMIT)
 
 
+def test_release_workflow_fetches_the_exact_current_source_asset():
+    lines = [line.split() for line in (ROOT / "tools/aria2c-source/source.sha256").read_text().splitlines()
+             if line and not line.startswith("#")]
+    assert len(lines) == 1
+    source_asset = lines[0][1]
+    assert AUTH.SOURCE_ASSET == source_asset
+    release_tag = source_asset.removesuffix("-source.tar.gz")
+    text = (ROOT / ".github/workflows/release.yml").read_text()
+    assert "gh release download " + release_tag + " \\\n" in text
+    assert "--pattern " + source_asset + " --dir release-assets" in text
+
+
 def test_workflows_separate_authentication_from_manual_publication_and_pin_actions():
     text = (ROOT / ".github/workflows/release.yml").read_text()
     publish = (ROOT / ".github/workflows/publish-release.yml").read_text()

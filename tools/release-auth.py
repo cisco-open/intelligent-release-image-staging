@@ -20,7 +20,7 @@ import tempfile
 
 REPOSITORY = "cisco-open/intelligent-release-image-staging"
 WORKFLOW = REPOSITORY + "/.github/workflows/release.yml"
-SOURCE_ASSET = "aria2c-2.5.6-p10-source.tar.gz"
+SOURCE_ASSET = "aria2c-2.5.6-p11-source.tar.gz"
 # These new binary products are local candidates until their complete source
 # coverage and deployment qualification gates are connected to publication.
 # A release attestation establishes provenance, not those missing checks.

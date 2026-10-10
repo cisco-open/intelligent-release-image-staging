@@ -138,6 +138,46 @@ under the same clock-skew allowance every request gets. The retry itself is
 checked under the server's own lock on the secrets store, so a revocation or
 a newer, already-completed rotation always wins over a late retry.
 
+## Device certificate revocation
+
+`peer_tls_revocations.Ledger` stores permanent certificate-identity tombstones
+under `IRIS_CONFIG/peer-tls`. Issuance and revocation share its process lock.
+Management actions require the reviewed identity, ledger revision and a unique
+request ID. Repeating the same request returns its recorded outcome; an uncertain
+write is reconciled by reading status, never by automatically repeating a POST.
+
+The native client identifies a certificate by its single
+`urn:iris:device:<64 lowercase hex>` SAN, not by its address. This also covers
+certificates issued before revocation support. The catalog serves a bounded
+deny-list snapshot over pinned HTTPS, authenticated with the device's current
+token and bound to a fresh request nonce. Its lease lasts at most 300 seconds.
+`device/agent/peer_revocations.py` refreshes independently of staging work every
+30 seconds. It persists a replay checkpoint before publishing the native file;
+network errors never extend the previous lease.
+
+The native `bt-peer-tls-revocations` option is mandatory with required TLS and
+is also passed on the command line, so a client without support cannot silently
+ignore it as an unknown configuration key. The client checks both certificate
+identities during handshakes and payload I/O, and checks idle connections on the
+peer-command sweep. Missing, invalid or expired snapshots stop private peer
+connections. A monotonic deadline prevents clock rollback from extending a
+loaded lease. Allow up to two seconds after local publication for the normal
+reader and connection sweeps, in addition to distribution time; this is not a
+real-time scheduling guarantee.
+
+`aria2.getPeerTLSRevocationStatus` reports the actual loaded snapshot. Agent
+heartbeats and seeder telemetry retain its bounded public fields. A device's
+self-report is not proof of isolation across the fleet. Old clients do not
+implement the deny-list checks and must be upgraded before relying on them.
+
+Fresh onboarding approval retains the old tombstone. While holding the secrets
+store lock and then the ledger lock, the enrollment minter durably replaces the
+current bearer, removes its previous lineage, and only then activates a new
+opaque identity. Ordinary token refresh cannot activate it. The device creates
+a fresh private key, validates the new certificate against the pinned response,
+and atomically switches its private manifest. Its inventory ID stays unchanged.
+An older backup cannot bypass the managed restore configuration-generation check.
+
 ## Why per-device state is sharded
 
 Splitting per-device state into 256 shard files, rather than one

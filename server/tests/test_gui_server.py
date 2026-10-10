@@ -8681,9 +8681,9 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
 
     Steps -- telemetry, device packages, image verification -- with admin
     shown as already complete, because first-run just created it. Every step can be
-    skipped and the wizard resumes at the first incomplete one, because the
-    packages step can NEVER complete in-console (no Docker socket), so a
-    wizard that insisted on completion could never be finished."""
+    skipped. A new wizard visit starts at step one, and status refreshes leave
+    the operator's current step alone. Package preparation happens outside
+    the Console, so navigation must not require every step to be complete."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
@@ -8702,9 +8702,12 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     # packages is detect-and-instruct, never a form
     assert "recheck('wz-pkg-recheck'" in wiz
     assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
-    # skippable, resumable, and it reports where you are
+    # Skippable, with an explicit step-one entry instead of status-based jumps.
+    # The controller's Node tests exercise navigation and refresh behavior.
     assert 'id="wz-skip"' in wiz and 'id="wz-next"' in wiz and 'id="wz-back"' in wiz
-    assert 'firstIncomplete(status)' in _react_shell('setup-packages-controller.mjs')
+    controller = _react_shell('setup-packages-controller.mjs')
+    assert "step: changed && mode === 'wizard' ? 0 : this.state.step" in controller
+    assert 'this.update({step, navigating: false})' in controller
     # the nudge that brings an operator back
     assert 'id="setup-nudge"' in wiz
     # first-run hands off to the wizard, not to the old checklist

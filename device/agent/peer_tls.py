@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import subprocess
 import tempfile
@@ -47,17 +48,22 @@ def _subject_matches(subject, identity):
             name.lstrip(b' ') == ('CN=' + identity).encode('ascii'))
 
 
-def _identity_valid(cert, ca, key, device_id, seconds=0):
+def _certificate_matches(cert, identity):
+    subject = _openssl('x509', '-in', cert, '-subject', '-noout', '-nameopt', 'RFC2253')
+    description = _openssl('x509', '-in', cert, '-text', '-noout')
+    identities = re.findall(rb'URI:urn:iris:device:([^\s,]+)', description)
+    return _subject_matches(subject, identity) and identities == [identity.encode('ascii')]
+
+
+def _identity_valid(cert, ca, key, identity, seconds=0):
     if cert is None or not _valid(cert, ca, seconds):
         return False
     try:
         if any(path.is_symlink() or path.parent.is_symlink() for path in (cert, ca)):
             return False
         public = _openssl('pkey', '-in', key, '-pubout')
-        identity = hashlib.sha256(device_id.encode('utf-8')).hexdigest()
-        subject = _openssl('x509', '-in', cert, '-subject', '-noout', '-nameopt', 'RFC2253')
         return (public == _openssl('x509', '-in', cert, '-pubkey', '-noout')
-                and _subject_matches(subject, identity))
+                and _certificate_matches(cert, identity))
     except PeerTLSError:
         return False
 
@@ -105,7 +111,7 @@ def ensure(cfg, client):
         manifest = root / 'current.json'
         if key.is_symlink() or manifest.is_symlink():
             raise PeerTLSError('peer identity files must not be symlinks')
-        if not key.exists():
+        if not key.exists() and not manifest.exists():
             with tempfile.TemporaryDirectory(dir=str(root)) as tmp:
                 pending = Path(tmp) / 'node.key'
                 _write(pending, b'')
@@ -114,9 +120,10 @@ def ensure(cfg, client):
                     os.fsync(stream.fileno())
                 os.replace(str(pending), str(key))
                 _sync_dir(root)
-        if key.stat().st_mode & 0o077:
+        if key.exists() and key.stat().st_mode & 0o077:
             raise PeerTLSError('peer private key permissions are unsafe')
         cert = ca = None
+        identity = hashlib.sha256(cfg['device_id'].encode('utf-8')).hexdigest()
         if manifest.exists():
             try:
                 row = json.loads(manifest.read_text())
@@ -125,30 +132,57 @@ def ensure(cfg, client):
                         or any(c not in '0123456789abcdef' for c in generation)):
                     raise ValueError()
                 cert, ca = root / generation / 'node.crt', root / generation / 'ca.crt'
+                if 'identity_sha256' in row:
+                    if (row.get('device_id') != cfg['device_id']
+                            or not isinstance(row['identity_sha256'], str)
+                            or re.fullmatch(r'[0-9a-f]{64}', row['identity_sha256']) is None
+                            or row.get('key') not in ('node.key', 'recovery.key')):
+                        raise ValueError()
+                    identity = row['identity_sha256']
+                    key = root / row['key']
+                    if key.is_symlink() or key.stat().st_mode & 0o077:
+                        raise ValueError()
             except (ValueError, KeyError, TypeError):
                 raise PeerTLSError('invalid peer identity manifest') from None
-        if not _identity_valid(cert, ca, key, cfg['device_id'], 21600):
-            csr = _openssl('req', '-new', '-key', key, '-subj', '/CN=IRIS enrollment')
+        from peer_revocations import refresh, identity_revoked, RevocationError
+        withdrawn = False
+        if ca is not None:
             try:
-                response = client.enroll_peer_tls(cfg['device_id'], csr.decode('ascii'))
-                if not isinstance(response, dict) or response.get('mode') != 'required':
-                    raise PeerTLSError('peer enrollment response is invalid')
-                leaf_bytes = response['certificate'].encode('ascii')
-                ca_bytes = response['ca'].encode('ascii')
-                if len(leaf_bytes) > 16384 or len(ca_bytes) > 16384:
-                    raise PeerTLSError('peer enrollment response is too large')
+                revoked_path = refresh(root, ca, cfg['device_id'], client, force=True)
+                withdrawn = identity_revoked(revoked_path, identity)
+            except (RevocationError, OSError):
+                raise PeerTLSError('peer revocation status unavailable') from None
+        if withdrawn or not _identity_valid(cert, ca, key, identity, 21600):
+            try:
                 with tempfile.TemporaryDirectory(dir=str(root)) as tmp:
                     pending = Path(tmp)
+                    enrollment_key = key
+                    if withdrawn:
+                        enrollment_key = pending / 'fresh.key'
+                        _write(enrollment_key, b'')
+                        _openssl('ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', enrollment_key)
+                    csr = _openssl('req', '-new', '-key', enrollment_key, '-subj', '/CN=IRIS enrollment')
+                    response = client.enroll_peer_tls(cfg['device_id'], csr.decode('ascii'))
+                    if not isinstance(response, dict) or response.get('mode') != 'required':
+                        raise PeerTLSError('peer enrollment response is invalid')
+                    next_identity = response.get('identity_sha256',
+                        hashlib.sha256(cfg['device_id'].encode('utf-8')).hexdigest())
+                    if (not isinstance(next_identity, str)
+                            or re.fullmatch(r'[0-9a-f]{64}', next_identity) is None
+                            or withdrawn and (next_identity == identity or identity_revoked(revoked_path, next_identity))):
+                        raise PeerTLSError('peer enrollment identity is unavailable')
+                    leaf_bytes = response['certificate'].encode('ascii')
+                    ca_bytes = response['ca'].encode('ascii')
+                    if len(leaf_bytes) > 16384 or len(ca_bytes) > 16384:
+                        raise PeerTLSError('peer enrollment response is too large')
                     _write(pending / 'node.crt', leaf_bytes)
                     _write(pending / 'ca.crt', ca_bytes)
                     if not _valid(pending / 'node.crt', pending / 'ca.crt', 21600):
                         raise PeerTLSError('peer certificate validation failed')
-                    public = _openssl('pkey', '-in', key, '-pubout')
+                    public = _openssl('pkey', '-in', enrollment_key, '-pubout')
                     if public != _openssl('x509', '-in', pending / 'node.crt', '-pubkey', '-noout'):
                         raise PeerTLSError('peer certificate does not match local key')
-                    identity = hashlib.sha256(cfg['device_id'].encode('utf-8')).hexdigest()
-                    subject = _openssl('x509', '-in', pending / 'node.crt', '-subject', '-noout', '-nameopt', 'RFC2253')
-                    if not _subject_matches(subject, identity):
+                    if not _certificate_matches(pending / 'node.crt', next_identity):
                         raise PeerTLSError('peer certificate identity does not match')
                     if ca is not None and ca.exists():
                         old = ssl.PEM_cert_to_DER_cert(ca.read_text())
@@ -169,16 +203,36 @@ def ensure(cfg, client):
                           or (destination / 'ca.crt').read_bytes() != ca_bytes):
                         raise PeerTLSError('peer certificate generation is corrupt')
                     state = pending / 'current.json'
-                    _write(state, json.dumps({'generation': generation}).encode('ascii'))
+                    active_key = key
+                    if withdrawn:
+                        active_key = root / ('recovery.key' if key.name == 'node.key' else 'node.key')
+                        if active_key.is_symlink():
+                            raise PeerTLSError('unsafe peer recovery key')
+                        with enrollment_key.open('rb') as stream:
+                            os.fsync(stream.fileno())
+                        os.replace(str(enrollment_key), str(active_key))
+                        _sync_dir(root)
+                    _write(state, json.dumps({'generation': generation, 'key': active_key.name,
+                        'device_id': cfg['device_id'], 'identity_sha256': next_identity}).encode('ascii'))
                     os.replace(str(state), str(manifest))
                     _sync_dir(root)
                     cert, ca = destination / 'node.crt', destination / 'ca.crt'
+                    if withdrawn:
+                        key.unlink()
+                        _sync_dir(root)
+                    key, identity = active_key, next_identity
             except Exception:
-                if not _identity_valid(cert, ca, key, cfg['device_id']):
+                if withdrawn or not _identity_valid(cert, ca, key, identity):
                     raise PeerTLSError('peer enrollment unavailable and no valid identity remains') from None
                 # A still-valid identity may survive transient renewal failures.
+        # Certificate validity alone cannot authorize a withdrawn peer. The
+        # native process also needs a finite, authenticated revocation lease.
+        try:
+            revocations = refresh(root, ca, cfg['device_id'], client)
+        except (RevocationError, OSError):
+            raise PeerTLSError('peer revocation status unavailable') from None
         return ('bt-peer-tls=required\nbt-peer-tls-cert=%s\nbt-peer-tls-key=%s\n'
-                'bt-peer-tls-ca=%s\n' % (cert, key, ca))
+                'bt-peer-tls-ca=%s\nbt-peer-tls-revocations=%s\n' % (cert, key, ca, revocations))
 
 
 def main():
@@ -189,6 +243,7 @@ def main():
     from catalog_client import CatalogClient
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', required=True)
+    parser.add_argument('--start-revocation-watch', action='store_true')
     args = parser.parse_args()
     try:
         cfg = agent_config.load(args.conf)
@@ -199,7 +254,11 @@ def main():
             raise PeerTLSError('peer enrollment requires verified HTTPS')
         context = ssl.create_default_context(cafile=cfg['catalog_ca'])
         client = CatalogClient(cfg['catalog_url'], cfg['catalog_token'], context=context)
-        sys.stdout.write(ensure(cfg, client))
+        fragment = ensure(cfg, client)
+        if args.start_revocation_watch:
+            from peer_revocations import start_watcher
+            start_watcher(args.conf, Path(cfg['stage_dir']) / 'peer-tls')
+        sys.stdout.write(fragment)
         return 0
     except Exception:
         print('peer identity unavailable; refusing unencrypted peer transport', file=sys.stderr)

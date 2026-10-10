@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rebuild the published aria2 source using a retained, checksum-locked APK cache."""
+"""Rebuild the matching aria2 source using a retained, checksum-locked APK cache."""
 
 import argparse
 import hashlib
@@ -15,20 +15,26 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.error
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
-SOURCE = HERE.parent / 'aria2c-source'
+SOURCE = HERE.parent if (HERE.parent / 'inputs.json').is_file() else HERE.parent / 'aria2c-source'
 ARCHES = {'x86_64': 'linux/amd64', 'aarch64': 'linux/arm64'}
 
 
 def load_helper(name):
     spec = importlib.util.spec_from_file_location('aria2_' + name, SOURCE / (name + '.py'))
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -135,7 +141,7 @@ def source_tree(archive_path, destination):
     lines = [line.split() for line in (SOURCE / 'source.sha256').read_text().splitlines()
              if line and not line.startswith('#')]
     if len(lines) != 1:
-        raise ValueError('Expected one published source pin')
+        raise ValueError('Expected one source pin')
     checksum, _filename = lines[0]
     archive_path = Path(archive_path).absolute()
     if archive_path.resolve() != archive_path:
@@ -165,6 +171,71 @@ def source_tree(archive_path, destination):
     return entries[0]
 
 
+def source_directory(directory, destination):
+    """Snapshot a complete extracted source bundle without following links."""
+    directory = Path(directory).absolute()
+    if directory.resolve() != directory:
+        raise ValueError('Linked source directory rejected')
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    total = count = 0
+
+    def copy_tree(fd, target, depth=0):
+        nonlocal total, count
+        if depth > 64:
+            raise ValueError('Extracted source exceeds directory depth limit')
+        target.mkdir()
+        with os.scandir(fd) as entries:
+            names = []
+            for entry in entries:
+                count += 1
+                if count > 20000:
+                    raise ValueError('Extracted source exceeds entry limit')
+                names.append(entry.name)
+        for name in sorted(names):
+            before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    opened = os.fstat(child)
+                    if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise ValueError('Source directory changed during snapshot')
+                    copy_tree(child, target / name, depth + 1)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(before.st_mode):
+                total += before.st_size
+                if total > 2 * 1024 * 1024 * 1024:
+                    raise ValueError('Extracted source exceeds snapshot limit')
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                with os.fdopen(child, 'rb') as source, (target / name).open('xb') as output:
+                    opened = os.fstat(source.fileno())
+                    if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise ValueError('Source file changed during snapshot')
+                    remaining = before.st_size
+                    while chunk := source.read(min(1024 * 1024, remaining + 1)):
+                        remaining -= len(chunk)
+                        if remaining < 0:
+                            raise ValueError('Source file grew during snapshot')
+                        output.write(chunk)
+                    if remaining:
+                        raise ValueError('Source file shrank during snapshot')
+                (target / name).chmod(0o755 if before.st_mode & 0o111 else 0o644)
+            else:
+                raise ValueError('Linked or non-regular source input rejected')
+
+    try:
+        identity = os.fstat(root)
+        output = destination / 'checked-source'
+        copy_tree(root, output)
+        current = directory.stat(follow_symlinks=False)
+        if (identity.st_dev, identity.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError('Source directory replaced during snapshot')
+    finally:
+        os.close(root)
+    load_helper('rebuild').verify(output)
+    return output
+
+
 def build(args):
     if not 1 <= args.jobs <= 256:
         raise ValueError('jobs must be between 1 and 256')
@@ -179,7 +250,8 @@ def build(args):
         context = Path(temporary)
         extracted = context / 'source-bundle'
         extracted.mkdir()
-        root = source_tree(args.source_archive, extracted)
+        directory = getattr(args, 'source_directory', None)
+        root = source_directory(directory, extracted) if directory is not None else source_tree(args.source_archive, extracted)
         manifest = json.loads((root / 'inputs.json').read_text())
         recipe = check_file(root / 'current-recipe/Dockerfile', manifest['current_recipe_sha256']['Dockerfile']).read_text()
         (context / 'Dockerfile').write_text(offline_recipe(recipe, lock['base_image']))
@@ -207,7 +279,8 @@ def build(args):
         (artifacts / 'aria2-next').rename(artifacts / 'aria2c')
         evidence = {'architecture': args.architecture, 'binary_sha256': expected,
                     'apk_lock_sha256': hashlib.sha256((HERE / 'apk-lock.json').read_bytes()).hexdigest(),
-                    'packages': len(packages), 'source_archive_unchanged': True}
+                    'packages': len(packages)}
+        evidence['source_directory_snapshotted' if directory is not None else 'source_archive_unchanged'] = True
         (artifacts / 'rebuild-evidence.json').write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n')
         output.mkdir()  # Exclusive publication, never adopt an existing directory.
         for artifact in artifacts.iterdir():
@@ -218,7 +291,9 @@ def build(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('architecture', choices=tuple(ARCHES))
-    parser.add_argument('--source-archive', type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--source-archive', type=Path)
+    source.add_argument('--source-directory', type=Path, help='complete extracted bundle with SHA256SUMS')
     parser.add_argument('--cache', type=Path, required=True, help='retain this directory for future rebuilds')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--jobs', type=int, default=2)

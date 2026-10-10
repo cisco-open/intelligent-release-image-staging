@@ -15,10 +15,16 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [], writes = [], failures = new Set();
   let held = null, hold = false, writeMode = 'ok';
+  let certificateMode = 'ok';
+  const certificateStates = new Map();
+  const deviceCertificate = id => certificateStates.get(id) || {device_id: id, identity_sha256: 'a'.repeat(64), revision: 2,
+    state: 'active', revoked_at: null, request_id: null, recovery_request_id: null, peer_tls_required: true, enforcement: 'not-applicable'};
   const devices = [
     {device_id: 'edge-01', device_ip: '192.0.2.10', model: '8201', model_family: 'XR8000', platform: 'xr-appmgr',
       management_type: 'xr-host', assigned_image_ids: ['a', 'b'], staged_image_ids: ['a', 'b'], errored_image_ids: ['b'],
-      current_image_id: 'a', last_seen: 2000000000, stage_state: 'error', stage_error: '<script>bad hash</script>'},
+      current_image_id: 'a', last_seen: 2000000000, stage_state: 'error', stage_error: '<script>bad hash</script>',
+      peer_tls: {revocations: {supported: true, mode: 'required', state: 'valid', authority: 'c'.repeat(64),
+        revision: 2, issued_at: 1999999990, expires_at: 2000000290, own_revoked: false, observed_at: 2000000000}}},
     {device_id: 'edge-02', device_ip: '192.0.2.11', model: 'C8xxx', model_family: 'C8xxx', platform: 'iox', assigned_image_ids: []},
   ];
   page.on('pageerror', error => errors.push(error.message));
@@ -33,12 +39,26 @@ try {
     if (url.pathname.startsWith('/api/')) {
       if (request.method() !== 'GET') {
         writes.push([request.method(), url.pathname, request.headers()['x-csrf-token'], request.postDataJSON()]);
+        if (url.pathname.endsWith('/certificate/revoke') || url.pathname.endsWith('/certificate/reenroll')) {
+          if (certificateMode === 'lost') return route.abort('failed');
+          if (certificateMode === 'reject') return route.fulfill({status: 409, json: {error: 'state changed'}});
+          const id = url.pathname.split('/').at(-3), previous = deviceCertificate(id), payload = request.postDataJSON();
+          assert.equal(payload.expected_revision, previous.revision);
+          assert.equal(payload.expected_identity_sha256, previous.identity_sha256);
+          assert.match(payload.request_id, /^[0-9a-f-]{36}$/);
+          const next = url.pathname.endsWith('/reenroll')
+            ? {...previous, state: 'reenrollment-required', revision: previous.revision + 1, recovery_request_id: payload.request_id}
+            : {...previous, state: 'revoked', revision: previous.revision + 1, revoked_at: 2000000000,
+              request_id: payload.request_id, enforcement: 'pending'};
+          certificateStates.set(id, next); return route.fulfill({json: {...next, applied: true}});
+        }
         assert.ok(url.pathname.endsWith('/forget-host-key'));
         if (writeMode === 'lost') return route.abort('failed');
         if (writeMode === 'reject') return route.fulfill({status: 400, json: {error: 'fixture rejected'}});
         return route.fulfill({json: {ok: true, peer: '192.0.2.10'}});
       }
       if (failures.has(url.pathname)) return route.fulfill({status: 503, json: {error: 'fixture unavailable'}});
+      if (url.pathname.endsWith('/certificate')) return route.fulfill({json: deviceCertificate(url.pathname.split('/').at(-2))});
       if (url.pathname.endsWith('/deployment') && url.pathname.includes('/devices/')) {
         const xr = url.pathname.includes('edge-01');
         return route.fulfill({json: {total: 1, record: {record_id: 'record-' + (xr ? 'xr' : 'xe'), state: 'active',
@@ -99,6 +119,11 @@ try {
   assert.equal(await undated.locator('.badge-ok').count(), 0);
   assert.match(await page.locator('#di-boundary').innerText(), /1 image quarantined/);
   assert.equal(await page.locator('#di-boundary .boundary-step').nth(4).getAttribute('class'), 'boundary-step is-na');
+  const certificateDetails = page.locator('summary').filter({hasText: 'Certificate and device report details'});
+  await certificateDetails.click();
+  assert.match(await page.locator('.device-certificate-details').innerText(), /Saved list revision\s+2.*Last device report\s+Reported current.*Device-reported list revision\s+2/s);
+  assert.match(await page.locator('#deploy-info-panel').innerText(), /Reported by this device only.*not confirmation that every peer/s);
+  await certificateDetails.click();
   await screenshot('details-desktop');
 
   page.once('dialog', dialog => dialog.dismiss());
@@ -162,7 +187,104 @@ try {
   await page.getByRole('navigation', {name: 'Primary', exact: true}).getByRole('link', {name: 'Images', exact: true}).click();
   await page.waitForFunction(() => document.getElementById('deploy-info-panel').hidden);
   assert.equal(writes.length, 3);
+  await page.getByRole('navigation', {name: 'Primary', exact: true}).getByRole('link', {name: 'Inventory', exact: true}).click();
+  await open('edge-01');
+  await page.locator('#di-certificate-state').getByText('Not revoked', {exact: true}).waitFor();
+  page.once('dialog', dialog => dialog.dismiss()); await page.locator('#di-certificate-revoke').click();
+  assert.equal(writes.length, 3, 'cancel does not revoke');
+  page.once('dialog', dialog => {
+    assert.match(dialog.message(), /Revoke device certificate for edge-01\?/);
+    assert.match(dialog.message(), /Updated peers.*five minutes.*Clients without this support/s);
+    return dialog.accept();
+  });
+  await page.locator('#di-certificate-revoke').click();
+  await page.locator('#di-certificate-state').getByText('Revoked', {exact: true}).waitFor();
+  assert.equal(writes.length, 4);
+  assert.deepEqual(writes[3].slice(0, 3), ['POST', '/api/v1/devices/edge-01/certificate/revoke', 'fixture-only']);
+  assert.match(await page.locator('#di-certificate-message').innerText(), /Enforcement by every peer is not yet confirmed/);
+  assert.equal(await page.locator('#di-certificate-revoke').isDisabled(), true);
+  await page.locator('#di-certificate-refresh').click(); assert.equal(writes.length, 4, 'status checks never replay writes');
+  await page.locator('#di-certificate-title').scrollIntoViewIfNeeded(); await screenshot('certificate-revoked-desktop');
+  await page.locator('#di-close').click(); await open('edge-02');
+  certificateMode = 'reject'; page.once('dialog', dialog => dialog.accept()); await page.locator('#di-certificate-revoke').click();
+  await page.locator('#di-certificate-message').getByText('state changed', {exact: false}).waitFor();
+  assert.equal(await page.locator('#di-certificate-revoke').isDisabled(), true);
+  await page.locator('#di-certificate-refresh').click();
+  await page.locator('#di-certificate-state').getByText('Not revoked', {exact: true}).waitFor();
+  certificateMode = 'lost'; page.once('dialog', dialog => dialog.accept()); await page.locator('#di-certificate-revoke').click();
+  await page.locator('#di-certificate-message').getByText('result is unknown', {exact: false}).waitFor();
+  assert.equal(await page.locator('#di-certificate-revoke').isDisabled(), true);
+  await page.locator('#di-close').click(); await open('edge-02');
+  await page.locator('#di-certificate-state').getByText('Not revoked', {exact: true}).waitFor();
+  assert.equal(await page.locator('#di-certificate-revoke').isDisabled(), true, 'unknown remains locked after reopening');
+  assert.equal(writes.length, 6);
+  certificateStates.set('edge-02', {...deviceCertificate('edge-02'), state: 'revoked', revision: 3,
+    request_id: writes[5][3].request_id, revoked_at: 2000000000, enforcement: 'pending'});
+  await page.locator('#di-certificate-refresh').click();
+  await page.locator('#di-certificate-state').getByText('Revoked', {exact: true}).waitFor();
+  assert.match(await page.locator('#di-certificate-message').innerText(), /Revocation saved/);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({width, height: 844});
+    await page.locator('#di-certificate-title').scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    const button = await page.locator('#di-certificate-reenroll').boundingBox();
+    assert.ok(button.x >= 0 && button.x + button.width <= width);
+    await page.locator('summary').filter({hasText: 'Certificate and device report details'}).click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.locator('summary').filter({hasText: 'Certificate and device report details'}).click();
+    await screenshot(`certificate-revoked-mobile-${width}`);
+  }
+  await page.setViewportSize({width: 1440, height: 1000});
+  await page.locator('#di-close').click(); await open('edge-01');
+  page.once('dialog', dialog => dialog.dismiss()); await page.locator('#di-certificate-reenroll').click();
+  assert.equal(writes.length, 6, 'cancel does not approve onboarding');
+  certificateMode = 'ok';
+  page.once('dialog', dialog => {
+    assert.match(dialog.message(), /Allow fresh onboarding for edge-01\?/);
+    assert.match(dialog.message(), /old certificates remain permanently revoked.*Run Onboard/s);
+    return dialog.accept();
+  });
+  await page.locator('#di-certificate-reenroll').click();
+  await page.locator('#di-certificate-state').getByText('Fresh onboarding required', {exact: true}).waitFor();
+  assert.equal(writes.length, 7);
+  assert.deepEqual(writes[6].slice(0, 3), ['POST', '/api/v1/devices/edge-01/certificate/reenroll', 'fixture-only']);
+  assert.match(await page.locator('#di-certificate-next').innerText(), /Keep this inventory device.*Onboard.*Undeploy it first/s);
+  assert.equal(await page.locator('#di-certificate-reenroll').count(), 0, 'no repeat approval while onboarding required');
+  assert.equal(await page.locator('#di-certificate-revoke').isVisible(), false);
+  const approved = deviceCertificate('edge-01');
+  certificateStates.set('edge-01', {...approved, state: 'active', identity_sha256: 'b'.repeat(64), revision: approved.revision + 1,
+    revoked_at: null, request_id: null, enforcement: 'not-applicable'});
+  await page.locator('#di-certificate-refresh').click();
+  await page.locator('#di-certificate-state').getByText('Not revoked', {exact: true}).waitFor();
+  assert.equal(await page.locator('#di-certificate-revoke').isEnabled(), true);
+  assert.match(await page.locator('#di-certificate-message').innerText(), /New device identity.*previous certificates remain revoked/);
+  await page.evaluate(() => { Date.now = () => 2000000400000; });
+  await page.locator('#di-certificate-refresh').click();
+  await page.locator('#di-certificate-state').getByText('Not revoked', {exact: true}).waitFor();
+  await certificateDetails.click();
+  assert.match(await page.locator('.device-certificate-details').innerText(), /Last device report\s+Not confirmed.*report is stale/s);
+  await certificateDetails.click();
+  await page.evaluate(() => { Date.now = () => 2000000000000; });
+  await page.locator('#di-close').click(); await open('edge-02'); certificateMode = 'lost';
+  page.once('dialog', dialog => dialog.accept()); await page.locator('#di-certificate-reenroll').click();
+  await page.locator('#di-certificate-message').getByText('approval result is unknown', {exact: false}).waitFor();
+  await page.locator('#di-close').click(); await open('edge-02');
+  await page.locator('#di-certificate-state').getByText('Revoked', {exact: true}).waitFor();
+  assert.equal(await page.locator('#di-certificate-reenroll').isDisabled(), true);
+  assert.equal(writes.length, 8, 'no automatic approval replay after reopening');
+  const waiting = deviceCertificate('edge-02');
+  certificateStates.set('edge-02', {...waiting, state: 'reenrollment-required', revision: waiting.revision + 1,
+    recovery_request_id: writes[7][3].request_id});
+  await page.locator('#di-certificate-refresh').click();
+  await page.locator('#di-certificate-state').getByText('Fresh onboarding required', {exact: true}).waitFor();
+  assert.match(await page.locator('#di-certificate-message').innerText(), /Fresh onboarding approved/);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({width, height: 844});
+    await page.locator('#di-certificate-title').scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await screenshot(`certificate-onboarding-mobile-${width}`);
+  }
   assert.deepEqual(errors, []);
   assert.deepEqual(await page.evaluate(() => window.testCspViolations), []);
-  console.log('Device details: XR/XE evidence, image errors, confirmed CSRF writes, stale logs, failures, focus, mobile and CSP passed.');
+  console.log('Device details: XR/XE evidence, certificate revocation and reconciliation, confirmed CSRF writes, stale logs, failures, focus, mobile and CSP passed.');
 } finally { await browser.close(); }

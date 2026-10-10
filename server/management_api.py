@@ -42,6 +42,7 @@ import bounded_pool
 import bulkhash_refresh
 import peer_tls_settings
 import peer_tls_issuer
+import peer_tls_revocations
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
 import deployment_records
@@ -594,6 +595,19 @@ def _revoke_device_secrets(app, device_id):
                                recipients_csv=app.recipients_csv,
                                enc_path=app.secrets_enc)
     return "ok"
+
+
+def _peer_tls_required():
+    try:
+        return peer_tls_settings.mode() == "required"
+    except (ValueError, OSError):
+        raise peer_tls_revocations.RevocationError("Peer TLS mode is unavailable") from None
+
+
+def _device_certificate_status(device_id, value=None):
+    value = peer_tls_revocations.Ledger().status(device_id) if value is None else value
+    return dict(value, peer_tls_required=_peer_tls_required(),
+                enforcement="not-applicable" if value["state"] == "active" else "pending")
 
 
 def _fmt_bytes(n):
@@ -4782,6 +4796,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except ValueError as exc:
                     self._json(409, {"error": str(exc)}); return
                 self._json(200, {"plan": plan}); return
+            if path.startswith("/api/devices/") and path.endswith("/certificate"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                did = unquote(path[len("/api/devices/"):-len("/certificate")])
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(404, {"error": "no such device"}); return
+                try:
+                    with peer_tls_settings.LOCK:
+                        result = _device_certificate_status(did)
+                except (peer_tls_revocations.RevocationError, OSError, ValueError):
+                    self._json(503, {"error": "Device certificate status unavailable"}); return
+                self._json(200, result); return
             if path == "/api/devices/export-csv":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -6567,6 +6593,52 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return
             sid = self._sid()
             actor = "console:" + info["username"]
+            if path.startswith("/api/devices/") and path.endswith(("/certificate/revoke", "/certificate/reenroll")):
+                operation = "reenroll" if path.endswith("/reenroll") else "revoke"
+                did = unquote(path[len("/api/devices/"):-len("/certificate/" + operation)])
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(404, {"error": "no such device"}); return
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if not isinstance(data, dict) or set(data) != {
+                        "expected_revision", "expected_identity_sha256", "request_id"}:
+                    self._json(400, {"error": "Provide the reviewed certificate identity, revision and request ID"}); return
+                try:
+                    with peer_tls_settings.LOCK:
+                        if not _peer_tls_required():
+                            self._json(409, {"error": "Certificate revocation requires peer TLS"}); return
+                        ledger = peer_tls_revocations.Ledger()
+                        if operation == "reenroll":
+                            def check_jobs():
+                                if onboard is None:
+                                    raise peer_tls_revocations.RevocationError("Device onboarding status is unavailable")
+                                try:
+                                    active = any(job["device_id"] == did and job["state"] in ("queued", "running")
+                                                 for job in onboard.list_jobs())
+                                except Exception:
+                                    raise peer_tls_revocations.RevocationError("Device onboarding status is unavailable") from None
+                                if active:
+                                    raise peer_tls_revocations.RevisionConflict(
+                                        "Finish or cancel this device's current job before approving fresh onboarding")
+                            result = ledger.prepare_reenrollment(did, actor=actor, admission_check=check_jobs, **data)
+                        else:
+                            result = ledger.revoke(did, actor=actor, **data)
+                        result = _device_certificate_status(did, result)
+                except ValueError:
+                    self._json(400, {"error": "Invalid certificate operation request"}); return
+                except peer_tls_revocations.RevisionConflict as exc:
+                    self._json(409, {"error": str(exc)}); return
+                except (peer_tls_revocations.RevocationError, OSError):
+                    self._audit("device_certificate_" + operation, "device", action=operation,
+                                target=did, actor=actor, result="fail",
+                                detail="Certificate operation outcome needs a status check")
+                    self._json(503, {"error": "Certificate operation could not be confirmed; refresh certificate status before retrying"}); return
+                self._audit("device_certificate_" + operation, "device", action=operation,
+                            target=did, actor=actor,
+                            detail="Certificate identity %s; revision %d; state %s" %
+                                   (result["identity_sha256"], result["revision"], result["state"]))
+                self._json(200, result); return
             if path == "/api/logout":
                 app.logout(sid)
                 self._audit("logout", "auth", action="logout", actor=actor,

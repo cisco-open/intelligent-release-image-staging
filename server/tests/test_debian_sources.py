@@ -209,7 +209,8 @@ def test_ambiguous_inventory_never_silently_overwrites(fixture, mutation):
 @pytest.mark.parametrize('field,value', [('Origin', 'Ubuntu'), ('Label', 'Debian'), ('Suite', 'testing-security'),
                                       ('Codename', 'bookworm-security'), ('Components', 'main'),
                                       ('Date', format_datetime(datetime.now(timezone.utc) + timedelta(days=3))),
-                                      ('Valid-Until', format_datetime(datetime.now(timezone.utc) - timedelta(days=3)))])
+                                      ('Valid-Until', format_datetime(datetime.now(timezone.utc) - timedelta(days=3)))],
+                         ids=['origin', 'label', 'suite', 'codename', 'components', 'future-date', 'expired-until'])
 def test_signed_wrong_identity_or_date_refused(fixture, field, value):
     release_change(fixture, 'trixie-security', lambda text: '\n'.join(
         field + ': ' + value if line.startswith(field + ':') else line for line in text.split('\n')))

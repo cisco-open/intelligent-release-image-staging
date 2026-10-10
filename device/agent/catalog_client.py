@@ -283,6 +283,14 @@ class CatalogClient:
             raise CatalogError("peer certificate enrollment failed (HTTP %d)" % status)
         return json.loads(body)
 
+    def get_peer_revocations(self, device_id, nonce):
+        status, body = self._req(
+            "GET", "/v1/devices/%s/peer-tls-revocations?nonce=%s" % (device_id, nonce),
+            max_response_bytes=1024 * 1024)
+        if status != 200:
+            raise CatalogError("peer certificate revocation status unavailable (HTTP %d)" % status)
+        return json.loads(body)
+
     def refresh_token(self, device_id):
         # POST the device's current Bearer to mint a fresh catalog token; the
         # response is the device's full current secret bag (new catalog_token +

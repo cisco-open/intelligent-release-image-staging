@@ -209,7 +209,7 @@ def prebuilt(stage, request, tmp_path, monkeypatch):
         "scope": "inventory-only", "authenticated": False, "source_coverage_complete": False, "commit": COMMIT,
         "commit_scope": "core-revision-labels-only", "images": images, "attribution_policy": "Fixture evidence only"})
     companions = {}
-    for role, name in {"aria2": "aria2c-2.5.6-p10-source.tar.gz", **completion.COMPANIONS}.items():
+    for role, name in {"aria2": "aria2c-2.5.6-p11-source.tar.gz", **completion.COMPANIONS}.items():
         if role == "ubuntu" and profile != "ubuntu-dependencies":
             continue
         files[name] = ("inert source companion " + role).encode()
@@ -497,7 +497,7 @@ def test_source_stage_matches_actual_installer_builder_and_release_prepare(stage
                "release/iris.tgz.sha256": "fixture source sidecar",
                "release/MANIFEST.txt": "fixture source manifest"}
     aria_source = b"fixture pinned corresponding aria source"
-    sources["tools/aria2c-source/source.sha256"] = sha(aria_source) + "  aria2c-2.5.6-p10-source.tar.gz\n"
+    sources["tools/aria2c-source/source.sha256"] = sha(aria_source) + "  aria2c-2.5.6-p11-source.tar.gz\n"
     sources["tools/aria2c.sha256"] = "".join(sha(arch.encode()) + "  " + arch + "\n" for arch in ("x86_64", "aarch64"))
     for arch in ("x86_64", "aarch64"):
         sources["deliverables/aria2c-" + arch] = arch
@@ -516,7 +516,7 @@ def test_source_stage_matches_actual_installer_builder_and_release_prepare(stage
     builder.build(repo, output)
     packages = list(output.glob("*.deb"))
     assert [path.name for path in packages] == ["iris-installer_" + TAG[1:] + "+installer.0.g" + commit[:12] + "_amd64.deb"]
-    (output / "aria2c-2.5.6-p10-source.tar.gz").write_bytes(aria_source)
+    (output / "aria2c-2.5.6-p11-source.tar.gz").write_bytes(aria_source)
     STAGE.create_stage_record(output / "release-stage.json", TAG, commit, 31, 2)
     STAGE._auth().prepare(repo, output, TAG)
     (output / "attestations.jsonl").write_bytes(stage["files"]["attestations.jsonl"])

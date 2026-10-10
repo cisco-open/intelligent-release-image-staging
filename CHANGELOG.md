@@ -17,6 +17,19 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Revoke one device's peer certificates from its Inventory details without
+  deleting its row or staged images. Show the saved decision separately from
+  device-reported enforcement. Allow fresh onboarding under the same inventory
+  name with new credentials and keys while keeping old certificates revoked.
+  Updated clients reject revoked identities and stop encrypted peer connections
+  when their revocation list expires; clients without this support still need
+  network isolation when an immediate cutoff is required.
+
+- Refresh both precompiled aria2c clients with certificate-withdrawal enforcement
+  and matching source records. Keep publication separate from local build checks.
+  Correct a package-build freshness warning when a merged feature branch has
+  newer device code and no missing upstream changes.
+
 - Clarify Policies and certificate maintenance with plain-language choices and
   expandable technical details. Stop periodic refreshes on the Policies form
   and confirm before discarding edited distribution settings. Keep deployment

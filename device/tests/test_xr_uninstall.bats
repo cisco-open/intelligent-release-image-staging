@@ -1614,7 +1614,7 @@ _xr_peer_fixture() {
 106 -rw-r--r--. 1 20 Sep 29 06:17 operator-notes.txt"
 }
 
-@test "peer identity: ownership-proven reset deletes three exact files and retains images and public generations" {
+@test "peer identity: ownership-proven reset deletes exact active files and retains images and public generations" {
   _xr_peer_fixture
   run _xr_uninstall_run_live
   [ "$status" -eq 0 ]
@@ -1623,16 +1623,36 @@ _xr_peer_fixture() {
   [[ "$probe" == *"dir harddisk:/peer-tls/$FAKE_PEER_ID"* ]] || return 1
   [[ "$probe" != *delete* ]] || return 1
   sweep="$(_xr_call_body 3)"
-  for path in current.json node.key enrollment.lock; do
+  for path in current.json node.key recovery.key enrollment.lock revocations.txt revocations-state.json revocations.lock revocations-watch.lock; do
     [[ "$sweep" == *"delete /noprompt harddisk:/peer-tls/$path"* ]] || return 1
   done
-  [ "$(printf '%s\n' "$sweep" | grep -c '^delete /noprompt harddisk:/peer-tls/')" -eq 3 ]
+  [ "$(printf '%s\n' "$sweep" | grep -c '^delete /noprompt harddisk:/peer-tls/')" -eq 8 ]
   [ "$(printf '%s\n' "$sweep" | grep '^delete /noprompt harddisk:/peer-tls/' | tail -1)" = \
     'delete /noprompt harddisk:/peer-tls/current.json' ]
   [[ "$sweep" != *"peer-tls/*"* ]] || return 1
   [[ "$sweep" != *"delete /noprompt harddisk:/peer-tls/$FAKE_PEER_ID"* ]] || return 1
   [[ "$sweep" != *"delete /noprompt harddisk:/operator-image.iso"* ]] || return 1
   [[ "$sweep" != *"delete /noprompt harddisk:/peer-tls/operator-notes.txt"* ]]
+}
+
+@test "peer identity: recovered certificate manifest authorizes only the fixed active filenames" {
+  _xr_peer_fixture
+  FAKE_PEER_MANIFEST="{\"generation\":\"$FAKE_PEER_ID\",\"key\":\"recovery.key\",\"device_id\":\"router-a\",\"identity_sha256\":\"$FAKE_PEER_ID\"}" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ]
+  _xr_peer_fixture
+  FAKE_PEER_MANIFEST="{\"generation\":\"$FAKE_PEER_ID\",\"key\":\"../operator.key\",\"device_id\":\"router-a\",\"identity_sha256\":\"$FAKE_PEER_ID\"}" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+}
+
+@test "peer identity: symlink revocation or recovery files refuse all cleanup" {
+  for name in recovery.key revocations.txt revocations-state.json revocations.lock revocations-watch.lock; do
+    _xr_peer_fixture
+    FAKE_PEER_BEFORE="$FAKE_PEER_BEFORE
+107 lrwx------. 1 20 Sep 29 06:17 $name -> operator" run _xr_uninstall_run_live
+    [ "$status" -ne 0 ]
+    ! grep -q '^delete ' "$FAKE_COMMAND_LOG"
+  done
 }
 
 @test "peer identity: absent directory accepts canonical missing-file output" {

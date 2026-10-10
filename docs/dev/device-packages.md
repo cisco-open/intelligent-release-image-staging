@@ -171,12 +171,13 @@ Normal installation uses the committed tested binaries. A failed download
 is a connectivity or release-availability problem. Do not bypass verification
 or substitute an unverified source build to work around it.
 
-For source audits, use the matching release's
-`aria2c-2.5.6-p10-source.tar.gz` asset. It contains the upstream source, ten
+For source audits, use the matching
+`aria2c-2.5.6-p11-source.tar.gz` asset. It contains the upstream source, eleven
 patches, build recipes, dependency sources and license files. Follow
 [aria2c source distribution](../../tools/aria2c-source/README.md) for the
 archive checks and rebuild procedure. Source archives supplement the
-precompiled clients; they do not replace them.
+precompiled clients; they do not replace them. The current p11 clients and
+source are local development artifacts until an authorized publication.
 
 For development from this checkout, use the pinned source and tracked recipe:
 

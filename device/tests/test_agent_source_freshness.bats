@@ -164,6 +164,51 @@ _check_under_set_e() {
   [[ "$output" != *"WARNING"* ]]
 }
 
+_make_merged_feature_with_newer_agent() {
+  export GIT_AUTHOR_DATE=2020-01-01T00:00:00Z GIT_COMMITTER_DATE=2020-01-01T00:00:00Z
+  _make_stale_repo
+  git -C "$R" branch feature main
+  git -C "$R" branch -f main "$C1"
+  git -C "$R" checkout -q main
+  echo "two" > "$R/device/agent/a.py"
+  git -C "$R" add device/agent/a.py
+  git -C "$R" commit -q -m "Independent identical agent source"
+  git -C "$R" merge -q --no-ff feature -m "Merge feature"
+  MERGED_FEATURE="$(git -C "$R" rev-parse feature)"
+  git -C "$R" checkout -q feature
+  echo "newer feature" > "$R/device/agent/a.py"
+  git -C "$R" add device/agent/a.py
+  git -C "$R" commit -q -m "Continue agent work after merge"
+}
+
+@test "newer feature source is fresh when its merge into main added no guarded changes" {
+  _make_merged_feature_with_newer_agent
+  [ "$(git -C "$R" rev-list --count HEAD..main -- device/agent)" -gt 0 ]
+  [ "$(git -C "$R" merge-base HEAD main)" = "$MERGED_FEATURE" ]
+  git -C "$R" diff --exit-code "$MERGED_FEATURE" main -- device/agent device/verify_image.py device/iox
+  run git -C "$R" diff --quiet HEAD main -- device/agent
+  [ "$status" -eq 1 ]
+  _check_under_set_e IRIS_REQUIRE_FRESH_AGENT=1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"REACHED-THE-END"* ]]
+  [[ "$output" != *"WARNING"* ]]
+}
+
+@test "newer feature source still fails when main adds a genuine guarded change after merge" {
+  _make_merged_feature_with_newer_agent
+  git -C "$R" checkout -q main
+  echo "upstream verification fix" > "$R/device/verify_image.py"
+  git -C "$R" add device/verify_image.py
+  git -C "$R" commit -q -m "New upstream verification fix"
+  git -C "$R" checkout -q feature
+  [ "$(git -C "$R" merge-base HEAD main)" = "$MERGED_FEATURE" ]
+  _check_under_set_e IRIS_REQUIRE_FRESH_AGENT=1
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"New upstream verification fix"* ]]
+  [[ "$output" == *"refusing to build a stale agent"* ]]
+  [[ "$output" != *"REACHED-THE-END"* ]]
+}
+
 @test "identical cherry-picked source is fresh but differing upstream bytes still fail" {
   _make_stale_repo
   upstream="$(git -C "$R" rev-parse main)"

@@ -20,11 +20,21 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import auth            # noqa: E402
 import peer_endpoints  # noqa: E402
+import peer_tls_revocations  # noqa: E402
 import secretfs       # noqa: E402
 import secrets_store  # noqa: E402
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    except peer_tls_revocations.RevocationError:
+        print("error: device certificate recovery could not be confirmed; enrollment NOT delivered",
+              file=sys.stderr)
+        return 1
+
+
+def _main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
 
     if len(argv) != 1:
@@ -63,7 +73,8 @@ def main(argv=None):
     # Hold the same advisory lock the catalog server's token-refresh takes, so
     # a concurrent rotation/revoke can't load a snapshot that predates this
     # mint and write it back, dropping the freshly minted enrollment token.
-    with secrets_store.store_lock(secrets_path):
+    with secrets_store.store_lock(secrets_path), \
+            peer_tls_revocations.fresh_enrollment(device_id) as finish_peer_enrollment:
         try:
             store = secrets_store.load(secrets_path)
         except secrets_store.StoreCorruptError as exc:
@@ -144,6 +155,10 @@ def main(argv=None):
             print("error: durable persist failed, enrollment NOT minted",
                   file=sys.stderr)
             return 1
+        # The old current/previous catalog credentials are now unusable. Only
+        # this explicit onboarding boundary may activate a previously approved
+        # fresh certificate identity; an ordinary token refresh cannot do so.
+        finish_peer_enrollment()
 
     print(token)
     return 0

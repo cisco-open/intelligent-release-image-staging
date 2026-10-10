@@ -82,6 +82,9 @@
 .iris-react-shell #dev-rows tr[data-id]:focus-visible { outline: 2px solid var(--iris-action); outline-offset: -2px; }
 .iris-react-shell #dev-rows tr.sel td:first-child { box-shadow: inset 3px 0 var(--iris-action); }
 .iris-react-shell #dev-rows .dev-id .dinfo { font: inherit; font-size: 14px; text-align: left; }
+.device-certificate-details { margin: 12px 0 0; }
+.device-certificate-details dt { color: var(--text-secondary); }
+.device-certificate-details dd { margin: 0 0 8px; overflow-wrap: anywhere; }
 .iris-react-shell #dev-rows .dev-id { min-width: 128px; white-space: nowrap; }
 .iris-react-shell #dev-rows .machine { white-space: nowrap; }
 .iris-react-shell #dev-rows .dev-series { min-width: 144px; white-space: nowrap; }

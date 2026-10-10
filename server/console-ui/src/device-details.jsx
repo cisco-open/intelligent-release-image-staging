@@ -8,6 +8,7 @@ import {DeviceDetailsController} from './device-details-controller.mjs';
 import {boundarySteps, hardwareRows, imageRows, recordRows} from './device-details-model.mjs';
 import {formatDate, formatSize} from './image-model.mjs';
 import {deploymentResult} from './monitoring-model.mjs';
+import {enforcementDelay, runtimeObservation} from './device-certificate-model.mjs';
 
 const steps = ['Catalogued', 'Source checked', 'Assigned', 'Transferring', 'Verified', 'Staged'];
 const icons = {negative: 'i-octagon-x', severe: 'i-diamond-severe', warning: 'i-triangle-warn'};
@@ -30,6 +31,46 @@ function StagingBoundary({entries}) {
   </Fragment>)}<span className="boundary-connector" aria-hidden="true" />
     <span className="boundary-terminus"><span className="boundary-terminus-label">Operator control</span></span>
   </div>;
+}
+
+function DeviceCertificate({state, controller, device, now}) {
+  const status = state?.status, revoked = status?.state === 'revoked', pending = status?.state === 'reenrollment-required';
+  const observedNow = Math.max(Number.isSafeInteger(now) ? now : 0, Math.floor(Date.now() / 1000));
+  const report = runtimeObservation(device?.peer_tls?.revocations, observedNow, device?.last_seen);
+  return <section className="card" aria-labelledby="di-certificate-title">
+    <h3 id="di-certificate-title">Device certificate</h3>
+    <p className="muted">Controls whether this device's certificate is accepted for encrypted peer transfers.</p>
+    <p><span id="di-certificate-state" className={`badge ${revoked ? 'badge-fail' : pending ? 'badge-queued' : 'badge-off'}`}>
+      {state?.loading ? 'Checking status…' : status ? revoked ? 'Revoked' : pending ? 'Fresh onboarding required' : 'Not revoked' : 'Status unavailable'}</span></p>
+    {status && !status.peer_tls_required && <p className="policy-warning">Peer TLS must be required before you can revoke a device certificate.</p>}
+    {status?.state === 'active' && <p className="muted">Revocation withdraws all certificates for this device identity and blocks new ones. This cannot be undone.</p>}
+    <p className="muted">{enforcementDelay}</p>
+    <div className="form-actions">
+      <button type="button" className="btn danger" id="di-certificate-revoke" hidden={revoked || pending} disabled={!controller.canRevoke()}
+        onClick={() => controller.revoke()}>Revoke device certificate</button>
+      {revoked && <button type="button" className="btn" id="di-certificate-reenroll" disabled={!controller.canReenroll()}
+        onClick={() => controller.reenroll()}>Allow fresh onboarding</button>}
+      <button type="button" className="btn ghost" id="di-certificate-refresh" disabled={!state || state.loading || state.busy}
+        onClick={() => controller.refresh()}>Check status</button>
+    </div>
+    <p id="di-certificate-message" className={state?.failed ? 'err' : 'muted'} role="status" aria-live="polite">{state?.message}</p>
+    {revoked && <p className="muted">To return a secured device to service, allow fresh onboarding. Its old certificates stay revoked.</p>}
+    {pending && <p className="muted" id="di-certificate-next">Keep this inventory device. Close this panel, select its row,
+      and choose Onboard. If the IRIS agent is still installed, Undeploy it first.</p>}
+    {status && <details><summary>Certificate and device report details</summary>
+      <dl className="device-certificate-details"><dt>Device identity</dt><dd>{status.identity_sha256}</dd>
+        <dt>Saved list revision</dt><dd>{status.revision}</dd>
+        {(revoked || pending) && <><dt>Revoked</dt><dd>{formatDate(status.revoked_at)}</dd></>}
+        <dt>Last device report</dt><dd>{report.label}. {report.detail}</dd>
+        {report.values && <><dt>Device-reported time</dt><dd>{formatDate(report.values.observed_at)}</dd>
+          {report.values.revision !== null && <><dt>Device-reported list revision</dt><dd>{report.values.revision}</dd>
+            <dt>Device-reported list expiry</dt><dd>{formatDate(report.values.expires_at)}</dd>
+            <dt>Device-reported certificate authority</dt><dd>{report.values.authority}</dd></>}
+        </>}
+      </dl>
+      <p className="muted">Reported by this device only. This is not confirmation that every peer has enforced the revocation.</p>
+    </details>}
+  </section>;
 }
 
 function DeviceDetails({controller}) {
@@ -68,6 +109,7 @@ function DeviceDetails({controller}) {
       <p className="muted" id="di-note" role="status" aria-live="polite">{state?.note}</p>
       <div className="card"><div id="di-boundary"><StagingBoundary entries={boundarySteps(state?.device || {}, state?.status,
         state?.failedRatio, state?.quarantined)} /></div></div>
+      <DeviceCertificate state={state?.certificate} controller={controller.certificate} device={state?.device} now={state?.now} />
       <div className="card"><h3>SSH host key</h3>
         <p className="muted">If this device was re-imaged or replaced and sessions now fail with a changed host key error,
           verify its identity before forgetting the saved key. The next connection will trust and save the key it presents.</p>

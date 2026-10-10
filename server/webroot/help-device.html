@@ -103,6 +103,26 @@ dir harddisk:</pre>
     any remaining root image files. See
     <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/assignments/#unassigned-image-park" target="_blank" rel="noopener">What happens to an image you unassign</a>.</p>
 
+    <h2>Revoke a device certificate</h2>
+    <p>Open <strong>Inventory</strong>, click the device name, and choose
+    <strong>Revoke device certificate</strong> under <strong>Device
+    certificate</strong>. Review the device before confirming. This withdraws
+    every peer certificate issued for that device identity and cannot be
+    undone. The inventory row and staged images stay in place.</p>
+    <p><strong>Check status</strong> reads the saved result without repeating
+    the revocation. <strong>Revoked</strong> does not confirm enforcement by
+    every peer. Updated peers refresh the revocation list or stop encrypted
+    peer connections when it expires, within five minutes. Clients without
+    this support can still accept the old certificate. For immediate isolation, block
+    the device's network access as well.</p>
+    <p>To return a secured device, keep its inventory row and choose
+    <strong>Allow fresh onboarding</strong>. Its old certificates stay revoked.
+    Close the panel, select the device, and <strong>Undeploy</strong> the agent
+    if it is still installed. Then choose <strong>Onboard</strong> and check
+    the result in <strong>Activity</strong>. Onboarding handles the new
+    credentials, private key and certificate identity; no key files need
+    copying.</p>
+
     <h2>Network and certificate checks</h2>
     <p>All agents need HTTPS to the catalog on TCP <code>8443</code>, HTTPS
     tracker announces on TCP <code>6969</code>, and BitTorrent TCP

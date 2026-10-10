@@ -16680,6 +16680,78 @@
                                       "aria2_rpc",
                                       "unknown"
                                     ]
+                                  },
+                                  "revocations": {
+                                    "type": "object",
+                                    "properties": {
+                                      "supported": {
+                                        "const": true
+                                      },
+                                      "mode": {
+                                        "enum": [
+                                          "required",
+                                          "disabled"
+                                        ]
+                                      },
+                                      "state": {
+                                        "enum": [
+                                          "valid",
+                                          "unavailable",
+                                          "expired"
+                                        ]
+                                      },
+                                      "authority": {
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ],
+                                        "pattern": "^[0-9a-f]{64}$"
+                                      },
+                                      "revision": {
+                                        "type": [
+                                          "integer",
+                                          "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "issued_at": {
+                                        "type": [
+                                          "integer",
+                                          "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "expires_at": {
+                                        "type": [
+                                          "integer",
+                                          "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "own_revoked": {
+                                        "type": "boolean"
+                                      },
+                                      "observed_at": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": [
+                                      "supported",
+                                      "mode",
+                                      "state",
+                                      "authority",
+                                      "revision",
+                                      "issued_at",
+                                      "expires_at",
+                                      "own_revoked",
+                                      "observed_at"
+                                    ],
+                                    "additionalProperties": false
                                   }
                                 },
                                 "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
@@ -20292,6 +20364,1180 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{device_id}/certificate": {
+      "get": {
+        "operationId": "console_get_api_v1_devices_device_id_certificate",
+        "summary": "Read device peer certificate status",
+        "description": "Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "identity_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "revoked",
+                        "reenrollment-required"
+                      ]
+                    },
+                    "revoked_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recovery_request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "peer_tls_required": {
+                      "type": "boolean"
+                    },
+                    "enforcement": {
+                      "enum": [
+                        "pending",
+                        "not-applicable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "identity_sha256",
+                    "revision",
+                    "state",
+                    "revoked_at",
+                    "request_id",
+                    "recovery_request_id",
+                    "peer_tls_required",
+                    "enforcement"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "device_id": "edge-01",
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "revision": 1,
+                  "state": "revoked",
+                  "revoked_at": 1788470400,
+                  "request_id": "00000000-0000-0000-0000-000000000001",
+                  "recovery_request_id": null,
+                  "peer_tls_required": true,
+                  "enforcement": "pending"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{device_id}/certificate/revoke": {
+      "post": {
+        "operationId": "console_post_api_v1_devices_device_id_certificate_revoke",
+        "summary": "Revoke a device peer certificate",
+        "description": "Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "identity_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "revoked",
+                        "reenrollment-required"
+                      ]
+                    },
+                    "revoked_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recovery_request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "peer_tls_required": {
+                      "type": "boolean"
+                    },
+                    "enforcement": {
+                      "enum": [
+                        "pending",
+                        "not-applicable"
+                      ]
+                    },
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "identity_sha256",
+                    "revision",
+                    "state",
+                    "revoked_at",
+                    "request_id",
+                    "recovery_request_id",
+                    "peer_tls_required",
+                    "enforcement",
+                    "applied"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "device_id": "edge-01",
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "revision": 1,
+                  "state": "revoked",
+                  "revoked_at": 1788470400,
+                  "request_id": "00000000-0000-0000-0000-000000000001",
+                  "recovery_request_id": null,
+                  "peer_tls_required": true,
+                  "enforcement": "pending",
+                  "applied": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource conflict",
+            "x-iris-problem-codes": [
+              "resource-conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-conflict",
+                  "title": "Resource conflict",
+                  "status": 409,
+                  "code": "resource-conflict"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "ConsoleDevicesDeviceIdCertificateRevokeRequest",
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expected_identity_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "expected_identity_sha256",
+                  "request_id"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "expected_revision": 0,
+                "expected_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "request_id": "00000000-0000-0000-0000-000000000001"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{device_id}/certificate/reenroll": {
+      "post": {
+        "operationId": "console_post_api_v1_devices_device_id_certificate_reenroll",
+        "summary": "Approve fresh device certificate onboarding",
+        "description": "Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "identity_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "revoked",
+                        "reenrollment-required"
+                      ]
+                    },
+                    "revoked_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recovery_request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "peer_tls_required": {
+                      "type": "boolean"
+                    },
+                    "enforcement": {
+                      "enum": [
+                        "pending",
+                        "not-applicable"
+                      ]
+                    },
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "identity_sha256",
+                    "revision",
+                    "state",
+                    "revoked_at",
+                    "request_id",
+                    "recovery_request_id",
+                    "peer_tls_required",
+                    "enforcement",
+                    "applied"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "device_id": "edge-01",
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "revision": 1,
+                  "state": "revoked",
+                  "revoked_at": 1788470400,
+                  "request_id": "00000000-0000-0000-0000-000000000001",
+                  "recovery_request_id": null,
+                  "peer_tls_required": true,
+                  "enforcement": "pending",
+                  "applied": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Content-Length or Request body not supported or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid Content-Length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required",
+            "x-iris-problem-codes": [
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                  "title": "Console session required",
+                  "status": 401,
+                  "code": "console-session-required"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource conflict",
+            "x-iris-problem-codes": [
+              "resource-conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-conflict",
+                  "title": "Resource conflict",
+                  "status": 409,
+                  "code": "resource-conflict"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content-Length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content-Length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management API unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management API unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "ConsoleDevicesDeviceIdCertificateReenrollRequest",
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expected_identity_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "expected_identity_sha256",
+                  "request_id"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "expected_revision": 1,
+                "expected_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "request_id": "00000000-0000-0000-0000-000000000002"
               }
             }
           }
@@ -28197,6 +29443,78 @@
                                         "unknown"
                                       ]
                                     },
+                                    "revocations": {
+                                      "type": "object",
+                                      "properties": {
+                                        "supported": {
+                                          "const": true
+                                        },
+                                        "mode": {
+                                          "enum": [
+                                            "required",
+                                            "disabled"
+                                          ]
+                                        },
+                                        "state": {
+                                          "enum": [
+                                            "valid",
+                                            "unavailable",
+                                            "expired"
+                                          ]
+                                        },
+                                        "authority": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ],
+                                          "pattern": "^[0-9a-f]{64}$"
+                                        },
+                                        "revision": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "issued_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "expires_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "own_revoked": {
+                                          "type": "boolean"
+                                        },
+                                        "observed_at": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        }
+                                      },
+                                      "required": [
+                                        "supported",
+                                        "mode",
+                                        "state",
+                                        "authority",
+                                        "revision",
+                                        "issued_at",
+                                        "expires_at",
+                                        "own_revoked",
+                                        "observed_at"
+                                      ],
+                                      "additionalProperties": false
+                                    },
                                     "reported_at": {
                                       "type": [
                                         "number",
@@ -28357,6 +29675,78 @@
                                                 "aria2_rpc",
                                                 "unknown"
                                               ]
+                                            },
+                                            "revocations": {
+                                              "type": "object",
+                                              "properties": {
+                                                "supported": {
+                                                  "const": true
+                                                },
+                                                "mode": {
+                                                  "enum": [
+                                                    "required",
+                                                    "disabled"
+                                                  ]
+                                                },
+                                                "state": {
+                                                  "enum": [
+                                                    "valid",
+                                                    "unavailable",
+                                                    "expired"
+                                                  ]
+                                                },
+                                                "authority": {
+                                                  "type": [
+                                                    "string",
+                                                    "null"
+                                                  ],
+                                                  "pattern": "^[0-9a-f]{64}$"
+                                                },
+                                                "revision": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "issued_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "expires_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "own_revoked": {
+                                                  "type": "boolean"
+                                                },
+                                                "observed_at": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                }
+                                              },
+                                              "required": [
+                                                "supported",
+                                                "mode",
+                                                "state",
+                                                "authority",
+                                                "revision",
+                                                "issued_at",
+                                                "expires_at",
+                                                "own_revoked",
+                                                "observed_at"
+                                              ],
+                                              "additionalProperties": false
                                             },
                                             "reported_at": {
                                               "type": [
@@ -28719,6 +30109,78 @@
                                         "unknown"
                                       ]
                                     },
+                                    "revocations": {
+                                      "type": "object",
+                                      "properties": {
+                                        "supported": {
+                                          "const": true
+                                        },
+                                        "mode": {
+                                          "enum": [
+                                            "required",
+                                            "disabled"
+                                          ]
+                                        },
+                                        "state": {
+                                          "enum": [
+                                            "valid",
+                                            "unavailable",
+                                            "expired"
+                                          ]
+                                        },
+                                        "authority": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ],
+                                          "pattern": "^[0-9a-f]{64}$"
+                                        },
+                                        "revision": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "issued_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "expires_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "own_revoked": {
+                                          "type": "boolean"
+                                        },
+                                        "observed_at": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        }
+                                      },
+                                      "required": [
+                                        "supported",
+                                        "mode",
+                                        "state",
+                                        "authority",
+                                        "revision",
+                                        "issued_at",
+                                        "expires_at",
+                                        "own_revoked",
+                                        "observed_at"
+                                      ],
+                                      "additionalProperties": false
+                                    },
                                     "reported_at": {
                                       "type": [
                                         "number",
@@ -28879,6 +30341,78 @@
                                                 "aria2_rpc",
                                                 "unknown"
                                               ]
+                                            },
+                                            "revocations": {
+                                              "type": "object",
+                                              "properties": {
+                                                "supported": {
+                                                  "const": true
+                                                },
+                                                "mode": {
+                                                  "enum": [
+                                                    "required",
+                                                    "disabled"
+                                                  ]
+                                                },
+                                                "state": {
+                                                  "enum": [
+                                                    "valid",
+                                                    "unavailable",
+                                                    "expired"
+                                                  ]
+                                                },
+                                                "authority": {
+                                                  "type": [
+                                                    "string",
+                                                    "null"
+                                                  ],
+                                                  "pattern": "^[0-9a-f]{64}$"
+                                                },
+                                                "revision": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "issued_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "expires_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "own_revoked": {
+                                                  "type": "boolean"
+                                                },
+                                                "observed_at": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                }
+                                              },
+                                              "required": [
+                                                "supported",
+                                                "mode",
+                                                "state",
+                                                "authority",
+                                                "revision",
+                                                "issued_at",
+                                                "expires_at",
+                                                "own_revoked",
+                                                "observed_at"
+                                              ],
+                                              "additionalProperties": false
                                             },
                                             "reported_at": {
                                               "type": [
@@ -59497,6 +61031,78 @@
                                       "aria2_rpc",
                                       "unknown"
                                     ]
+                                  },
+                                  "revocations": {
+                                    "type": "object",
+                                    "properties": {
+                                      "supported": {
+                                        "const": true
+                                      },
+                                      "mode": {
+                                        "enum": [
+                                          "required",
+                                          "disabled"
+                                        ]
+                                      },
+                                      "state": {
+                                        "enum": [
+                                          "valid",
+                                          "unavailable",
+                                          "expired"
+                                        ]
+                                      },
+                                      "authority": {
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ],
+                                        "pattern": "^[0-9a-f]{64}$"
+                                      },
+                                      "revision": {
+                                        "type": [
+                                          "integer",
+                                          "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "issued_at": {
+                                        "type": [
+                                          "integer",
+                                          "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "expires_at": {
+                                        "type": [
+                                          "integer",
+                                          "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "own_revoked": {
+                                        "type": "boolean"
+                                      },
+                                      "observed_at": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": [
+                                      "supported",
+                                      "mode",
+                                      "state",
+                                      "authority",
+                                      "revision",
+                                      "issued_at",
+                                      "expires_at",
+                                      "own_revoked",
+                                      "observed_at"
+                                    ],
+                                    "additionalProperties": false
                                   }
                                 },
                                 "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
@@ -62612,6 +64218,1049 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/devices/{device_id}/certificate": {
+      "get": {
+        "operationId": "management_get_internal_v1_devices_device_id_certificate",
+        "summary": "Read device peer certificate status",
+        "description": "Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "identity_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "revoked",
+                        "reenrollment-required"
+                      ]
+                    },
+                    "revoked_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recovery_request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "peer_tls_required": {
+                      "type": "boolean"
+                    },
+                    "enforcement": {
+                      "enum": [
+                        "pending",
+                        "not-applicable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "identity_sha256",
+                    "revision",
+                    "state",
+                    "revoked_at",
+                    "request_id",
+                    "recovery_request_id",
+                    "peer_tls_required",
+                    "enforcement"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "device_id": "edge-01",
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "revision": 1,
+                  "state": "revoked",
+                  "revoked_at": 1788470400,
+                  "request_id": "00000000-0000-0000-0000-000000000001",
+                  "recovery_request_id": null,
+                  "peer_tls_required": true,
+                  "enforcement": "pending"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/devices/{device_id}/certificate/revoke": {
+      "post": {
+        "operationId": "management_post_internal_v1_devices_device_id_certificate_revoke",
+        "summary": "Revoke a device peer certificate",
+        "description": "Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "identity_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "revoked",
+                        "reenrollment-required"
+                      ]
+                    },
+                    "revoked_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recovery_request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "peer_tls_required": {
+                      "type": "boolean"
+                    },
+                    "enforcement": {
+                      "enum": [
+                        "pending",
+                        "not-applicable"
+                      ]
+                    },
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "identity_sha256",
+                    "revision",
+                    "state",
+                    "revoked_at",
+                    "request_id",
+                    "recovery_request_id",
+                    "peer_tls_required",
+                    "enforcement",
+                    "applied"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "device_id": "edge-01",
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "revision": 1,
+                  "state": "revoked",
+                  "revoked_at": 1788470400,
+                  "request_id": "00000000-0000-0000-0000-000000000001",
+                  "recovery_request_id": null,
+                  "peer_tls_required": true,
+                  "enforcement": "pending",
+                  "applied": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource conflict",
+            "x-iris-problem-codes": [
+              "resource-conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-conflict",
+                  "title": "Resource conflict",
+                  "status": 409,
+                  "code": "resource-conflict"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "ManagementDevicesDeviceIdCertificateRevokeRequest",
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expected_identity_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "expected_identity_sha256",
+                  "request_id"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "expected_revision": 0,
+                "expected_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "request_id": "00000000-0000-0000-0000-000000000001"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/devices/{device_id}/certificate/reenroll": {
+      "post": {
+        "operationId": "management_post_internal_v1_devices_device_id_certificate_reenroll",
+        "summary": "Approve fresh device certificate onboarding",
+        "description": "Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "identity_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "revoked",
+                        "reenrollment-required"
+                      ]
+                    },
+                    "revoked_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recovery_request_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "peer_tls_required": {
+                      "type": "boolean"
+                    },
+                    "enforcement": {
+                      "enum": [
+                        "pending",
+                        "not-applicable"
+                      ]
+                    },
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "identity_sha256",
+                    "revision",
+                    "state",
+                    "revoked_at",
+                    "request_id",
+                    "recovery_request_id",
+                    "peer_tls_required",
+                    "enforcement",
+                    "applied"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "device_id": "edge-01",
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "revision": 1,
+                  "state": "revoked",
+                  "revoked_at": 1788470400,
+                  "request_id": "00000000-0000-0000-0000-000000000001",
+                  "recovery_request_id": null,
+                  "peer_tls_required": true,
+                  "enforcement": "pending",
+                  "applied": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Management authentication required or Console session required",
+            "x-iris-problem-codes": [
+              "management-authentication-required",
+              "console-session-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  },
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF validation failed or Forbidden",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed",
+              "forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "csrf-validation-failed": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                      "title": "CSRF validation failed",
+                      "status": 403,
+                      "code": "csrf-validation-failed"
+                    }
+                  },
+                  "forbidden": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#forbidden",
+                      "title": "Forbidden",
+                      "status": 403,
+                      "code": "forbidden"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found or Route not found",
+            "x-iris-problem-codes": [
+              "resource-not-found",
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "resource-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                      "title": "Resource not found",
+                      "status": 404,
+                      "code": "resource-not-found"
+                    }
+                  },
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource conflict",
+            "x-iris-problem-codes": [
+              "resource-conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-conflict",
+                  "title": "Resource conflict",
+                  "status": 409,
+                  "code": "resource-conflict"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "x-iris-problem-codes": [
+              "rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#rate-limit-exceeded",
+                  "title": "Rate limit exceeded",
+                  "status": 429,
+                  "code": "rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "x-iris-problem-codes": [
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                  "title": "Service unavailable",
+                  "status": 503,
+                  "code": "service-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "ManagementDevicesDeviceIdCertificateReenrollRequest",
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expected_identity_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "expected_identity_sha256",
+                  "request_id"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "expected_revision": 1,
+                "expected_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "request_id": "00000000-0000-0000-0000-000000000002"
               }
             }
           }
@@ -69448,6 +72097,78 @@
                                         "unknown"
                                       ]
                                     },
+                                    "revocations": {
+                                      "type": "object",
+                                      "properties": {
+                                        "supported": {
+                                          "const": true
+                                        },
+                                        "mode": {
+                                          "enum": [
+                                            "required",
+                                            "disabled"
+                                          ]
+                                        },
+                                        "state": {
+                                          "enum": [
+                                            "valid",
+                                            "unavailable",
+                                            "expired"
+                                          ]
+                                        },
+                                        "authority": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ],
+                                          "pattern": "^[0-9a-f]{64}$"
+                                        },
+                                        "revision": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "issued_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "expires_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "own_revoked": {
+                                          "type": "boolean"
+                                        },
+                                        "observed_at": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        }
+                                      },
+                                      "required": [
+                                        "supported",
+                                        "mode",
+                                        "state",
+                                        "authority",
+                                        "revision",
+                                        "issued_at",
+                                        "expires_at",
+                                        "own_revoked",
+                                        "observed_at"
+                                      ],
+                                      "additionalProperties": false
+                                    },
                                     "reported_at": {
                                       "type": [
                                         "number",
@@ -69608,6 +72329,78 @@
                                                 "aria2_rpc",
                                                 "unknown"
                                               ]
+                                            },
+                                            "revocations": {
+                                              "type": "object",
+                                              "properties": {
+                                                "supported": {
+                                                  "const": true
+                                                },
+                                                "mode": {
+                                                  "enum": [
+                                                    "required",
+                                                    "disabled"
+                                                  ]
+                                                },
+                                                "state": {
+                                                  "enum": [
+                                                    "valid",
+                                                    "unavailable",
+                                                    "expired"
+                                                  ]
+                                                },
+                                                "authority": {
+                                                  "type": [
+                                                    "string",
+                                                    "null"
+                                                  ],
+                                                  "pattern": "^[0-9a-f]{64}$"
+                                                },
+                                                "revision": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "issued_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "expires_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "own_revoked": {
+                                                  "type": "boolean"
+                                                },
+                                                "observed_at": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                }
+                                              },
+                                              "required": [
+                                                "supported",
+                                                "mode",
+                                                "state",
+                                                "authority",
+                                                "revision",
+                                                "issued_at",
+                                                "expires_at",
+                                                "own_revoked",
+                                                "observed_at"
+                                              ],
+                                              "additionalProperties": false
                                             },
                                             "reported_at": {
                                               "type": [
@@ -69970,6 +72763,78 @@
                                         "unknown"
                                       ]
                                     },
+                                    "revocations": {
+                                      "type": "object",
+                                      "properties": {
+                                        "supported": {
+                                          "const": true
+                                        },
+                                        "mode": {
+                                          "enum": [
+                                            "required",
+                                            "disabled"
+                                          ]
+                                        },
+                                        "state": {
+                                          "enum": [
+                                            "valid",
+                                            "unavailable",
+                                            "expired"
+                                          ]
+                                        },
+                                        "authority": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ],
+                                          "pattern": "^[0-9a-f]{64}$"
+                                        },
+                                        "revision": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "issued_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "expires_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "own_revoked": {
+                                          "type": "boolean"
+                                        },
+                                        "observed_at": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        }
+                                      },
+                                      "required": [
+                                        "supported",
+                                        "mode",
+                                        "state",
+                                        "authority",
+                                        "revision",
+                                        "issued_at",
+                                        "expires_at",
+                                        "own_revoked",
+                                        "observed_at"
+                                      ],
+                                      "additionalProperties": false
+                                    },
                                     "reported_at": {
                                       "type": [
                                         "number",
@@ -70130,6 +72995,78 @@
                                                 "aria2_rpc",
                                                 "unknown"
                                               ]
+                                            },
+                                            "revocations": {
+                                              "type": "object",
+                                              "properties": {
+                                                "supported": {
+                                                  "const": true
+                                                },
+                                                "mode": {
+                                                  "enum": [
+                                                    "required",
+                                                    "disabled"
+                                                  ]
+                                                },
+                                                "state": {
+                                                  "enum": [
+                                                    "valid",
+                                                    "unavailable",
+                                                    "expired"
+                                                  ]
+                                                },
+                                                "authority": {
+                                                  "type": [
+                                                    "string",
+                                                    "null"
+                                                  ],
+                                                  "pattern": "^[0-9a-f]{64}$"
+                                                },
+                                                "revision": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "issued_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "expires_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "own_revoked": {
+                                                  "type": "boolean"
+                                                },
+                                                "observed_at": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                }
+                                              },
+                                              "required": [
+                                                "supported",
+                                                "mode",
+                                                "state",
+                                                "authority",
+                                                "revision",
+                                                "issued_at",
+                                                "expires_at",
+                                                "own_revoked",
+                                                "observed_at"
+                                              ],
+                                              "additionalProperties": false
                                             },
                                             "reported_at": {
                                               "type": [
@@ -86143,6 +89080,78 @@
                           "aria2_rpc",
                           "unknown"
                         ]
+                      },
+                      "revocations": {
+                        "type": "object",
+                        "properties": {
+                          "supported": {
+                            "const": true
+                          },
+                          "mode": {
+                            "enum": [
+                              "required",
+                              "disabled"
+                            ]
+                          },
+                          "state": {
+                            "enum": [
+                              "valid",
+                              "unavailable",
+                              "expired"
+                            ]
+                          },
+                          "authority": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "revision": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "issued_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "expires_at": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "own_revoked": {
+                            "type": "boolean"
+                          },
+                          "observed_at": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "supported",
+                          "mode",
+                          "state",
+                          "authority",
+                          "revision",
+                          "issued_at",
+                          "expires_at",
+                          "own_revoked",
+                          "observed_at"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "description": "Last reported torrent TLS daemon policy, not negotiated connection evidence. Missing means unknown."
@@ -87536,13 +90545,17 @@
                     },
                     "renew_before_seconds": {
                       "type": "integer"
+                    },
+                    "identity_sha256": {
+                      "type": "string"
                     }
                   },
                   "required": [
                     "mode",
                     "certificate",
                     "ca",
-                    "renew_before_seconds"
+                    "renew_before_seconds",
+                    "identity_sha256"
                   ],
                   "additionalProperties": true
                 },
@@ -87550,7 +90563,8 @@
                   "mode": "required",
                   "certificate": "-----BEGIN CERTIFICATE-----\n...",
                   "ca": "-----BEGIN CERTIFICATE-----\n...",
-                  "renew_before_seconds": 21600
+                  "renew_before_seconds": 21600,
+                  "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }
               }
             }
@@ -87814,6 +90828,229 @@
               },
               "example": {
                 "csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/devices/{device_id}/peer-tls-revocations": {
+      "get": {
+        "operationId": "catalog_get_v1_devices_device_id_peer_tls_revocations",
+        "summary": "Read current peer certificate revocations",
+        "description": "Read the current complete peer-certificate identity deny list using the current same-device catalog Bearer over pinned HTTPS. A fresh 32-character lowercase hexadecimal nonce is required and echoed. The ASCII snapshot binds the issuing CA DER SHA256, monotonically increasing revision, issue time, five-minute expiry and at most 10,000 sorted identity hashes. Clients reject rollback and changed deny lists at the same revision; missing, invalid or expired snapshots stop peer traffic. Poll every 30 seconds.",
+        "tags": [
+          "catalog"
+        ],
+        "x-iris-service": "catalog",
+        "x-iris-security": "deviceBearer",
+        "servers": [
+          {
+            "url": "https://iris.example:8443",
+            "description": "Device catalog"
+          }
+        ],
+        "security": [
+          {
+            "deviceBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "nonce",
+            "in": "query",
+            "required": true,
+            "description": "Fresh client challenge echoed by the authenticated response",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "example": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CA-bound complete identity deny list, valid for five minutes",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema": {
+                      "const": 1
+                    },
+                    "nonce": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    "snapshot": {
+                      "type": "string",
+                      "maxLength": 1048576
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "nonce",
+                    "snapshot"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schema": 1,
+                  "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "snapshot": "IRIS-PEER-REVOCATIONS-1\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n0\n1788470400\n1788470700\n"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Catalog authentication required",
+            "x-iris-problem-codes": [
+              "catalog-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#catalog-authentication-required",
+                  "title": "Catalog authentication required",
+                  "status": 401,
+                  "code": "catalog-authentication-required"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "x-iris-problem-codes": [
+              "resource-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-not-found",
+                  "title": "Resource not found",
+                  "status": 404,
+                  "code": "resource-not-found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource conflict",
+            "x-iris-problem-codes": [
+              "resource-conflict"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#resource-conflict",
+                  "title": "Resource conflict",
+                  "status": 409,
+                  "code": "resource-conflict"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "x-iris-problem-codes": [
+              "internal-error"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#internal-error",
+                  "title": "Internal server error",
+                  "status": 500,
+                  "code": "internal-error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Credential store unavailable",
+            "x-iris-problem-codes": [
+              "credential-store-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable",
+                  "title": "Credential store unavailable",
+                  "status": 503,
+                  "code": "credential-store-unavailable"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
               }
             }
           }
@@ -88354,6 +91591,78 @@
                                         "unknown"
                                       ]
                                     },
+                                    "revocations": {
+                                      "type": "object",
+                                      "properties": {
+                                        "supported": {
+                                          "const": true
+                                        },
+                                        "mode": {
+                                          "enum": [
+                                            "required",
+                                            "disabled"
+                                          ]
+                                        },
+                                        "state": {
+                                          "enum": [
+                                            "valid",
+                                            "unavailable",
+                                            "expired"
+                                          ]
+                                        },
+                                        "authority": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ],
+                                          "pattern": "^[0-9a-f]{64}$"
+                                        },
+                                        "revision": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "issued_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "expires_at": {
+                                          "type": [
+                                            "integer",
+                                            "null"
+                                          ],
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "own_revoked": {
+                                          "type": "boolean"
+                                        },
+                                        "observed_at": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        }
+                                      },
+                                      "required": [
+                                        "supported",
+                                        "mode",
+                                        "state",
+                                        "authority",
+                                        "revision",
+                                        "issued_at",
+                                        "expires_at",
+                                        "own_revoked",
+                                        "observed_at"
+                                      ],
+                                      "additionalProperties": false
+                                    },
                                     "reported_at": {
                                       "type": [
                                         "number",
@@ -88514,6 +91823,78 @@
                                                 "aria2_rpc",
                                                 "unknown"
                                               ]
+                                            },
+                                            "revocations": {
+                                              "type": "object",
+                                              "properties": {
+                                                "supported": {
+                                                  "const": true
+                                                },
+                                                "mode": {
+                                                  "enum": [
+                                                    "required",
+                                                    "disabled"
+                                                  ]
+                                                },
+                                                "state": {
+                                                  "enum": [
+                                                    "valid",
+                                                    "unavailable",
+                                                    "expired"
+                                                  ]
+                                                },
+                                                "authority": {
+                                                  "type": [
+                                                    "string",
+                                                    "null"
+                                                  ],
+                                                  "pattern": "^[0-9a-f]{64}$"
+                                                },
+                                                "revision": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "issued_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "expires_at": {
+                                                  "type": [
+                                                    "integer",
+                                                    "null"
+                                                  ],
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                },
+                                                "own_revoked": {
+                                                  "type": "boolean"
+                                                },
+                                                "observed_at": {
+                                                  "type": "integer",
+                                                  "minimum": 0,
+                                                  "maximum": 9007199254740991
+                                                }
+                                              },
+                                              "required": [
+                                                "supported",
+                                                "mode",
+                                                "state",
+                                                "authority",
+                                                "revision",
+                                                "issued_at",
+                                                "expires_at",
+                                                "own_revoked",
+                                                "observed_at"
+                                              ],
+                                              "additionalProperties": false
                                             },
                                             "reported_at": {
                                               "type": [

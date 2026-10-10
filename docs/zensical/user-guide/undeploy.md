@@ -56,6 +56,46 @@ IRIS-named artifacts only, never your network configuration.
 !!! warning "Force does not repair an IOx verification failure"
     Recover and reconcile the journal first: see [Recover from an interrupted job or damaged state](../admin-guide/recovery.md).
 
+### Revoke a device certificate
+
+Revoke a device's peer certificate when it may have been copied or the device
+should no longer join encrypted peer transfers. The inventory row and staged
+images stay in place.
+
+1. Open **Inventory** and click the device name.
+2. In **Device certificate**, choose **Revoke device certificate**.
+3. Review the named device and confirm. Revocation applies to every certificate
+   issued for that device identity and cannot be undone.
+4. Choose **Check status** to read the saved result. If the request result is
+   unknown, this checks the server without sending another revocation.
+
+Peer TLS must be required before the action is available. **Not revoked** means
+no revocation is recorded; it does not prove that a certificate has been issued.
+**Revoked** confirms the saved decision, not enforcement by every peer.
+Updated peers refresh the revocation list or stop encrypted peer connections
+when it expires, within five minutes. Clients without this support can still
+accept the old certificate. For immediate isolation, block the device's network access
+as well. **Certificate and device report details** shows the last reported
+list revision and time. This is one device's report, not proof for every peer.
+
+### Return a device after revocation
+
+First secure the device and decide that it can be trusted again. Keep its
+inventory row; you can return it under the same device name.
+
+1. Open the device details and choose **Allow fresh onboarding**. Review the
+   device and confirm. Its old certificates remain permanently revoked.
+2. Close the panel and select that device in **Inventory**. If the IRIS agent
+   is still installed, choose **Undeploy** and wait for completion.
+3. Choose **Onboard** and follow the job in **Activity**. Onboarding creates
+   fresh credentials and a new private key and certificate identity.
+4. Check that onboarding completes and the device reports in again.
+
+Approval alone does not change the device or restore access. **Fresh onboarding
+required** remains until fresh credentials are created. A new identity does
+not prove that the whole onboarding job completed; check **Activity**.
+You do not need to copy certificate or key files yourself.
+
 ### Retire a device from the inventory
 
 Delete revokes the device's credentials first. If that write fails, the delete stops and nothing else changes. The rest of the cleanup is best effort, and a partial cleanup is reported.

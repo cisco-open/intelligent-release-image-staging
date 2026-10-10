@@ -973,6 +973,7 @@ STUB
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
   grep -qx -- '--bt-peer-tls=required' "$tmp/launched"
+  grep -qx -- "--bt-peer-tls-revocations=$tmp/stage/peer-tls/revocations.txt" "$tmp/launched"
   grep -qx 'bt-peer-tls=required' "$tmp/home/aria2.conf"
   rm -rf "$tmp"
 }

@@ -160,8 +160,28 @@ Encrypting the payload between peers is one setting for the whole swarm, off by 
 
 When it is required, peers use TLS 1.3 with a hybrid key exchange, an authenticated cipher, a dedicated application protocol name, and mutual certificate checks, and a required peer never falls back to plain text. Each device generates its own private key, sends a certificate request over the catalog connection it already trusts, and receives a certificate valid for 24 hours, renewed six hours before it expires. A missing, expired or mismatched identity stops the peer from starting.
 
+The Console can revoke every peer certificate for one device identity without
+deleting its inventory row. Issuance and renewal stop for that identity.
+Updated clients receive the revocation list over the pinned catalog HTTPS
+connection. The list names its certificate authority, revision and expiry;
+clients reject another authority, an older revision or a list lasting more
+than five minutes. A failed refresh does not extend its expiry. Native peer
+transport rejects revoked identities and stops encrypted peer connections
+when the list expires.
+
+Revocation remains recorded through inventory deletion, onboarding and server
+restarts. **Allow fresh onboarding** approves a new identity for the same
+inventory device; it never removes the old revocation. The approval changes
+no device files. Normal onboarding creates fresh credentials and the device
+generates a new private key. See
+[Revoke a device certificate](../user-guide/undeploy.md#revoke-a-device-certificate).
+
 !!! warning
-    Revoking a device's catalog token prevents renewal, but a certificate already issued can still authenticate new connections until it expires. Token revocation does not immediately disconnect established peer sessions; certificate expiry is checked during the TLS handshake, not continuously on an open connection. Replacing the issuing authority means enrolling every peer again. See [Find your way around the Console](../user-guide/console.md).
+    Revoking only the catalog token prevents renewal; it is separate from
+    withdrawing a peer certificate. Clients without revocation support can
+    accept unexpired certificates and continue existing transfers. For immediate
+    isolation, block the device's network access. A saved revocation or one device's report is not proof
+    that every peer has enforced it.
 
 ## Image authenticity: the Bulk Hash check
 

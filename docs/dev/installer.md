@@ -258,7 +258,7 @@ image builds and writes `local-candidate.json` with `authenticated: false`.
 Add `--ubuntu-dependencies /path/to/iris-ubuntu-dependencies.tar.gz` for a prepared
 Ubuntu dependency archive. Use a new output directory within a protected parent.
 
-Add `--aria2-sources /path/to/aria2c-2.5.6-p10-source.tar.gz` to carry the reviewed
+Add `--aria2-sources /path/to/aria2c-2.5.6-p11-source.tar.gz` to carry the reviewed
 aria2 source companion. Before building, the helper checks the selected commit's
 source checksum, source-input manifest and both client binaries, including ARM64.
 It keeps an immutable private copy and records the binding in `local-candidate.json`.

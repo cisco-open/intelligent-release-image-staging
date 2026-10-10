@@ -4,6 +4,7 @@
 
 import {validRecordResponse} from './device-details-model.mjs';
 import {validRows} from './monitoring-model.mjs';
+import {DeviceCertificateController} from './device-certificate-controller.mjs';
 
 const uncertain = 'The host-key request outcome is unknown. Check the saved host key before trying again.';
 
@@ -16,6 +17,7 @@ export class DeviceDetailsController {
     this.mutations = new Set();
     this.listeners = new Set();
     this.disposed = false;
+    this.certificate = new DeviceCertificateController(certificate => this.patch({certificate}));
   }
   subscribe = listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
   snapshot = () => this.state;
@@ -25,7 +27,7 @@ export class DeviceDetailsController {
     this.listeners.forEach(listener => listener());
   }
   patch(patch) { if (this.state) this.update({...this.state, ...patch}); }
-  connect(services) { this.services = services; }
+  connect(services) { this.services = services; this.certificate.connect(services); }
   current(generation) { return !this.disposed && !!this.state && generation === this.generation; }
   invalidate() {
     this.generation++; this.fileGeneration++;
@@ -41,7 +43,7 @@ export class DeviceDetailsController {
       logNote: 'Loading…', file: null, forgetBusy: this.mutations.has(id),
       forgetStatus: this.mutations.has(id) ? 'Earlier host-key request is still pending.' : ''});
     // Independent reads: malformed/missing records must not hide device logs.
-    return Promise.all([this.loadRecord(id, generation), this.loadLogs(id, generation)]);
+    return Promise.all([this.loadRecord(id, generation), this.loadLogs(id, generation), this.certificate.open(id)]);
   }
   async loadRecord(id, generation) {
     try {
@@ -117,6 +119,6 @@ export class DeviceDetailsController {
         forgetStatus: sent ? 'Earlier host-key request ended. Check the saved host key before trying again.' : ''});
     }
   }
-  close(restoreFocus = true) { this.restoreFocus = restoreFocus; this.invalidate(); this.update(null); }
-  dispose() { this.invalidate(); this.disposed = true; this.listeners.clear(); }
+  close(restoreFocus = true) { this.restoreFocus = restoreFocus; this.invalidate(); this.certificate.close(); this.update(null); }
+  dispose() { this.invalidate(); this.certificate.close(); this.disposed = true; this.listeners.clear(); }
 }

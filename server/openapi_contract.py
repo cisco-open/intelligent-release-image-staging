@@ -1117,6 +1117,16 @@ def _peer_tls_schema(projected=False, origin=False):
     if origin:
         properties.pop("configured_mode")
     required = list(properties)
+    properties["revocations"] = _schedule_object({
+        "supported": {"const": True},
+        "mode": {"enum": ["required", "disabled"]},
+        "state": {"enum": ["valid", "unavailable", "expired"]},
+        "authority": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        **{field: {"type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991}
+           for field in ("revision", "issued_at", "expires_at")},
+        "own_revoked": {"type": "boolean"},
+        "observed_at": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    })
     if projected:
         properties["reported_at"] = {"type": ["number", "null"]}
     return {"type": "object", "additionalProperties": False,
@@ -1596,6 +1606,11 @@ def _query_parameters(route):
     path = route.path
     suffix = _resource_suffix(route)
     params = []
+    if path == "/v1/devices/{device_id}/peer-tls-revocations":
+        params.append({"name": "nonce", "in": "query", "required": True,
+                       "description": "Fresh client challenge echoed by the authenticated response",
+                       "schema": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+                       "example": "a" * 32})
     if _schedule_resource(route) and suffix.endswith(("/occurrences",
                                                       "/receipts")):
         occurrence_page = suffix.endswith("/occurrences")
@@ -1897,6 +1912,14 @@ _JSON_REQUESTS = {
     "/devices/{device_id}/platform": ({"platform": "iox"},
                                       ("platform",), True),
     "/devices/{device_id}/forget-host-key": ({}, (), False),
+    "/devices/{device_id}/certificate/revoke": (
+        {"expected_revision": 0, "expected_identity_sha256": "a" * 64,
+         "request_id": "00000000-0000-0000-0000-000000000001"},
+        ("expected_revision", "expected_identity_sha256", "request_id"), True),
+    "/devices/{device_id}/certificate/reenroll": (
+        {"expected_revision": 1, "expected_identity_sha256": "a" * 64,
+         "request_id": "00000000-0000-0000-0000-000000000002"},
+        ("expected_revision", "expected_identity_sha256", "request_id"), True),
     "/devices/{device_id}/request-report": ({}, (), False),
     "/devices/{device_id}/peer-telemetry": (
         {"interval_s": 10, "confirm_token": "candidate-bound-sha256"}, ("interval_s",), True),
@@ -2122,6 +2145,13 @@ def _request_body(route):
         schema["additionalProperties"] = False
         for field in ("mode", "expected_mode"):
             schema["properties"][field]["enum"] = ["disabled", "required"]
+    if suffix in ("/devices/{device_id}/certificate/revoke", "/devices/{device_id}/certificate/reenroll"):
+        schema["additionalProperties"] = False
+        schema["properties"]["expected_revision"] = {
+            "type": "integer", "minimum": 0, "maximum": 9007199254740991}
+        schema["properties"]["expected_identity_sha256"] = {
+            "type": "string", "pattern": "^[0-9a-f]{64}$"}
+        schema["properties"]["request_id"] = {"type": "string", "format": "uuid"}
     if suffix in ("/devices/{device_id}/onboard", "/devices/{device_id}/undeploy"):
         schema["properties"]["log"].update({
             "default": False,
@@ -2572,7 +2602,8 @@ def _json_success_example(route):
         "/v1/devices/{device_id}/live-telemetry": {"ok": True},
         "/v1/devices/{device_id}/peer-tls": {
             "mode": "required", "certificate": "-----BEGIN CERTIFICATE-----\n...",
-            "ca": "-----BEGIN CERTIFICATE-----\n...", "renew_before_seconds": 21600},
+            "ca": "-----BEGIN CERTIFICATE-----\n...", "renew_before_seconds": 21600,
+            "identity_sha256": "a" * 64},
         "/v1/devices/{device_id}/token-refresh": {
             "catalog_token": "replacement-catalog-token",
             "expires_at": 1788556800},
@@ -2631,6 +2662,37 @@ def _success(route):
         return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
+    if suffix in ("/devices/{device_id}/certificate", "/devices/{device_id}/certificate/revoke", "/devices/{device_id}/certificate/reenroll"):
+        properties = {
+            "device_id": {"type": "string", "maxLength": 128},
+            "identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "state": {"enum": ["active", "revoked", "reenrollment-required"]},
+            "revoked_at": {"type": ["integer", "null"], "minimum": 0},
+            "request_id": {"type": ["string", "null"], "format": "uuid"},
+            "recovery_request_id": {"type": ["string", "null"], "format": "uuid"},
+            "peer_tls_required": {"type": "boolean"},
+            "enforcement": {"enum": ["pending", "not-applicable"]},
+        }
+        example = {"device_id": "edge-01", "identity_sha256": "a" * 64,
+                   "revision": 1, "state": "revoked", "revoked_at": 1788470400,
+                   "request_id": "00000000-0000-0000-0000-000000000001",
+                   "recovery_request_id": None,
+                   "peer_tls_required": True, "enforcement": "pending"}
+        if route.method == "POST":
+            properties["applied"] = {"type": "boolean"}
+            example["applied"] = True
+        return "200", {"description": "Durable certificate identity withdrawal; not proof every peer has applied it",
+                       "content": {"application/json": _media(_schedule_object(properties), example)}}
+    if path == "/v1/devices/{device_id}/peer-tls-revocations":
+        example = {"schema": 1, "nonce": "a" * 32,
+                   "snapshot": "IRIS-PEER-REVOCATIONS-1\n" + "b" * 64 + "\n0\n1788470400\n1788470700\n"}
+        schema = _schedule_object({"schema": {"const": 1},
+                                   "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+                                   "snapshot": {"type": "string", "maxLength": 1048576}})
+        return "200", {"description": "CA-bound complete identity deny list, valid for five minutes",
+                       "headers": {"Cache-Control": {"schema": {"type": "string"}, "example": "private, no-store"}},
+                       "content": {"application/json": _media(schema, example)}}
     if suffix == "/peer-policy/origin-enforcement":
         writing = route.method == "PUT"
         media = _media(_origin_control_schema(writing), _origin_control_example())
@@ -3523,6 +3585,8 @@ def _error_statuses(route):
         return (401, 404)
     if route.service == "catalog":
         if route.method == "GET":
+            if suffix.endswith("/peer-tls-revocations"):
+                return (400, 401, 404, 409, 500, 503)
             return (400, 401, 404, 500, 503)
         statuses = [400, 401, 404, 411, 413, 500, 503]
         if suffix.endswith("/peer-tls"):
@@ -3587,6 +3651,8 @@ def _error_statuses(route):
                   "/devices/{device_id}/adopt",
                   "/devices/{device_id}/onboard",
                   "/devices/{device_id}/undeploy",
+                  "/devices/{device_id}/certificate/revoke",
+                  "/devices/{device_id}/certificate/reenroll",
                   "/onboard/jobs/{job_id}/abort",
                   "/settings/audit-export/run", "/settings/peer-tls"):
         statuses.add(409)
@@ -3689,6 +3755,22 @@ def _resource_path_exception(route):
 
 def _description(route):
     notes = [route.summary + "."]
+    if route.path.endswith(("/certificate", "/certificate/revoke", "/certificate/reenroll")):
+        return ("Read or withdraw one device's peer TLS certificate identity while retaining its inventory entry. "
+                "The status 'active' means not revoked; it does not attest that a certificate has been issued or remains valid. "
+                "Withdrawal requires TLS mode, the reviewed identity SHA256 and revision, and a UUID request_id. "
+                "The durable request ID is bound to the device, identity and reviewed revision. Retrying the same request is safe; "
+                "a conflicting review returns 409. A 503 may follow a completed write: GET reconciles the authoritative state. "
+                "Revoked identities remain denied across restart and inventory removal. The reenroll action approves fresh onboarding "
+                "for the same inventory entry and returns reenrollment-required; it does not restore old certificate access. "
+                "Only explicit onboarding, after old catalog credentials are replaced durably, activates the new random certificate identity. "
+                "Queued or running device jobs must finish first. The response does not prove peer-wide enforcement.")
+    if route.path == "/v1/devices/{device_id}/peer-tls-revocations":
+        return ("Read the current complete peer-certificate identity deny list using the current same-device catalog Bearer "
+                "over pinned HTTPS. A fresh 32-character lowercase hexadecimal nonce is required and echoed. "
+                "The ASCII snapshot binds the issuing CA DER SHA256, monotonically increasing revision, issue time, "
+                "five-minute expiry and at most 10,000 sorted identity hashes. Clients reject rollback and changed deny lists "
+                "at the same revision; missing, invalid or expired snapshots stop peer traffic. Poll every 30 seconds.")
     if route.path.endswith("/settings/peer-tls"):
         return ("Read or change process-wide BitTorrent peer TLS. Defaults to disabled. "
                 "Changes persist across restarts and restart the origin seeder automatically. "

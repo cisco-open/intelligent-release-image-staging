@@ -188,6 +188,16 @@ def poll_seeder(rpc):
             peer_tls = {"runtime_mode": mode, "runtime_source": "aria2_rpc"}
     except Exception:
         pass
+    if peer_tls['runtime_mode'] == 'required':
+        try:
+            import peer_tls_revocations
+            status = rpc('aria2.getPeerTLSRevocationStatus', [])
+            if isinstance(status, dict):
+                status = peer_tls_revocations.observation(dict(status, observed_at=int(time.time())))
+                if status is not None:
+                    peer_tls['revocations'] = status
+        except Exception:
+            pass
     connections = sum(_int(d.get("connections")) for d in active)
     names, totals, upload_bps = {}, {}, {}
     for d in active:

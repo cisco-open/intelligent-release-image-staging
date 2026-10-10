@@ -26,9 +26,9 @@ command-line / RPC interface and remains under its own license:
                the historical OpenSSL/SSLeay exception to OpenSSL 3.x.
                Original source notices and exceptions remain intact.
                Provided by aria2-next (a fork of aria2), built as a
-               fully-static musl binary by a separate project which pins the
-               source by commit SHA and applies local patches. It is HANDED IN
-               to this repository as a binary artifact and is NOT built here.
+               fully-static musl binary from pinned source and local patches.
+               Contributor rebuilds use the recorded recipe and dependencies;
+               normal installation uses the tested precompiled clients.
                The tested client for each architecture IS COMMITTED in this
                repository — bin/aria2c and deliverables/aria2c-x86_64 (the
                same bytes) and deliverables/aria2c-aarch64 — so a clone
@@ -55,15 +55,15 @@ command-line / RPC interface and remains under its own license:
                d4971f0e12322e2ffcdb1721911b7d5c6206d0e5; the patches in
                tools/aria2c-patches/, applied in numeric order; and the
                scripts used to control compilation in tools/aria2c-build/
-               (Dockerfile + build.sh). The README in each directory
+               (Dockerfile, rebuild-pinned.py, apk-lock.json and build.sh).
+               The README in each directory
                explains how to rebuild. These inputs identify the source of the
                binaries committed here: tools/aria2c.sha256 records the
                aria2-next version, the same source pin, the exact patch list
                applied, and the sha256 of each committed binary.
 
-               Corresponding source and binary release:
-               https://github.com/cisco-open/intelligent-release-image-staging/releases/tag/aria2c-2.5.6-p10
-               The source archive accompanies the binaries at that release.
+               Current corresponding source: aria2c-2.5.6-p11-source.tar.gz.
+               This local source record does not assert a published p11 release.
                It contains the pinned upstream tree, local patches, build
                recipes, dependency source archives and Alpine packaging
                patches, original license texts, and recorded provenance.

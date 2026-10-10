@@ -31,7 +31,8 @@ def test_observation_preserves_configured_and_running_mode(configured, runtime):
     result = iris_agent._peer_tls_observation({"peer_tls_mode": configured}, rpc)
     assert result == {"configured_mode": configured, "runtime_mode": runtime,
                       "runtime_source": "aria2_rpc"}
-    assert calls == [("aria2.getGlobalOption", [])]
+    assert calls == [("aria2.getGlobalOption", [])] + (
+        [("aria2.getPeerTLSRevocationStatus", [])] if runtime == 'required' else [])
     assert "do-not-export" not in json.dumps(result)
 
 
@@ -51,6 +52,19 @@ def test_failed_rpc_preserves_desired_mode_without_leaking_error():
     assert result == {"configured_mode": "required", "runtime_mode": "unknown",
                       "runtime_source": "unknown"}
     assert "credential" not in json.dumps(result)
+
+
+def test_observation_includes_only_valid_native_revocation_acknowledgement():
+    status = dict(supported=True, mode='required', state='valid', authority='a' * 64,
+                  revision=8, issued_at=1000, expires_at=1300, own_revoked=False)
+    def rpc(method, params):
+        return {'bt-peer-tls': 'required'} if method == 'aria2.getGlobalOption' else status
+    result = iris_agent._peer_tls_observation({'peer_tls_mode': 'required'}, rpc)
+    observed = result['revocations'].pop('observed_at')
+    assert type(observed) is int
+    assert result['revocations'] == status
+    status['private_path'] = '/must/not/export'
+    assert 'revocations' not in iris_agent._peer_tls_observation({}, rpc)
 
 
 def test_dependency_replacement_retains_and_can_replace_callback():
@@ -105,6 +119,8 @@ def test_runtime_callback_caches_only_within_one_agent_tick(tmp_path, monkeypatc
     modes = iter(("required", "disabled"))
     def urlopen(request, timeout):
         body = json.loads(request.data)
+        if body['method'] == 'aria2.getPeerTLSRevocationStatus':
+            raise OSError('older client has no revocation status RPC')
         assert body["method"] == "aria2.getGlobalOption"
         assert request.full_url == "http://127.0.0.1:6800/jsonrpc"
         assert timeout == 10

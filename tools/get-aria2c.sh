@@ -150,10 +150,10 @@ esac
 # half-built producer tree must not take its place. Every candidate is
 # verified against tools/aria2c.sha256 below, so a stale copy fails closed
 # either way.
-# The published deliverables live on a release of their own, tagged by the
-# aria2-next version and patch count rather than by an IRIS CalVer release:
-# the binary changes only when the build does.
-ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p10}"
+# When published, deliverables use their own release tag based on the
+# aria2-next version and patch count rather than the IRIS CalVer version.
+# A committed development client may precede publication of those assets.
+ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p11}"
 ARIA2C_RELEASE_URL="${ARIA2C_RELEASE_URL:-https://github.com/cisco-open/intelligent-release-image-staging/releases/download/$ARIA2C_RELEASE_TAG/aria2c-$ARCH}"
 
 DOWNLOADED=""

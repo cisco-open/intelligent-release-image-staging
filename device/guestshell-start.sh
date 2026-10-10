@@ -200,7 +200,7 @@ _peer_mode="${IRIS_PEER_TLS_MODE:-$(sed -n 's/^[[:space:]]*peer_tls_mode[[:space
 case "${_peer_mode:-disabled}" in
   disabled) ;;
   required)
-    python3 "$STAGE_DIR/agent/peer_tls.py" --conf "$_peer_conf" >> "$_aria2_conf_tmp" \
+    python3 "$STAGE_DIR/agent/peer_tls.py" --conf "$_peer_conf" --start-revocation-watch >> "$_aria2_conf_tmp" \
       || _peer_tls_failed=1 ;;
   *) _peer_tls_failed=1 ;;
 esac
@@ -555,7 +555,7 @@ unset _aria2_binary_tmp
 # Put the requirement on argv too: old aria2 ignores unknown config keys,
 # but rejects an unknown command-line option before opening any socket.
 if [ "${_peer_mode:-disabled}" = required ]; then
-  set -- "$@" --bt-peer-tls=required
+  set -- "$@" --bt-peer-tls=required --bt-peer-tls-revocations="$STAGE_DIR/peer-tls/revocations.txt"
 fi
 exec "$ARIA2" \
   --daemon=true \

@@ -143,8 +143,8 @@ def build(inputs, upstream, destination, recipe):
         # A private repository prevents git apply from using an enclosing ignored worktree.
         subprocess.run(['git', '-C', str(original), 'init', '-q'], check=True)
         for patch in manifest['patches']:
-            path = (payload / 'original-producer-recipe/patches' / patch['file']).resolve()
-            require(digest(path) == patch['sha256'], 'Patch checksum mismatch')
+            name = patch.get('path', 'original-producer-recipe/patches/' + patch['file'])
+            path = checked_file(payload, name, patch['sha256'])
             subprocess.run(['git', '-C', str(original), 'apply', '--check', str(path)], check=True)
             subprocess.run(['git', '-C', str(original), 'apply', str(path)], check=True)
         # Only this newly generated private metadata directory is removed.
@@ -157,7 +157,9 @@ def build(inputs, upstream, destination, recipe):
         for name in changed:
             target = notices / name
             prefix = '# ' if name.endswith('.cmake') else '// '
-            notice = prefix + 'Modified for IRIS on ' + manifest['notice_date'] + ': patches 0001-0010; see IRIS-MODIFICATIONS.md.\n'
+            notice = (prefix + 'Modified for IRIS on ' + manifest['notice_date']
+                      + ': patches 0001-' + f"{len(manifest['patches']):04d}"
+                      + '; see IRIS-MODIFICATIONS.md.\n')
             target.write_bytes(notice.encode() + target.read_bytes())
         shutil.copyfile(HERE / 'IRIS-MODIFICATIONS.md', notices / 'IRIS-MODIFICATIONS.md')
         (payload / 'current-recipe').mkdir()

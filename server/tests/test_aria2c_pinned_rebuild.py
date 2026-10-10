@@ -138,9 +138,82 @@ def test_mutated_source_fails_before_any_extraction(tmp_path, monkeypatch):
     assert not list(output.iterdir())
 
 
+def source_bundle(tmp_path, executable=False):
+    root = tmp_path / 'source'
+    root.mkdir()
+    path = root / 'input'
+    path.write_bytes(b'complete source input')
+    path.chmod(0o755 if executable else 0o644)
+    (root / 'SHA256SUMS').write_text(record(path.read_bytes())['sha256'] + '  input\n')
+    destination = tmp_path / 'private'
+    destination.mkdir()
+    return root, destination
+
+
+@pytest.mark.parametrize('executable', (False, True))
+def test_extracted_source_is_privately_snapshotted_and_verified(tmp_path, executable):
+    root, destination = source_bundle(tmp_path, executable)
+    result = pinned.source_directory(root, destination)
+    assert result == destination / 'checked-source'
+    assert (result / 'input').read_bytes() == b'complete source input'
+    assert (result / 'input').stat().st_mode & 0o777 == (0o755 if executable else 0o644)
+    (root / 'input').write_bytes(b'caller changes afterward')
+    assert (result / 'input').read_bytes() == b'complete source input'
+
+
+@pytest.mark.parametrize('kind', ('hash', 'extra', 'symlink', 'fifo', 'root-link'))
+def test_extracted_source_refuses_changed_extra_or_linked_members(tmp_path, kind):
+    root, destination = source_bundle(tmp_path)
+    if kind == 'hash':
+        (root / 'input').write_bytes(b'changed')
+    elif kind == 'extra':
+        (root / 'extra').write_bytes(b'not listed')
+    elif kind == 'symlink':
+        (root / 'extra').symlink_to(tmp_path / 'absent')
+    elif kind == 'fifo':
+        os.mkfifo(root / 'extra')
+    else:
+        linked = tmp_path / 'linked'
+        linked.symlink_to(root, target_is_directory=True)
+        root = linked
+    with pytest.raises(ValueError):
+        pinned.source_directory(root, destination)
+
+
+def test_extracted_directory_replacement_refuses_without_reading_replacement(tmp_path, monkeypatch):
+    root, destination = source_bundle(tmp_path)
+    original_scandir = pinned.os.scandir
+    replaced = False
+
+    def replacement(fd):
+        nonlocal replaced
+        if not replaced:
+            root.rename(tmp_path / 'original')
+            root.mkdir()
+            (root / 'sentinel').write_bytes(b'owner replacement')
+            replaced = True
+        return original_scandir(fd)
+
+    monkeypatch.setattr(pinned.os, 'scandir', replacement)
+    with pytest.raises(ValueError, match='replaced'):
+        pinned.source_directory(root, destination)
+    assert (root / 'sentinel').read_bytes() == b'owner replacement'
+    assert not (destination / 'checked-source/sentinel').exists()
+
+
+def test_packaged_helper_import_creates_no_unlisted_bytecode(tmp_path, monkeypatch):
+    (tmp_path / 'fixture.py').write_text('VALUE = 23\n')
+    monkeypatch.setattr(pinned, 'SOURCE', tmp_path)
+    monkeypatch.setattr(pinned.sys, 'dont_write_bytecode', False)
+    assert pinned.load_helper('fixture').VALUE == 23
+    assert list(tmp_path.iterdir()) == [tmp_path / 'fixture.py']
+    assert pinned.sys.dont_write_bytecode is False
+
+
 @pytest.mark.parametrize('architecture', ('x86_64', 'aarch64'))
 @pytest.mark.parametrize('matching', (True, False))
-def test_rebuild_disables_network_and_adopts_only_the_distributed_hash(tmp_path, monkeypatch, architecture, matching):
+@pytest.mark.parametrize('source_kind', ('archive', 'directory'))
+def test_rebuild_disables_network_and_adopts_only_the_distributed_hash(tmp_path, monkeypatch, architecture, matching, source_kind):
     recipe = (REPO / 'tools/aria2c-build/Dockerfile').read_bytes()
     lock = pinned.lock_data()
     lock['packages'] = {arch: {'fixture-1-r0.apk': record()} for arch in pinned.ARCHES}
@@ -156,6 +229,7 @@ def test_rebuild_disables_network_and_adopts_only_the_distributed_hash(tmp_path,
         return root
 
     monkeypatch.setattr(pinned, 'source_tree', extract)
+    monkeypatch.setattr(pinned, 'source_directory', extract)
     monkeypatch.setattr(pinned, 'load_helper', lambda name: SimpleNamespace(reconstruct=lambda root, target, manifest: target.mkdir()))
     monkeypatch.setattr(pinned.urllib.request, 'urlopen', lambda *a, **k: Download(b'fixture package'))
     commands = []
@@ -170,10 +244,12 @@ def test_rebuild_disables_network_and_adopts_only_the_distributed_hash(tmp_path,
     monkeypatch.setattr(pinned.subprocess, 'run', build)
     args = SimpleNamespace(architecture=architecture, jobs=2, output=tmp_path / 'result',
                            source_archive=tmp_path / 'source.tar.gz', cache=tmp_path / 'cache', offline=False, no_cache=True)
+    if source_kind == 'directory':
+        args.source_directory = tmp_path / 'source'
     if matching:
         evidence = pinned.build(args)
         assert (args.output / 'aria2c').read_bytes() == b'exact binary'
-        assert evidence['source_archive_unchanged'] is True
+        assert evidence['source_directory_snapshotted' if source_kind == 'directory' else 'source_archive_unchanged'] is True
         with pytest.raises(ValueError, match='must be new'):
             pinned.build(args)
     else:

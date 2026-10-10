@@ -92,7 +92,7 @@ provenance manifest next to them, not whether the source has changed.
 
 Before publishing aria2c binaries, build and verify the matching source
 archive with [aria2c source distribution](../../tools/aria2c-source/README.md).
-The `aria2c-2.5.6-p10-source.tar.gz` asset contains upstream source, the ten
+The `aria2c-2.5.6-p11-source.tar.gz` asset contains upstream source, the eleven
 local patches, build scripts, dependency sources and license files. Keep
 precompiled clients available beside that source archive.
 

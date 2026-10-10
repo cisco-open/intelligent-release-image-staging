@@ -670,13 +670,13 @@
   function openDeployInfo(id) {
     closeActivity(false);
     var d = LAST_DEVICES.find(function (x) { return x.device_id === id; }) || {};
-    return deviceDetailsCommand('open', {id: id, data: {device: d,
+    return deviceDetailsCommand('open', {id: id, data: {device: d, now: LAST_DEV_NOW,
       status: deviceStatus(d, LAST_DEV_NOW), failedRatio: imageFailedRatio(d),
       filenames: imageFilenames, quarantined: imageQuarantined}});
   }
   function closeDeployInfo(restoreFocus) { return deviceDetailsCommand('close', {restoreFocus: restoreFocus}); }
   await deviceDetailsCommand('connect', {services: {fetch: fetch, post: jpost,
-    confirm: function (message) { return confirm(message); }}});
+    uuid: maintenanceRequestId, confirm: function (message) { return confirm(message); }}});
 
   // React owns Activity, its timer, streams and batch request lifetimes.
   // The adapter retains shared authentication and the Inventory selection lock.
