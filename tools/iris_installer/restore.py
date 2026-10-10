@@ -218,17 +218,30 @@ def _kubernetes_resources(path):
     return resources
 
 
-def _origin_authority(current, archived):
+def _origin_authority(current, archived, *, source=None):
     """Overlay current reviewed origin authority into a stopped candidate.
 
-    Use the installer's shipped runtime schema, as the key helpers do. This
-    requires neither a running service nor an import from the backup's source.
+    Use the live installation's verified source schema. Managed workers keep
+    their Python runtime separately from that source snapshot. This requires
+    neither a running service nor an import from the backup's source.
     Only candidate files change; the stopped current generation stays intact.
     """
-    package = Path(__file__).resolve().parents[1] / 'source/server'
-    source = package if package.is_dir() else Path(__file__).resolve().parents[2] / 'server'
-    sys.path.insert(0, str(source))
-    import origin_enforcement as origin
+    if source is None:
+        package = Path(__file__).resolve().parents[1] / 'source/server'
+        source = package if package.is_dir() else Path(__file__).resolve().parents[2] / 'server'
+    source = Path(source)
+    if not source.is_dir() or source.resolve() != source:
+        raise InstallError('Verified distribution access schema is unavailable')
+    prior_path = sys.path[:]
+    try:
+        sys.path.insert(0, str(source))
+        import origin_enforcement as origin
+        if Path(origin.__file__).resolve() != source / 'origin_enforcement.py':
+            raise InstallError('Distribution access schema belongs to a different source generation')
+    except ImportError as exc:
+        raise InstallError('Verified distribution access schema is unavailable') from exc
+    finally:
+        sys.path[:] = prior_path
 
     try:
         generations = []
@@ -286,13 +299,13 @@ def _origin_authority(current, archived):
         old_paths[2].unlink()
 
 
-def state_authority(current, archived):
+def state_authority(current, archived, *, source=None):
     """Keep policy, ownership and external trust in the approved generation.
 
     Execution and disclosure records are monotonic authority, while descriptive
     inventory, assignments, job history and content remain backup-authoritative.
     """
-    _origin_authority(current, archived)
+    _origin_authority(current, archived, source=source)
     unchanged = ('peer-policy', 'deployment_records', 'ca-trust-settings',
                  'audit-export-', 'telemetry-destination', 'instance-id', 'schedules.')
     preserved = ('peer-handouts', 'schedule-progress', 'schedule-retired',
@@ -774,7 +787,8 @@ class Transaction:
             storage.apply_metadata(extracted / 'volume-iris-config', _records(extracted, 'volume-iris-config'))
             _audit_overlay(sources['volume-iris-config'], extracted / 'volume-iris-config')
             storage.apply_metadata(extracted / 'volume-iris-state', _records(extracted, 'volume-iris-state'))
-            state_authority(sources['volume-iris-state'], extracted / 'volume-iris-state')
+            state_authority(sources['volume-iris-state'], extracted / 'volume-iris-state',
+                            source=install.source / 'server')
             proof = replay_overlay(sources['volume-iris-state'], extracted / 'volume-iris-state')
             proof.update(authority)
             proof['audit_history'] = 'current-fenced-primary'

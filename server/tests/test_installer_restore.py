@@ -543,7 +543,8 @@ def transaction(tmp_path, monkeypatch, request):
     calls = []
     def command(argv, **kwargs):
         return subprocess.check_output([str(value) for value in argv], input=kwargs.get('input'))
-    install = SimpleNamespace(base=base, config=document['config'], command=command,
+    install = SimpleNamespace(base=base, source=Path(__file__).resolve().parents[2],
+                              config=document['config'], command=command,
                               verify_resource_ownership=lambda: calls.append('ownership'))
     install.compose = lambda *args, **kwargs: calls.append(args)
     def installation(journal):

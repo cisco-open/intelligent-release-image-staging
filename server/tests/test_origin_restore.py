@@ -361,7 +361,7 @@ def test_all_topologies_stage_current_origin_authority_before_publication(
         assert target == "docker-split" and argv[:2] == ["age", "-d"]
         return b"{}"
 
-    install = SimpleNamespace(base=base, config=document["config"],
+    install = SimpleNamespace(base=base, source=Path(__file__).resolve().parents[2], config=document["config"],
         journal=SimpleNamespace(document=document), command=command,
         console_custody_snapshot=lambda: b"{}",
         capture_backup_extras=lambda _sources: captured.append("stopped-kubernetes-snapshot"))

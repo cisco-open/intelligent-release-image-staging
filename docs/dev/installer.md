@@ -132,6 +132,10 @@ backup, verification, isolated extraction and same-deployment restore cutover
 are implemented as described in [Lifecycle development](lifecycle.md).
 Restore requires current security authority and the same credential generation;
 it does not adopt a replacement host or reset missing replay history.
+The managed worker keeps its Python runtime separate from the deployment source.
+Restore loads distribution-access validation from the verified live source, not
+from the backup. Test this layout in an isolated Python process so checkout
+imports cannot hide a missing runtime dependency.
 The scoped worker requires a verified backup for credential maintenance;
 `irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.

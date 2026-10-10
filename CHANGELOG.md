@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Load restore validation from the installed deployment's verified source,
+  including when the managed lifecycle worker runs from its separate runtime.
+
 - Clarify Force undeploy in the guide, recovery message and audit trail:
   router Guest Shell cleanup also removes IRIS-marked VirtualPortGroups and
   related NAT configuration, while preserving unrelated operator networking.
